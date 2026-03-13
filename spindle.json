@@ -1,0 +1,19 @@
+{
+  "version": "0.1.0",
+  "name": "LumiScript",
+  "identifier": "lumiscript",
+  "author": "mindbound",
+  "github": "https://github.com/mindbound/lumiscript",
+  "homepage": "https://github.com/mindbound/lumiscript",
+  "description": "A JavaScript scripting platform for Lumiverse. Write scripts that react to chat events, automate behaviour, and extend your AI chat experience.",
+  "permissions": [
+    "chat_mutation",
+    "generation",
+    "interceptor",
+    "cors_proxy",
+    "ui_panels"
+  ],
+  "entry_backend": "dist/backend.js",
+  "entry_frontend": "dist/frontend.js",
+  "minimum_lumiverse_version": "0.1.0"
+}
