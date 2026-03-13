@@ -3,3 +3,4 @@ notes/
 tsconfig.tsbuildinfo
 *.local
 .env
+CLAUDE.md
