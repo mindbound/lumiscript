@@ -1,0 +1,119 @@
+import { FC } from 'react';
+import { Copy, Trash2, ToggleLeft, ToggleRight, UserRound, MessageSquare, Pencil } from 'lucide-react';
+import type { Script } from '../../types/script.js';
+import type { FrontendToBackend } from '../../types/messages.js';
+
+export type ExecutionDot = 'idle' | 'running' | 'success' | 'error';
+
+interface ScriptListItemProps {
+  script: Script;
+  selected: boolean;
+  dot: ExecutionDot;
+  duration?: number;
+  onSelect: () => void;
+  onEdit: () => void;
+  sendToBackend: (msg: FrontendToBackend) => void;
+}
+
+const DOT_CLASS: Record<ExecutionDot, string> = {
+  idle:    'ls-item-dot',
+  running: 'ls-item-dot ls-dot-running',
+  success: 'ls-item-dot ls-dot-success',
+  error:   'ls-item-dot ls-dot-error',
+};
+
+export const ScriptListItem: FC<ScriptListItemProps> = ({
+  script,
+  selected,
+  dot,
+  duration,
+  onSelect,
+  onEdit,
+  sendToBackend,
+}) => {
+  const handleToggle = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    sendToBackend({ type: 'update_script', id: script.id, patch: { enabled: !script.enabled } });
+  };
+
+  const handleDuplicate = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    sendToBackend({ type: 'duplicate_script', id: script.id });
+  };
+
+  const handleDelete = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!window.confirm(`Delete "${script.name}"?`)) return;
+    sendToBackend({ type: 'delete_script', id: script.id });
+  };
+
+  const handleEdit = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    onEdit();
+  };
+
+  const bindingCount = script.bindings?.length ?? 0;
+
+  return (
+    <div
+      className={`ls-item${selected ? ' ls-selected' : ''}${!script.enabled && script.type !== 'library' ? ' ls-disabled' : ''}`}
+      onClick={onSelect}
+    >
+      {/* Execution status dot */}
+      <span className={DOT_CLASS[dot]} title={dot} />
+
+      {/* Name + meta */}
+      <div className="ls-item-body">
+        <div className="ls-item-name" title={script.name}>{script.name}</div>
+        <div className="ls-item-meta">
+          {script.type !== 'library' && (
+            <span>{script.enabled ? 'Enabled' : 'Disabled'}</span>
+          )}
+          {duration !== undefined && dot !== 'running' && (
+            <span style={{ color: dot === 'error' ? '#ef4444' : 'var(--lumiverse-text-muted)' }}>
+              {duration}ms
+            </span>
+          )}
+          {/* Binding badges */}
+          {script.type !== 'library' && bindingCount > 0 && (
+            <span className="ls-item-binding-badges">
+              {script.bindings!.map((b, i) => (
+                <span key={i} className="ls-binding-badge">
+                  {b.type === 'character'
+                    ? <UserRound size={9} />
+                    : <MessageSquare size={9} />}
+                  <span style={{ maxWidth: 60, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {b.displayName}
+                  </span>
+                </span>
+              ))}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Actions (shown on hover via CSS) */}
+      <div className="ls-item-actions">
+        {/* Edit button — always first, most prominent */}
+        <button className="ls-icon-btn" onClick={handleEdit} title="Edit script">
+          <Pencil size={13} />
+        </button>
+
+        {script.type !== 'library' && (
+          <button className="ls-icon-btn" onClick={handleToggle}
+            title={script.enabled ? 'Disable' : 'Enable'}>
+            {script.enabled
+              ? <ToggleRight size={14} style={{ color: 'var(--lumiverse-accent)' }} />
+              : <ToggleLeft  size={14} />}
+          </button>
+        )}
+        <button className="ls-icon-btn" onClick={handleDuplicate} title="Duplicate">
+          <Copy size={13} />
+        </button>
+        <button className="ls-icon-btn ls-danger" onClick={handleDelete} title="Delete">
+          <Trash2 size={13} />
+        </button>
+      </div>
+    </div>
+  );
+};
