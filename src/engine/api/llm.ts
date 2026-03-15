@@ -100,12 +100,10 @@ function buildLLMParams(opts?: LLMOptions): Record<string, unknown> {
 
 // ─── Structured output helpers ────────────────────────────────────────────────
 
-/**
- * Providers whose APIs do not accept the response_format parameter at all.
- * All other Lumiverse providers use OpenAICompatibleProvider and support at
- * least response_format: json_object (including NanoGPT, Z.AI, OpenAI, etc.).
- */
-const NO_RESPONSE_FORMAT_PROVIDERS = new Set(['anthropic', 'google']);
+/** Provider name for Google Gemini (uses generationConfig format, not response_format). */
+const GOOGLE_PROVIDER = 'google';
+/** Provider name for Anthropic Claude (uses output_config.format, not response_format). */
+const ANTHROPIC_PROVIDER = 'anthropic';
 
 /**
  * Runtime check: is this value a Zod schema?
@@ -221,21 +219,36 @@ export function buildLLMAPI(deps: APIBuildDeps): LumiScriptAPI['llm'] {
             ...(effectiveProvider ? { provider: effectiveProvider } as Record<string, string> : {}),
             ...(effectiveModel    ? { model:    effectiveModel    } as Record<string, string> : {}),
           };
-          // Schema is always injected into the system prompt so every provider
-          // (including thinking models like GLM-4.7:thinking) gets explicit schema
-          // guidance even when the API-level format enforcement is unavailable.
-          //
-          // For OpenAI-compatible providers (all except Anthropic/Google) we additionally
-          // set response_format: json_object — this instructs the model to output raw
-          // JSON rather than markdown.  We use json_object (not json_schema) because
-          // json_schema is not universally supported across OpenAI-compatible APIs and
-          // is silently ignored by thinking-model variants (GLM, etc.).
-          //
-          // For Anthropic/Google the response_format field is not accepted by the API.
+          // Schema is always injected into the system prompt — universal guidance
+          // for every model regardless of API-level format enforcement.
           const finalMessages = enhanceMessagesWithSchema(messages, jsonSchema);
-          const extraParams: Record<string, unknown> = !NO_RESPONSE_FORMAT_PROVIDERS.has(effectiveProvider)
-            ? { response_format: { type: 'json_object' } }
-            : {};
+
+          // Three-tier native structured output support:
+          //
+          // Tier 1 — Anthropic: output_config.format.json_schema
+          //   AnthropicProvider.buildBody explicitly copies params.output_config to
+          //   body.output_config, so this lands correctly in the API request.
+          //
+          // Tier 2 — OpenAI-compatible (all other providers incl. NanoGPT, Z.AI, etc.):
+          //   response_format: json_object — widely supported, including thinking models
+          //   (GLM, etc.) that silently ignore json_schema mode.
+          //   Passed through OpenAICompatibleProvider.buildBody's parameter passthrough.
+          //
+          // Tier 3 — Google: schema-in-prompt only (above).
+          //   responseMimeType / responseJsonSchema must live inside generationConfig,
+          //   which is not reachable via the current parameter passthrough mechanism.
+          //   TODO: add Google native structured output once Lumiverse updates
+          //   GoogleProvider.buildBody to forward these fields into generationConfig.
+          let extraParams: Record<string, unknown> = {};
+          if (effectiveProvider === ANTHROPIC_PROVIDER) {
+            extraParams = {
+              output_config: { format: { type: 'json_schema', schema: jsonSchema } },
+            };
+          } else if (effectiveProvider !== GOOGLE_PROVIDER) {
+            extraParams = {
+              response_format: { type: 'json_object' },
+            };
+          }
 
           return spindle.generate.raw({
             type: 'raw',

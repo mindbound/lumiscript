@@ -14283,7 +14283,8 @@ function buildLLMParams(opts) {
     p.model = opts.model;
   return p;
 }
-var NO_RESPONSE_FORMAT_PROVIDERS = new Set(["anthropic", "google"]);
+var GOOGLE_PROVIDER = "google";
+var ANTHROPIC_PROVIDER = "anthropic";
 function isZodLike(schema) {
   return schema instanceof ZodType;
 }
@@ -14362,7 +14363,16 @@ function buildLLMAPI(deps) {
           ...effectiveModel ? { model: effectiveModel } : {}
         };
         const finalMessages = enhanceMessagesWithSchema(messages, jsonSchema);
-        const extraParams = !NO_RESPONSE_FORMAT_PROVIDERS.has(effectiveProvider) ? { response_format: { type: "json_object" } } : {};
+        let extraParams = {};
+        if (effectiveProvider === ANTHROPIC_PROVIDER) {
+          extraParams = {
+            output_config: { format: { type: "json_schema", schema: jsonSchema } }
+          };
+        } else if (effectiveProvider !== GOOGLE_PROVIDER) {
+          extraParams = {
+            response_format: { type: "json_object" }
+          };
+        }
         return spindle.generate.raw({
           type: "raw",
           messages: finalMessages,
