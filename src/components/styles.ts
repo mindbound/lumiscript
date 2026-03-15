@@ -261,10 +261,13 @@ export const PANEL_CSS = `
   padding: 2px 6px;
 }
 .ls-editor-unsaved {
-  width: 6px;
-  height: 6px;
+  display: inline-block;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
-  background: var(--lumiverse-accent);
+  /* --lumiverse-accent is set dynamically by the theme engine;
+     fall back to the base primary purple if not yet available */
+  background: var(--lumiverse-accent, rgba(147, 112, 219, 0.9));
   flex-shrink: 0;
 }
 .ls-editor-monaco { flex: 1; min-height: 0; }

@@ -287,16 +287,7 @@ ${script.code}
 }
 function buildCapturedConsole(onConsole) {
   const makeHandler = (type) => (...args) => {
-    const message = args.map((a) => {
-      if (typeof a === "object" && a !== null) {
-        try {
-          return JSON.stringify(a, null, 2);
-        } catch {
-          return String(a);
-        }
-      }
-      return String(a);
-    }).join(" ");
+    const message = args.map(serializeConsoleArg).join(" ");
     const entry = {
       timestamp: new Date().toLocaleTimeString(),
       type,
@@ -353,7 +344,7 @@ ${library.code}
   };
 }
 function buildAPI(script, options) {
-  const { grantedPermissions, activeContext } = options;
+  const { grantedPermissions, activeContext, userId } = options;
   const hasPerm = (p) => grantedPermissions.has(p);
   const utils = {
     uuid: () => generateUUID(),
@@ -379,11 +370,41 @@ function buildAPI(script, options) {
       }
     },
     http: {
-      get: (url, opts) => doHttp(url, { ...opts, method: "GET" }, script, grantedPermissions),
-      post: (url, body, opts) => doHttp(url, { ...opts, method: "POST", body }, script, grantedPermissions),
-      put: (url, body, opts) => doHttp(url, { ...opts, method: "PUT", body }, script, grantedPermissions),
-      delete: (url, opts) => doHttp(url, { ...opts, method: "DELETE" }, script, grantedPermissions),
-      request: (url, opts) => doHttp(url, opts, script, grantedPermissions)
+      get: (url, opts) => {
+        if (!script.allowDangerous)
+          throw new Error(`"${script.name}" must have "Allow Dangerous" enabled to use api.utils.http`);
+        if (!grantedPermissions.has("cors_proxy"))
+          throw new Error("PERMISSION_DENIED:cors_proxy \u2014 grant this permission to use api.utils.http");
+        return shielded(spindle.cors(url, { method: "GET", headers: opts?.headers }));
+      },
+      post: (url, body, opts) => {
+        if (!script.allowDangerous)
+          throw new Error(`"${script.name}" must have "Allow Dangerous" enabled to use api.utils.http`);
+        if (!grantedPermissions.has("cors_proxy"))
+          throw new Error("PERMISSION_DENIED:cors_proxy \u2014 grant this permission to use api.utils.http");
+        return shielded(spindle.cors(url, { method: "POST", headers: opts?.headers, body }));
+      },
+      put: (url, body, opts) => {
+        if (!script.allowDangerous)
+          throw new Error(`"${script.name}" must have "Allow Dangerous" enabled to use api.utils.http`);
+        if (!grantedPermissions.has("cors_proxy"))
+          throw new Error("PERMISSION_DENIED:cors_proxy \u2014 grant this permission to use api.utils.http");
+        return shielded(spindle.cors(url, { method: "PUT", headers: opts?.headers, body }));
+      },
+      delete: (url, opts) => {
+        if (!script.allowDangerous)
+          throw new Error(`"${script.name}" must have "Allow Dangerous" enabled to use api.utils.http`);
+        if (!grantedPermissions.has("cors_proxy"))
+          throw new Error("PERMISSION_DENIED:cors_proxy \u2014 grant this permission to use api.utils.http");
+        return shielded(spindle.cors(url, { method: "DELETE", headers: opts?.headers }));
+      },
+      request: (url, opts) => {
+        if (!script.allowDangerous)
+          throw new Error(`"${script.name}" must have "Allow Dangerous" enabled to use api.utils.http`);
+        if (!grantedPermissions.has("cors_proxy"))
+          throw new Error("PERMISSION_DENIED:cors_proxy \u2014 grant this permission to use api.utils.http");
+        return shielded(spindle.cors(url, { method: opts.method ?? "GET", headers: opts.headers, body: opts.body }));
+      }
     }
   };
   const json = {
@@ -456,64 +477,67 @@ function buildAPI(script, options) {
   };
   const chat = {
     getChatId: () => activeContext.chatId,
-    async getMessages(opts) {
+    getMessages: (opts) => {
       assertPerm("chat_mutation", hasPerm);
       const id = requireChatId(activeContext);
-      const msgs = await spindle.chat.getMessages(id);
-      if (opts?.last !== undefined)
-        return msgs.slice(-opts.last);
-      if (opts?.first !== undefined)
-        return msgs.slice(0, opts.first);
-      return msgs;
+      return shielded(spindle.chat.getMessages(id).then((msgs) => {
+        if (opts?.last !== undefined)
+          return msgs.slice(-opts.last);
+        if (opts?.first !== undefined)
+          return msgs.slice(0, opts.first);
+        return msgs;
+      }));
     },
-    async sendMessage(content, opts) {
+    sendMessage: (content, opts) => {
       assertPerm("chat_mutation", hasPerm);
       const id = requireChatId(activeContext);
-      return spindle.chat.appendMessage(id, {
+      return shielded(spindle.chat.appendMessage(id, {
         role: opts?.role ?? "user",
         content,
         metadata: opts?.metadata
-      });
+      }));
     },
-    async editMessage(msgId, content) {
+    editMessage: (msgId, content) => {
       assertPerm("chat_mutation", hasPerm);
       const id = requireChatId(activeContext);
-      await spindle.chat.updateMessage(id, msgId, { content });
+      return shielded(spindle.chat.updateMessage(id, msgId, { content }));
     },
-    async deleteMessage(msgId) {
+    deleteMessage: (msgId) => {
       assertPerm("chat_mutation", hasPerm);
       const id = requireChatId(activeContext);
-      await spindle.chat.deleteMessage(id, msgId);
+      return shielded(spindle.chat.deleteMessage(id, msgId));
     }
   };
   const llm = {
-    async generate(messages, opts) {
+    generate: (messages, opts) => {
       assertPerm("generation", hasPerm);
-      const result = await spindle.generate.quiet({
+      return shielded(spindle.generate.quiet({
         type: "quiet",
         messages,
         ...opts?.connectionId ? { connection_id: opts.connectionId } : {},
-        parameters: buildLLMParams(opts)
-      });
-      return result.content;
+        parameters: buildLLMParams(opts),
+        userId: userId ?? undefined
+      }).then((result) => result.content));
     },
-    async generateStructured(messages, _schema, opts) {
+    generateStructured: (messages, _schema, opts) => {
       assertPerm("generation", hasPerm);
-      const result = await spindle.generate.quiet({
+      return shielded(spindle.generate.quiet({
         type: "quiet",
         messages: [
           ...messages,
           { role: "system", content: "Respond with valid JSON only. No markdown, no extra text." }
         ],
         ...opts?.connectionId ? { connection_id: opts.connectionId } : {},
-        parameters: buildLLMParams(opts)
-      });
-      const content = result.content;
-      try {
-        return JSON.parse(content.replace(/^```json\s*/i, "").replace(/\s*```$/, ""));
-      } catch {
-        throw new Error(`api.llm.generateStructured: response was not valid JSON: ${content.slice(0, 200)}`);
-      }
+        parameters: buildLLMParams(opts),
+        userId: userId ?? undefined
+      }).then((result) => {
+        const content = result.content;
+        try {
+          return JSON.parse(content.replace(/^```json\s*/i, "").replace(/\s*```$/, ""));
+        } catch {
+          throw new Error(`api.llm.generateStructured: response was not valid JSON: ${content.slice(0, 200)}`);
+        }
+      }));
     }
   };
   const files = {
@@ -591,6 +615,43 @@ function buildAPI(script, options) {
   });
   return { utils, json, variables, chat, llm, events, files, worldInfo, characters };
 }
+function serializeConsoleArg(a) {
+  if (a === undefined)
+    return "undefined";
+  if (a === null)
+    return "null";
+  if (typeof a === "function")
+    return `[Function: ${a.name ?? "(anonymous)"}]`;
+  if (a instanceof Promise)
+    return "[Promise (pending)]";
+  if (a instanceof Error)
+    return `${a.name}: ${a.message}`;
+  if (a instanceof Map) {
+    try {
+      return `Map(${a.size}) { ${[...a.entries()].map(([k, v]) => `${JSON.stringify(k)} => ${serializeConsoleArg(v)}`).join(", ")} }`;
+    } catch {
+      return `[Map(${a.size})]`;
+    }
+  }
+  if (a instanceof Set) {
+    try {
+      return `Set(${a.size}) { ${[...a].map(serializeConsoleArg).join(", ")} }`;
+    } catch {
+      return `[Set(${a.size})]`;
+    }
+  }
+  if (typeof a === "object") {
+    const tag = Object.prototype.toString.call(a);
+    if (tag !== "[object Object]" && tag !== "[object Array]")
+      return tag;
+    try {
+      return JSON.stringify(a, null, 2);
+    } catch {
+      return String(a);
+    }
+  }
+  return String(a);
+}
 function assertPerm(permission, hasPerm) {
   if (!hasPerm(permission)) {
     throw new Error(`PERMISSION_DENIED:${permission} \u2014 grant this permission to use this API`);
@@ -600,6 +661,10 @@ function assertDangerous(script) {
   if (!script.allowDangerous) {
     throw new Error(`"${script.name}" must have "Allow Dangerous" enabled to use this API`);
   }
+}
+function shielded(p) {
+  p.catch(() => {});
+  return p;
 }
 function requireChatId(ctx) {
   if (!ctx.chatId)
@@ -658,18 +723,6 @@ function makeStorageVarStore(getPath) {
       await spindle.userStorage.setJson(path, {});
     }
   };
-}
-async function doHttp(url, opts, script, granted) {
-  assertDangerous(script);
-  if (!granted.has("cors_proxy")) {
-    throw new Error("PERMISSION_DENIED:cors_proxy \u2014 grant this permission to use api.utils.http");
-  }
-  const result = await spindle.cors(url, {
-    method: opts.method ?? "GET",
-    headers: opts.headers,
-    body: opts.body
-  });
-  return result;
 }
 
 // src/backend.ts
@@ -765,6 +818,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
         const result = await executeScript(script, {
           grantedPermissions,
           activeContext: { chatId: ctx.chatId, characterId: ctx.characterId },
+          userId: activeUserId,
           onConsole: (entry) => {
             send({ type: "console_entry", scriptId: script.id, runId, entry });
           },

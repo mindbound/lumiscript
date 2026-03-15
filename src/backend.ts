@@ -143,6 +143,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
         const result = await executeScript(script, {
           grantedPermissions,
           activeContext: { chatId: ctx.chatId, characterId: ctx.characterId },
+          userId: activeUserId,
           onConsole: (entry) => {
             send({ type: 'console_entry', scriptId: script.id, runId, entry });
           },
