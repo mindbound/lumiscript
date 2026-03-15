@@ -159,10 +159,37 @@ export interface LLMMessage {
   content: string;
 }
 
+/**
+ * Provider identifier strings as used internally by Lumiverse.
+ * Maps directly to the `readonly name` field of each provider class in
+ * src/llm/providers/*.  Update when Lumiverse adds or removes providers.
+ */
+export type LLMProvider =
+  | 'ai21' | 'anthropic' | 'chutes' | 'custom' | 'deepseek' | 'electronhub'
+  | 'fireworks' | 'google' | 'groq' | 'mistral' | 'moonshot' | 'nanogpt'
+  | 'openai' | 'openrouter' | 'perplexity' | 'pollinations' | 'siliconflow'
+  | 'xai' | 'zai';
+
 export interface LLMOptions {
-  /** Connection profile ID. If omitted, uses the user's active connection. */
+  /**
+   * Connection profile ID. When provided, the named saved connection is used
+   * (its provider, model, and API key).
+   * Takes precedence over connectionName, provider, and model.
+   */
   connectionId?: string;
-  /** Override model. */
+  /**
+   * Connection profile name (human-readable label as shown in Lumiverse
+   * settings). Resolved to an ID at call time via spindle.connections.list().
+   * Ignored when connectionId is set. Matching is case-insensitive.
+   */
+  connectionName?: string;
+  /**
+   * LLM provider identifier. Must be one of the LLMProvider values.
+   * Validated at call time — an unknown value throws immediately.
+   * Ignored when connectionId or connectionName is set.
+   */
+  provider?: LLMProvider;
+  /** Model identifier. Used together with provider for direct calls. */
   model?: string;
   /** Override temperature. */
   temperature?: number;
@@ -170,13 +197,31 @@ export interface LLMOptions {
   maxTokens?: number;
 }
 
+/**
+ * Structural interface for a Zod schema (or any compatible object with a `parse` method).
+ * Avoids importing Zod into this types file while still providing TypeScript-level
+ * expressiveness.  The executor uses `instanceof z.ZodType` for runtime discrimination.
+ */
+export interface ZodLike<T> {
+  parse(data: unknown): T;
+}
+
 export interface LLMAPI {
   /** Generate using the user's active connection and preset. Requires generation permission. */
   generate(messages: LLMMessage[], options?: LLMOptions): Promise<string>;
-  /** Generate with a JSON schema and return a typed object. Requires generation permission. */
+  /**
+   * Generate and parse a structured JSON response. Requires generation permission.
+   *
+   * - Pass a **Zod schema** (`z.object({...})`) for automatic JSON-Schema conversion,
+   *   native `response_format` mode on OpenAI-compatible providers, and Zod validation.
+   * - Pass a **raw JSON Schema** object (`Record<string, unknown>`) to skip Zod validation
+   *   while still benefiting from native structured-output mode where supported.
+   *
+   * Anthropic and Google fall back to schema-in-prompt when native JSON mode is unavailable.
+   */
   generateStructured<T = unknown>(
     messages: LLMMessage[],
-    schema: Record<string, unknown>,
+    schema: ZodLike<T> | Record<string, unknown>,
     options?: LLMOptions
   ): Promise<T>;
 }

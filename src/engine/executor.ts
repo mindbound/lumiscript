@@ -9,9 +9,11 @@
  * - api.utils.http.* requires allowDangerous on the script AND cors_proxy permission.
  * - api.chat.* requires chat_mutation permission.
  * - api.llm.* requires generation permission.
+ *
+ * API modules live in src/engine/api/. This file is the thin orchestrator.
  */
 
-declare const spindle: import('lumiverse-spindle-types').SpindleAPI
+import * as z from 'zod';
 
 import type {
   Script,
@@ -20,12 +22,18 @@ import type {
   ConsoleEntry,
   ConsoleEntryType,
   ScriptNamespace,
-  ScriptEventHandler,
-  HttpResponse,
-  HttpRequestOptions,
 } from '../types/script.js';
 import type { ScriptStorage } from '../storage/script-storage.js';
-import { generateUUID, generateShortId } from '../utils/uuid.js';
+import { generateUUID } from '../utils/uuid.js';
+
+import { type APIBuildDeps } from './api/shared.js';
+import { buildUtilsAPI     } from './api/utils.js';
+import { buildJSONAPI      } from './api/json.js';
+import { buildChatAPI      } from './api/chat.js';
+import { buildLLMAPI       } from './api/llm.js';
+import { buildVariablesAPI } from './api/variables.js';
+import { buildFilesAPI     } from './api/files.js';
+import { buildEventsAPI    } from './api/events.js';
 
 // ─── Executor options ─────────────────────────────────────────────────────────
 
@@ -65,10 +73,11 @@ export async function executeScript(
       'api',
       'script',
       '__console',
+      'z',
       `"use strict";\nconst console = __console;\n${script.code}\n`,
     );
 
-    await fn(api, scriptNS, capturedConsole);
+    await fn(api, scriptNS, capturedConsole, z);
 
     const duration = Math.round(performance.now() - startTime);
     return { success: true, duration, scriptId: script.id, runId };
@@ -79,28 +88,39 @@ export async function executeScript(
   }
 }
 
-// ─── Console capture ──────────────────────────────────────────────────────────
+// ─── API assembler ────────────────────────────────────────────────────────────
 
-function buildCapturedConsole(
-  onConsole?: (e: ConsoleEntry) => void,
-): Record<string, (...args: unknown[]) => void> {
-  const makeHandler = (type: ConsoleEntryType) =>
-    (...args: unknown[]) => {
-      const message = args.map(serializeConsoleArg).join(' ');
+function buildAPI(script: Script, options: ExecutorOptions): LumiScriptAPI {
+  const { grantedPermissions, activeContext, userId } = options;
+  const hasPerm = (p: string) => grantedPermissions.has(p);
 
-      const entry: ConsoleEntry = {
-        timestamp: new Date().toLocaleTimeString(),
-        type,
-        message,
-      };
-      onConsole?.(entry);
-    };
+  const deps: APIBuildDeps = { script, hasPerm, userId, activeContext };
+
+  // Stubs — replaced when Lumiverse devs expose the native Spindle APIs.
+  const worldInfo = new Proxy({} as LumiScriptAPI['worldInfo'], {
+    get: (_t, prop) => {
+      if (prop === '_stub') return true;
+      return () => { throw new Error(`api.worldInfo.${String(prop)}: not yet available in LumiScript`); };
+    },
+  });
+
+  const characters = new Proxy({} as LumiScriptAPI['characters'], {
+    get: (_t, prop) => {
+      if (prop === '_stub') return true;
+      return () => { throw new Error(`api.characters.${String(prop)}: not yet available in LumiScript`); };
+    },
+  });
 
   return {
-    log:   makeHandler('log'),
-    warn:  makeHandler('warn'),
-    error: makeHandler('error'),
-    info:  makeHandler('info'),
+    utils:      buildUtilsAPI(deps),
+    json:       buildJSONAPI(),
+    variables:  buildVariablesAPI(deps),
+    chat:       buildChatAPI(deps),
+    llm:        buildLLMAPI(deps),
+    files:      buildFilesAPI(deps),
+    events:     buildEventsAPI(),
+    worldInfo,
+    characters,
   };
 }
 
@@ -163,268 +183,29 @@ function buildScriptNamespace(
   };
 }
 
-// ─── API factory ──────────────────────────────────────────────────────────────
+// ─── Console capture ──────────────────────────────────────────────────────────
 
-function buildAPI(script: Script, options: ExecutorOptions): LumiScriptAPI {
-  const { grantedPermissions, activeContext, userId } = options;
-  const hasPerm = (p: string) => grantedPermissions.has(p);
+function buildCapturedConsole(
+  onConsole?: (e: ConsoleEntry) => void,
+): Record<string, (...args: unknown[]) => void> {
+  const makeHandler = (type: ConsoleEntryType) =>
+    (...args: unknown[]) => {
+      const message = args.map(serializeConsoleArg).join(' ');
+      const entry: ConsoleEntry = {
+        timestamp: new Date().toLocaleTimeString(),
+        type,
+        message,
+      };
+      onConsole?.(entry);
+    };
 
-  // ── api.utils ──────────────────────────────────────────────────────────────
-  const utils: LumiScriptAPI['utils'] = {
-    uuid: () => generateUUID(),
-    shortId: () => generateShortId(),
-    wait: (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)),
-
-    random: {
-      int: (min, max) => Math.floor(Math.random() * (max - min + 1)) + min,
-      float: (min, max) => Math.random() * (max - min) + min,
-      pick<T>(array: T[]): T {
-        if (array.length === 0) throw new Error('api.utils.random.pick: empty array');
-        return array[Math.floor(Math.random() * array.length)]!;
-      },
-      bool: () => Math.random() < 0.5,
-      chance: (p) => Math.random() < Math.max(0, Math.min(1, p)),
-      shuffle<T>(array: T[]): T[] {
-        const a = [...array];
-        for (let i = a.length - 1; i > 0; i--) {
-          const j = Math.floor(Math.random() * (i + 1));
-          [a[i], a[j]] = [a[j]!, a[i]!];
-        }
-        return a;
-      },
-    },
-
-    // Synchronous guards throw directly in the AsyncFunction body — reliably
-    // caught by executeScript's try/catch. shielded() prevents the returned
-    // spindle.cors() Promise from becoming an unhandled rejection in Bun
-    // when the user script calls the method without await; callers who DO
-    // await still receive the rejection normally.
-    http: {
-      get: (url, opts) => {
-        if (!script.allowDangerous) throw new Error(`"${script.name}" must have "Allow Dangerous" enabled to use api.utils.http`);
-        if (!grantedPermissions.has('cors_proxy')) throw new Error('PERMISSION_DENIED:cors_proxy — grant this permission to use api.utils.http');
-        return shielded(spindle.cors(url, { method: 'GET', headers: opts?.headers }) as unknown as Promise<HttpResponse>);
-      },
-      post: (url, body, opts) => {
-        if (!script.allowDangerous) throw new Error(`"${script.name}" must have "Allow Dangerous" enabled to use api.utils.http`);
-        if (!grantedPermissions.has('cors_proxy')) throw new Error('PERMISSION_DENIED:cors_proxy — grant this permission to use api.utils.http');
-        return shielded(spindle.cors(url, { method: 'POST', headers: opts?.headers, body }) as unknown as Promise<HttpResponse>);
-      },
-      put: (url, body, opts) => {
-        if (!script.allowDangerous) throw new Error(`"${script.name}" must have "Allow Dangerous" enabled to use api.utils.http`);
-        if (!grantedPermissions.has('cors_proxy')) throw new Error('PERMISSION_DENIED:cors_proxy — grant this permission to use api.utils.http');
-        return shielded(spindle.cors(url, { method: 'PUT', headers: opts?.headers, body }) as unknown as Promise<HttpResponse>);
-      },
-      delete: (url, opts) => {
-        if (!script.allowDangerous) throw new Error(`"${script.name}" must have "Allow Dangerous" enabled to use api.utils.http`);
-        if (!grantedPermissions.has('cors_proxy')) throw new Error('PERMISSION_DENIED:cors_proxy — grant this permission to use api.utils.http');
-        return shielded(spindle.cors(url, { method: 'DELETE', headers: opts?.headers }) as unknown as Promise<HttpResponse>);
-      },
-      request: (url, opts) => {
-        if (!script.allowDangerous) throw new Error(`"${script.name}" must have "Allow Dangerous" enabled to use api.utils.http`);
-        if (!grantedPermissions.has('cors_proxy')) throw new Error('PERMISSION_DENIED:cors_proxy — grant this permission to use api.utils.http');
-        return shielded(spindle.cors(url, { method: opts.method ?? 'GET', headers: opts.headers, body: opts.body }) as unknown as Promise<HttpResponse>);
-      },
-    },
+  return {
+    log:   makeHandler('log'),
+    warn:  makeHandler('warn'),
+    error: makeHandler('error'),
+    info:  makeHandler('info'),
   };
-
-  // ── api.json ───────────────────────────────────────────────────────────────
-  const json: LumiScriptAPI['json'] = {
-    parse: (text) => JSON.parse(text) as never,
-    stringify: (data, pretty) => pretty ? JSON.stringify(data, null, 2) : JSON.stringify(data),
-    clone: <T>(data: T): T => JSON.parse(JSON.stringify(data)) as T,
-    get(data, path, defaultValue?) {
-      try {
-        const parts = path.split('.');
-        let cur: unknown = data;
-        for (const p of parts) {
-          if (cur == null) return defaultValue;
-          cur = (cur as Record<string, unknown>)[p];
-        }
-        return cur ?? defaultValue;
-      } catch { return defaultValue; }
-    },
-    set(data, path, value) {
-      const parts = path.split('.');
-      let cur = data as Record<string, unknown>;
-      for (let i = 0; i < parts.length - 1; i++) {
-        const p = parts[i]!;
-        if (typeof cur[p] !== 'object' || cur[p] === null) cur[p] = {};
-        cur = cur[p] as Record<string, unknown>;
-      }
-      cur[parts[parts.length - 1]!] = value;
-      return data;
-    },
-    merge: (...objects) => Object.assign({}, ...objects) as never,
-    isValid: (text) => { try { JSON.parse(text); return true; } catch { return false; } },
-    filter: <T>(data: T[], predicate: (item: T) => boolean) => data.filter(predicate),
-    sort<T>(data: T[], key: string, dir: 'asc' | 'desc' = 'asc'): T[] {
-      return [...data].sort((a, b) => {
-        const av = (a as Record<string, unknown>)[key];
-        const bv = (b as Record<string, unknown>)[key];
-        const cmp = av! < bv! ? -1 : av! > bv! ? 1 : 0;
-        return dir === 'asc' ? cmp : -cmp;
-      });
-    },
-    uniq: <T>(data: T[]) => [...new Set(data)],
-    flatten: <T>(data: unknown[]): T[] => data.flat(Infinity) as T[],
-  };
-
-  // ── api.variables ──────────────────────────────────────────────────────────
-  const flowStore = new Map<string, unknown>();
-
-  const variables: LumiScriptAPI['variables'] = {
-    local:     makeStorageVarStore(() => activeContext.chatId ? `variables/chats/${activeContext.chatId}.json` : null),
-    global:    makeStorageVarStore(() => 'variables/global.json'),
-    character: makeStorageVarStore(() => activeContext.characterId ? `variables/characters/${activeContext.characterId}.json` : null),
-    flow: {
-      get:    <T>(key: string, def?: T): T | undefined => (flowStore.has(key) ? flowStore.get(key) as T : def),
-      set:    (_key: string, val: unknown) => { flowStore.set(_key, val); },
-      delete: (key: string) => flowStore.delete(key),
-      has:    (key: string) => flowStore.has(key),
-      clear:  () => { flowStore.clear(); },
-    },
-  };
-
-  // ── api.chat ───────────────────────────────────────────────────────────────
-  // All methods are non-async synchronous wrappers: guards throw immediately
-  // in the script body, then shielded() prevents an unhandled rejection if
-  // the user omits await. Callers who DO await still receive the rejection.
-  const chat: LumiScriptAPI['chat'] = {
-    getChatId: () => activeContext.chatId,
-
-    getMessages: (opts) => {
-      assertPerm('chat_mutation', hasPerm);
-      const id = requireChatId(activeContext);
-      return shielded(
-        spindle.chat.getMessages(id).then(msgs => {
-          if (opts?.last !== undefined) return msgs.slice(-opts.last);
-          if (opts?.first !== undefined) return msgs.slice(0, opts.first);
-          return msgs;
-        }),
-      );
-    },
-
-    sendMessage: (content, opts) => {
-      assertPerm('chat_mutation', hasPerm);
-      const id = requireChatId(activeContext);
-      return shielded(
-        spindle.chat.appendMessage(id, {
-          role: opts?.role ?? 'user',
-          content,
-          metadata: opts?.metadata,
-        }),
-      );
-    },
-
-    editMessage: (msgId, content) => {
-      assertPerm('chat_mutation', hasPerm);
-      const id = requireChatId(activeContext);
-      return shielded(spindle.chat.updateMessage(id, msgId, { content }));
-    },
-
-    deleteMessage: (msgId) => {
-      assertPerm('chat_mutation', hasPerm);
-      const id = requireChatId(activeContext);
-      return shielded(spindle.chat.deleteMessage(id, msgId));
-    },
-  };
-
-  // ── api.llm ────────────────────────────────────────────────────────────────
-  const llm: LumiScriptAPI['llm'] = {
-    generate: (messages, opts) => {
-      assertPerm('generation', hasPerm);
-      return shielded(
-        spindle.generate.quiet({
-          type: 'quiet',
-          messages,
-          ...(opts?.connectionId ? { connection_id: opts.connectionId } : {}),
-          parameters: buildLLMParams(opts),
-          userId: userId ?? undefined,
-        }).then(result => (result as { content: string }).content),
-      );
-    },
-
-    generateStructured: <T>(
-      messages: import('../types/script.js').LLMMessage[],
-      _schema: Record<string, unknown>,
-      opts?: import('../types/script.js').LLMOptions,
-    ): Promise<T> => {
-      assertPerm('generation', hasPerm);
-      return shielded(
-        spindle.generate.quiet({
-          type: 'quiet',
-          messages: [
-            ...messages,
-            { role: 'system', content: 'Respond with valid JSON only. No markdown, no extra text.' },
-          ],
-          ...(opts?.connectionId ? { connection_id: opts.connectionId } : {}),
-          parameters: buildLLMParams(opts),
-          userId: userId ?? undefined,
-        }).then(result => {
-          const content = (result as { content: string }).content;
-          try {
-            return JSON.parse(content.replace(/^```json\s*/i, '').replace(/\s*```$/, '')) as T;
-          } catch {
-            throw new Error(`api.llm.generateStructured: response was not valid JSON: ${content.slice(0, 200)}`);
-          }
-        }),
-      );
-    },
-  };
-
-  // ── api.files ──────────────────────────────────────────────────────────────
-  const files: LumiScriptAPI['files'] = {
-    read:   (path) => { assertDangerous(script); return spindle.userStorage.read(path); },
-    write:  (path, content) => { assertDangerous(script); return spindle.userStorage.write(path, content); },
-    delete: (path) => { assertDangerous(script); return spindle.userStorage.delete(path); },
-    exists: (path) => { assertDangerous(script); return spindle.userStorage.exists(path); },
-    list:   (prefix) => { assertDangerous(script); return spindle.userStorage.list(prefix); },
-  };
-
-  // ── api.events (internal bus — Phase 1) ───────────────────────────────────
-  const bus = new Map<string, Array<(d: unknown) => void>>();
-
-  const events: LumiScriptAPI['events'] = {
-    on<T>(event: string, handler: (d: T) => void | Promise<void>) {
-      if (!bus.has(event)) bus.set(event, []);
-      const fn = (d: unknown) => { void handler(d as T); };
-      bus.get(event)!.push(fn);
-      return { event, unsubscribe: () => {
-        const ls = bus.get(event);
-        if (ls) ls.splice(ls.indexOf(fn), 1);
-      }};
-    },
-    off(sub) { sub.unsubscribe(); },
-    once<T>(event: string, handler: (d: T) => void | Promise<void>) {
-      let sub: ReturnType<typeof events.on>;
-      sub = events.on<T>(event, (data) => { sub.unsubscribe(); return handler(data); });
-      return sub;
-    },
-    trigger(event, data) { for (const fn of bus.get(event) ?? []) fn(data); },
-    list: () => [...bus.keys()],
-    count: (event) => bus.get(event)?.length ?? 0,
-  };
-
-  // ── Stubs ─────────────────────────────────────────────────────────────────
-  const worldInfo = new Proxy({} as LumiScriptAPI['worldInfo'], {
-    get: (_t, prop) => {
-      if (prop === '_stub') return true;
-      return () => { throw new Error(`api.worldInfo.${String(prop)}: not yet available in LumiScript`); };
-    },
-  });
-
-  const characters = new Proxy({} as LumiScriptAPI['characters'], {
-    get: (_t, prop) => {
-      if (prop === '_stub') return true;
-      return () => { throw new Error(`api.characters.${String(prop)}: not yet available in LumiScript`); };
-    },
-  });
-
-  return { utils, json, variables, chat, llm, events, files, worldInfo, characters };
 }
-
-// ─── Small helpers ────────────────────────────────────────────────────────────
 
 /**
  * Serialize a single console.log argument to a human-readable string.
@@ -432,11 +213,11 @@ function buildAPI(script: Script, options: ExecutorOptions): LumiScriptAPI {
  * would silently reduce to "{}" or "[]".
  */
 function serializeConsoleArg(a: unknown): string {
-  if (a === undefined)        return 'undefined';
-  if (a === null)             return 'null';
+  if (a === undefined)         return 'undefined';
+  if (a === null)              return 'null';
   if (typeof a === 'function') return `[Function: ${(a as { name?: string }).name ?? '(anonymous)'}]`;
-  if (a instanceof Promise)   return '[Promise (pending)]';
-  if (a instanceof Error)     return `${a.name}: ${a.message}`;
+  if (a instanceof Promise)    return '[Promise (pending)]';
+  if (a instanceof Error)      return `${a.name}: ${a.message}`;
   if (a instanceof Map) {
     try {
       return `Map(${a.size}) { ${[...a.entries()].map(([k, v]) => `${JSON.stringify(k)} => ${serializeConsoleArg(v)}`).join(', ')} }`;
@@ -448,7 +229,6 @@ function serializeConsoleArg(a: unknown): string {
     } catch { return `[Set(${a.size})]`; }
   }
   if (typeof a === 'object') {
-    // Non-plain objects (RegExp, Date, etc.) fall back to toString tag
     const tag = Object.prototype.toString.call(a);
     if (tag !== '[object Object]' && tag !== '[object Array]') return tag;
     try { return JSON.stringify(a, null, 2); }
@@ -456,81 +236,3 @@ function serializeConsoleArg(a: unknown): string {
   }
   return String(a);
 }
-
-function assertPerm(permission: string, hasPerm: (p: string) => boolean): void {
-  if (!hasPerm(permission)) {
-    throw new Error(`PERMISSION_DENIED:${permission} — grant this permission to use this API`);
-  }
-}
-
-function assertDangerous(script: Script): void {
-  if (!script.allowDangerous) {
-    throw new Error(`"${script.name}" must have "Allow Dangerous" enabled to use this API`);
-  }
-}
-
-/**
- * Mark a Promise as "handled" to prevent Bun from crashing the worker when a
- * user script calls an async API method without await. The no-op .catch()
- * satisfies Bun's unhandled-rejection detector; callers who DO await still
- * receive the rejection normally because we return the original Promise p.
- */
-function shielded<T>(p: Promise<T>): Promise<T> {
-  p.catch(() => {});
-  return p;
-}
-
-function requireChatId(ctx: { chatId: string | null }): string {
-  if (!ctx.chatId) throw new Error('api.chat: no active chat — open a chat first');
-  return ctx.chatId;
-}
-
-function buildLLMParams(opts?: import('../types/script.js').LLMOptions): Record<string, unknown> {
-  const p: Record<string, unknown> = {};
-  if (opts?.temperature !== undefined) p.temperature = opts.temperature;
-  if (opts?.maxTokens !== undefined) p.max_tokens = opts.maxTokens;
-  if (opts?.model !== undefined) p.model = opts.model;
-  return p;
-}
-
-function makeStorageVarStore(
-  getPath: () => string | null,
-): LumiScriptAPI['variables']['local'] {
-  return {
-    async get<T>(key: string, def?: T): Promise<T | undefined> {
-      const path = getPath();
-      if (!path) return def;
-      const store = await spindle.userStorage.getJson<Record<string, unknown>>(path, { fallback: {} });
-      return (key in store ? store[key] as T : def);
-    },
-    async set<T>(_key: string, value: T): Promise<void> {
-      const path = getPath();
-      if (!path) return;
-      const store = await spindle.userStorage.getJson<Record<string, unknown>>(path, { fallback: {} });
-      store[_key] = value;
-      await spindle.userStorage.setJson(path, store);
-    },
-    async delete(key: string): Promise<boolean> {
-      const path = getPath();
-      if (!path) return false;
-      const store = await spindle.userStorage.getJson<Record<string, unknown>>(path, { fallback: {} });
-      if (!(key in store)) return false;
-      delete store[key];
-      await spindle.userStorage.setJson(path, store);
-      return true;
-    },
-    async has(key: string): Promise<boolean> {
-      const path = getPath();
-      if (!path) return false;
-      const store = await spindle.userStorage.getJson<Record<string, unknown>>(path, { fallback: {} });
-      return key in store;
-    },
-    async clear(): Promise<void> {
-      const path = getPath();
-      if (!path) return;
-      await spindle.userStorage.setJson(path, {});
-    },
-  };
-}
-
-
