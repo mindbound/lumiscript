@@ -46,18 +46,18 @@ function toCreateDTO(
   input: CharacterCreateInput,
 ): import('lumiverse-spindle-types').CharacterCreateDTO {
   return {
-    name:                    input.name,
-    description:             input.description,
-    personality:             input.personality,
-    scenario:                input.scenario,
-    first_mes:               input.firstMessage,
-    mes_example:             input.mesExample,
-    creator_notes:           input.creatorNotes,
-    system_prompt:           input.systemPrompt,
+    name:                      input.name,
+    description:               input.description,
+    personality:               input.personality,
+    scenario:                  input.scenario,
+    first_mes:                 input.firstMessage,
+    mes_example:               input.mesExample,
+    creator_notes:             input.creatorNotes,
+    system_prompt:             input.systemPrompt,
     post_history_instructions: input.postHistoryInstructions,
-    tags:                    input.tags,
-    alternate_greetings:     input.alternateGreetings,
-    creator:                 input.creator,
+    tags:                      input.tags,
+    alternate_greetings:       input.alternateGreetings,
+    creator:                   input.creator,
   };
 }
 
@@ -70,36 +70,37 @@ function toUpdateDTO(
 // ─── API builder ──────────────────────────────────────────────────────────────
 
 export function buildCharactersAPI(deps: APIBuildDeps): LumiScriptAPI['characters'] {
-  const { hasPerm } = deps;
+  const { hasPerm, userId } = deps;
+  const uid = userId ?? undefined;
 
   return {
     list: async (options) => {
       assertPerm('characters', hasPerm);
-      const result = await spindle.characters.list(options);
+      const result = await spindle.characters.list({ ...options, userId: uid });
       return { data: result.data.map(mapCharacter), total: result.total };
     },
 
     get: async (id) => {
       assertPerm('characters', hasPerm);
-      const dto = await spindle.characters.get(id);
+      const dto = await spindle.characters.get(id, uid);
       return dto ? mapCharacter(dto) : null;
     },
 
     create: async (input) => {
       assertPerm('characters', hasPerm);
-      const dto = await spindle.characters.create(toCreateDTO(input));
+      const dto = await spindle.characters.create(toCreateDTO(input), uid);
       return mapCharacter(dto);
     },
 
     update: async (id, input) => {
       assertPerm('characters', hasPerm);
-      const dto = await spindle.characters.update(id, toUpdateDTO(input));
+      const dto = await spindle.characters.update(id, toUpdateDTO(input), uid);
       return mapCharacter(dto);
     },
 
     delete: async (id) => {
       assertPerm('characters', hasPerm);
-      return spindle.characters.delete(id);
+      return spindle.characters.delete(id, uid);
     },
   };
 }

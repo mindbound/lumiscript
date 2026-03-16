@@ -74,22 +74,23 @@ export const ScriptListItem: FC<ScriptListItemProps> = ({
               {duration}ms
             </span>
           )}
-          {/* Binding badges */}
-          {script.type !== 'library' && bindingCount > 0 && (
-            <span className="ls-item-binding-badges">
-              {script.bindings!.map((b, i) => (
-                <span key={i} className="ls-binding-badge">
-                  {b.type === 'character'
-                    ? <UserRound size={9} />
-                    : <MessageSquare size={9} />}
-                  <span style={{ maxWidth: 60, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {b.displayName}
-                  </span>
-                </span>
-              ))}
-            </span>
-          )}
         </div>
+
+        {/* Binding badges — own row so they don't crowd the meta or action controls */}
+        {script.type !== 'library' && bindingCount > 0 && (
+          <div className="ls-item-bindings">
+            {script.bindings!.map((b, i) => (
+              <span key={i} className="ls-binding-badge">
+                {b.type === 'character'
+                  ? <UserRound size={9} />
+                  : <MessageSquare size={9} />}
+                <span style={{ maxWidth: 70, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {b.displayName}
+                </span>
+              </span>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Actions (shown on hover via CSS) */}

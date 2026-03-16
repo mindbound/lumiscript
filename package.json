@@ -19,7 +19,7 @@
   "devDependencies": {
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
-    "lumiverse-spindle-types": "^0.1.4",
+    "lumiverse-spindle-types": "^0.1.5",
     "typescript": "^5.9.3"
   }
 }

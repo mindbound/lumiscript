@@ -77,7 +77,8 @@ function makeCharacterVarStore(
 // ─── API builder ──────────────────────────────────────────────────────────────
 
 export function buildVariablesAPI(deps: APIBuildDeps): LumiScriptAPI['variables'] {
-  const { activeContext } = deps;
+  const { activeContext, userId } = deps;
+  const uid = userId ?? undefined;
   const flowStore = new Map<string, unknown>();
 
   return {
@@ -118,24 +119,24 @@ export function buildVariablesAPI(deps: APIBuildDeps): LumiScriptAPI['variables'
     // ── global: spindle.variables.global (macro-compatible, JSON-serialized) ───
     global: {
       async get<T>(key: string, def?: T): Promise<T | undefined> {
-        const raw = await spindle.variables.global.get(key);
+        const raw = await spindle.variables.global.get(key, uid);
         return deserialize<T>(raw, def);
       },
       async set<T>(key: string, value: T): Promise<void> {
-        await spindle.variables.global.set(key, serialize(value));
+        await spindle.variables.global.set(key, serialize(value), uid);
       },
       async delete(key: string): Promise<boolean> {
-        const exists = await spindle.variables.global.has(key);
+        const exists = await spindle.variables.global.has(key, uid);
         if (!exists) return false;
-        await spindle.variables.global.delete(key);
+        await spindle.variables.global.delete(key, uid);
         return true;
       },
       async has(key: string): Promise<boolean> {
-        return spindle.variables.global.has(key);
+        return spindle.variables.global.has(key, uid);
       },
       async clear(): Promise<void> {
-        const all = await spindle.variables.global.list();
-        await Promise.all(Object.keys(all).map(k => spindle.variables.global.delete(k)));
+        const all = await spindle.variables.global.list(uid);
+        await Promise.all(Object.keys(all).map(k => spindle.variables.global.delete(k, uid)));
       },
     },
 

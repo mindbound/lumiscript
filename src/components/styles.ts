@@ -152,6 +152,11 @@ export const PANEL_CSS = `
   transition: opacity 0.1s;
 }
 .ls-item:hover .ls-item-actions { opacity: 1; }
+.ls-item-bindings {
+  display: flex;
+  flex-wrap: wrap;
+  margin-top: 3px;
+}
 .ls-item-binding-badges {
   display: flex;
   gap: 2px;
