@@ -8,6 +8,8 @@
   "description": "A JavaScript scripting platform for Lumiverse. Write scripts that react to chat events, automate behaviour, and extend your AI chat experience.",
   "permissions": [
     "chat_mutation",
+    "chats",
+    "characters",
     "generation",
     "interceptor",
     "cors_proxy",
