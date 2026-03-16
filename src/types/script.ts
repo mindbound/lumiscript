@@ -112,10 +112,12 @@ export interface LumiScriptAPI {
   json: JSONAPI;
   events: EventsAPI;
   utils: UtilsAPI;
+  /** Character CRUD. Requires characters permission. */
+  characters: CharactersAPI;
+  /** Chat session management. Requires chats permission. */
+  chats: ChatsAPI;
   /** Not yet available — stub only */
   worldInfo: WorldInfoAPIStub;
-  /** Not yet available — stub only */
-  characters: CharactersAPIStub;
   /** Requires allowDangerous */
   files: FilesAPI;
 }
@@ -340,13 +342,99 @@ export interface FilesAPI {
   list(prefix?: string): Promise<string[]>;
 }
 
+// ─── Characters API ───────────────────────────────────────────────────────────
+
+/**
+ * A character card as exposed to scripts.
+ * Maps directly to CharacterDTO from lumiverse-spindle-types.
+ */
+export interface Character {
+  id: string;
+  name: string;
+  description: string;
+  personality: string;
+  scenario: string;
+  /** First message / greeting */
+  firstMessage: string;
+  mesExample: string;
+  creatorNotes: string;
+  systemPrompt: string;
+  postHistoryInstructions: string;
+  tags: string[];
+  alternateGreetings: string[];
+  creator: string;
+  imageId: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CharacterCreateInput {
+  name: string;
+  description?: string;
+  personality?: string;
+  scenario?: string;
+  firstMessage?: string;
+  mesExample?: string;
+  creatorNotes?: string;
+  systemPrompt?: string;
+  postHistoryInstructions?: string;
+  tags?: string[];
+  alternateGreetings?: string[];
+  creator?: string;
+}
+
+export interface CharacterUpdateInput extends Partial<CharacterCreateInput> {}
+
+export interface CharactersAPI {
+  /** List characters (paginated). Requires characters permission. */
+  list(options?: { limit?: number; offset?: number }): Promise<{ data: Character[]; total: number }>;
+  /** Get a character by ID. Returns null if not found. Requires characters permission. */
+  get(id: string): Promise<Character | null>;
+  /** Create a new character. Requires characters permission. */
+  create(input: CharacterCreateInput): Promise<Character>;
+  /** Update a character. Requires characters permission. */
+  update(id: string, input: CharacterUpdateInput): Promise<Character>;
+  /** Delete a character. Returns true if deleted. Requires characters permission. */
+  delete(id: string): Promise<boolean>;
+}
+
+// ─── Chat Session API ─────────────────────────────────────────────────────────
+// (Separate from ChatAPI which handles individual messages within a chat.)
+
+/**
+ * A chat session entity.
+ * Maps directly to ChatDTO from lumiverse-spindle-types.
+ */
+export interface ChatSession {
+  id: string;
+  characterId: string;
+  name: string;
+  metadata: Record<string, unknown>;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ChatSessionUpdateInput {
+  name?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ChatsAPI {
+  /** List chat sessions, optionally filtered by character. Requires chats permission. */
+  list(options?: { characterId?: string; limit?: number; offset?: number }): Promise<{ data: ChatSession[]; total: number }>;
+  /** Get a chat session by ID. Returns null if not found. Requires chats permission. */
+  get(id: string): Promise<ChatSession | null>;
+  /** Get the currently active chat session. Returns null if none is open. Requires chats permission. */
+  getActive(): Promise<ChatSession | null>;
+  /** Update a chat session's name or metadata. Requires chats permission. */
+  update(id: string, input: ChatSessionUpdateInput): Promise<ChatSession>;
+  /** Delete a chat session and all its messages. Returns true if deleted. Requires chats permission. */
+  delete(id: string): Promise<boolean>;
+}
+
 // ─── Stub APIs (not yet implemented) ─────────────────────────────────────────
 
 export type WorldInfoAPIStub = {
-  [K in string]: (...args: unknown[]) => never;
-} & { _stub: true };
-
-export type CharactersAPIStub = {
   [K in string]: (...args: unknown[]) => never;
 } & { _stub: true };
 

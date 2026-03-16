@@ -81,10 +81,10 @@ export class CollectionStore<T extends { id: string }> {
   async update(id: string, patch: Partial<T>): Promise<T | null> {
     const idx = this.items.findIndex(item => item.id === id);
     if (idx === -1) return null;
-    this.items[idx] = { ...this.items[idx], ...patch };
+    this.items[idx] = { ...this.items[idx], ...patch } as T;
     await this.persist();
     this.notify();
-    return this.items[idx];
+    return this.items[idx] ?? null;
   }
 
   async delete(id: string): Promise<boolean> {

@@ -26,14 +26,16 @@ import type {
 import type { ScriptStorage } from '../storage/script-storage.js';
 import { generateUUID } from '../utils/uuid.js';
 
-import { type APIBuildDeps } from './api/shared.js';
-import { buildUtilsAPI     } from './api/utils.js';
-import { buildJSONAPI      } from './api/json.js';
-import { buildChatAPI      } from './api/chat.js';
-import { buildLLMAPI       } from './api/llm.js';
-import { buildVariablesAPI } from './api/variables.js';
-import { buildFilesAPI     } from './api/files.js';
-import { buildEventsAPI    } from './api/events.js';
+import { type APIBuildDeps  } from './api/shared.js';
+import { buildUtilsAPI      } from './api/utils.js';
+import { buildJSONAPI       } from './api/json.js';
+import { buildChatAPI       } from './api/chat.js';
+import { buildLLMAPI        } from './api/llm.js';
+import { buildVariablesAPI  } from './api/variables.js';
+import { buildFilesAPI      } from './api/files.js';
+import { buildEventsAPI     } from './api/events.js';
+import { buildCharactersAPI } from './api/characters.js';
+import { buildChatsAPI      } from './api/chats-session.js';
 
 // ─── Executor options ─────────────────────────────────────────────────────────
 
@@ -96,18 +98,11 @@ function buildAPI(script: Script, options: ExecutorOptions): LumiScriptAPI {
 
   const deps: APIBuildDeps = { script, hasPerm, userId, activeContext };
 
-  // Stubs — replaced when Lumiverse devs expose the native Spindle APIs.
+  // worldInfo is still a stub — pending Lumiverse World Book API.
   const worldInfo = new Proxy({} as LumiScriptAPI['worldInfo'], {
     get: (_t, prop) => {
       if (prop === '_stub') return true;
       return () => { throw new Error(`api.worldInfo.${String(prop)}: not yet available in LumiScript`); };
-    },
-  });
-
-  const characters = new Proxy({} as LumiScriptAPI['characters'], {
-    get: (_t, prop) => {
-      if (prop === '_stub') return true;
-      return () => { throw new Error(`api.characters.${String(prop)}: not yet available in LumiScript`); };
     },
   });
 
@@ -119,8 +114,9 @@ function buildAPI(script: Script, options: ExecutorOptions): LumiScriptAPI {
     llm:        buildLLMAPI(deps),
     files:      buildFilesAPI(deps),
     events:     buildEventsAPI(),
+    characters: buildCharactersAPI(deps),
+    chats:      buildChatsAPI(deps),
     worldInfo,
-    characters,
   };
 }
 

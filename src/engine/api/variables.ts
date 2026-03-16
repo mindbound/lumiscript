@@ -2,10 +2,17 @@
  * ============================================================================
  * LUMISCRIPT — VARIABLES API
  * ============================================================================
- * flow (in-memory), local (per-chat), global (cross-chat), character (per-character)
+ * flow (in-memory), local (chat-scoped), global (cross-chat), character (per-character)
  *
- * local/global/character are backed by spindle.userStorage JSON files.
- * flow is an in-memory Map cleared at the end of each script execution.
+ * local and global now use spindle.variables — the same storage as Lumiverse's
+ * built-in {{getvar}}/{{setvar}} macros.  Values are JSON-serialized so scripts
+ * can store any type while still being macro-compatible (macro users see the
+ * JSON string; script users transparently get the original type back).
+ *
+ * character continues to use userStorage JSON files (no native Spindle equivalent).
+ * flow is in-memory only, cleared after each script execution.
+ *
+ * No permission required for local/global/flow. character uses userStorage.
  */
 
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
@@ -13,28 +20,23 @@ declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
 import type { LumiScriptAPI } from '../../types/script.js';
 import type { APIBuildDeps } from './shared.js';
 
-export function buildVariablesAPI(deps: APIBuildDeps): LumiScriptAPI['variables'] {
-  const { activeContext } = deps;
-  const flowStore = new Map<string, unknown>();
+// ─── Serialization helpers ────────────────────────────────────────────────────
 
-  return {
-    local:     makeStorageVarStore(() => activeContext.chatId      ? `variables/chats/${activeContext.chatId}.json`           : null),
-    global:    makeStorageVarStore(() => 'variables/global.json'),
-    character: makeStorageVarStore(() => activeContext.characterId ? `variables/characters/${activeContext.characterId}.json` : null),
-
-    flow: {
-      get:    <T>(key: string, def?: T): T | undefined => (flowStore.has(key) ? flowStore.get(key) as T : def),
-      set:    (_key: string, val: unknown) => { flowStore.set(_key, val); },
-      delete: (key: string) => flowStore.delete(key),
-      has:    (key: string) => flowStore.has(key),
-      clear:  () => { flowStore.clear(); },
-    },
-  };
+function serialize(value: unknown): string {
+  if (typeof value === 'string') return value;
+  return JSON.stringify(value);
 }
 
-function makeStorageVarStore(
+function deserialize<T>(raw: string, def?: T): T | undefined {
+  if (raw === '') return def;
+  try { return JSON.parse(raw) as T; } catch { return raw as unknown as T; }
+}
+
+// ─── Per-character userStorage store (unchanged) ──────────────────────────────
+
+function makeCharacterVarStore(
   getPath: () => string | null,
-): LumiScriptAPI['variables']['local'] {
+): LumiScriptAPI['variables']['character'] {
   return {
     async get<T>(key: string, def?: T): Promise<T | undefined> {
       const path = getPath();
@@ -68,6 +70,89 @@ function makeStorageVarStore(
       const path = getPath();
       if (!path) return;
       await spindle.userStorage.setJson(path, {});
+    },
+  };
+}
+
+// ─── API builder ──────────────────────────────────────────────────────────────
+
+export function buildVariablesAPI(deps: APIBuildDeps): LumiScriptAPI['variables'] {
+  const { activeContext } = deps;
+  const flowStore = new Map<string, unknown>();
+
+  return {
+    // ── local: spindle.variables.local (macro-compatible, JSON-serialized) ─────
+    local: {
+      async get<T>(key: string, def?: T): Promise<T | undefined> {
+        const chatId = activeContext.chatId;
+        if (!chatId) return def;
+        const raw = await spindle.variables.local.get(chatId, key);
+        return deserialize<T>(raw, def);
+      },
+      async set<T>(key: string, value: T): Promise<void> {
+        const chatId = activeContext.chatId;
+        if (!chatId) return;
+        await spindle.variables.local.set(chatId, key, serialize(value));
+      },
+      async delete(key: string): Promise<boolean> {
+        const chatId = activeContext.chatId;
+        if (!chatId) return false;
+        const exists = await spindle.variables.local.has(chatId, key);
+        if (!exists) return false;
+        await spindle.variables.local.delete(chatId, key);
+        return true;
+      },
+      async has(key: string): Promise<boolean> {
+        const chatId = activeContext.chatId;
+        if (!chatId) return false;
+        return spindle.variables.local.has(chatId, key);
+      },
+      async clear(): Promise<void> {
+        const chatId = activeContext.chatId;
+        if (!chatId) return;
+        const all = await spindle.variables.local.list(chatId);
+        await Promise.all(Object.keys(all).map(k => spindle.variables.local.delete(chatId, k)));
+      },
+    },
+
+    // ── global: spindle.variables.global (macro-compatible, JSON-serialized) ───
+    global: {
+      async get<T>(key: string, def?: T): Promise<T | undefined> {
+        const raw = await spindle.variables.global.get(key);
+        return deserialize<T>(raw, def);
+      },
+      async set<T>(key: string, value: T): Promise<void> {
+        await spindle.variables.global.set(key, serialize(value));
+      },
+      async delete(key: string): Promise<boolean> {
+        const exists = await spindle.variables.global.has(key);
+        if (!exists) return false;
+        await spindle.variables.global.delete(key);
+        return true;
+      },
+      async has(key: string): Promise<boolean> {
+        return spindle.variables.global.has(key);
+      },
+      async clear(): Promise<void> {
+        const all = await spindle.variables.global.list();
+        await Promise.all(Object.keys(all).map(k => spindle.variables.global.delete(k)));
+      },
+    },
+
+    // ── character: userStorage JSON (no native Spindle equivalent) ────────────
+    character: makeCharacterVarStore(
+      () => activeContext.characterId
+        ? `variables/characters/${activeContext.characterId}.json`
+        : null,
+    ),
+
+    // ── flow: in-memory only, cleared after execution ─────────────────────────
+    flow: {
+      get:    <T>(key: string, def?: T): T | undefined => (flowStore.has(key) ? flowStore.get(key) as T : def),
+      set:    (_key: string, val: unknown) => { flowStore.set(_key, val); },
+      delete: (key: string) => flowStore.delete(key),
+      has:    (key: string) => flowStore.has(key),
+      clear:  () => { flowStore.clear(); },
     },
   };
 }

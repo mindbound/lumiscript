@@ -79,6 +79,11 @@ spindle.onFrontendMessage(async (raw, userId) => {
       }
 
       case 'get_active_context': {
+        // Always fetch live state rather than relying only on the cached context.
+        const activeChat = await spindle.chats.getActive();
+        if (activeChat) {
+          setActiveContext({ chatId: activeChat.id, characterId: activeChat.character_id });
+        }
         const ctx = getActiveContext();
         send({
           type: 'active_context',
@@ -183,15 +188,32 @@ spindle.onFrontendMessage(async (raw, userId) => {
 
 spindle.on('CHAT_CHANGED', (payload: unknown) => {
   const p = payload as { chatId?: string } | null;
-  setActiveContext({ chatId: p?.chatId ?? null });
-  // Inform the frontend so the binding editor can show the current context
-  const ctx = getActiveContext();
-  send({
-    type: 'active_context',
-    characterId: ctx.characterId,
-    characterName: ctx.characterName,
-    chatId: ctx.chatId,
-  });
+  const newChatId = p?.chatId ?? null;
+  // Fetch the full chat DTO to get character_id — the event payload doesn't include it.
+  if (newChatId) {
+    void spindle.chats.get(newChatId).then(chat => {
+      setActiveContext({
+        chatId: newChatId,
+        characterId: chat?.character_id ?? null,
+      });
+      const ctx = getActiveContext();
+      send({
+        type: 'active_context',
+        characterId: ctx.characterId,
+        characterName: ctx.characterName,
+        chatId: ctx.chatId,
+      });
+    });
+  } else {
+    setActiveContext({ chatId: null, characterId: null });
+    const ctx = getActiveContext();
+    send({
+      type: 'active_context',
+      characterId: ctx.characterId,
+      characterName: ctx.characterName,
+      chatId: ctx.chatId,
+    });
+  }
 });
 
 spindle.on('CHARACTER_EDITED', (payload: unknown) => {
@@ -224,6 +246,18 @@ spindle.permissions.onDenied(({ permission, operation }) => {
 
 ;(async () => {
   await refreshPermissions();
+  // Populate the active context immediately using spindle.chats.getActive() so that
+  // api.chat.*, api.variables.local/character, and script bindings all work from the
+  // first script run — without waiting for a CHAT_CHANGED event to fire.
+  try {
+    const activeChat = await spindle.chats.getActive();
+    if (activeChat) {
+      setActiveContext({ chatId: activeChat.id, characterId: activeChat.character_id });
+      spindle.log.info(`[LumiScript] Active context: chat=${activeChat.id} character=${activeChat.character_id}`);
+    }
+  } catch {
+    // Non-fatal — active context stays null/null until the first CHAT_CHANGED event.
+  }
   // Storage is loaded lazily in onFrontendMessage once userId is known.
   spindle.log.info('LumiScript backend ready');
 })();
