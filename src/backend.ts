@@ -91,13 +91,11 @@ async function syncTriggers(): Promise<void> {
   if (!settingsStore.isLoaded || !scriptStorage.store.isLoaded) return;
   if (!settingsStore.get().enabled) {
     triggerRegistry.unregisterAll();
-    send({ type: 'triggers_registered', registrations: {} });
     return;
   }
   await triggerRegistry.reloadAll(scriptStorage.getScripts()).catch(err => {
     spindle.log.error(`[LumiScript] syncTriggers failed: ${err instanceof Error ? err.message : String(err)}`);
   });
-  send({ type: 'triggers_registered', registrations: triggerRegistry.getRegistrations() });
 }
 
 // ─── Frontend message handler ─────────────────────────────────────────────────

@@ -388,6 +388,67 @@ export const PANEL_CSS = `
 .ls-bindings-add:hover { border-color: var(--lumiverse-accent); color: var(--lumiverse-text); }
 .ls-bindings-add:disabled { opacity: 0.38; cursor: not-allowed; border-color: transparent; }
 
+/* ── Triggers section ───────────────────────────────────────────────────────────────────── */
+.ls-triggers {
+  flex-shrink: 0;
+  border-top: 1px solid var(--lumiverse-border);
+  padding: 6px 10px;
+}
+.ls-triggers-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--lumiverse-text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+.ls-triggers-header:hover { color: var(--lumiverse-text); }
+.ls-triggers-title {
+  flex: 1;
+  font-size: 11px;
+  color: var(--lumiverse-text-muted);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.ls-triggers-body { margin-top: 6px; display: flex; flex-direction: column; gap: 5px; }
+.ls-triggers-count {
+  background: var(--lumiverse-accent);
+  color: var(--lumiverse-accent-fg);
+  border-radius: 999px;
+  padding: 1px 6px;
+  font-size: 10px;
+}
+.ls-trigger-group { display: flex; flex-direction: column; gap: 3px; }
+.ls-trigger-group-label {
+  font-size: 10px;
+  color: var(--lumiverse-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 500;
+}
+.ls-trigger-chips { display: flex; flex-wrap: wrap; gap: 3px; }
+.ls-trigger-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 4px;
+  border: 1px solid var(--lumiverse-border);
+  background: transparent;
+  color: var(--lumiverse-text-muted);
+  font-size: 10px;
+  font-family: monospace;
+  cursor: pointer;
+  transition: border-color 0.1s, background 0.1s, color 0.1s;
+}
+.ls-trigger-chip:hover { border-color: var(--lumiverse-accent); color: var(--lumiverse-text); }
+.ls-trigger-chip.ls-trigger-chip-active {
+  background: color-mix(in srgb, var(--lumiverse-accent) 15%, transparent);
+  border-color: var(--lumiverse-accent);
+  color: var(--lumiverse-text);
+}
+
 /* ── Metadata footer ────────────────────────────────────────────────────── */
 .ls-meta-footer {
   display: flex;

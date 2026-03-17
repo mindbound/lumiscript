@@ -58,6 +58,7 @@ export class ScriptStorage {
       allowDangerous: false,
       type,
       bindings: [],
+      triggers: [],
       createdAt: now,
       updatedAt: now,
     });

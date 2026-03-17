@@ -61,6 +61,13 @@ export interface Script {
    * Non-empty → runs if ANY entry matches the current context (OR semantics).
    */
   bindings?: ScriptBindingEntry[];
+  /**
+   * Lumiverse event names this trigger script listens to.
+   * Selected in the editor UI. When any declared event fires, the entire script
+   * body is executed with `data` (event payload + `__event` name) and `api`
+   * injected as top-level variables. Library scripts ignore this field.
+   */
+  triggers?: string[];
   createdAt: number;   // Unix ms
   updatedAt: number;   // Unix ms
   metadata?: ScriptMetadata;
@@ -110,7 +117,7 @@ export interface LumiScriptAPI {
   llm: LLMAPI;
   variables: VariablesAPI;
   json: JSONAPI;
-  events: EventsAPI;
+
   utils: UtilsAPI;
   /** Character CRUD. Requires characters permission. */
   characters: CharactersAPI;
@@ -265,21 +272,7 @@ export interface JSONAPI {
 
 // ─── Events API ───────────────────────────────────────────────────────────────
 
-export type EventHandler<T = unknown> = (data: T) => void | Promise<void>;
 
-export interface EventSubscription {
-  event: string;
-  unsubscribe(): void;
-}
-
-export interface EventsAPI {
-  on<T = unknown>(event: string, handler: EventHandler<T>): EventSubscription;
-  off(subscription: EventSubscription): void;
-  once<T = unknown>(event: string, handler: EventHandler<T>): EventSubscription;
-  trigger(event: string, data?: unknown): void;
-  list(): string[];
-  count(event: string): number;
-}
 
 // ─── Utils API ────────────────────────────────────────────────────────────────
 
@@ -429,16 +422,8 @@ export type WorldInfoAPIStub = {
 
 // ─── Script namespace (inside script body) ────────────────────────────────────
 
-export type ScriptEventHandler<T = unknown> = (data: T, api: LumiScriptAPI) => void | Promise<void>;
-
 /** The `script.*` namespace available inside script bodies */
 export interface ScriptNamespace {
-  /**
-   * Register a Lumiverse event handler.
-   * The binding gate is applied: if the script has bindings, the handler
-   * only fires when a binding is satisfied.
-   */
-  on<T = unknown>(event: string, handler: ScriptEventHandler<T>): void;
   /**
    * Load a library script by name or ID (lazy, cached per execution).
    * Throws if the library is not found or if a circular dependency is detected.

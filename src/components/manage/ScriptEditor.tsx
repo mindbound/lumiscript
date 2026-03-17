@@ -5,6 +5,7 @@ import type { Script, ScriptBindingEntry, ConsoleEntry } from '../../types/scrip
 import type { FrontendToBackend } from '../../types/messages.js';
 import { ScriptConsole } from './ScriptConsole.js';
 import { BindingsSection, type ActiveContext } from './BindingsSection.js';
+import { TriggersSection } from './TriggersSection.js';
 
 interface ScriptEditorProps {
   script: Script;
@@ -159,7 +160,7 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
           onMount={handleMount}
           options={{
             minimap: { enabled: false },
-            fontSize: 13,
+            fontSize: 12,
             lineNumbers: 'on',
             wordWrap: 'on',
             automaticLayout: true,
@@ -173,6 +174,15 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
 
       {/* Console */}
       <ScriptConsole entries={consoleEntries} isRunning={isRunning} onClear={onClearConsole} />
+
+      {/* Triggers (trigger scripts only) */}
+      {script.type !== 'library' && (
+        <TriggersSection
+          scriptId={script.id}
+          triggers={script.triggers ?? []}
+          sendToBackend={sendToBackend}
+        />
+      )}
 
       {/* Bindings (trigger scripts only) */}
       {script.type !== 'library' && (

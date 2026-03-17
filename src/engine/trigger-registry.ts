@@ -1,34 +1,28 @@
 /**
  * ============================================================================
- * LUMISCRIPT — TRIGGER REGISTRY
+ * LUMISCRIPT — TRIGGER REGISTRY (Option 2: metadata-declared events)
  * ============================================================================
- * Manages the lifecycle of trigger script event handlers.
+ * Manages spindle.on() subscriptions for trigger scripts.
  *
- * Two-phase model:
- *   Registration  — each enabled trigger script is executed once; any
- *                   script.on(event, handler) calls are intercepted and
- *                   wired to spindle.on() subscriptions.
- *   Invocation    — when a Lumiverse event fires, the stored handler is
- *                   called with a freshly built api object. Binding gate
- *                   and error isolation are applied per invocation.
+ * Execution model:
+ *   Registration — reads `script.triggers` (declared in the editor UI) and
+ *                  subscribes to those events via spindle.on(). No script body
+ *                  is executed during registration.
+ *   Invocation   — when an event fires the entire script body is executed via
+ *                  executeScript() with `data` injected as a top-level
+ *                  variable containing the event payload and `__event` name.
+ *                  The full api.* object is available as usual.
  *
- * TriggerRegistry is instantiated once in backend.ts and reloaded whenever
- * the script list changes (CRUD, enable/disable) or the master enabled
- * setting is toggled.
+ * This completely eliminates the "registration-phase body execution" problem
+ * that existed in the previous script.on() two-phase model.
  */
 
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
 
-import * as z from 'zod';
-import type { Script, ScriptNamespace, ScriptEventHandler } from '../types/script.js';
+import type { Script } from '../types/script.js';
 import type { BackendToFrontend } from '../types/messages.js';
 import type { ExecutorOptions } from './executor.js';
-import {
-  AsyncFunctionCtor,
-  buildScriptAPI,
-  buildScriptNamespace,
-  executeHandler,
-} from './executor.js';
+import { executeScript } from './executor.js';
 import { isAnyBindingSatisfied, getActiveContext } from './binding.js';
 import { executionStatusStore } from './execution-status.js';
 import { generateUUID } from '../utils/uuid.js';
@@ -36,10 +30,6 @@ import type { ScriptStorage } from '../storage/script-storage.js';
 
 // ─── Dependency factory ───────────────────────────────────────────────────────
 
-/**
- * Called on every event invocation to get fresh deps. Captured as a factory
- * so that userId and grantedPermissions are always current at firing time.
- */
 export interface TriggerDeps {
   grantedPermissions: Set<string>;
   userId: string | null;
@@ -49,7 +39,7 @@ export interface TriggerDeps {
 // ─── TriggerRegistry class ────────────────────────────────────────────────────
 
 export class TriggerRegistry {
-  /** scriptId → { unsubs, events } */
+  /** scriptId → { unsubs, events } — tracks live spindle.on() subscriptions */
   private cleanups = new Map<string, { unsubs: Array<() => void>; events: string[] }>();
 
   constructor(
@@ -58,39 +48,35 @@ export class TriggerRegistry {
   ) {}
 
   /**
-   * Execute a trigger script in registration mode.
-   * Any script.on(event, handler) calls will register real spindle.on()
-   * subscriptions. The registrations replace any previous ones for this
-   * script (unregister is called first).
+   * Subscribe to the events declared in `script.triggers`.
+   * No script body is executed; the body only runs when an event fires.
    */
   async register(script: Script): Promise<void> {
     this.unregister(script.id);
     if (!script.enabled || script.type !== 'trigger') return;
 
-    const captured: Array<() => void> = [];
+    const events = script.triggers ?? [];
+    if (events.length === 0) return;
 
-    /**
-     * Registration-mode implementation of script.on().
-     * Registers a spindle.on() subscription that fires the user handler with
-     * a fresh api object each time, after checking bindings.
-     */
-    const eventNames: string[] = [];
+    const unsubs: Array<() => void> = [];
 
-    const registrationOn: ScriptNamespace['on'] = <T>(
-      event: string,
-      handler: ScriptEventHandler<T>,
-    ) => {
-      eventNames.push(event);
+    for (const event of events) {
       const unsub = spindle.on(event, async (payload: unknown) => {
-        // ── Binding gate ────────────────────────────────────────────────────
+        // ── Binding gate ──────────────────────────────────────────────────
         if (!isAnyBindingSatisfied(script.bindings)) return;
 
-        // ── Fresh deps at invocation time ───────────────────────────────────
+        // ── Build execution context ────────────────────────────────────────
         const { grantedPermissions, userId, scriptStorage } = this.getDeps();
         const ctx = getActiveContext();
         const runId = generateUUID();
 
-        // ── Notify frontend: execution starting ─────────────────────────────
+        // Merge event name into the payload so scripts can use data.__event
+        const eventData: Record<string, unknown> = {
+          __event: event,
+          ...(payload !== null && typeof payload === 'object' ? payload as Record<string, unknown> : {}),
+        };
+
+        // ── Notify frontend ────────────────────────────────────────────────
         executionStatusStore.markRunning(script.id);
         this.sendToFrontend({
           type: 'execution_started',
@@ -99,19 +85,20 @@ export class TriggerRegistry {
           runId,
         });
 
-        // ── Execute the handler ─────────────────────────────────────────────
+        // ── Execute the script body ────────────────────────────────────────
         const opts: ExecutorOptions = {
           grantedPermissions,
           userId,
           scriptStorage,
           activeContext: ctx,
+          eventData,
           onConsole: (entry) =>
             this.sendToFrontend({ type: 'console_entry', scriptId: script.id, runId, entry }),
         };
 
-        const result = await executeHandler(script, handler as ScriptEventHandler, payload, opts);
+        const result = await executeScript(script, opts);
 
-        // ── Notify frontend: execution ended ────────────────────────────────
+        // ── Update status ──────────────────────────────────────────────────
         if (result.success) {
           executionStatusStore.markSuccess(script.id, result.duration);
         } else {
@@ -132,52 +119,13 @@ export class TriggerRegistry {
         });
       });
 
-      captured.push(unsub);
-    };
-
-    // ── Registration run ────────────────────────────────────────────────────
-    // Execute the script body so that script.on() calls are intercepted and
-    // stored above. Libraries required here are captured in handler closures.
-    const { grantedPermissions, userId, scriptStorage } = this.getDeps();
-    const ctx = getActiveContext();
-    const opts: ExecutorOptions = {
-      grantedPermissions,
-      userId,
-      scriptStorage,
-      activeContext: ctx,
-    };
-
-    const api = buildScriptAPI(script, opts);
-    const scriptNS = buildScriptNamespace(script, opts, registrationOn);
-    // Silent console during registration run — not an active execution.
-    const silent = { log: () => {}, warn: () => {}, error: () => {}, info: () => {} };
-
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-call
-      const fn: (...args: unknown[]) => Promise<unknown> = new AsyncFunctionCtor(
-        'api',
-        'script',
-        '__console',
-        'z',
-        `"use strict";\nconst console = __console;\n${script.code}\n`,
-      );
-      await fn(api, scriptNS, silent, z);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      spindle.log.error(
-        `[LumiScript] Trigger registration failed for "${script.name}": ${msg}`,
-      );
-      // Clean up any subscriptions that registered before the error.
-      for (const u of captured) u();
-      return;
+      unsubs.push(unsub);
     }
 
-    if (captured.length > 0) {
-      this.cleanups.set(script.id, { unsubs: captured, events: eventNames });
-      spindle.log.info(
-        `[LumiScript] Registered ${captured.length} handler(s) for trigger "${script.name}" (events: ${eventNames.join(', ')})`,
-      );
-    }
+    this.cleanups.set(script.id, { unsubs, events: [...events] });
+    spindle.log.info(
+      `[LumiScript] Subscribed "${script.name}" to: ${events.join(', ')}`,
+    );
   }
 
   /** Remove all spindle.on() subscriptions for a specific script. */
@@ -197,7 +145,7 @@ export class TriggerRegistry {
   }
 
   /**
-   * Full reload: unregister everything, then re-register all enabled triggers.
+   * Full reload: unregister everything, then re-subscribe all enabled triggers.
    * Called on startup, on any script CRUD, and on settings changes.
    */
   async reloadAll(scripts: Script[]): Promise<void> {
@@ -209,17 +157,9 @@ export class TriggerRegistry {
     }
   }
 
-  /** Total number of live spindle.on() subscriptions across all scripts. */
-  get handlerCount(): number {
-    let n = 0;
-    for (const [, entry] of this.cleanups) n += entry.unsubs.length;
-    return n;
-  }
-
   /**
-   * Returns the currently registered event names per script.
-   * scriptId → string[] of event names (may contain duplicates if script.on
-   * was called multiple times for the same event).
+   * Returns the currently subscribed event names per script.
+   * Derived from the live cleanups map (matches script.triggers at registration time).
    */
   getRegistrations(): Record<string, string[]> {
     const result: Record<string, string[]> = {};
@@ -227,5 +167,12 @@ export class TriggerRegistry {
       result[scriptId] = [...entry.events];
     }
     return result;
+  }
+
+  /** Total number of live spindle.on() subscriptions across all scripts. */
+  get handlerCount(): number {
+    let n = 0;
+    for (const [, entry] of this.cleanups) n += entry.unsubs.length;
+    return n;
   }
 }

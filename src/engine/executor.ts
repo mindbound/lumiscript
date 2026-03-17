@@ -15,8 +15,13 @@
  * Exports used by TriggerRegistry:
  *   AsyncFunctionCtor   — shared AsyncFunction constructor
  *   buildScriptAPI      — build the api.* object for a script
- *   buildScriptNamespace — build the script.* namespace (on / require)
- *   executeHandler      — run a pre-captured event handler closure
+ *   buildScriptNamespace — build the script.* namespace (require only)
+ *   buildCapturedConsole — build console capture
+ *
+ * Trigger scripts receive two additional top-level variables:
+ *   data  — event payload merged with { __event: 'EVENT_NAME' }
+ *           (empty object {} when the script is run manually)
+ *   api   — the full LumiScript API
  */
 
 import * as z from 'zod';
@@ -28,7 +33,6 @@ import type {
   ConsoleEntry,
   ConsoleEntryType,
   ScriptNamespace,
-  ScriptEventHandler,
 } from '../types/script.js';
 import type { ScriptStorage } from '../storage/script-storage.js';
 import { generateUUID } from '../utils/uuid.js';
@@ -40,7 +44,6 @@ import { buildChatAPI       } from './api/chat.js';
 import { buildLLMAPI        } from './api/llm.js';
 import { buildVariablesAPI  } from './api/variables.js';
 import { buildFilesAPI      } from './api/files.js';
-import { buildEventsAPI     } from './api/events.js';
 import { buildCharactersAPI } from './api/characters.js';
 import { buildChatsAPI      } from './api/chats-session.js';
 
@@ -56,6 +59,14 @@ export interface ExecutorOptions {
   userId?: string | null;
   onConsole?: (entry: ConsoleEntry) => void;
   scriptStorage?: ScriptStorage;
+  /**
+   * Event payload injected as the `data` top-level variable.
+   * Provided when the script is fired by TriggerRegistry in response to a
+   * Lumiverse event. The object includes `__event` (the event name) plus all
+   * fields from the raw event payload.
+   * When undefined (manual run), `data` is an empty object {}.
+   */
+  eventData?: Record<string, unknown>;
 }
 
 // ─── Async function constructor (exported for use by TriggerRegistry) ─────────
@@ -75,52 +86,21 @@ export async function executeScript(
   const capturedConsole = buildCapturedConsole(options.onConsole);
   const api = buildScriptAPI(script, options);
   const scriptNS = buildScriptNamespace(script, options);
+  const data = options.eventData ?? {};
 
   try {
     // eslint-disable-next-line @typescript-eslint/no-unsafe-call
     const fn: (...args: unknown[]) => Promise<unknown> = new AsyncFunctionCtor(
       'api',
+      'data',
       'script',
       '__console',
       'z',
       `"use strict";\nconst console = __console;\n${script.code}\n`,
     );
 
-    await fn(api, scriptNS, capturedConsole, z);
+    await fn(api, data, scriptNS, capturedConsole, z);
 
-    const duration = Math.round(performance.now() - startTime);
-    return { success: true, duration, scriptId: script.id, runId };
-  } catch (err: unknown) {
-    const duration = Math.round(performance.now() - startTime);
-    const error = err instanceof Error ? err : new Error(String(err));
-    return { success: false, error, duration, scriptId: script.id, runId };
-  }
-}
-
-// ─── Handler execution (used by TriggerRegistry for event-driven invocation) ──
-
-/**
- * Execute a pre-captured handler closure (from a script.on() registration).
- * The handler receives (eventData, api) — api is freshly built from options.
- */
-export async function executeHandler<T = unknown>(
-  script: Script,
-  handler: ScriptEventHandler<T>,
-  eventData: T,
-  options: ExecutorOptions,
-): Promise<ScriptExecutionResult> {
-  const runId = generateUUID();
-  const startTime = performance.now();
-
-  const capturedConsole = buildCapturedConsole(options.onConsole);
-  // Captured console is available in the api modules via the executor context.
-  // We don't inject it as a global here — handler is already a compiled closure.
-  void capturedConsole; // console forwarding happens via options.onConsole
-
-  const api = buildScriptAPI(script, options);
-
-  try {
-    await handler(eventData, api);
     const duration = Math.round(performance.now() - startTime);
     return { success: true, duration, scriptId: script.id, runId };
   } catch (err: unknown) {
@@ -153,34 +133,27 @@ export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiSc
     chat:       buildChatAPI(deps),
     llm:        buildLLMAPI(deps),
     files:      buildFilesAPI(deps),
-    events:     buildEventsAPI(),
     characters: buildCharactersAPI(deps),
     chats:      buildChatsAPI(deps),
     worldInfo,
   };
 }
 
-// ─── Script namespace (script.on, script.require) ─────────────────────────────
+// ─── Script namespace (script.require) ───────────────────────────────────────
 
 /**
  * Build the `script.*` namespace injected into each script execution.
- *
- * @param onImpl  Optional override for `script.on()`. When omitted the default
- *                no-op is used (Phase 1 manual-run behaviour). TriggerRegistry
- *                passes its registration handler here so `script.on()` captures
- *                event handlers during the trigger registration run.
+ * Contains only `require()` — event registration is handled via `triggers`
+ * metadata and the TriggerRegistry, not via script.on().
  */
 export function buildScriptNamespace(
   script: Script,
   options: ExecutorOptions,
-  onImpl?: ScriptNamespace['on'],
 ): ScriptNamespace {
   const requireCache = new Map<string, unknown>();
   const inProgress = new Set<string>();
 
   return {
-    on: onImpl ?? ((_event, _handler) => { /* no-op in manual-run / library context */ }) as ScriptNamespace['on'],
-
     async require(nameOrId: string): Promise<unknown> {
       if (!options.scriptStorage) {
         throw new Error('script.require: ScriptStorage not available');
@@ -211,11 +184,11 @@ export function buildScriptNamespace(
 
         // eslint-disable-next-line @typescript-eslint/no-unsafe-call
         const libFn: (...args: unknown[]) => Promise<unknown> = new AsyncFunctionCtor(
-          'api', 'script', '__console', 'exports', 'module',
+          'api', 'data', 'script', '__console', 'exports', 'module',
           `"use strict";\nconst console = __console;\n${library.code}\n`,
         );
 
-        await libFn(libApi, libScriptNS, silentConsole, libExports, libModule);
+        await libFn(libApi, {}, libScriptNS, silentConsole, libExports, libModule);
         const exports = libModule.exports;
         requireCache.set(nameOrId, exports);
         return exports;

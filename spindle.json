@@ -1,5 +1,5 @@
 {
-  "version": "0.3.0",
+  "version": "0.4.0",
   "name": "LumiScript",
   "identifier": "lumiscript",
   "author": "mindbound",
@@ -14,7 +14,8 @@
     "interceptor",
     "cors_proxy",
     "ui_panels",
-    "ephemeral_storage"
+    "ephemeral_storage",
+    "world_books"
   ],
   "entry_backend": "dist/backend.js",
   "entry_frontend": "dist/frontend.js",

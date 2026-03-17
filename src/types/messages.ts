@@ -37,6 +37,7 @@ export type FrontendToBackend =
         enabled?: boolean;
         allowDangerous?: boolean;
         bindings?: ScriptBindingEntry[];
+        triggers?: string[];
         metadata?: ScriptMetadata;
       };
     }
@@ -97,14 +98,4 @@ export type BackendToFrontend =
   | {
       type: 'error';
       message: string;
-    }
-  | {
-      /**
-       * Sent after syncTriggers() completes.
-       * Maps each script ID that has active spindle.on() subscriptions to the
-       * array of event names it is listening to. Scripts with no script.on()
-       * calls will not appear in this map.
-       */
-      type: 'triggers_registered';
-      registrations: Record<string, string[]>;
     };

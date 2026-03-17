@@ -100,7 +100,7 @@ function buildLLMParams(opts?: LLMOptions): Record<string, unknown> {
 
 // ─── Structured output helpers ────────────────────────────────────────────────
 
-/** Provider name for Google Gemini (uses generationConfig format, not response_format). */
+/** Provider name for Google Gemini (uses responseMimeType/responseSchema parameters). */
 const GOOGLE_PROVIDER = 'google';
 /** Provider name for Anthropic Claude (uses output_config.format, not response_format). */
 const ANTHROPIC_PROVIDER = 'anthropic';
@@ -131,7 +131,7 @@ function toJsonSchemaObject(schema: ZodLike<unknown> | Record<string, unknown>):
 /**
  * Inject a JSON Schema constraint into the message array's system prompt.
  * Appends to the last existing system message, or prepends a new one.
- * Used as fallback for Anthropic and Google providers.
+ * Used for all providers as a supplemental hint alongside native structured output modes.
  */
 function enhanceMessagesWithSchema(
   messages: LLMMessage[],
@@ -229,22 +229,26 @@ export function buildLLMAPI(deps: APIBuildDeps): LumiScriptAPI['llm'] {
           //   AnthropicProvider.buildBody explicitly copies params.output_config to
           //   body.output_config, so this lands correctly in the API request.
           //
-          // Tier 2 — OpenAI-compatible (all other providers incl. NanoGPT, Z.AI, etc.):
+          // Tier 2 — Google Gemini: responseMimeType + responseSchema
+          //   GoogleProvider.buildBody forwards top-level parameters responseMimeType and
+          //   responseSchema (or its alias responseJsonSchema) into generationConfig.
+          //   Schema-in-prompt (above) is still included as an additional hint.
+          //
+          // Tier 3 — OpenAI-compatible (all other providers incl. NanoGPT, Z.AI, etc.):
           //   response_format: json_object — widely supported, including thinking models
           //   (GLM, etc.) that silently ignore json_schema mode.
           //   Passed through OpenAICompatibleProvider.buildBody's parameter passthrough.
-          //
-          // Tier 3 — Google: schema-in-prompt only (above).
-          //   responseMimeType / responseJsonSchema must live inside generationConfig,
-          //   which is not reachable via the current parameter passthrough mechanism.
-          //   TODO: add Google native structured output once Lumiverse updates
-          //   GoogleProvider.buildBody to forward these fields into generationConfig.
           let extraParams: Record<string, unknown> = {};
           if (effectiveProvider === ANTHROPIC_PROVIDER) {
             extraParams = {
               output_config: { format: { type: 'json_schema', schema: jsonSchema } },
             };
-          } else if (effectiveProvider !== GOOGLE_PROVIDER) {
+          } else if (effectiveProvider === GOOGLE_PROVIDER) {
+            extraParams = {
+              responseMimeType: 'application/json',
+              responseSchema: jsonSchema,
+            };
+          } else {
             extraParams = {
               response_format: { type: 'json_object' },
             };

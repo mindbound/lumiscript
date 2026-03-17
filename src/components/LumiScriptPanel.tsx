@@ -47,10 +47,7 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
     scriptExecInfo: {},
   });
 
-  // ── Trigger tracking ──────────────────────────────────────────────────────
-  /** scriptId → event names the script is currently listening to */
-  const [triggerRegistrations, setTriggerRegistrations] = useState<Record<string, string[]>>({});
-  /** scriptId → total number of trigger invocations this session */
+  /** Per-trigger invocation counter (session-local, increments on execution_started) */
   const [invocationCounts, setInvocationCounts] = useState<Record<string, number>>({});
 
   // Register a single backend message handler at the top level
@@ -75,10 +72,6 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
           });
           break;
 
-        case 'triggers_registered':
-          setTriggerRegistrations(msg.registrations);
-          break;
-
         case 'execution_started':
           setExecState(prev => ({
             ...prev,
@@ -91,13 +84,11 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
               [msg.scriptId]: { dot: 'running' },
             },
           }));
-          // Count trigger invocations (scripts that have registered handlers)
-          setInvocationCounts(prev => {
-            if (msg.scriptId in triggerRegistrations || msg.scriptId in prev) {
-              return { ...prev, [msg.scriptId]: (prev[msg.scriptId] ?? 0) + 1 };
-            }
-            return prev;
-          });
+          // Count invocations for trigger scripts
+          setInvocationCounts(prev => ({
+            ...prev,
+            [msg.scriptId]: (prev[msg.scriptId] ?? 0) + 1,
+          }));
           break;
 
         case 'console_entry':
@@ -134,21 +125,6 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
 
     return unsub;
   }, [onBackendMessage, sendToBackend]);
-
-  // invocationCounts updater needs to see triggerRegistrations — use a ref-free
-  // approach by tracking trigger scripts from the scripts list directly.
-  const triggerScriptIds = new Set(
-    scripts.filter(s => s.type === 'trigger').map(s => s.id),
-  );
-
-  const handleExecutionStarted = useCallback((scriptId: string) => {
-    if (triggerScriptIds.has(scriptId)) {
-      setInvocationCounts(prev => ({ ...prev, [scriptId]: (prev[scriptId] ?? 0) + 1 }));
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scripts]);
-
-  void handleExecutionStarted; // used indirectly via the message handler above
 
   const clearConsole = useCallback(() => {
     setExecState(prev => ({ ...prev, entries: [] }));
@@ -191,7 +167,6 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
           <StatusTab
             scripts={scripts}
             execInfo={execState.scriptExecInfo}
-            triggerRegistrations={triggerRegistrations}
             invocationCounts={invocationCounts}
           />
         )}
@@ -212,16 +187,10 @@ const DOT_TITLE: Record<ExecutionDot, string> = {
 interface StatusTabProps {
   scripts: Script[];
   execInfo: Record<string, ScriptExecInfo>;
-  triggerRegistrations: Record<string, string[]>;
   invocationCounts: Record<string, number>;
 }
 
-const StatusTab: FC<StatusTabProps> = ({
-  scripts,
-  execInfo,
-  triggerRegistrations,
-  invocationCounts,
-}) => {
+const StatusTab: FC<StatusTabProps> = ({ scripts, execInfo, invocationCounts }) => {
   const enabled = scripts.filter(s => s.type === 'trigger' && s.enabled);
 
   if (enabled.length === 0) {
@@ -246,13 +215,13 @@ const StatusTab: FC<StatusTabProps> = ({
           error:   'ls-item-dot ls-dot-error',
         }[dot];
 
-        const events = triggerRegistrations[script.id];
-        const hasHandlers = events !== undefined && events.length > 0;
+        // Event subscriptions come directly from the script's declared triggers
+        const events = script.triggers ?? [];
         const invokeCount = invocationCounts[script.id];
 
         return (
           <div key={script.id} className="ls-status-row">
-            {/* Row 1: dot + name + duration + invocation count */}
+            {/* Row 1: dot + name + invocation count + duration */}
             <div className="ls-status-row-main">
               <span className={dotClass} title={DOT_TITLE[dot]} />
               <span className="ls-status-name">{script.name}</span>
@@ -273,10 +242,10 @@ const StatusTab: FC<StatusTabProps> = ({
               </span>
             </div>
 
-            {/* Row 2: event badges or "no handlers" note */}
-            {hasHandlers ? (
+            {/* Row 2: declared event badges or "no events" note */}
+            {events.length > 0 ? (
               <div className="ls-status-events">
-                {[...new Set(events)].map(ev => (
+                {events.map(ev => (
                   <span key={ev} className="ls-event-badge">
                     <Zap size={9} />
                     {ev}
@@ -285,7 +254,7 @@ const StatusTab: FC<StatusTabProps> = ({
               </div>
             ) : (
               <div className="ls-no-handlers">
-                no handlers — call script.on() to listen for events
+                no events selected — choose events in the editor
               </div>
             )}
           </div>
