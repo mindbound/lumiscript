@@ -33,7 +33,10 @@ async function refreshPermissions(): Promise<void> {
 async function refreshActiveContext(userId: string | null): Promise<void> {
   const uid = userId ?? undefined;
   const chat = await spindle.chats.getActive(uid);
-  if (!chat) return;
+  if (!chat) {
+    setActiveContext({ chatId: null, characterId: null, characterName: null });
+    return;
+  }
   const char = await spindle.characters.get(chat.character_id, uid).catch(() => null);
   setActiveContext({
     chatId:        chat.id,

@@ -23,20 +23,14 @@ export const BindingsSection: FC<BindingsSectionProps> = ({
 }) => {
   const handleAddCharacter = () => {
     const { characterId, characterName } = activeContext;
-    if (!characterId) {
-      alert('No active character — open a chat with a character first.');
-      return;
-    }
+    if (!characterId) return;
     if (bindings.some(b => b.type === 'character' && b.characterId === characterId)) return;
     onAdd({ type: 'character', characterId, displayName: characterName ?? characterId });
   };
 
   const handleAddChat = () => {
     const { chatId, characterName } = activeContext;
-    if (!chatId) {
-      alert('No active chat — open a chat first.');
-      return;
-    }
+    if (!chatId) return;
     if (bindings.some(b => b.type === 'chat' && b.chatId === chatId)) return;
     const displayName = characterName ? `${characterName} — ${chatId.slice(0, 8)}` : chatId.slice(0, 8);
     onAdd({ type: 'chat', chatId, displayName });
@@ -65,11 +59,21 @@ export const BindingsSection: FC<BindingsSectionProps> = ({
           ))
         )}
 
-        <button className="ls-bindings-add" onClick={handleAddCharacter} title="Bind to current character">
+        <button
+          className="ls-bindings-add"
+          onClick={handleAddCharacter}
+          disabled={!activeContext.characterId}
+          title={activeContext.characterId ? 'Bind to current character' : 'Open a chat first'}
+        >
           <UserPlus size={10} />
           +char
         </button>
-        <button className="ls-bindings-add" onClick={handleAddChat} title="Bind to current chat">
+        <button
+          className="ls-bindings-add"
+          onClick={handleAddChat}
+          disabled={!activeContext.chatId}
+          title={activeContext.chatId ? 'Bind to current chat' : 'Open a chat first'}
+        >
           <MessageSquarePlus size={10} />
           +chat
         </button>

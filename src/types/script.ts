@@ -238,15 +238,6 @@ export interface VariableStore {
   clear(): Promise<void>;
 }
 
-/** Synchronous in-memory store (no persistence) */
-export interface SyncVariableStore {
-  get<T = unknown>(key: string, defaultValue?: T): T | undefined;
-  set<T = unknown>(key: string, value: T): void;
-  delete(key: string): boolean;
-  has(key: string): boolean;
-  clear(): void;
-}
-
 export interface VariablesAPI {
   /** Per-chat persistence (stored under chatId) */
   local: VariableStore;
@@ -254,8 +245,6 @@ export interface VariablesAPI {
   global: VariableStore;
   /** Per-character persistence (stored under characterId) */
   character: VariableStore;
-  /** In-memory only; cleared after the current execution */
-  flow: SyncVariableStore;
 }
 
 // ─── JSON API ─────────────────────────────────────────────────────────────────

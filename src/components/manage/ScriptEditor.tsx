@@ -38,6 +38,21 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
     setRenameValue(script.name);
   }, [script.id, script.code, script.name]);
 
+  // Immediately refresh context when a different script is opened.
+  useEffect(() => {
+    sendToBackend({ type: 'get_active_context' });
+  }, [script.id, sendToBackend]);
+
+  // Poll every 2 s while the editor is open so the binding buttons (+char / +chat)
+  // reflect the live chat state. The backend resolves the current chat via
+  // spindle.chats.getActive(), which returns null when no chat is open.
+  useEffect(() => {
+    const timer = setInterval(() => {
+      sendToBackend({ type: 'get_active_context' });
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [sendToBackend]);
+
   const saveCode = useCallback((code: string) => {
     sendToBackend({ type: 'update_script', id: script.id, patch: { code } });
     setUnsaved(false);

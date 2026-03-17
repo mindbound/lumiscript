@@ -386,6 +386,7 @@ export const PANEL_CSS = `
   transition: border-color 0.1s, color 0.1s;
 }
 .ls-bindings-add:hover { border-color: var(--lumiverse-accent); color: var(--lumiverse-text); }
+.ls-bindings-add:disabled { opacity: 0.38; cursor: not-allowed; border-color: transparent; }
 
 /* ── Metadata footer ────────────────────────────────────────────────────── */
 .ls-meta-footer {

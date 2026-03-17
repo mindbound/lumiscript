@@ -10,9 +10,7 @@
  * JSON string; script users transparently get the original type back).
  *
  * character continues to use userStorage JSON files (no native Spindle equivalent).
- * flow is in-memory only, cleared after each script execution.
- *
- * No permission required for local/global/flow. character uses userStorage.
+ * No permission required for local/global. character uses userStorage.
  */
 
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
@@ -79,7 +77,6 @@ function makeCharacterVarStore(
 export function buildVariablesAPI(deps: APIBuildDeps): LumiScriptAPI['variables'] {
   const { activeContext, userId } = deps;
   const uid = userId ?? undefined;
-  const flowStore = new Map<string, unknown>();
 
   return {
     // ── local: spindle.variables.local (macro-compatible, JSON-serialized) ─────
@@ -147,13 +144,5 @@ export function buildVariablesAPI(deps: APIBuildDeps): LumiScriptAPI['variables'
         : null,
     ),
 
-    // ── flow: in-memory only, cleared after execution ─────────────────────────
-    flow: {
-      get:    <T>(key: string, def?: T): T | undefined => (flowStore.has(key) ? flowStore.get(key) as T : def),
-      set:    (_key: string, val: unknown) => { flowStore.set(_key, val); },
-      delete: (key: string) => flowStore.delete(key),
-      has:    (key: string) => flowStore.has(key),
-      clear:  () => { flowStore.clear(); },
-    },
   };
 }

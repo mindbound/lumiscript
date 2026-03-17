@@ -13,7 +13,8 @@
     "generation",
     "interceptor",
     "cors_proxy",
-    "ui_panels"
+    "ui_panels",
+    "ephemeral_storage"
   ],
   "entry_backend": "dist/backend.js",
   "entry_frontend": "dist/frontend.js",
