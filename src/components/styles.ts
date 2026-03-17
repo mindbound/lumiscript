@@ -575,15 +575,31 @@ export const PANEL_CSS = `
 }
 .ls-status-row {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  gap: 3px;
   padding: 6px 8px;
   border-radius: var(--lumiverse-radius);
 }
 .ls-status-row:hover { background: var(--lumiverse-fill-subtle); }
+.ls-status-row-main { display: flex; align-items: center; gap: 8px; }
 .ls-status-name { flex: 1; font-size: 12px; }
+.ls-status-right { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .ls-status-duration { font-size: 11px; color: var(--lumiverse-text-muted); }
 .ls-status-error { font-size: 11px; color: #ef4444; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ls-invoke-count { font-size: 10px; color: var(--lumiverse-text-muted); font-variant-numeric: tabular-nums; }
+.ls-status-events { display: flex; flex-wrap: wrap; gap: 4px; padding-left: 16px; }
+.ls-event-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--lumiverse-border);
+  font-size: 10px;
+  color: var(--lumiverse-text-muted);
+  white-space: nowrap;
+}
+.ls-no-handlers { padding-left: 16px; font-size: 10px; color: var(--lumiverse-text-dim); font-style: italic; }
 .ls-placeholder {
   display: flex;
   flex-direction: column;

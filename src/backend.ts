@@ -8,6 +8,7 @@ import { SettingsStore } from './storage/settings-store.js';
 import { executionStatusStore } from './engine/execution-status.js';
 import { setActiveContext, getActiveContext } from './engine/binding.js';
 import { executeScript } from './engine/executor.js';
+import { TriggerRegistry } from './engine/trigger-registry.js';
 import { generateUUID } from './utils/uuid.js';
 
 // ─── Active user + permission tracking ───────────────────────────────────────
@@ -72,7 +73,36 @@ function pushSettings(): void {
   send({ type: 'settings_updated', settings: settingsStore.get() });
 }
 
+// ─── Trigger registry ─────────────────────────────────────────────────────────
+
+const triggerRegistry = new TriggerRegistry(
+  () => ({ grantedPermissions, userId: activeUserId, scriptStorage }),
+  send,
+);
+
+/**
+ * Synchronise the trigger registry with the current settings + scripts.
+ * Called after any script mutation, settings change, or on first storage load.
+ *
+ * - If LumiScript is globally disabled: remove all spindle.on() subscriptions.
+ * - Otherwise: rebuild subscriptions for all enabled trigger scripts.
+ */
+async function syncTriggers(): Promise<void> {
+  if (!settingsStore.isLoaded || !scriptStorage.store.isLoaded) return;
+  if (!settingsStore.get().enabled) {
+    triggerRegistry.unregisterAll();
+    send({ type: 'triggers_registered', registrations: {} });
+    return;
+  }
+  await triggerRegistry.reloadAll(scriptStorage.getScripts()).catch(err => {
+    spindle.log.error(`[LumiScript] syncTriggers failed: ${err instanceof Error ? err.message : String(err)}`);
+  });
+  send({ type: 'triggers_registered', registrations: triggerRegistry.getRegistrations() });
+}
+
 // ─── Frontend message handler ─────────────────────────────────────────────────
+
+let triggersInitialized = false;
 
 spindle.onFrontendMessage(async (raw, userId) => {
   activeUserId = userId;
@@ -82,6 +112,12 @@ spindle.onFrontendMessage(async (raw, userId) => {
   // and avoids a read/write path mismatch caused by loading before userId is available.
   if (!settingsStore.isLoaded) await settingsStore.load();
   if (!scriptStorage.store.isLoaded) await scriptStorage.load();
+
+  // Register trigger handlers on the first message once storage is ready.
+  if (!triggersInitialized) {
+    triggersInitialized = true;
+    void syncTriggers();
+  }
 
   const msg = raw as FrontendToBackend;
 
@@ -115,24 +151,28 @@ spindle.onFrontendMessage(async (raw, userId) => {
       case 'create_script': {
         await scriptStorage.createScript(msg.name, msg.scriptType);
         pushScripts();
+        void syncTriggers();
         break;
       }
 
       case 'update_script': {
         await scriptStorage.updateScript(msg.id, msg.patch);
         pushScripts();
+        void syncTriggers();
         break;
       }
 
       case 'delete_script': {
         await scriptStorage.deleteScript(msg.id);
         pushScripts();
+        void syncTriggers();
         break;
       }
 
       case 'duplicate_script': {
         await scriptStorage.duplicateScript(msg.id);
         pushScripts();
+        void syncTriggers();
         break;
       }
 
@@ -140,6 +180,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
       case 'update_settings': {
         await settingsStore.update(msg.patch);
         pushSettings();
+        void syncTriggers(); // handles the master enabled/disabled toggle
         break;
       }
 
@@ -266,8 +307,9 @@ spindle.permissions.onDenied(({ permission, operation }) => {
   // Active context is populated lazily:
   // - On the first `get_active_context` frontend message (calls spindle.chats.getActive with userId)
   // - On each CHAT_CHANGED event (calls spindle.chats.get with userId)
-  // userId is not available at startup so getActive cannot be called here.
-  // Storage is loaded lazily in onFrontendMessage once userId is known.
+  // Trigger handlers are initialized lazily on the first frontend message once
+  // storage and userId are both available (see triggersInitialized guard above).
+  // userId is not available at startup so getActive/storage cannot be called here.
   spindle.log.info('LumiScript backend ready');
 })();
 

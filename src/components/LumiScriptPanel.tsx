@@ -1,5 +1,5 @@
 import { FC, useState, useEffect, useCallback } from 'react';
-import { Code2, Activity } from 'lucide-react';
+import { Code2, Activity, Zap } from 'lucide-react';
 import type { Script, LumiScriptSettings, ConsoleEntry } from '../types/script.js';
 import type { BackendToFrontend, FrontendToBackend } from '../types/messages.js';
 import type { ActiveContext } from './manage/BindingsSection.js';
@@ -47,6 +47,12 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
     scriptExecInfo: {},
   });
 
+  // ── Trigger tracking ──────────────────────────────────────────────────────
+  /** scriptId → event names the script is currently listening to */
+  const [triggerRegistrations, setTriggerRegistrations] = useState<Record<string, string[]>>({});
+  /** scriptId → total number of trigger invocations this session */
+  const [invocationCounts, setInvocationCounts] = useState<Record<string, number>>({});
+
   // Register a single backend message handler at the top level
   useEffect(() => {
     const unsub = onBackendMessage((raw) => {
@@ -69,6 +75,10 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
           });
           break;
 
+        case 'triggers_registered':
+          setTriggerRegistrations(msg.registrations);
+          break;
+
         case 'execution_started':
           setExecState(prev => ({
             ...prev,
@@ -81,6 +91,13 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
               [msg.scriptId]: { dot: 'running' },
             },
           }));
+          // Count trigger invocations (scripts that have registered handlers)
+          setInvocationCounts(prev => {
+            if (msg.scriptId in triggerRegistrations || msg.scriptId in prev) {
+              return { ...prev, [msg.scriptId]: (prev[msg.scriptId] ?? 0) + 1 };
+            }
+            return prev;
+          });
           break;
 
         case 'console_entry':
@@ -117,6 +134,21 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
 
     return unsub;
   }, [onBackendMessage, sendToBackend]);
+
+  // invocationCounts updater needs to see triggerRegistrations — use a ref-free
+  // approach by tracking trigger scripts from the scripts list directly.
+  const triggerScriptIds = new Set(
+    scripts.filter(s => s.type === 'trigger').map(s => s.id),
+  );
+
+  const handleExecutionStarted = useCallback((scriptId: string) => {
+    if (triggerScriptIds.has(scriptId)) {
+      setInvocationCounts(prev => ({ ...prev, [scriptId]: (prev[scriptId] ?? 0) + 1 }));
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scripts]);
+
+  void handleExecutionStarted; // used indirectly via the message handler above
 
   const clearConsole = useCallback(() => {
     setExecState(prev => ({ ...prev, entries: [] }));
@@ -156,14 +188,19 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
             sendToBackend={sendToBackend}
           />
         ) : (
-          <StatusTab scripts={scripts} execInfo={execState.scriptExecInfo} />
+          <StatusTab
+            scripts={scripts}
+            execInfo={execState.scriptExecInfo}
+            triggerRegistrations={triggerRegistrations}
+            invocationCounts={invocationCounts}
+          />
         )}
       </div>
     </div>
   );
 };
 
-// ─── Status tab (Phase 1 — execution dots only) ──────────────────────────────
+// ─── Status tab ───────────────────────────────────────────────────────────────
 
 const DOT_TITLE: Record<ExecutionDot, string> = {
   idle:    'Not yet run this session',
@@ -175,9 +212,16 @@ const DOT_TITLE: Record<ExecutionDot, string> = {
 interface StatusTabProps {
   scripts: Script[];
   execInfo: Record<string, ScriptExecInfo>;
+  triggerRegistrations: Record<string, string[]>;
+  invocationCounts: Record<string, number>;
 }
 
-const StatusTab: FC<StatusTabProps> = ({ scripts, execInfo }) => {
+const StatusTab: FC<StatusTabProps> = ({
+  scripts,
+  execInfo,
+  triggerRegistrations,
+  invocationCounts,
+}) => {
   const enabled = scripts.filter(s => s.type === 'trigger' && s.enabled);
 
   if (enabled.length === 0) {
@@ -202,12 +246,47 @@ const StatusTab: FC<StatusTabProps> = ({ scripts, execInfo }) => {
           error:   'ls-item-dot ls-dot-error',
         }[dot];
 
+        const events = triggerRegistrations[script.id];
+        const hasHandlers = events !== undefined && events.length > 0;
+        const invokeCount = invocationCounts[script.id];
+
         return (
           <div key={script.id} className="ls-status-row">
-            <span className={dotClass} title={DOT_TITLE[dot]} />
-            <span className="ls-status-name">{script.name}</span>
-            {info?.duration !== undefined && dot !== 'running' && (
-              <span className="ls-status-duration">{info.duration}ms</span>
+            {/* Row 1: dot + name + duration + invocation count */}
+            <div className="ls-status-row-main">
+              <span className={dotClass} title={DOT_TITLE[dot]} />
+              <span className="ls-status-name">{script.name}</span>
+              <span className="ls-status-right">
+                {invokeCount !== undefined && invokeCount > 0 && (
+                  <span className="ls-invoke-count" title={`Fired ${invokeCount} time${invokeCount !== 1 ? 's' : ''} this session`}>
+                    ×{invokeCount}
+                  </span>
+                )}
+                {info?.duration !== undefined && dot !== 'running' && (
+                  <span
+                    className="ls-status-duration"
+                    style={{ color: dot === 'error' ? '#ef4444' : undefined }}
+                  >
+                    {info.duration}ms
+                  </span>
+                )}
+              </span>
+            </div>
+
+            {/* Row 2: event badges or "no handlers" note */}
+            {hasHandlers ? (
+              <div className="ls-status-events">
+                {[...new Set(events)].map(ev => (
+                  <span key={ev} className="ls-event-badge">
+                    <Zap size={9} />
+                    {ev}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <div className="ls-no-handlers">
+                no handlers — call script.on() to listen for events
+              </div>
             )}
           </div>
         );

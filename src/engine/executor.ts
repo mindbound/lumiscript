@@ -11,6 +11,12 @@
  * - api.llm.* requires generation permission.
  *
  * API modules live in src/engine/api/. This file is the thin orchestrator.
+ *
+ * Exports used by TriggerRegistry:
+ *   AsyncFunctionCtor   — shared AsyncFunction constructor
+ *   buildScriptAPI      — build the api.* object for a script
+ *   buildScriptNamespace — build the script.* namespace (on / require)
+ *   executeHandler      — run a pre-captured event handler closure
  */
 
 import * as z from 'zod';
@@ -22,6 +28,7 @@ import type {
   ConsoleEntry,
   ConsoleEntryType,
   ScriptNamespace,
+  ScriptEventHandler,
 } from '../types/script.js';
 import type { ScriptStorage } from '../storage/script-storage.js';
 import { generateUUID } from '../utils/uuid.js';
@@ -51,10 +58,10 @@ export interface ExecutorOptions {
   scriptStorage?: ScriptStorage;
 }
 
-// ─── Async function constructor (with correct type for `new`) ─────────────────
+// ─── Async function constructor (exported for use by TriggerRegistry) ─────────
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const AsyncFunctionCtor = Object.getPrototypeOf(async function () {}).constructor as any;
+export const AsyncFunctionCtor = Object.getPrototypeOf(async function () {}).constructor as any;
 
 // ─── Main entry point ─────────────────────────────────────────────────────────
 
@@ -66,7 +73,7 @@ export async function executeScript(
   const startTime = performance.now();
 
   const capturedConsole = buildCapturedConsole(options.onConsole);
-  const api = buildAPI(script, options);
+  const api = buildScriptAPI(script, options);
   const scriptNS = buildScriptNamespace(script, options);
 
   try {
@@ -90,9 +97,42 @@ export async function executeScript(
   }
 }
 
-// ─── API assembler ────────────────────────────────────────────────────────────
+// ─── Handler execution (used by TriggerRegistry for event-driven invocation) ──
 
-function buildAPI(script: Script, options: ExecutorOptions): LumiScriptAPI {
+/**
+ * Execute a pre-captured handler closure (from a script.on() registration).
+ * The handler receives (eventData, api) — api is freshly built from options.
+ */
+export async function executeHandler<T = unknown>(
+  script: Script,
+  handler: ScriptEventHandler<T>,
+  eventData: T,
+  options: ExecutorOptions,
+): Promise<ScriptExecutionResult> {
+  const runId = generateUUID();
+  const startTime = performance.now();
+
+  const capturedConsole = buildCapturedConsole(options.onConsole);
+  // Captured console is available in the api modules via the executor context.
+  // We don't inject it as a global here — handler is already a compiled closure.
+  void capturedConsole; // console forwarding happens via options.onConsole
+
+  const api = buildScriptAPI(script, options);
+
+  try {
+    await handler(eventData, api);
+    const duration = Math.round(performance.now() - startTime);
+    return { success: true, duration, scriptId: script.id, runId };
+  } catch (err: unknown) {
+    const duration = Math.round(performance.now() - startTime);
+    const error = err instanceof Error ? err : new Error(String(err));
+    return { success: false, error, duration, scriptId: script.id, runId };
+  }
+}
+
+// ─── API assembler (exported for use by TriggerRegistry) ──────────────────────
+
+export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiScriptAPI {
   const { grantedPermissions, activeContext, userId } = options;
   const hasPerm = (p: string) => grantedPermissions.has(p);
 
@@ -122,17 +162,24 @@ function buildAPI(script: Script, options: ExecutorOptions): LumiScriptAPI {
 
 // ─── Script namespace (script.on, script.require) ─────────────────────────────
 
-function buildScriptNamespace(
+/**
+ * Build the `script.*` namespace injected into each script execution.
+ *
+ * @param onImpl  Optional override for `script.on()`. When omitted the default
+ *                no-op is used (Phase 1 manual-run behaviour). TriggerRegistry
+ *                passes its registration handler here so `script.on()` captures
+ *                event handlers during the trigger registration run.
+ */
+export function buildScriptNamespace(
   script: Script,
   options: ExecutorOptions,
+  onImpl?: ScriptNamespace['on'],
 ): ScriptNamespace {
   const requireCache = new Map<string, unknown>();
   const inProgress = new Set<string>();
 
   return {
-    // Phase 1: handlers are registered but not fired automatically.
-    // Phase 2 will wire these to Lumiverse events via spindle.on().
-    on: ((_event: unknown, _handler: unknown) => { /* no-op in Phase 1 */ }) as ScriptNamespace['on'],
+    on: onImpl ?? ((_event, _handler) => { /* no-op in manual-run / library context */ }) as ScriptNamespace['on'],
 
     async require(nameOrId: string): Promise<unknown> {
       if (!options.scriptStorage) {
@@ -158,7 +205,7 @@ function buildScriptNamespace(
       try {
         const libExports: Record<string, unknown> = {};
         const libModule = { exports: libExports };
-        const libApi = buildAPI(library, options);
+        const libApi = buildScriptAPI(library, options);
         const libScriptNS = buildScriptNamespace(library, options);
         const silentConsole = { log: () => {}, warn: () => {}, error: () => {}, info: () => {} };
 
@@ -181,7 +228,7 @@ function buildScriptNamespace(
 
 // ─── Console capture ──────────────────────────────────────────────────────────
 
-function buildCapturedConsole(
+export function buildCapturedConsole(
   onConsole?: (e: ConsoleEntry) => void,
 ): Record<string, (...args: unknown[]) => void> {
   const makeHandler = (type: ConsoleEntryType) =>
