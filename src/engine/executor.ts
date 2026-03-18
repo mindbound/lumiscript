@@ -44,6 +44,7 @@ import { buildChatAPI       } from './api/chat.js';
 import { buildLLMAPI        } from './api/llm.js';
 import { buildVariablesAPI  } from './api/variables.js';
 import { buildFilesAPI      } from './api/files.js';
+import { buildUIAPI         } from './api/ui.js';
 import { buildCharactersAPI } from './api/characters.js';
 import { buildChatsAPI      } from './api/chats-session.js';
 
@@ -133,6 +134,7 @@ export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiSc
     chat:       buildChatAPI(deps),
     llm:        buildLLMAPI(deps),
     files:      buildFilesAPI(deps),
+    ui:         buildUIAPI(deps),
     characters: buildCharactersAPI(deps),
     chats:      buildChatsAPI(deps),
     worldInfo,

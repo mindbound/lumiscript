@@ -1,0 +1,129 @@
+/* ── Toast container ─────────────────────────────────────────────────────── */
+/* Fixed bottom-right stack; column-reverse so newest toast sits at the bottom */
+.ls-toast-container {
+  position: fixed;
+  z-index: 10010;
+  bottom: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 8px;
+  pointer-events: none;
+  max-width: 420px;
+  width: 100%;
+  padding: 16px;
+  box-sizing: border-box;
+}
+
+/* ── Individual toast ────────────────────────────────────────────────────── */
+.ls-toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: var(--lumiverse-radius, 8px);
+  border: 1px solid;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  min-width: 280px;
+  max-width: 400px;
+  position: relative;
+  overflow: hidden;
+  cursor: default;
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+/* ── Per-type backgrounds, borders and glows ─────────────────────────────── */
+.ls-toast-success {
+  background: rgba(22, 101, 52, 0.85);
+  border-color: rgba(34, 197, 94, 0.3);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35), 0 0 20px rgba(34, 197, 94, 0.1);
+}
+.ls-toast-warning {
+  background: rgba(113, 63, 18, 0.85);
+  border-color: rgba(245, 158, 11, 0.3);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35), 0 0 20px rgba(245, 158, 11, 0.1);
+}
+.ls-toast-error {
+  background: rgba(127, 29, 29, 0.85);
+  border-color: rgba(239, 68, 68, 0.3);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35), 0 0 20px rgba(239, 68, 68, 0.1);
+}
+.ls-toast-info {
+  background: rgba(49, 36, 80, 0.85);
+  border-color: rgba(147, 112, 219, 0.3);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35), 0 0 20px rgba(147, 112, 219, 0.1);
+}
+
+/* ── Icon ────────────────────────────────────────────────────────────────── */
+.ls-toast-icon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 1px;
+}
+.ls-toast-success .ls-toast-icon { color: #4ade80; }
+.ls-toast-warning .ls-toast-icon { color: #fbbf24; }
+.ls-toast-error   .ls-toast-icon { color: #f87171; }
+.ls-toast-info    .ls-toast-icon { color: #a78bfa; }
+
+/* ── Body ────────────────────────────────────────────────────────────────── */
+.ls-toast-body {
+  flex: 1;
+  min-width: 0;
+}
+.ls-toast-message {
+  font-size: 12.5px;
+  color: rgba(255, 255, 255, 0.85);
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+/* ── Close button ────────────────────────────────────────────────────────── */
+.ls-toast-close {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  color: rgba(255, 255, 255, 0.5);
+  cursor: pointer;
+  transition: background 150ms ease, color 150ms ease;
+  padding: 0;
+  margin-top: -1px;
+}
+.ls-toast-close:hover {
+  background: rgba(255, 255, 255, 0.15);
+  color: rgba(255, 255, 255, 0.9);
+}
+
+/* ── Progress bar ────────────────────────────────────────────────────────── */
+.ls-toast-progress-track {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: rgba(0, 0, 0, 0.2);
+}
+.ls-toast-progress-bar {
+  height: 100%;
+  transform-origin: left;
+  animation: ls-toast-shrink linear forwards;
+}
+@keyframes ls-toast-shrink {
+  from { transform: scaleX(1); }
+  to   { transform: scaleX(0); }
+}
+.ls-toast-success .ls-toast-progress-bar { background: rgba(34, 197, 94, 0.6); }
+.ls-toast-warning .ls-toast-progress-bar { background: rgba(245, 158, 11, 0.6); }
+.ls-toast-error   .ls-toast-progress-bar { background: rgba(239, 68, 68, 0.6); }
+.ls-toast-info    .ls-toast-progress-bar { background: rgba(147, 112, 219, 0.6); }

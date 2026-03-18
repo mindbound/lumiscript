@@ -1,0 +1,74 @@
+/* ── Script modal ───────────────────────────────────────────────────────── */
+.ls-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--lumiverse-modal-backdrop, rgba(0, 0, 0, 0.6));
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  backdrop-filter: blur(3px);
+}
+.ls-modal-card {
+  /* --lumiverse-gradient-modal is 98% opaque — correct for a portal modal with no parent backing */
+  background: var(--lumiverse-gradient-modal, linear-gradient(135deg, rgba(35, 30, 48, 0.98), rgba(20, 17, 28, 0.98)));
+  border: 1px solid var(--lumiverse-border);
+  border-radius: calc(var(--lumiverse-radius) + 4px);
+  width: 100%;
+  max-width: 1100px;
+  height: min(90vh, 820px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+}
+.ls-modal-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--lumiverse-border);
+  flex-shrink: 0;
+}
+.ls-modal-title {
+  flex: 1;
+  font-weight: 600;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.ls-modal-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--lumiverse-text-muted);
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.ls-modal-close:hover { background: var(--lumiverse-fill-subtle); color: var(--lumiverse-text); }
+.ls-modal-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.ls-modal-sidebar {
+  width: 250px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--lumiverse-border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.ls-modal-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}

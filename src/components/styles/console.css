@@ -1,0 +1,55 @@
+/* ── Console ────────────────────────────────────────────────────────────── */
+.ls-console {
+  flex-shrink: 0;
+  border-top: 1px solid var(--lumiverse-border);
+  display: flex;
+  flex-direction: column;
+}
+/* Fixed height when expanded — ensures a consistent scrollable area from the first entry */
+.ls-console:not(.ls-collapsed) {
+  height: 150px;
+}
+.ls-console-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  cursor: pointer;
+  user-select: none;
+  flex-shrink: 0;
+}
+.ls-console-title {
+  flex: 1;
+  font-size: 11px;
+  color: var(--lumiverse-text-muted);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.ls-console-output {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-family: monospace;
+}
+.ls-console-empty {
+  color: var(--lumiverse-text-muted);
+  font-style: italic;
+  padding: 4px 0;
+}
+.ls-log    { color: var(--lumiverse-text); }
+.ls-warn   { color: #f59e0b; }
+.ls-error  { color: #ef4444; }
+.ls-info   { color: #60a5fa; }
+.ls-success { color: #22c55e; }
+.ls-entry {
+  display: flex;
+  gap: 6px;
+  padding: 1px 0;
+  line-height: 1.5;
+}
+.ls-entry-time { color: var(--lumiverse-text-muted); flex-shrink: 0; }
+.ls-entry-type { flex-shrink: 0; font-weight: 600; }
+.ls-entry-msg { word-break: break-word; white-space: pre-wrap; }

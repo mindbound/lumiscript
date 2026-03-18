@@ -1,0 +1,82 @@
+/* ── Panel layout ─────────────────────────────────────────────────────────── */
+.ls-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  color: var(--lumiverse-text);
+  font-size: 13px;
+  font-family: inherit;
+}
+
+/* ── Tab pills ───────────────────────────────────────────────────────────── */
+.ls-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--lumiverse-border);
+  flex-shrink: 0;
+}
+.ls-tab-pill {
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--lumiverse-border);
+  background: transparent;
+  color: var(--lumiverse-text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  transition: background 0.15s, color 0.15s;
+}
+.ls-tab-pill:hover {
+  background: var(--lumiverse-fill-subtle);
+  color: var(--lumiverse-text);
+}
+.ls-tab-pill.ls-active {
+  background: var(--lumiverse-accent);
+  color: var(--lumiverse-accent-fg);
+  border-color: var(--lumiverse-accent);
+}
+
+/* ── Icon button ────────────────────────────────────────────────────────── */
+.ls-icon-btn {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  border: none;
+  background: transparent;
+  color: var(--lumiverse-text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.1s, color 0.1s;
+}
+.ls-icon-btn:hover { background: var(--lumiverse-fill-subtle); color: var(--lumiverse-text); }
+.ls-icon-btn.ls-danger:hover { color: #ef4444; }
+.ls-icon-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ── Primary button ─────────────────────────────────────────────────────── */
+.ls-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border-radius: var(--lumiverse-radius);
+  border: 1px solid var(--lumiverse-border);
+  background: var(--lumiverse-fill-subtle);
+  color: var(--lumiverse-text);
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  transition: background 0.1s;
+}
+.ls-btn:hover { background: var(--lumiverse-fill); }
+.ls-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.ls-btn.ls-accent {
+  background: var(--lumiverse-accent);
+  color: var(--lumiverse-accent-fg);
+  border-color: var(--lumiverse-accent);
+}
+.ls-btn.ls-accent:hover { opacity: 0.9; }

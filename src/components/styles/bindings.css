@@ -1,0 +1,54 @@
+/* ── Bindings ────────────────────────────────────────────────────────────── */
+.ls-bindings {
+  flex-shrink: 0;
+  border-top: 1px solid var(--lumiverse-border);
+  padding: 6px 10px;
+}
+.ls-bindings-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--lumiverse-text-muted);
+}
+.ls-bindings-global { font-style: italic; }
+.ls-binding-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px 2px 5px;
+  border-radius: 999px;
+  background: var(--lumiverse-fill-subtle);
+  border: 1px solid var(--lumiverse-border);
+  font-size: 11px;
+  color: var(--lumiverse-text);
+}
+.ls-chip-remove {
+  display: inline-flex;
+  align-items: center;
+  background: none;
+  border: none;
+  color: var(--lumiverse-text-muted);
+  cursor: pointer;
+  padding: 0;
+  margin-left: 2px;
+  line-height: 1;
+}
+.ls-chip-remove:hover { color: #ef4444; }
+.ls-bindings-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px dashed var(--lumiverse-border);
+  background: none;
+  color: var(--lumiverse-text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  font-family: inherit;
+  transition: border-color 0.1s, color 0.1s;
+}
+.ls-bindings-add:hover { border-color: var(--lumiverse-accent); color: var(--lumiverse-text); }
+.ls-bindings-add:disabled { opacity: 0.38; cursor: not-allowed; border-color: transparent; }

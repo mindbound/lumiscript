@@ -1,0 +1,126 @@
+/* ── Script list header ─────────────────────────────────────────────────── */
+.ls-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--lumiverse-border);
+  flex-shrink: 0;
+}
+.ls-list-type-tabs {
+  display: flex;
+  gap: 2px;
+}
+.ls-type-tab {
+  padding: 3px 10px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--lumiverse-text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+}
+.ls-type-tab:hover { background: var(--lumiverse-fill-subtle); color: var(--lumiverse-text); }
+.ls-type-tab.ls-active {
+  background: var(--lumiverse-fill-subtle);
+  border-color: var(--lumiverse-border);
+  color: var(--lumiverse-text);
+}
+
+/* ── Script list ────────────────────────────────────────────────────────── */
+.ls-list-body {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+  padding: 4px;
+}
+.ls-list-empty {
+  padding: 32px 16px;
+  text-align: center;
+  color: var(--lumiverse-text-muted);
+}
+.ls-list-empty svg { margin-bottom: 8px; }
+.ls-list-empty p { margin: 0; font-size: 12px; }
+
+/* ── Script list item ──────────────────────────────────────────────────── */
+.ls-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-radius: var(--lumiverse-radius);
+  border: 1px solid transparent;
+  cursor: pointer;
+  margin-bottom: 2px;
+  transition: background 0.1s;
+}
+.ls-item:hover { background: var(--lumiverse-fill-subtle); }
+.ls-item.ls-selected {
+  background: var(--lumiverse-fill-subtle);
+  border-color: var(--lumiverse-accent);
+}
+.ls-item.ls-disabled { opacity: 0.55; }
+.ls-item-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--lumiverse-border);
+}
+.ls-item-dot.ls-dot-success { background: #22c55e; }
+.ls-item-dot.ls-dot-running {
+  background: #f59e0b;
+  animation: ls-pulse 1s infinite;
+}
+.ls-item-dot.ls-dot-error { background: #ef4444; }
+@keyframes ls-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.ls-item-body { flex: 1; min-width: 0; }
+.ls-item-name {
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 13px;
+}
+.ls-item-meta {
+  font-size: 11px;
+  color: var(--lumiverse-text-muted);
+  margin-top: 1px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.ls-item-actions {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+.ls-item:hover .ls-item-actions { opacity: 1; }
+.ls-item-bindings {
+  display: flex;
+  flex-wrap: wrap;
+  margin-top: 3px;
+}
+.ls-item-binding-badges {
+  display: flex;
+  gap: 2px;
+  flex-wrap: wrap;
+}
+.ls-binding-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--lumiverse-fill-subtle);
+  border: 1px solid var(--lumiverse-border);
+  font-size: 10px;
+  color: var(--lumiverse-text-muted);
+  white-space: nowrap;
+}

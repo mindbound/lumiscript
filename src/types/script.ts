@@ -117,8 +117,9 @@ export interface LumiScriptAPI {
   llm: LLMAPI;
   variables: VariablesAPI;
   json: JSONAPI;
-
   utils: UtilsAPI;
+  /** User-facing notifications and dialogs. Fire-and-forget toast + async prompt/confirm. */
+  ui: UIAPI;
   /** Character CRUD. Requires characters permission. */
   characters: CharactersAPI;
   /** Chat session management. Requires chats permission. */
@@ -421,6 +422,25 @@ export type WorldInfoAPIStub = {
 } & { _stub: true };
 
 // ─── Script namespace (inside script body) ────────────────────────────────────
+
+// ─── UI API ────────────────────────────────────────────────────────────────────────
+
+export type UINotificationType = 'info' | 'success' | 'warning' | 'error';
+
+export interface UIAPI {
+  /** Show a temporary notification toast. Fire-and-forget. */
+  toast(message: string, type?: UINotificationType): void;
+  /**
+   * Show a text input prompt. Returns the entered text, or null if the user
+   * cancels. Resolves after the user dismisses the dialog.
+   */
+  prompt(message: string, defaultValue?: string): Promise<string | null>;
+  /**
+   * Show a yes/no confirmation dialog. Returns true if the user confirms,
+   * false if the user cancels. Resolves after the user dismisses the dialog.
+   */
+  confirm(message: string, title?: string): Promise<boolean>;
+}
 
 /** The `script.*` namespace available inside script bodies */
 export interface ScriptNamespace {

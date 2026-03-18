@@ -1,0 +1,74 @@
+/* ── Settings panel ─────────────────────────────────────────────────────── */
+.ls-settings {
+  padding: 12px;
+  border-radius: var(--lumiverse-radius);
+  border: 1px solid var(--lumiverse-border);
+  background: var(--lumiverse-fill-subtle);
+  color: var(--lumiverse-text);
+  font-size: 13px;
+  font-family: inherit;
+}
+.ls-settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.ls-settings-title {
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ls-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.ls-toggle {
+  position: relative;
+  display: inline-flex;
+  width: 32px;
+  height: 18px;
+  flex-shrink: 0;
+}
+.ls-toggle input { opacity: 0; width: 0; height: 0; }
+.ls-toggle-slider {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: var(--lumiverse-border);
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.ls-toggle-slider::after {
+  content: '';
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  left: 3px;
+  top: 3px;
+  border-radius: 50%;
+  background: white;
+  transition: transform 0.2s;
+}
+.ls-toggle input:checked + .ls-toggle-slider { background: var(--lumiverse-accent); }
+.ls-toggle input:checked + .ls-toggle-slider::after { transform: translateX(14px); }
+.ls-settings-counts {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.ls-count-card {
+  flex: 1;
+  padding: 8px;
+  border-radius: var(--lumiverse-radius);
+  border: 1px solid var(--lumiverse-border);
+  cursor: pointer;
+  text-align: center;
+  transition: background 0.1s;
+}
+.ls-count-card:hover { background: var(--lumiverse-fill); }
+.ls-count-num { font-size: 18px; font-weight: 600; color: var(--lumiverse-accent); }
+.ls-count-label { font-size: 11px; color: var(--lumiverse-text-muted); }

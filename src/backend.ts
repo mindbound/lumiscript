@@ -9,6 +9,7 @@ import { executionStatusStore } from './engine/execution-status.js';
 import { setActiveContext, getActiveContext } from './engine/binding.js';
 import { executeScript } from './engine/executor.js';
 import { TriggerRegistry } from './engine/trigger-registry.js';
+import { resolvePendingUIRequest } from './engine/api/ui.js';
 import { generateUUID } from './utils/uuid.js';
 
 // ─── Active user + permission tracking ───────────────────────────────────────
@@ -156,7 +157,12 @@ spindle.onFrontendMessage(async (raw, userId) => {
       case 'update_script': {
         await scriptStorage.updateScript(msg.id, msg.patch);
         pushScripts();
-        void syncTriggers();
+        // Only re-register when subscriptions need to change.
+        // Code / name / metadata / bindings take effect at the next invocation
+        // via live storage lookup — no re-registration needed.
+        if ('enabled' in msg.patch || 'triggers' in msg.patch) {
+          void syncTriggers();
+        }
         break;
       }
 
@@ -179,6 +185,12 @@ spindle.onFrontendMessage(async (raw, userId) => {
         await settingsStore.update(msg.patch);
         pushSettings();
         void syncTriggers(); // handles the master enabled/disabled toggle
+        break;
+      }
+
+      // ── UI responses ──────────────────────────────────────────────────────
+      case 'ui_response': {
+        resolvePendingUIRequest(msg.requestId, msg.value);
         break;
       }
 
