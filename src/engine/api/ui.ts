@@ -4,8 +4,8 @@
  * ============================================================================
  * api.ui — user-facing notifications and dialogs.
  *
- * toast()   — fire-and-forget notification; rendered by the frontend via
- *             ctx.dom.inject into the page DOM.
+ * toast()   — fire-and-forget notification; delegates to spindle.toast which
+ *             renders the native Lumiverse toast in the frontend.
  *
  * prompt()  — async text input; sends ui_request to the frontend, which shows
  *             a native dialog and sends back ui_response with the user's input.
@@ -49,17 +49,18 @@ export function resolvePendingUIRequest(
 // ─── API builder ──────────────────────────────────────────────────────────────
 
 export function buildUIAPI(_deps: APIBuildDeps): LumiScriptAPI['ui'] {
-  const sendToast = (message: string, toastType: UINotificationType) => {
-    spindle.sendToFrontend({ type: 'ui_toast', message, toastType } as import('../../types/messages.js').BackendToFrontend);
-  };
-
   const sendRequest = (msg: import('../../types/messages.js').BackendToFrontend) => {
     spindle.sendToFrontend(msg);
   };
 
   return {
-    toast(message: string, type: UINotificationType = 'info'): void {
-      sendToast(message, type);
+    toast(
+      message: string,
+      type: UINotificationType = 'info',
+      options?: { title?: string; duration?: number },
+    ): void {
+      // Delegate to the native Lumiverse toast API — no frontend round-trip needed.
+      spindle.toast[type](message, options);
     },
 
     prompt(message: string, defaultValue = ''): Promise<string | null> {

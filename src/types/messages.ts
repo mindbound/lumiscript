@@ -15,7 +15,6 @@ import type {
   ScriptMetadata,
   ConsoleEntry,
   LumiScriptSettings,
-  UINotificationType,
 } from './script.js';
 
 // ─── Frontend → Backend ───────────────────────────────────────────────────────
@@ -108,12 +107,6 @@ export type BackendToFrontend =
   | {
       type: 'error';
       message: string;
-    }
-  | {
-      /** Fire-and-forget toast notification. */
-      type: 'ui_toast';
-      message: string;
-      toastType: UINotificationType;
     }
   | {
       /** Request user input — frontend shows a dialog and sends back ui_response. */

@@ -30,8 +30,6 @@ import TRIGGERS_CSS  from './triggers.css' with { type: 'text' };
 import MODAL_CSS     from './modal.css'    with { type: 'text' };
 import STATUS_CSS    from './status.css'   with { type: 'text' };
 import SETTINGS_CSS  from './settings.css' with { type: 'text' };
-import TOAST_CSS     from './toast.css'    with { type: 'text' };
-
 export const PANEL_CSS =
   BASE_CSS +
   LIST_CSS +
@@ -41,5 +39,4 @@ export const PANEL_CSS =
   TRIGGERS_CSS +
   MODAL_CSS +
   STATUS_CSS +
-  SETTINGS_CSS +
-  TOAST_CSS;
+  SETTINGS_CSS;

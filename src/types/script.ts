@@ -428,8 +428,16 @@ export type WorldInfoAPIStub = {
 export type UINotificationType = 'info' | 'success' | 'warning' | 'error';
 
 export interface UIAPI {
-  /** Show a temporary notification toast. Fire-and-forget. */
-  toast(message: string, type?: UINotificationType): void;
+  /**
+   * Show a temporary notification toast via the native Lumiverse toast system.
+   * Fire-and-forget — returns void. Toasts are rate-limited to 5 per 10 seconds.
+   * The extension name is automatically prepended as the toast title.
+   */
+  toast(
+    message: string,
+    type?: UINotificationType,
+    options?: { title?: string; duration?: number },
+  ): void;
   /**
    * Show a text input prompt. Returns the entered text, or null if the user
    * cancels. Resolves after the user dismisses the dialog.

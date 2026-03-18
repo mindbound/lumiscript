@@ -1,9 +1,6 @@
 import type { SpindleFrontendContext } from 'lumiverse-spindle-types';
 import { StrictMode } from 'react';
-import type { ReactElement } from 'react';
 import { createRoot } from 'react-dom/client';
-import { flushSync } from 'react-dom';
-import { CheckCircle, AlertTriangle, XCircle, Info, X } from 'lucide-react';
 import { PANEL_CSS } from './components/styles/index.js';
 import { LumiScriptPanel } from './components/LumiScriptPanel.js';
 import { SettingsPanel } from './components/settings/SettingsPanel.js';
@@ -13,35 +10,27 @@ import type { BackendToFrontend, FrontendToBackend } from './types/messages.js';
 // Runs in the browser via dynamic import.
 // Mounts a React 19 tree into the Spindle Dock Panel and Settings Panel.
 
-// ─── Toast constants ──────────────────────────────────────────────────────
-// Durations match Lumiverse's native ToastContainer defaults.
-const TOAST_DURATIONS: Record<string, number> = {
-  success: 4000,
-  info:    5000,
-  warning: 6000,
-  error:   8000,
-};
-
-// Render a lucide-react icon to an SVG string using flushSync + createRoot.
-// Both are already bundled via react-dom/client — no extra renderer needed.
-// Runs once at module init; the detached div is discarded immediately after.
-function iconToString(el: ReactElement): string {
-  const div = document.createElement('div');
-  const root = createRoot(div);
-  flushSync(() => root.render(el));
-  const html = div.innerHTML;
-  root.unmount();
-  return html;
-}
-
-const TOAST_ICONS: Record<string, string> = {
-  success: iconToString(<CheckCircle   size={18} />),
-  warning: iconToString(<AlertTriangle size={18} />),
-  error:   iconToString(<XCircle       size={18} />),
-  info:    iconToString(<Info          size={18} />),
-};
-
-const CLOSE_ICON = iconToString(<X size={14} />);
+// ─── iconToString ─────────────────────────────────────────────────────────
+// Pattern for using lucide-react icons outside the React tree (e.g. raw DOM
+// injection). Uses flushSync + createRoot — both already bundled via
+// react-dom/client, so no extra renderer is pulled into the bundle.
+//
+// Usage:
+//   import { flushSync } from 'react-dom';
+//   import type { ReactElement } from 'react';
+//   import { CheckCircle } from 'lucide-react';
+//
+//   function iconToString(el: ReactElement): string {
+//     const div = document.createElement('div');
+//     const root = createRoot(div);
+//     flushSync(() => root.render(el));
+//     const html = div.innerHTML;
+//     root.unmount();
+//     return html;
+//   }
+//
+//   const icon = iconToString(<CheckCircle size={18} />);
+//   someElement.innerHTML = icon; // safe — controlled SVG string, not user input
 
 export function setup(ctx: SpindleFrontendContext) {
   const cleanups: (() => void)[] = [];
@@ -49,14 +38,6 @@ export function setup(ctx: SpindleFrontendContext) {
   // ─── CSS ────────────────────────────────────────────────────────────────
   const removeStyle = ctx.dom.addStyle(PANEL_CSS);
   cleanups.push(removeStyle);
-
-  // ─── Toast container ─────────────────────────────────────────────────────
-  // A persistent bottom-right stack; toasts are appended as children.
-  // ctx.dom.createElement() creates a Spindle-tracked element — it will be
-  // removed automatically by ctx.dom.cleanup() on extension teardown.
-  const toastContainer = ctx.dom.createElement('div', { class: 'ls-toast-container' });
-  document.body.appendChild(toastContainer);
-  cleanups.push(() => { try { toastContainer.remove(); } catch { /* already removed */ } });
 
   // ─── Backend message multiplexer ─────────────────────────────────────
   // A single Spindle onBackendMessage handler fans out to all React subtrees
@@ -80,59 +61,13 @@ export function setup(ctx: SpindleFrontendContext) {
     ctx.sendToBackend(msg);
   };
 
-  // ─── Non-React UI handler (toast + prompt/confirm) ────────────────────
-  // Handles ui_toast and ui_request messages outside the React tree so that
-  // toasts appear in the page DOM (not inside the dock panel) and dialogs
-  // can use the native browser APIs.
+  // ─── Non-React UI handler (prompt / confirm) ──────────────────────────
+  // Handles ui_request messages outside the React tree so that dialogs can
+  // use the native browser APIs.
+  // Note: toasts are now handled by spindle.toast on the backend — no
+  // frontend involvement needed.
   const handleUIMessage = (raw: unknown) => {
     const msg = raw as BackendToFrontend;
-
-    if (msg.type === 'ui_toast') {
-      const type = msg.toastType in TOAST_DURATIONS ? msg.toastType : 'info';
-      const duration = TOAST_DURATIONS[type]!;
-
-      // Build toast element via DOM API so message text is set via textContent
-      // (avoids any XSS via injected HTML even though the backend is trusted).
-      const toastEl = document.createElement('div');
-      toastEl.className = `ls-toast ls-toast-${type}`;
-      toastEl.setAttribute('role', 'alert');
-      toastEl.innerHTML = `
-        <div class="ls-toast-icon">${TOAST_ICONS[type]}</div>
-        <div class="ls-toast-body"><div class="ls-toast-message"></div></div>
-        <button type="button" class="ls-toast-close" aria-label="Dismiss">${CLOSE_ICON}</button>
-        <div class="ls-toast-progress-track">
-          <div class="ls-toast-progress-bar" style="animation-duration:${duration}ms"></div>
-        </div>
-      `;
-
-      // Set message via textContent — no HTML injection.
-      const msgEl = toastEl.querySelector('.ls-toast-message');
-      if (msgEl) msgEl.textContent = msg.message;
-
-      toastContainer.appendChild(toastEl);
-
-      // ── Dismiss logic ──────────────────────────────────────────────────
-      let timer: ReturnType<typeof setTimeout>;
-
-      const dismiss = () => {
-        clearTimeout(timer);
-        try { toastEl.remove(); } catch { /* already removed */ }
-      };
-
-      timer = setTimeout(dismiss, duration);
-
-      // Click × to dismiss immediately.
-      toastEl.querySelector('.ls-toast-close')?.addEventListener('click', dismiss);
-
-      // Hover: pause auto-dismiss; on leave resume with 2 s grace period
-      // (matches Lumiverse native ToastContainer behaviour).
-      toastEl.addEventListener('mouseenter', () => clearTimeout(timer));
-      toastEl.addEventListener('mouseleave', () => {
-        timer = setTimeout(dismiss, 2000);
-      });
-
-      return;
-    }
 
     if (msg.type === 'ui_request') {
       if (msg.kind === 'prompt') {
