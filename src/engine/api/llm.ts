@@ -2,7 +2,7 @@
  * ============================================================================
  * LUMISCRIPT — LLM API
  * ============================================================================
- * generate, generateStructured
+ * generate, generateStructured, dryRun
  *
  * Includes:
  * - Provider validation (KNOWN_PROVIDERS / assertProvider)
@@ -19,6 +19,7 @@ import type {
   LLMOptions,
   LLMMessage,
   ZodLike,
+  DryRunOptions,
 } from '../../types/script.js';
 import { type APIBuildDeps, assertPerm, shielded } from './shared.js';
 
@@ -169,7 +170,7 @@ function extractJsonFromResponse(text: string): string {
 // ─── API builder ──────────────────────────────────────────────────────────────
 
 export function buildLLMAPI(deps: APIBuildDeps): LumiScriptAPI['llm'] {
-  const { hasPerm, userId } = deps;
+  const { hasPerm, userId, activeContext } = deps;
 
   return {
     generate: (messages, opts) => {
@@ -282,6 +283,46 @@ export function buildLLMAPI(deps: APIBuildDeps): LumiScriptAPI['llm'] {
             return parsed;
           });
         }),
+      );
+    },
+
+    dryRun: (options?: DryRunOptions) => {
+      assertPerm('generation', hasPerm);
+
+      const chatId = options?.chatId ?? activeContext.chatId;
+      if (!chatId) {
+        throw new Error('api.llm.dryRun: no active chat — open a chat first');
+      }
+
+      return shielded(
+        spindle.generate.dryRun({
+          chatId,
+          connectionId:   options?.connectionId,
+          personaId:      options?.personaId,
+          presetId:       options?.presetId,
+          generationType: options?.generationType,
+          parameters:     options?.parameters,
+        }).then(result => ({
+          messages: result.messages.map(m => ({
+            role:    m.role as 'system' | 'user' | 'assistant',
+            content: m.content,
+          })),
+          // AssemblyBreakdownEntryDTO fields match DryRunBlock — pass through.
+          breakdown:  result.breakdown,
+          parameters: result.parameters,
+          model:      result.model,
+          provider:   result.provider,
+          // DryRunTokenCountDTO needs snake_case → camelCase remapping.
+          tokenCount: result.tokenCount ? {
+            totalTokens:   result.tokenCount.total_tokens,
+            breakdown:     result.tokenCount.breakdown,
+            tokenizerId:   result.tokenCount.tokenizer_id,
+            tokenizerName: result.tokenCount.tokenizer_name,
+          } : undefined,
+          // ActivationStatsDTO and MemoryStatsDTO are already camelCase — pass through.
+          worldInfoStats: result.worldInfoStats,
+          memoryStats:    result.memoryStats,
+        })),
       );
     },
   };

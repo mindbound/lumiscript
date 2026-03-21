@@ -1,6 +1,6 @@
 {
   "name": "lumiscript",
-  "version": "0.4.7",
+  "version": "0.4.8",
   "private": true,
   "type": "module",
   "scripts": {
@@ -19,7 +19,7 @@
   "devDependencies": {
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
-    "lumiverse-spindle-types": "^0.1.7",
+    "lumiverse-spindle-types": "^0.1.8",
     "typescript": "^5.9.3"
   }
 }

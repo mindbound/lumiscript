@@ -2,7 +2,7 @@
  * ============================================================================
  * LUMISCRIPT — WORLD INFO API
  * ============================================================================
- * Full CRUD access to world books (lorebbooks) and their entries.
+ * Full CRUD access to world books (lorebooks) and their entries.
  * Requires the "world_books" permission.
  *
  * Naming convention:
@@ -13,6 +13,7 @@
  *
  * api.worldInfo.*           — world book CRUD
  * api.worldInfo.entries.*   — entry CRUD (nested)
+ * api.worldInfo.getCapturedActive(chatId?) — activated entries for a chat
  *
  * WorldInfoRef resolution:
  *   All methods that accept a world book reference (WorldInfoRef) accept
@@ -20,9 +21,6 @@
  *   lookup, a spindle.world_books.list() call is made and the results are
  *   cached for the lifetime of the script execution to avoid redundant
  *   round-trips.
- *
- * getCapturedActive() is deferred — the dry-run activation scan has no
- * Spindle equivalent yet. It will be added when Lumiverse exposes it.
  */
 
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
@@ -34,6 +32,7 @@ import type {
   WorldInfoCreateInput,
   WorldInfoUpdateInput,
   WorldInfoEntryInput,
+  ActivatedWorldInfoEntry,
 } from '../../types/script.js';
 import type { APIBuildDeps } from './shared.js';
 import { assertPerm } from './shared.js';
@@ -146,7 +145,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // ─── API builder ──────────────────────────────────────────────────────────────
 
 export function buildWorldInfoAPI(deps: APIBuildDeps): LumiScriptAPI['worldInfo'] {
-  const { hasPerm, userId } = deps;
+  const { hasPerm, userId, activeContext } = deps;
   const uid = userId ?? undefined;
 
   // Per-execution name→id cache to avoid redundant list() calls when the same
@@ -260,6 +259,38 @@ export function buildWorldInfoAPI(deps: APIBuildDeps): LumiScriptAPI['worldInfo'
         assertPerm('world_books', hasPerm);
         return spindle.world_books.entries.delete(entryId, uid);
       },
+    },
+
+    // ── Activation scan ───────────────────────────────────────────────────────
+
+    async getCapturedActive(chatId?: string): Promise<ActivatedWorldInfoEntry[]> {
+      assertPerm('world_books', hasPerm);
+
+      const id = chatId ?? activeContext.chatId;
+      if (!id) throw new Error('api.worldInfo.getCapturedActive: no active chat — open a chat first');
+
+      // 1. Get the lightweight list of activated entries (runs the full pipeline).
+      const activated = await spindle.world_books.getActivated(id, uid);
+      if (activated.length === 0) return [];
+
+      // 2. Fetch full entry data in parallel for TavernScript parity.
+      //    Each activated entry provides only { id, comment, keys, source, score? };
+      //    we merge with the full WorldInfoEntry from entries.get().
+      const results = await Promise.all(
+        activated.map(async (a) => {
+          const dto = await spindle.world_books.entries.get(a.id, uid);
+          if (!dto) return null;
+          const entry: ActivatedWorldInfoEntry = {
+            ...mapEntry(dto),
+            source: a.source,
+            score:  a.score,
+          };
+          return entry;
+        }),
+      );
+
+      // Filter out any nulls (entries deleted between activation scan and fetch).
+      return results.filter((e): e is ActivatedWorldInfoEntry => e !== null);
     },
   };
 }

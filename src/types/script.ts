@@ -230,6 +230,92 @@ export interface ZodLike<T> {
   parse(data: unknown): T;
 }
 
+// ─── Dry Run types ────────────────────────────────────────────────────────────
+
+export interface DryRunOptions {
+  /** The chat to assemble the prompt for. Defaults to the active chat. */
+  chatId?: string;
+  /** Override the connection profile used for assembly. */
+  connectionId?: string;
+  /** Override the persona used for assembly. */
+  personaId?: string;
+  /** Override the generation preset. */
+  presetId?: string;
+  /** Override the generation type (default: "normal"). */
+  generationType?: 'normal' | 'continue' | 'regenerate' | 'swipe' | 'impersonate';
+  /** Override sampler parameters. */
+  parameters?: Record<string, unknown>;
+}
+
+/** A single block in the assembled prompt. */
+export interface DryRunBlock {
+  /** Block type: "block", "chat_history", "world_info", "authors_note", "utility", etc. */
+  type: string;
+  name: string;
+  role?: string;
+  content?: string;
+  blockId?: string;
+  marker?: string;
+  messageCount?: number;
+  firstMessageIndex?: number;
+  preCountedTokens?: number;
+  excludeFromTotal?: boolean;
+}
+
+/** World info activation statistics from a dry run. */
+export interface WorldInfoActivationStats {
+  totalCandidates: number;
+  activatedBeforeBudget: number;
+  activatedAfterBudget: number;
+  evictedByBudget: number;
+  evictedByMinPriority: number;
+  estimatedTokens: number;
+  recursionPassesUsed: number;
+}
+
+/** Per-block token count data from a dry run. Only present when a tokenizer is configured. */
+export interface DryRunTokenCount {
+  totalTokens: number;
+  breakdown: Array<{ name: string; type: string; tokens: number; role?: string }>;
+  tokenizerId: string | null;
+  tokenizerName: string | null;
+}
+
+/** Long-term memory retrieval statistics from a dry run. */
+export interface DryRunMemoryStats {
+  enabled: boolean;
+  chunksRetrieved: number;
+  chunksAvailable: number;
+  chunksPending: number;
+  injectionMethod: 'macro' | 'fallback' | 'disabled';
+  retrievedChunks: Array<{
+    score: number;
+    tokenEstimate: number;
+    messageRange: [number, number];
+    preview: string;
+  }>;
+  queryPreview: string;
+  settingsSource: 'global' | 'per_chat';
+}
+
+/** Result of a dry run — the assembled prompt state without calling the LLM. */
+export interface DryRunResult {
+  /** The fully assembled message array that would be sent to the LLM. */
+  messages: LLMMessage[];
+  /** Ordered prompt composition blocks (one entry per prompt section). */
+  breakdown: DryRunBlock[];
+  /** Final merged sampler parameters. */
+  parameters: Record<string, unknown>;
+  model: string;
+  provider: string;
+  /** Per-block token counts. Only present if a tokenizer is configured. */
+  tokenCount?: DryRunTokenCount;
+  /** World info activation statistics. */
+  worldInfoStats?: WorldInfoActivationStats;
+  /** Long-term memory retrieval statistics. */
+  memoryStats?: DryRunMemoryStats;
+}
+
 export interface LLMAPI {
   /** Generate using the user's active connection and preset. Requires generation permission. */
   generate(messages: LLMMessage[], options?: LLMOptions): Promise<string>;
@@ -248,6 +334,16 @@ export interface LLMAPI {
     schema: ZodLike<T> | Record<string, unknown>,
     options?: LLMOptions
   ): Promise<T>;
+  /**
+   * Run the full prompt assembly pipeline without calling the LLM.
+   * Returns the assembled messages, breakdown blocks, token counts, world info
+   * activation stats, and memory stats — identical to what a real generation
+   * would use, but with the LLM call skipped.
+   *
+   * Uses the active chat if chatId is not provided in options.
+   * Requires generation permission.
+   */
+  dryRun(options?: DryRunOptions): Promise<DryRunResult>;
 }
 
 // ─── Variables API ────────────────────────────────────────────────────────────
@@ -538,6 +634,21 @@ export interface WorldInfoEntryInput {
  */
 export type WorldInfoRef = string;
 
+/**
+ * A world info entry that is currently activated for a chat.
+ * Extends WorldInfoEntry with activation metadata (source and optional vector
+ * similarity score) from the Lumiverse activation pipeline.
+ */
+export type ActivatedWorldInfoEntry = WorldInfoEntry & {
+  /** How the entry was activated — via keyword matching or vector similarity. */
+  source: 'keyword' | 'vector';
+  /**
+   * For vector-activated entries: the cosine similarity score (lower = more
+   * similar). Not present for keyword-activated entries.
+   */
+  score?: number;
+};
+
 export interface WorldInfoAPI {
   /** List world books. Requires world_books permission. */
   list(options?: { limit?: number; offset?: number }): Promise<{ data: WorldInfo[]; total: number }>;
@@ -575,6 +686,17 @@ export interface WorldInfoAPI {
     /** Delete an entry by its entry ID. Returns true if deleted. Requires world_books permission. */
     delete(entryId: string): Promise<boolean>;
   };
+  /**
+   * Get all world info entries that would activate for the current (or specified) chat.
+   * Runs the full Lumiverse activation pipeline (keyword matching, selective logic,
+   * probability rolls, sticky/cooldown/delay state, group competition, budget enforcement,
+   * vector search) and returns full WorldInfoEntry objects enriched with activation metadata.
+   *
+   * Falls back to the active chat if chatId is not provided.
+   * Performs one getActivated call + one entries.get call per activated entry (in parallel).
+   * Requires world_books permission.
+   */
+  getCapturedActive(chatId?: string): Promise<ActivatedWorldInfoEntry[]>;
 }
 
 // ─── Script namespace (inside script body) ────────────────────────────────────
