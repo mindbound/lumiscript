@@ -124,8 +124,8 @@ export interface LumiScriptAPI {
   characters: CharactersAPI;
   /** Chat session management. Requires chats permission. */
   chats: ChatsAPI;
-  /** Not yet available — stub only */
-  worldInfo: WorldInfoAPIStub;
+  /** World Info / Lorebook CRUD. Requires world_books permission. */
+  worldInfo: WorldInfoAPI;
   /** Requires allowDangerous */
   files: FilesAPI;
 }
@@ -160,6 +160,20 @@ export interface ChatAPI {
   deleteMessage(id: string): Promise<void>;
   /** Get the current chat ID from the active context. */
   getChatId(): string | null;
+  /**
+   * Get a single metadata value from the current chat.
+   * Returns undefined if the key does not exist.
+   * Convenience wrapper over api.chats.get() with active-context auto-resolve.
+   * Requires chats permission.
+   */
+  getMetadata(key: string): Promise<unknown>;
+  /**
+   * Set a single metadata key on the current chat.
+   * Performs a read-modify-write to safely merge the new key without
+   * overwriting other metadata keys.
+   * Requires chats permission.
+   */
+  setMetadata(key: string, value: unknown): Promise<void>;
 }
 
 // ─── LLM API ─────────────────────────────────────────────────────────────────
@@ -415,11 +429,153 @@ export interface ChatsAPI {
   delete(id: string): Promise<boolean>;
 }
 
-// ─── Stub APIs (not yet implemented) ─────────────────────────────────────────
+// ─── WorldInfo API ────────────────────────────────────────────────────────────
 
-export type WorldInfoAPIStub = {
-  [K in string]: (...args: unknown[]) => never;
-} & { _stub: true };
+/** A world book / lorebook header. Maps to WorldBookDTO. */
+export interface WorldInfo {
+  id: string;
+  name: string;
+  description: string;
+  metadata: Record<string, unknown>;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface WorldInfoCreateInput {
+  name: string;
+  description?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface WorldInfoUpdateInput {
+  name?: string;
+  description?: string;
+  metadata?: Record<string, unknown>;
+}
+
+/** A world book entry (lorebook entry). Maps to WorldBookEntryDTO. */
+export interface WorldInfoEntry {
+  id: string;
+  worldBookId: string;
+  uid: string;
+  key: string[];
+  keysecondary: string[];
+  content: string;
+  comment: string;
+  position: number;
+  depth: number;
+  role: string | null;
+  orderValue: number;
+  selective: boolean;
+  constant: boolean;
+  disabled: boolean;
+  groupName: string;
+  groupOverride: boolean;
+  groupWeight: number;
+  probability: number;
+  scanDepth: number | null;
+  caseSensitive: boolean;
+  matchWholeWords: boolean;
+  automationId: string | null;
+  useRegex: boolean;
+  preventRecursion: boolean;
+  excludeRecursion: boolean;
+  delayUntilRecursion: boolean;
+  priority: number;
+  sticky: number;
+  cooldown: number;
+  delay: number;
+  /** 0 = AND, 1 = NOT, 2 = OR for secondary key matching */
+  selectiveLogic: number;
+  useProbability: boolean;
+  vectorized: boolean;
+  extensions: Record<string, unknown>;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Input for creating or updating a world book entry. All fields are optional. */
+export interface WorldInfoEntryInput {
+  key?: string[];
+  keysecondary?: string[];
+  content?: string;
+  comment?: string;
+  /** Injection position: 0=WI Before, 1=WI After, 4=at depth */
+  position?: number;
+  depth?: number;
+  role?: string;
+  orderValue?: number;
+  selective?: boolean;
+  constant?: boolean;
+  disabled?: boolean;
+  groupName?: string;
+  groupOverride?: boolean;
+  groupWeight?: number;
+  probability?: number;
+  scanDepth?: number;
+  caseSensitive?: boolean;
+  matchWholeWords?: boolean;
+  automationId?: string;
+  useRegex?: boolean;
+  preventRecursion?: boolean;
+  excludeRecursion?: boolean;
+  delayUntilRecursion?: boolean;
+  priority?: number;
+  sticky?: number;
+  cooldown?: number;
+  delay?: number;
+  selectiveLogic?: number;
+  useProbability?: boolean;
+  vectorized?: boolean;
+  extensions?: Record<string, unknown>;
+}
+
+/**
+ * A reference to a world book — either a UUID (e.g. `"a1b2c3d4-..."`) or the
+ * world book's human-readable name (e.g. `"My Character Lore"`).
+ * The API resolves names to IDs automatically on first use and caches the
+ * result for the lifetime of the script execution.
+ */
+export type WorldInfoRef = string;
+
+export interface WorldInfoAPI {
+  /** List world books. Requires world_books permission. */
+  list(options?: { limit?: number; offset?: number }): Promise<{ data: WorldInfo[]; total: number }>;
+  /**
+   * Get a world book by ID or name. Returns null if not found.
+   * Requires world_books permission.
+   */
+  get(ref: WorldInfoRef): Promise<WorldInfo | null>;
+  /** Create a world book. Requires world_books permission. */
+  create(input: WorldInfoCreateInput): Promise<WorldInfo>;
+  /**
+   * Update a world book by ID or name. Requires world_books permission.
+   */
+  update(ref: WorldInfoRef, input: WorldInfoUpdateInput): Promise<WorldInfo>;
+  /**
+   * Delete a world book and all its entries by ID or name.
+   * Requires world_books permission.
+   */
+  delete(ref: WorldInfoRef): Promise<boolean>;
+  entries: {
+    /**
+     * List entries in a world book, identified by ID or name.
+     * Requires world_books permission.
+     */
+    list(ref: WorldInfoRef, options?: { limit?: number; offset?: number }): Promise<{ data: WorldInfoEntry[]; total: number }>;
+    /** Get a single entry by its entry ID. Returns null if not found. Requires world_books permission. */
+    get(entryId: string): Promise<WorldInfoEntry | null>;
+    /**
+     * Create a new entry in a world book, identified by ID or name.
+     * Requires world_books permission.
+     */
+    create(ref: WorldInfoRef, input: WorldInfoEntryInput): Promise<WorldInfoEntry>;
+    /** Update an entry by its entry ID. Requires world_books permission. */
+    update(entryId: string, input: WorldInfoEntryInput): Promise<WorldInfoEntry>;
+    /** Delete an entry by its entry ID. Returns true if deleted. Requires world_books permission. */
+    delete(entryId: string): Promise<boolean>;
+  };
+}
 
 // ─── Script namespace (inside script body) ────────────────────────────────────
 

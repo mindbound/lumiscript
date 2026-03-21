@@ -47,6 +47,7 @@ import { buildFilesAPI      } from './api/files.js';
 import { buildUIAPI         } from './api/ui.js';
 import { buildCharactersAPI } from './api/characters.js';
 import { buildChatsAPI      } from './api/chats-session.js';
+import { buildWorldInfoAPI  } from './api/world-info.js';
 
 // ─── Executor options ─────────────────────────────────────────────────────────
 
@@ -119,14 +120,6 @@ export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiSc
 
   const deps: APIBuildDeps = { script, hasPerm, userId, activeContext };
 
-  // worldInfo is still a stub — pending Lumiverse World Book API.
-  const worldInfo = new Proxy({} as LumiScriptAPI['worldInfo'], {
-    get: (_t, prop) => {
-      if (prop === '_stub') return true;
-      return () => { throw new Error(`api.worldInfo.${String(prop)}: not yet available in LumiScript`); };
-    },
-  });
-
   return {
     utils:      buildUtilsAPI(deps),
     json:       buildJSONAPI(),
@@ -137,7 +130,7 @@ export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiSc
     ui:         buildUIAPI(deps),
     characters: buildCharactersAPI(deps),
     chats:      buildChatsAPI(deps),
-    worldInfo,
+    worldInfo:  buildWorldInfoAPI(deps),
   };
 }
 
