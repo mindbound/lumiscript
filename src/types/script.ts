@@ -428,13 +428,86 @@ export interface UtilsAPI {
 
 // ─── Files API ────────────────────────────────────────────────────────────────
 
-/** Requires allowDangerous on the script */
+/** Metadata returned by `api.files.sharedStat`. */
+export interface FileStatResult {
+  exists: boolean;
+  isFile: boolean;
+  isDirectory: boolean;
+  sizeBytes: number;
+  /** ISO 8601 timestamp of last modification. */
+  modifiedAt: string;
+}
+
+/** Metadata returned by `api.files.tempStat`. */
+export interface TempStatResult {
+  sizeBytes: number;
+  /** ISO 8601 creation timestamp. */
+  createdAt: string;
+  /** ISO 8601 expiration timestamp. Absent if no TTL was set. */
+  expiresAt?: string;
+}
+
+/** Options for `api.files.tempWrite`. */
+export interface TempWriteOptions {
+  /** Time-to-live in milliseconds. If omitted the file persists until manually deleted or restart. */
+  ttlMs?: number;
+}
+
+/**
+ * Flat file-system API with three storage tiers. All methods require
+ * `allowDangerous` on the script. `temp*` methods additionally require the
+ * `ephemeral_storage` permission.
+ *
+ * - `user*`   — per-user persistent storage (`spindle.userStorage`)
+ * - `shared*` — extension-wide persistent storage (`spindle.storage`)
+ * - `temp*`   — TTL-bound, quota-managed storage (`spindle.ephemeral`)
+ */
 export interface FilesAPI {
-  read(path: string): Promise<string>;
-  write(path: string, content: string): Promise<void>;
-  delete(path: string): Promise<void>;
-  exists(path: string): Promise<boolean>;
-  list(prefix?: string): Promise<string[]>;
+  // ── User storage (per-user, persistent) ─────────────────────────────────
+  /** Read a file from per-user storage as UTF-8 text. */
+  userRead(path: string): Promise<string>;
+  /** Write UTF-8 text to per-user storage (creates directories as needed). */
+  userWrite(path: string, data: string): Promise<void>;
+  /** Delete a file from per-user storage. */
+  userDelete(path: string): Promise<void>;
+  /** Check if a path exists in per-user storage. */
+  userExists(path: string): Promise<boolean>;
+  /** List files in per-user storage, optionally under a prefix. */
+  userList(prefix?: string): Promise<string[]>;
+  /** Create a directory in per-user storage. */
+  userMkdir(path: string): Promise<void>;
+
+  // ── Shared storage (extension-wide, persistent) ──────────────────────────
+  /** Read a file from extension-wide shared storage as UTF-8 text. */
+  sharedRead(path: string): Promise<string>;
+  /** Write UTF-8 text to extension-wide shared storage (creates directories as needed). */
+  sharedWrite(path: string, data: string): Promise<void>;
+  /** Delete a file from extension-wide shared storage. */
+  sharedDelete(path: string): Promise<void>;
+  /** Check if a path exists in extension-wide shared storage. */
+  sharedExists(path: string): Promise<boolean>;
+  /** List files in extension-wide shared storage, optionally under a prefix. */
+  sharedList(prefix?: string): Promise<string[]>;
+  /** Get file metadata from extension-wide shared storage. */
+  sharedStat(path: string): Promise<FileStatResult>;
+  /** Create a directory in extension-wide shared storage. */
+  sharedMkdir(path: string): Promise<void>;
+  /** Move or rename a file in extension-wide shared storage. */
+  sharedMove(from: string, to: string): Promise<void>;
+
+  // ── Temp storage (ephemeral, TTL-bound) ──────────────────────────────────
+  /** Read a file from ephemeral storage as UTF-8 text. Requires ephemeral_storage permission. */
+  tempRead(path: string): Promise<string>;
+  /** Write UTF-8 text to ephemeral storage. Requires ephemeral_storage permission. */
+  tempWrite(path: string, data: string, options?: TempWriteOptions): Promise<void>;
+  /** Delete a file from ephemeral storage. Requires ephemeral_storage permission. */
+  tempDelete(path: string): Promise<void>;
+  /** List files in ephemeral storage, optionally under a prefix. Requires ephemeral_storage permission. */
+  tempList(prefix?: string): Promise<string[]>;
+  /** Get file metadata from ephemeral storage (includes expiration). Requires ephemeral_storage permission. */
+  tempStat(path: string): Promise<TempStatResult>;
+  /** Remove all expired ephemeral files. Returns count of files removed. Requires ephemeral_storage permission. */
+  tempClearExpired(): Promise<number>;
 }
 
 // ─── Characters API ───────────────────────────────────────────────────────────
