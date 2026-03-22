@@ -126,6 +126,8 @@ export interface LumiScriptAPI {
   chats: ChatsAPI;
   /** World Info / Lorebook CRUD. Requires world_books permission. */
   worldInfo: WorldInfoAPI;
+  /** Persona (identity profile) CRUD + active persona switching. Requires personas permission. */
+  personas: PersonasAPI;
   /** Requires allowDangerous */
   files: FilesAPI;
 }
@@ -512,6 +514,31 @@ export interface ChatSessionUpdateInput {
   metadata?: Record<string, unknown>;
 }
 
+/** A single long-term memory chunk retrieved via vector search. */
+export interface ChatMemoryChunk {
+  /** The chunk text (concatenated messages from a conversation segment). */
+  content: string;
+  /** Cosine similarity score (lower = more similar). */
+  score: number;
+  /** Chunk metadata (may include startIndex, endIndex, etc.). */
+  metadata: Record<string, unknown>;
+}
+
+/** Result of a chat memory vector search. */
+export interface ChatMemoryResult {
+  chunks: ChatMemoryChunk[];
+  /** Pre-formatted output using the user's memory template settings. Ready to inject. */
+  formatted: string;
+  count: number;
+  /** Whether chat memory is enabled (requires embedding config + vectorized messages). */
+  enabled: boolean;
+  queryPreview: string;
+  settingsSource: 'global' | 'per_chat';
+  chunksAvailable: number;
+  /** Chunks awaiting vectorization. If > 0, results may be incomplete. */
+  chunksPending: number;
+}
+
 export interface ChatsAPI {
   /** List chat sessions, optionally filtered by character. Requires chats permission. */
   list(options?: { characterId?: string; limit?: number; offset?: number }): Promise<{ data: ChatSession[]; total: number }>;
@@ -523,6 +550,14 @@ export interface ChatsAPI {
   update(id: string, input: ChatSessionUpdateInput): Promise<ChatSession>;
   /** Delete a chat session and all its messages. Returns true if deleted. Requires chats permission. */
   delete(id: string): Promise<boolean>;
+  /**
+   * Retrieve long-term memory chunks for a chat via vector search — the same
+   * semantic search used by the `{{memories}}` macro during prompt assembly.
+   * Falls back to the active chat if chatId is not provided.
+   * Returns `{ enabled: false }` without error if memory is not configured.
+   * Requires chats permission.
+   */
+  getMemories(chatId?: string, options?: { topK?: number }): Promise<ChatMemoryResult>;
 }
 
 // ─── WorldInfo API ────────────────────────────────────────────────────────────
@@ -624,6 +659,78 @@ export interface WorldInfoEntryInput {
   useProbability?: boolean;
   vectorized?: boolean;
   extensions?: Record<string, unknown>;
+}
+
+// ─── Personas API ────────────────────────────────────────────────────────────
+
+/** A user persona (identity profile). Maps to PersonaDTO. */
+export interface Persona {
+  id: string;
+  name: string;
+  /** Short tagline displayed in the persona picker. */
+  title: string;
+  description: string;
+  /** Avatar image ID (use the Images API to fetch). Null if no avatar set. */
+  imageId: string | null;
+  /** ID of the world book attached to this persona. Null if none. */
+  attachedWorldBookId: string | null;
+  /** Organisational folder label. */
+  folder: string;
+  isDefault: boolean;
+  metadata: Record<string, unknown>;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface PersonaCreateInput {
+  name: string;
+  title?: string;
+  description?: string;
+  folder?: string;
+  /** Set as the user's default persona (clears the previous default). */
+  isDefault?: boolean;
+  /** Attach a world book by ID. */
+  attachedWorldBookId?: string;
+  metadata?: Record<string, unknown>;
+}
+
+/** All fields optional — only provided fields are updated. */
+export interface PersonaUpdateInput {
+  name?: string;
+  title?: string;
+  description?: string;
+  folder?: string;
+  isDefault?: boolean;
+  attachedWorldBookId?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface PersonasAPI {
+  /** List personas. Requires personas permission. */
+  list(options?: { limit?: number; offset?: number }): Promise<{ data: Persona[]; total: number }>;
+  /** Get a persona by ID. Returns null if not found. Requires personas permission. */
+  get(personaId: string): Promise<Persona | null>;
+  /** Get the user's default persona (is_default = true). Returns null if none set. Requires personas permission. */
+  getDefault(): Promise<Persona | null>;
+  /** Get the currently active persona. Returns null if none is active. Requires personas permission. */
+  getActive(): Promise<Persona | null>;
+  /** Create a persona. Requires personas permission. */
+  create(input: PersonaCreateInput): Promise<Persona>;
+  /** Update a persona. Requires personas permission. */
+  update(personaId: string, input: PersonaUpdateInput): Promise<Persona>;
+  /** Delete a persona. Returns true if deleted. Requires personas permission. */
+  delete(personaId: string): Promise<boolean>;
+  /**
+   * Switch the active persona. Pass null to deactivate.
+   * Emits a SETTINGS_UPDATED event so the frontend updates immediately.
+   * Requires personas permission.
+   */
+  switchActive(personaId: string | null): Promise<void>;
+  /**
+   * Get the world book attached to a persona. Returns null if none is attached.
+   * Only requires personas permission (not world_books).
+   */
+  getWorldBook(personaId: string): Promise<WorldInfo | null>;
 }
 
 /**

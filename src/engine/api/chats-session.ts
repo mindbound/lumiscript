@@ -20,7 +20,7 @@ import type {
   ChatSession,
   ChatSessionUpdateInput,
 } from '../../types/script.js';
-import { type APIBuildDeps, assertPerm } from './shared.js';
+import { type APIBuildDeps, assertPerm, requireChatId } from './shared.js';
 
 // ─── DTO → ChatSession mapping ────────────────────────────────────────────────
 
@@ -38,7 +38,7 @@ function mapChatSession(dto: import('lumiverse-spindle-types').ChatDTO): ChatSes
 // ─── API builder ──────────────────────────────────────────────────────────────
 
 export function buildChatsAPI(deps: APIBuildDeps): LumiScriptAPI['chats'] {
-  const { hasPerm, userId } = deps;
+  const { hasPerm, userId, activeContext } = deps;
   const uid = userId ?? undefined;
 
   return {
@@ -69,6 +69,16 @@ export function buildChatsAPI(deps: APIBuildDeps): LumiScriptAPI['chats'] {
     delete: async (id) => {
       assertPerm('chats', hasPerm);
       return spindle.chats.delete(id, uid);
+    },
+
+    getMemories: async (chatId, options) => {
+      assertPerm('chats', hasPerm);
+      const id = chatId ?? requireChatId(activeContext);
+      // ChatMemoryResultDTO is already camelCase — pass through as-is.
+      return spindle.chats.getMemories(id, {
+        topK:   options?.topK,
+        userId: uid,
+      });
     },
   };
 }

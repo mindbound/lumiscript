@@ -48,6 +48,7 @@ import { buildUIAPI         } from './api/ui.js';
 import { buildCharactersAPI } from './api/characters.js';
 import { buildChatsAPI      } from './api/chats-session.js';
 import { buildWorldInfoAPI  } from './api/world-info.js';
+import { buildPersonasAPI  } from './api/personas.js';
 
 // ─── Executor options ─────────────────────────────────────────────────────────
 
@@ -131,6 +132,7 @@ export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiSc
     characters: buildCharactersAPI(deps),
     chats:      buildChatsAPI(deps),
     worldInfo:  buildWorldInfoAPI(deps),
+    personas:   buildPersonasAPI(deps),
   };
 }
 
