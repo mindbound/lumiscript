@@ -151,6 +151,50 @@ export interface SendMessageOptions {
   metadata?: Record<string, unknown>;
 }
 
+/**
+ * Options for `api.chat.inject`.
+ *
+ * Two modes:
+ * - `'intercept'` (default) — injection is spliced into the fully assembled
+ *   message array at the given depth position before it reaches the LLM.
+ * - `'context'` — injection is provided to the generation context handler
+ *   *before* prompt assembly. Whether the assembler acts on it depends on
+ *   Lumiverse dev support for `_lumiScriptInjections` in the context object.
+ */
+export interface InjectOptions {
+  /**
+   * Which pipeline phase to inject into.
+   * - `'intercept'`: post-assembly, splice into message array (default)
+   * - `'context'`: pre-assembly, enrich the assembler context
+   */
+  mode?: 'intercept' | 'context';
+  /** Message role. Default: `'system'`. */
+  role?: 'system' | 'user' | 'assistant';
+  /**
+   * For `mode: 'intercept'` only — how many messages from the END of the
+   * assembled array to insert before. `0` = append after all messages (default).
+   * `1` = before the last message. `4` = before the 4th-to-last, etc.
+   */
+  depth?: number;
+  /**
+   * If `true` the injection is automatically removed after the next generation
+   * cycle. Default: `false`.
+   */
+  ephemeral?: boolean;
+}
+
+/** A snapshot of a single active injection entry. */
+export interface InjectionInfo {
+  id: string;
+  content: string;
+  mode: 'intercept' | 'context';
+  role: string;
+  depth: number;
+  ephemeral: boolean;
+  /** The ID of the script that created this injection. */
+  scriptId: string;
+}
+
 export interface ChatAPI {
   /** Get all messages in the current chat. Requires chat_mutation permission. */
   getMessages(options?: GetMessagesOptions): Promise<ChatMessage[]>;
@@ -176,6 +220,30 @@ export interface ChatAPI {
    * Requires chats permission.
    */
   setMetadata(key: string, value: unknown): Promise<void>;
+
+  /**
+   * Register a prompt injection under the given ID. Overwrites any existing
+   * injection with the same ID. Requires `interceptor` permission.
+   *
+   * - `mode: 'intercept'` (default): injected post-assembly at the requested
+   *   depth position in the message array.
+   * - `mode: 'context'`: injected into the assembler context pre-assembly.
+   */
+  inject(id: string, content: string, options?: InjectOptions): void;
+  /** Remove a single injection by ID. */
+  removeInjection(id: string): void;
+  /** List all currently active injections (across all scripts). */
+  getInjections(): InjectionInfo[];
+  /**
+   * Remove all injections created by this script.
+   * Requires `interceptor` permission.
+   */
+  clearInjections(): void;
+  /**
+   * Remove ALL injections across all scripts.
+   * Requires `interceptor` permission + `allowDangerous`.
+   */
+  clearAllInjections(): void;
 }
 
 // ─── LLM API ─────────────────────────────────────────────────────────────────

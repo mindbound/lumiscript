@@ -302,7 +302,7 @@ export function buildLLMAPI(deps: APIBuildDeps): LumiScriptAPI['llm'] {
           presetId:       options?.presetId,
           generationType: options?.generationType,
           parameters:     options?.parameters,
-        }).then(result => ({
+        }, userId ?? undefined).then(result => ({
           messages: result.messages.map(m => ({
             role:    m.role as 'system' | 'user' | 'assistant',
             content: m.content,

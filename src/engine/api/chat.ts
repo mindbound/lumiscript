@@ -3,7 +3,8 @@
  * LUMISCRIPT — CHAT API
  * ============================================================================
  * getChatId, getMessages, sendMessage, editMessage, deleteMessage,
- * getMetadata, setMetadata
+ * getMetadata, setMetadata,
+ * inject, removeInjection, getInjections, clearInjections, clearAllInjections
  *
  * Message operations (getMessages, sendMessage, editMessage, deleteMessage)
  * use spindle.chat.* and require the chat_mutation permission.
@@ -11,15 +12,26 @@
  * Metadata operations (getMetadata, setMetadata) use spindle.chats.* and
  * require the chats permission. setMetadata performs a read-modify-write so
  * that a single-key update never silently overwrites other metadata keys.
+ *
+ * Injection operations delegate to the module-level injection-store singleton.
+ * inject / clearInjections require the `interceptor` permission.
+ * clearAllInjections additionally requires `allowDangerous`.
  */
 
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
 
-import type { LumiScriptAPI } from '../../types/script.js';
-import { type APIBuildDeps, assertPerm, requireChatId, shielded } from './shared.js';
+import type { LumiScriptAPI, InjectionInfo } from '../../types/script.js';
+import { type APIBuildDeps, assertPerm, assertDangerous, requireChatId, shielded } from './shared.js';
+import {
+  addInjection,
+  removeInjection as storeRemove,
+  clearByScriptId,
+  clearAll,
+  listAll,
+} from '../injection-store.js';
 
 export function buildChatAPI(deps: APIBuildDeps): LumiScriptAPI['chat'] {
-  const { hasPerm, activeContext, userId } = deps;
+  const { script, hasPerm, activeContext, userId } = deps;
   const uid = userId ?? undefined;
 
   return {
@@ -84,6 +96,48 @@ export function buildChatAPI(deps: APIBuildDeps): LumiScriptAPI['chat'] {
           await spindle.chats.update(id, { metadata: merged }, uid);
         }),
       );
+    },
+
+    // ── Prompt injection ────────────────────────────────────────────────────
+
+    inject(id, content, options) {
+      assertPerm('interceptor', hasPerm);
+      addInjection({
+        id,
+        content,
+        mode:      options?.mode ?? 'intercept',
+        role:      options?.role ?? 'system',
+        depth:     options?.depth ?? 0,
+        ephemeral: options?.ephemeral ?? false,
+        scriptId:  script.id,
+      });
+    },
+
+    removeInjection(id) {
+      storeRemove(id);
+    },
+
+    getInjections(): InjectionInfo[] {
+      return listAll().map(e => ({
+        id:       e.id,
+        content:  e.content,
+        mode:     e.mode,
+        role:     e.role,
+        depth:    e.depth,
+        ephemeral: e.ephemeral,
+        scriptId: e.scriptId,
+      }));
+    },
+
+    clearInjections() {
+      assertPerm('interceptor', hasPerm);
+      clearByScriptId(script.id);
+    },
+
+    clearAllInjections() {
+      assertPerm('interceptor', hasPerm);
+      assertDangerous(script);
+      clearAll();
     },
   };
 }

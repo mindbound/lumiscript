@@ -11,6 +11,7 @@ import { executeScript } from './engine/executor.js';
 import { TriggerRegistry } from './engine/trigger-registry.js';
 import { resolvePendingUIRequest } from './engine/api/ui.js';
 import { generateUUID } from './utils/uuid.js';
+import { listByMode, listAll, clearEphemeral, clearByScriptId } from './engine/injection-store.js';
 
 // ─── Active user + permission tracking ───────────────────────────────────────
 
@@ -74,6 +75,65 @@ function pushSettings(): void {
   send({ type: 'settings_updated', settings: settingsStore.get() });
 }
 
+function pushInjections(): void {
+  send({ type: 'injections_updated', injections: listAll() });
+}
+
+// ─── Prompt injection handlers ────────────────────────────────────────────────
+//
+// Registered unconditionally at module load so that any script calling
+// api.chat.inject() has its entries picked up during the next generation
+// cycle, without requiring any per-injection Spindle call.
+//
+// Context handler (pre-assembly) — handles mode:'context' entries.
+// Enriches the spindle context object with a `_lumiScriptInjections` key BEFORE
+// prompt assembly. The interceptor (below) reads this key from the context it
+// receives and prepends the entries to the assembled message array.
+spindle.registerContextHandler(async (ctx) => {
+  const entries = listByMode('context');
+  if (entries.length === 0) return ctx;
+  return {
+    ...(ctx as Record<string, unknown>),
+    _lumiScriptInjections: entries.map(e => ({ content: e.content, role: e.role })),
+  };
+}, 50);
+
+// Interceptor (post-assembly) — handles BOTH injection modes.
+//
+// mode:'context' — reads _lumiScriptInjections from the spindle context
+//   (populated by the context handler above) and PREPENDS them at index 0,
+//   before all assembled content. Ephemeral context entries are cleared here.
+//
+// mode:'intercept' — reads from the injection store and splices each entry
+//   at depth from the END of the message array. Ephemeral entries cleared after.
+spindle.registerInterceptor(async (messages, context) => {
+  let result = [...messages];
+
+  // ── Context-mode: prepend before all assembled content (index 0) ──────────
+  const ctx = context as Record<string, unknown>;
+  const ctxInjections = ctx?._lumiScriptInjections as Array<{ content: string; role: string }> | undefined;
+  if (ctxInjections && ctxInjections.length > 0) {
+    result = [
+      ...ctxInjections.map(e => ({
+        role: e.role as 'system' | 'user' | 'assistant',
+        content: e.content,
+      })),
+      ...result,
+    ];
+    clearEphemeral('context');
+  }
+
+  // ── Intercept-mode: splice at depth from end of assembled array ───────────
+  const interceptEntries = listByMode('intercept');
+  for (const e of interceptEntries) {
+    const idx = Math.max(0, result.length - e.depth);
+    result.splice(idx, 0, { role: e.role as 'system' | 'user' | 'assistant', content: e.content });
+  }
+  clearEphemeral('intercept');
+
+  return result;
+}, 50);
+
 // ─── Trigger registry ─────────────────────────────────────────────────────────
 
 const triggerRegistry = new TriggerRegistry(
@@ -133,6 +193,11 @@ spindle.onFrontendMessage(async (raw, userId) => {
         break;
       }
 
+      case 'get_injections': {
+        pushInjections();
+        break;
+      }
+
       case 'get_active_context': {
         // Always fetch live state — also resolves character name for binding display labels.
         await refreshActiveContext(userId).catch(() => {});
@@ -163,10 +228,18 @@ spindle.onFrontendMessage(async (raw, userId) => {
         if ('enabled' in msg.patch || 'triggers' in msg.patch) {
           void syncTriggers();
         }
+        // Clear injections when a script is disabled so stale entries don't linger.
+        if ('enabled' in msg.patch && !msg.patch.enabled) {
+          clearByScriptId(msg.id);
+          pushInjections();
+        }
         break;
       }
 
       case 'delete_script': {
+        // Clear any injections this script registered before removing it.
+        clearByScriptId(msg.id);
+        pushInjections();
         await scriptStorage.deleteScript(msg.id);
         pushScripts();
         void syncTriggers();
@@ -245,6 +318,8 @@ spindle.onFrontendMessage(async (raw, userId) => {
           duration: result.duration,
           error: result.error?.message,
         });
+        // Push injection snapshot so the Status tab reflects any inject() calls made during execution.
+        pushInjections();
 
         break;
       }
@@ -324,3 +399,5 @@ spindle.permissions.onDenied(({ permission, operation }) => {
 })();
 
 export {};
+
+

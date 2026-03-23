@@ -15,6 +15,7 @@ import type {
   ScriptMetadata,
   ConsoleEntry,
   LumiScriptSettings,
+  InjectionInfo,
 } from './script.js';
 
 // ─── Frontend → Backend ───────────────────────────────────────────────────────
@@ -23,6 +24,7 @@ export type FrontendToBackend =
   | { type: 'get_scripts' }
   | { type: 'get_settings' }
   | { type: 'get_active_context' }
+  | { type: 'get_injections' }
   | {
       type: 'create_script';
       name: string;
@@ -107,6 +109,11 @@ export type BackendToFrontend =
   | {
       type: 'error';
       message: string;
+    }
+  | {
+      /** Current snapshot of all active injection entries. */
+      type: 'injections_updated';
+      injections: InjectionInfo[];
     }
   | {
       /** Request user input — frontend shows a dialog and sends back ui_response. */
