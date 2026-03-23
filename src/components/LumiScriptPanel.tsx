@@ -1,5 +1,5 @@
 import { FC, useState, useEffect, useCallback } from 'react';
-import { Code2, Activity, Zap, ArrowDownToLine, ArrowUpToLine, Timer } from 'lucide-react';
+import { Code2, Activity, Zap, ArrowDownToLine, ArrowUpToLine, Timer, ChevronDown, ChevronUp } from 'lucide-react';
 import type { Script, LumiScriptSettings, ConsoleEntry, InjectionInfo } from '../types/script.js';
 import type { BackendToFrontend, FrontendToBackend } from '../types/messages.js';
 import type { ActiveContext } from './manage/BindingsSection.js';
@@ -204,6 +204,18 @@ const StatusTab: FC<StatusTabProps> = ({ scripts, execInfo, invocationCounts, in
   /** Quick lookup: scriptId → script name for injection attribution. */
   const scriptNameById = Object.fromEntries(scripts.map(s => [s.id, s.name]));
 
+  /** Set of injection IDs whose content is currently expanded. */
+  const [expandedInjections, setExpandedInjections] = useState<Set<string>>(new Set());
+
+  const toggleInjection = (id: string) => {
+    setExpandedInjections(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
   if (enabled.length === 0 && injections.length === 0) {
     return (
       <div className="ls-placeholder">
@@ -279,40 +291,56 @@ const StatusTab: FC<StatusTabProps> = ({ scripts, execInfo, invocationCounts, in
             Active Injections
             <span className="ls-inject-count">{injections.length}</span>
           </div>
-          {injections.map(inj => (
-            <div key={inj.id} className="ls-inject-row">
-              {/* Mode icon: ⇣ blue for intercept, ⇡ purple for context */}
-              <span
-                className={`ls-inject-mode-icon ls-inject-${inj.mode}`}
-                title={inj.mode === 'intercept' ? 'Post-assembly intercept' : 'Pre-assembly context'}
-              >
-                {inj.mode === 'intercept'
-                  ? <ArrowDownToLine size={11} />
-                  : <ArrowUpToLine size={11} />
-                }
-              </span>
+          {injections.map(inj => {
+            const isExpanded = expandedInjections.has(inj.id);
+            return (
+              <div key={inj.id} className="ls-inject-row ls-inject-row-clickable" onClick={() => toggleInjection(inj.id)}>
+                {/* Mode icon: ⇣ blue for intercept, ⇡ purple for context */}
+                <span
+                  className={`ls-inject-mode-icon ls-inject-${inj.mode}`}
+                  title={inj.mode === 'intercept' ? 'Post-assembly intercept' : 'Pre-assembly context'}
+                >
+                  {inj.mode === 'intercept'
+                    ? <ArrowDownToLine size={11} />
+                    : <ArrowUpToLine size={11} />
+                  }
+                </span>
 
-              <div className="ls-inject-body">
-                <span className="ls-inject-id" title={inj.id}>{inj.id}</span>
-                <div className="ls-inject-meta">
-                  <span className="ls-inject-role">{inj.role}</span>
-                  {inj.mode === 'intercept' && inj.depth > 0 && (
-                    <span className="ls-inject-depth" title={`Insert before last ${inj.depth} message${inj.depth !== 1 ? 's' : ''}`}>
-                      d:{inj.depth}
+                <div className="ls-inject-body">
+                  {/* Header row: ID + meta + chevron */}
+                  <div className="ls-inject-header-row">
+                    <span className="ls-inject-id" title={inj.id}>{inj.id}</span>
+                    <div className="ls-inject-meta">
+                      <span className="ls-inject-role">{inj.role}</span>
+                      {inj.mode === 'intercept' && inj.depth > 0 && (
+                        <span className="ls-inject-depth" title={`Insert before last ${inj.depth} message${inj.depth !== 1 ? 's' : ''}`}>
+                          d:{inj.depth}
+                        </span>
+                      )}
+                      {inj.ephemeral && (
+                        <span className="ls-inject-ephemeral" title="Ephemeral — clears after next generation">
+                          <Timer size={9} />
+                        </span>
+                      )}
+                      <span className="ls-inject-script" title={inj.scriptId}>
+                        {scriptNameById[inj.scriptId] ?? inj.scriptId.slice(0, 8)}
+                      </span>
+                    </div>
+                    <span className="ls-inject-chevron">
+                      {isExpanded ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
                     </span>
+                  </div>
+
+                  {/* Collapsible content */}
+                  {isExpanded && (
+                    <div className="ls-inject-content" onClick={e => e.stopPropagation()}>
+                      {inj.content}
+                    </div>
                   )}
-                  {inj.ephemeral && (
-                    <span className="ls-inject-ephemeral" title="Ephemeral — clears after next generation">
-                      <Timer size={9} />
-                    </span>
-                  )}
-                  <span className="ls-inject-script" title={inj.scriptId}>
-                    {scriptNameById[inj.scriptId] ?? inj.scriptId.slice(0, 8)}
-                  </span>
                 </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
