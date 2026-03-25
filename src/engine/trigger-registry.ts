@@ -35,6 +35,8 @@ export interface TriggerDeps {
   grantedPermissions: Set<string>;
   userId: string | null;
   scriptStorage: ScriptStorage;
+  /** Forwarded to ExecutorOptions so api.tools.register/unregister push live updates. */
+  onToolsChanged?: () => void;
 }
 
 // ─── TriggerRegistry class ────────────────────────────────────────────────────
@@ -42,6 +44,15 @@ export interface TriggerDeps {
 export class TriggerRegistry {
   /** scriptId → { unsubs, events } — tracks live spindle.on() subscriptions */
   private cleanups = new Map<string, { unsubs: Array<() => void>; events: string[] }>();
+
+  /**
+   * Per-script count of currently-running concurrent invocations.
+   * Used to suppress premature execution_ended messages: when multiple events
+   * fire for the same script simultaneously (e.g., SETTINGS_UPDATED fires more
+   * than once on chat open), a fast early-return from a guard check must not
+   * mark the script as "done" while a slower invocation is still running.
+   */
+  private runningCounts = new Map<string, number>();
 
   constructor(
     private readonly getDeps: () => TriggerDeps,
@@ -71,7 +82,7 @@ export class TriggerRegistry {
     for (const event of events) {
       const unsub = spindle.on(event, async (payload: unknown) => {
         // ── Fetch current script from storage ──────────────────────────────
-        const { grantedPermissions, userId, scriptStorage } = this.getDeps();
+        const { grantedPermissions, userId, scriptStorage, onToolsChanged } = this.getDeps();
         const currentScript = scriptStorage.getScript(scriptId);
 
         // Bail if the script has been deleted, disabled, or is no longer a trigger.
@@ -88,6 +99,12 @@ export class TriggerRegistry {
           __event: event,
           ...(payload !== null && typeof payload === 'object' ? payload as Record<string, unknown> : {}),
         };
+
+        // ── Track concurrent invocations (issue: multiple events fire on chat
+        //    open; a fast early-return from a guard check must not prematurely
+        //    mark the script as done while a slower invocation is still running).
+        const prevCount = this.runningCounts.get(currentScript.id) ?? 0;
+        this.runningCounts.set(currentScript.id, prevCount + 1);
 
         // ── Notify frontend ────────────────────────────────────────────────
         executionStatusStore.markRunning(currentScript.id);
@@ -107,29 +124,35 @@ export class TriggerRegistry {
           eventData,
           onConsole: (entry) =>
             this.sendToFrontend({ type: 'console_entry', scriptId: currentScript.id, runId, entry }),
+          onToolsChanged,
         };
 
         const result = await executeScript(currentScript, opts);
 
-        // ── Update status ──────────────────────────────────────────────────
-        if (result.success) {
-          executionStatusStore.markSuccess(currentScript.id, result.duration);
-        } else {
-          executionStatusStore.markError(
-            currentScript.id,
-            result.duration,
-            result.error?.message ?? 'Unknown error',
-          );
-        }
+        // ── Update status — only when the LAST concurrent invocation finishes
+        const remaining = (this.runningCounts.get(currentScript.id) ?? 1) - 1;
+        this.runningCounts.set(currentScript.id, remaining);
 
-        this.sendToFrontend({
-          type: 'execution_ended',
-          scriptId: currentScript.id,
-          runId: result.runId,
-          success: result.success,
-          duration: result.duration,
-          error: result.error?.message,
-        });
+        if (remaining === 0) {
+          if (result.success) {
+            executionStatusStore.markSuccess(currentScript.id, result.duration);
+          } else {
+            executionStatusStore.markError(
+              currentScript.id,
+              result.duration,
+              result.error?.message ?? 'Unknown error',
+            );
+          }
+
+          this.sendToFrontend({
+            type: 'execution_ended',
+            scriptId: currentScript.id,
+            runId: result.runId,
+            success: result.success,
+            duration: result.duration,
+            error: result.error?.message,
+          });
+        }
       });
 
       unsubs.push(unsub);

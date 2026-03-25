@@ -14,7 +14,7 @@
       "devDependencies": {
         "@types/react": "^19.2.14",
         "@types/react-dom": "^19.2.3",
-        "lumiverse-spindle-types": "^0.2.0",
+        "lumiverse-spindle-types": "^0.2.4",
         "typescript": "^5.9.3",
       },
     },
@@ -36,7 +36,7 @@
 
     "lucide-react": ["lucide-react@0.468.0", "", { "peerDependencies": { "react": "^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0-rc" } }, "sha512-6koYRhnM2N0GGZIdXzSeiNwguv1gt/FAjZOiPl76roBi3xKEXa4WmfpxgQwTTL4KipXjefrnf3oV4IsYhi4JFA=="],
 
-    "lumiverse-spindle-types": ["lumiverse-spindle-types@0.2.0", "", {}, "sha512-4c8dFkIvouTjvC0Ag+Zbs4WwDztCjTEpR/KRk48B9lrMoxYKlfpvyAZ0S4h2iG/PdzUusxHgQDLW0xT5QP+uIw=="],
+    "lumiverse-spindle-types": ["lumiverse-spindle-types@0.2.4", "", {}, "sha512-cPszF6hxXwiQisNnLCX5v4RYzriCtfdDvunTN8bgCBugsTYmLQUmcsTzIat9IZXGfGqVEQgH0T5h/a6gzm+ncA=="],
 
     "marked": ["marked@14.0.0", "", { "bin": { "marked": "bin/marked.js" } }, "sha512-uIj4+faQ+MgHgwUW1l2PsPglZLOLOT1uErt06dAPtx2kjteLAkbsd/0FiYg/MGS+i7ZKLb7w2WClxHkzOOuryQ=="],
 

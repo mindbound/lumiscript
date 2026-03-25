@@ -49,6 +49,7 @@ import { buildCharactersAPI } from './api/characters.js';
 import { buildChatsAPI      } from './api/chats-session.js';
 import { buildWorldInfoAPI  } from './api/world-info.js';
 import { buildPersonasAPI  } from './api/personas.js';
+import { buildToolsAPI     } from './api/tools.js';
 
 // ─── Executor options ─────────────────────────────────────────────────────────
 
@@ -70,6 +71,12 @@ export interface ExecutorOptions {
    * When undefined (manual run), `data` is an empty object {}.
    */
   eventData?: Record<string, unknown>;
+  /**
+   * Called immediately after a tool is registered or unregistered via
+   * api.tools.register/unregister so the Status tab updates in real time
+   * rather than waiting for script execution to complete.
+   */
+  onToolsChanged?: () => void;
 }
 
 // ─── Async function constructor (exported for use by TriggerRegistry) ─────────
@@ -116,12 +123,15 @@ export async function executeScript(
 // ─── API assembler (exported for use by TriggerRegistry) ──────────────────────
 
 export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiScriptAPI {
-  const { grantedPermissions, activeContext, userId } = options;
+  const { grantedPermissions, activeContext, userId, onToolsChanged } = options;
   const hasPerm = (p: string) => grantedPermissions.has(p);
 
-  const deps: APIBuildDeps = { script, hasPerm, userId, activeContext };
+  const deps: APIBuildDeps = { script, hasPerm, userId, activeContext, onToolsChanged };
 
-  return {
+  // api is captured in a variable so that buildToolsAPI can receive a lazy
+  // getter (() => api) that resolves to the fully-constructed object at
+  // tool invocation time — not at build time (which would be a circular ref).
+  const api: LumiScriptAPI = {
     utils:      buildUtilsAPI(deps),
     json:       buildJSONAPI(),
     variables:  buildVariablesAPI(deps),
@@ -133,7 +143,9 @@ export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiSc
     chats:      buildChatsAPI(deps),
     worldInfo:  buildWorldInfoAPI(deps),
     personas:   buildPersonasAPI(deps),
+    tools:      buildToolsAPI(deps, () => api),
   };
+  return api;
 }
 
 // ─── Script namespace (script.require) ───────────────────────────────────────

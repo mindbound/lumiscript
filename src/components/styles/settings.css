@@ -72,3 +72,56 @@
 .ls-count-card:hover { background: var(--lumiverse-fill); }
 .ls-count-num { font-size: 18px; font-weight: 600; color: var(--lumiverse-accent); }
 .ls-count-label { font-size: 11px; color: var(--lumiverse-text-muted); }
+
+/* ── Settings sub-sections (Tool Sidecar etc.) ──────────────────────────── */
+.ls-settings-section {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--lumiverse-border);
+}
+.ls-settings-section-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--lumiverse-text-muted);
+  margin-bottom: 8px;
+}
+.ls-settings-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.ls-settings-field-label {
+  font-size: 11px;
+  color: var(--lumiverse-text-muted);
+  flex-shrink: 0;
+  width: 72px;
+}
+.ls-select {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  padding: 3px 6px;
+  border-radius: var(--lumiverse-radius);
+  border: 1px solid var(--lumiverse-border);
+  background: var(--lumiverse-fill);
+  color: var(--lumiverse-text);
+  cursor: pointer;
+}
+.ls-select:focus { outline: none; border-color: var(--lumiverse-accent); }
+.ls-number-input {
+  width: 54px;
+  font-size: 11px;
+  padding: 3px 6px;
+  border-radius: var(--lumiverse-radius);
+  border: 1px solid var(--lumiverse-border);
+  background: var(--lumiverse-fill);
+  color: var(--lumiverse-text);
+  text-align: right;
+}
+.ls-number-input:focus { outline: none; border-color: var(--lumiverse-accent); }

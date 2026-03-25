@@ -16,6 +16,7 @@ import type {
   ConsoleEntry,
   LumiScriptSettings,
   InjectionInfo,
+  RegisteredToolInfo,
 } from './script.js';
 
 // ─── Frontend → Backend ───────────────────────────────────────────────────────
@@ -25,6 +26,8 @@ export type FrontendToBackend =
   | { type: 'get_settings' }
   | { type: 'get_active_context' }
   | { type: 'get_injections' }
+  | { type: 'get_tools' }
+  | { type: 'get_connections' }
   | {
       type: 'create_script';
       name: string;
@@ -114,6 +117,31 @@ export type BackendToFrontend =
       /** Current snapshot of all active injection entries. */
       type: 'injections_updated';
       injections: InjectionInfo[];
+    }
+  | {
+      /** Current snapshot of all registered tools. */
+      type: 'tools_updated';
+      tools: RegisteredToolInfo[];
+    }
+  | {
+      /** Available connection profiles for the sidecar settings dropdown. */
+      type: 'connections_updated';
+      connections: Array<{ id: string; name: string; provider: string }>;
+    }
+  | {
+      /**
+       * Result of an auto-sidecar run. Sent after each interceptor pass that
+       * executed the sidecar loop, whether it succeeded or was skipped.
+       */
+      type: 'sidecar_run_result';
+      /** Number of LLM turns consumed (0 if loop did not run). */
+      turns: number;
+      /** Tool calls that were executed in this run. */
+      toolCalls: Array<{ name: string; success: boolean }>;
+      /** Whether a result was injected into the assembled messages. */
+      injected: boolean;
+      /** Error message if the sidecar loop failed. */
+      error?: string;
     }
   | {
       /** Request user input — frontend shows a dialog and sends back ui_response. */

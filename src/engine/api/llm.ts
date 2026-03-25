@@ -60,11 +60,13 @@ interface ResolvedConnection {
  * Returns { id, model, provider } so that provider-strict APIs (e.g. NanoGPT)
  * always receive an explicit model even when the caller omits opts.model.
  *
- * Precedence: connectionId > connectionName > undefined (use Lumiverse default).
- *
- * - connectionId   → spindle.connections.get()   (throws if not found)
- * - connectionName → spindle.connections.list()  (throws if name unmatched,
- *                                                  includes list of valid names)
+ * Precedence:
+ *  1. opts.connectionId   → spindle.connections.get()  (throws if not found)
+ *  2. opts.connectionName → spindle.connections.list() (throws if name unmatched)
+ *  3. no explicit connection → user's default connection (is_default flag, or
+ *     first in the list). Mirrors the fallback behaviour of the main generation
+ *     path so that calling api.llm.generate() without options "just works" when
+ *     the user has a connection configured.
  */
 async function resolveConnection(
   opts: LLMOptions | undefined,
@@ -88,7 +90,11 @@ async function resolveConnection(
     }
     return { id: match.id, model: match.model, provider: match.provider };
   }
-  return undefined;
+  // Fall back to the user's default connection (is_default, or first available).
+  const connections = await spindle.connections.list(userId ?? undefined).catch(() => []);
+  const def = connections.find(c => c.is_default) ?? connections[0];
+  if (!def) return undefined;
+  return { id: def.id, model: def.model, provider: def.provider };
 }
 
 function buildLLMParams(opts?: LLMOptions): Record<string, unknown> {
@@ -167,6 +173,29 @@ function extractJsonFromResponse(text: string): string {
   return text.trim();
 }
 
+/**
+ * Recursively add `additionalProperties: false` to every `object` node in a
+ * JSON Schema. Required by Anthropic's `output_config.format.json_schema` mode,
+ * which refuses schemas where object types do not explicitly forbid extra keys.
+ */
+function strictifySchema(schema: Record<string, unknown>): Record<string, unknown> {
+  const s = { ...schema };
+  if (s.type === 'object') {
+    s.additionalProperties = false;
+    if (s.properties && typeof s.properties === 'object') {
+      const strict: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(s.properties as Record<string, Record<string, unknown>>)) {
+        strict[k] = strictifySchema(v);
+      }
+      s.properties = strict;
+    }
+  }
+  if (s.type === 'array' && s.items && typeof s.items === 'object' && s.items !== null) {
+    s.items = strictifySchema(s.items as Record<string, unknown>);
+  }
+  return s;
+}
+
 // ─── API builder ──────────────────────────────────────────────────────────────
 
 export function buildLLMAPI(deps: APIBuildDeps): LumiScriptAPI['llm'] {
@@ -242,7 +271,7 @@ export function buildLLMAPI(deps: APIBuildDeps): LumiScriptAPI['llm'] {
           let extraParams: Record<string, unknown> = {};
           if (effectiveProvider === ANTHROPIC_PROVIDER) {
             extraParams = {
-              output_config: { format: { type: 'json_schema', schema: jsonSchema } },
+              output_config: { format: { type: 'json_schema', schema: strictifySchema(jsonSchema) } },
             };
           } else if (effectiveProvider === GOOGLE_PROVIDER) {
             extraParams = {
@@ -285,6 +314,76 @@ export function buildLLMAPI(deps: APIBuildDeps): LumiScriptAPI['llm'] {
         }),
       );
     },
+
+    generateWithTools: (<T = unknown>(
+      messages: LLMMessage[],
+      tools: Array<{ name: string; description: string; parameters?: Record<string, unknown> }>,
+      opts?: LLMOptions,
+      schema?: ZodLike<T> | Record<string, unknown>,
+    ) => {
+      assertPerm('generation', hasPerm);
+      if (opts?.provider) assertProvider(opts.provider);
+      return shielded(
+        resolveConnection(opts, userId).then(conn => {
+          const effectiveProvider = opts?.provider ?? conn?.provider;
+          const effectiveModel    = opts?.model    ?? conn?.model;
+          const providerFields = {
+            ...(effectiveProvider ? { provider: effectiveProvider } as Record<string, string> : {}),
+            ...(effectiveModel    ? { model:    effectiveModel    } as Record<string, string> : {}),
+          };
+          // Build structured-output extras when a schema is supplied
+          let extraParams: Record<string, unknown> = {};
+          let effectiveMessages = messages;
+          if (schema) {
+            const jsonSchema = toJsonSchemaObject(schema as ZodLike<unknown> | Record<string, unknown>);
+            effectiveMessages = enhanceMessagesWithSchema(messages, jsonSchema);
+            if (effectiveProvider === ANTHROPIC_PROVIDER) {
+              extraParams = { output_config: { format: { type: 'json_schema', schema: strictifySchema(jsonSchema) } } };
+            } else if (effectiveProvider === GOOGLE_PROVIDER) {
+              extraParams = { responseMimeType: 'application/json', responseSchema: jsonSchema };
+            } else {
+              extraParams = { response_format: { type: 'json_object' } };
+            }
+          }
+          // Normalise tool parameter schemas: Anthropic requires input_schema to be
+          // present; default to an empty object schema when the caller omitted it.
+          const normalisedTools = tools.map(t => ({
+            ...t,
+            parameters: t.parameters ?? { type: 'object', properties: {} },
+          }));
+          return (spindle.generate.raw({
+            type: 'raw' as const,
+            messages: effectiveMessages,
+            tools: normalisedTools,
+            ...providerFields,
+            ...(conn?.id ? { connection_id: conn.id } : {}),
+            parameters: { ...buildLLMParams(opts), ...extraParams },
+            userId: userId ?? undefined,
+          } as any) as Promise<{ content?: string; tool_calls?: Array<{ name: string; args: Record<string, unknown>; call_id: string }> }>).then(raw => {
+            // Structured output path: parse/validate on the final step (no tool_calls returned)
+            if (schema && !raw.tool_calls?.length) {
+              let parsed: unknown;
+              try {
+                const jsonText = extractJsonFromResponse(raw.content ?? '');
+                parsed = JSON.parse(jsonText);
+              } catch {
+                parsed = raw.content;
+              }
+              if (isZodLike(schema)) {
+                try {
+                  parsed = (schema as ZodLike<T>).parse(parsed);
+                } catch { /* return raw-parsed value if Zod validation fails */ }
+              }
+              return { content: parsed as T, tool_calls: undefined };
+            }
+            return {
+              content:    raw.content ?? '',
+              tool_calls: raw.tool_calls?.length ? raw.tool_calls : undefined,
+            };
+          });
+        }),
+      );
+    }) as any,
 
     dryRun: (options?: DryRunOptions) => {
       assertPerm('generation', hasPerm);

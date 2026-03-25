@@ -12,6 +12,7 @@ import { TriggerRegistry } from './engine/trigger-registry.js';
 import { resolvePendingUIRequest } from './engine/api/ui.js';
 import { generateUUID } from './utils/uuid.js';
 import { listByMode, listAll, clearEphemeral, clearByScriptId } from './engine/injection-store.js';
+import { getTool, clearByScriptId as clearToolsByScriptId, listAll as listAllTools } from './engine/tool-store.js';
 
 // ─── Active user + permission tracking ───────────────────────────────────────
 
@@ -79,6 +80,20 @@ function pushInjections(): void {
   send({ type: 'injections_updated', injections: listAll() });
 }
 
+function pushTools(): void {
+  send({
+    type: 'tools_updated',
+    tools: listAllTools().map(e => ({
+      name:             e.name,
+      display_name:     e.displayName,
+      description:      e.description,
+      council_eligible: e.councilEligible,
+      scriptId:         e.scriptId,
+      scriptName:       e.scriptName,
+    })),
+  });
+}
+
 // ─── Prompt injection handlers ────────────────────────────────────────────────
 //
 // Registered unconditionally at module load so that any script calling
@@ -98,19 +113,109 @@ spindle.registerContextHandler(async (ctx) => {
   };
 }, 50);
 
-// Interceptor (post-assembly) — handles BOTH injection modes.
+// Interceptor (post-assembly) — three responsibilities, in order:
 //
-// mode:'context' — reads _lumiScriptInjections from the spindle context
-//   (populated by the context handler above) and PREPENDS them at index 0,
-//   before all assembled content. Ephemeral context entries are cleared here.
+//  1. Auto-sidecar: if sidecarEnabled + connection configured + tools registered,
+//     run an agentic LLM tool loop on the assembled messages and splice the final
+//     result into the array before returning. Mirrors TavernScript's external-mode
+//     interceptor (index.tsx:337–394). Skipped for quiet/impersonate/continue.
+//     No cycle detection needed — spindle.generate.raw() bypasses the interceptor.
 //
-// mode:'intercept' — reads from the injection store and splices each entry
-//   at depth from the END of the message array. Ephemeral entries cleared after.
+//  2. mode:'context' injections: reads _lumiScriptInjections from the spindle
+//     context (populated by the context handler above) and PREPENDS them at index
+//     0, before all assembled content. Ephemeral context entries are cleared here.
+//
+//  3. mode:'intercept' injections: splices each entry at depth from the END of
+//     the message array. Ephemeral entries cleared after.
 spindle.registerInterceptor(async (messages, context) => {
   let result = [...messages];
-
-  // ── Context-mode: prepend before all assembled content (index 0) ──────────
   const ctx = context as Record<string, unknown>;
+
+  // ── 1. Auto-sidecar agentic loop ─────────────────────────────────────────
+  // Only runs when: sidecarEnabled + connection configured + tools registered
+  // + generation type is not quiet/impersonate/continue.
+  // No cycle detection needed — spindle.generate.raw() bypasses the interceptor.
+  if (settingsStore.isLoaded) {
+    const settings = settingsStore.get();
+    const genType = ctx.generationType as string | undefined;
+    const skipTypes = ['quiet', 'impersonate', 'continue'];
+    const sidecarTools = listAllTools();
+
+    if (
+      settings.sidecarEnabled &&
+      settings.sidecarConnectionId &&
+      !skipTypes.includes(genType ?? '') &&
+      sidecarTools.length > 0
+    ) {
+      const schemas = sidecarTools.map(t => ({
+        name:        t.name,
+        description: t.description,
+        parameters:  t.parameters ?? {},
+      }));
+
+      let loopMessages = [...result];
+      let turnCount = 0;
+      const toolCallSummary: Array<{ name: string; success: boolean }> = [];
+      let sidecarInjected = false;
+      let sidecarError: string | undefined;
+
+      try {
+        const maxTurns = settings.sidecarMaxTurns ?? 6;
+        for (let i = 0; i < maxTurns; i++) {
+          type RawResult = { content?: string; tool_calls?: Array<{ name: string; args: Record<string, unknown>; call_id: string }> };
+          const raw = await (spindle.generate.raw({
+            type:          'raw' as const,
+            messages:      loopMessages,
+            tools:         schemas,
+            connection_id: settings.sidecarConnectionId!,
+          } as any)) as RawResult;
+
+          turnCount = i + 1;
+
+          if (!raw.tool_calls?.length) {
+            // LLM produced final text — inject into the assembled messages
+            if (raw.content) {
+              const depth = settings.sidecarInjectionDepth ?? 0;
+              const idx = Math.max(0, result.length - depth);
+              result.splice(idx, 0, { role: 'system' as const, content: raw.content });
+              sidecarInjected = true;
+            }
+            break;
+          }
+
+          // LLM made tool calls — execute handlers and append results
+          for (const call of raw.tool_calls) {
+            const entry = getTool(call.name);
+            if (!entry) {
+              toolCallSummary.push({ name: call.name, success: false });
+              loopMessages = [...loopMessages, { role: 'user' as const, content: `[Tool not found: ${call.name}]` }];
+              continue;
+            }
+            try {
+              const toolResult = await entry.handler(call.args ?? {});
+              toolCallSummary.push({ name: call.name, success: true });
+              loopMessages = [
+                ...loopMessages,
+                { role: 'assistant' as const, content: `[Calling: ${call.name}]` },
+                { role: 'user'      as const, content: `[Result of ${call.name}]: ${toolResult}` },
+              ];
+            } catch (err: any) {
+              toolCallSummary.push({ name: call.name, success: false });
+              loopMessages = [...loopMessages, { role: 'user' as const, content: `[Error in ${call.name}]: ${err?.message ?? 'unknown'}` }];
+            }
+          }
+        }
+      } catch (err: any) {
+        sidecarError = err?.message ?? 'Sidecar loop failed';
+        spindle.log.warn(`[LumiScript] Sidecar loop error: ${sidecarError}`);
+      }
+
+      // Report run stats to the Status tab
+      send({ type: 'sidecar_run_result', turns: turnCount, toolCalls: toolCallSummary, injected: sidecarInjected, error: sidecarError });
+    }
+  }
+
+  // ── 2. Context-mode: prepend before all assembled content (index 0) ───────
   const ctxInjections = ctx?._lumiScriptInjections as Array<{ content: string; role: string }> | undefined;
   if (ctxInjections && ctxInjections.length > 0) {
     result = [
@@ -123,7 +228,7 @@ spindle.registerInterceptor(async (messages, context) => {
     clearEphemeral('context');
   }
 
-  // ── Intercept-mode: splice at depth from end of assembled array ───────────
+  // ── 3. Intercept-mode: splice at depth from end of assembled array ─────────
   const interceptEntries = listByMode('intercept');
   for (const e of interceptEntries) {
     const idx = Math.max(0, result.length - e.depth);
@@ -134,10 +239,33 @@ spindle.registerInterceptor(async (messages, context) => {
   return result;
 }, 50);
 
+// ─── Tool invocation dispatch ─────────────────────────────────────────────────
+//
+// Registered once at startup. Receives TOOL_INVOCATION messages for ALL tools
+// registered by LumiScript scripts — both Council (sidecar/inline modes) and
+// native LLM function-calling paths.
+//
+// The handler dispatches to the script's stored handler function. The handler
+// was already wrapped in buildToolsAPI to inject the `api` reference lazily,
+// so we only need to forward `args` here.
+//
+// IMPORTANT: The 'TOOL_INVOCATION' key must be UPPERCASE — the worker-runtime
+// case "tool_invocation" dispatches to eventHandlers.get("TOOL_INVOCATION")
+// (uppercase), and spindle.on() stores keys as-is without normalisation.
+spindle.on('TOOL_INVOCATION', async (event: unknown) => {
+  const { toolName, args } = event as { toolName: string; args: Record<string, unknown> };
+  const entry = getTool(toolName);
+  if (!entry) {
+    spindle.log.warn(`[LumiScript] TOOL_INVOCATION: no handler for tool '${toolName}'`);
+    return '';
+  }
+  return entry.handler(args);
+});
+
 // ─── Trigger registry ─────────────────────────────────────────────────────────
 
 const triggerRegistry = new TriggerRegistry(
-  () => ({ grantedPermissions, userId: activeUserId, scriptStorage }),
+  () => ({ grantedPermissions, userId: activeUserId, scriptStorage, onToolsChanged: pushTools }),
   send,
 );
 
@@ -198,6 +326,20 @@ spindle.onFrontendMessage(async (raw, userId) => {
         break;
       }
 
+      case 'get_tools': {
+        pushTools();
+        break;
+      }
+
+      case 'get_connections': {
+        const connections = await spindle.connections.list(userId ?? undefined).catch(() => []);
+        send({
+          type: 'connections_updated',
+          connections: connections.map(c => ({ id: c.id, name: c.name, provider: c.provider })),
+        });
+        break;
+      }
+
       case 'get_active_context': {
         // Always fetch live state — also resolves character name for binding display labels.
         await refreshActiveContext(userId).catch(() => {});
@@ -228,18 +370,24 @@ spindle.onFrontendMessage(async (raw, userId) => {
         if ('enabled' in msg.patch || 'triggers' in msg.patch) {
           void syncTriggers();
         }
-        // Clear injections when a script is disabled so stale entries don't linger.
+        // Clear injections and tools when a script is disabled so stale entries don't linger.
         if ('enabled' in msg.patch && !msg.patch.enabled) {
           clearByScriptId(msg.id);
           pushInjections();
+          const clearedTools = clearToolsByScriptId(msg.id);
+          for (const name of clearedTools) spindle.unregisterTool(name);
+          pushTools();
         }
         break;
       }
 
       case 'delete_script': {
-        // Clear any injections this script registered before removing it.
+        // Clear injections and tools this script registered before removing it.
         clearByScriptId(msg.id);
         pushInjections();
+        const clearedTools = clearToolsByScriptId(msg.id);
+        for (const name of clearedTools) spindle.unregisterTool(name);
+        pushTools();
         await scriptStorage.deleteScript(msg.id);
         pushScripts();
         void syncTriggers();
@@ -318,8 +466,10 @@ spindle.onFrontendMessage(async (raw, userId) => {
           duration: result.duration,
           error: result.error?.message,
         });
-        // Push injection snapshot so the Status tab reflects any inject() calls made during execution.
+        // Push injection and tool snapshots so the Status tab reflects any
+        // api.chat.inject() or api.tools.register() calls made during execution.
         pushInjections();
+        pushTools();
 
         break;
       }

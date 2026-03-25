@@ -1,5 +1,5 @@
 {
-  "version": "0.5.0",
+  "version": "0.6.0",
   "name": "LumiScript",
   "identifier": "lumiscript",
   "author": "mindbound",
@@ -17,7 +17,8 @@
     "ephemeral_storage",
     "world_books",
     "personas",
-    "context_handler"
+    "context_handler",
+    "tools"
   ],
   "entry_backend": "dist/backend.js",
   "entry_frontend": "dist/frontend.js",

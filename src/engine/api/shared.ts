@@ -25,6 +25,11 @@ export interface APIBuildDeps {
     chatId: string | null;
     characterId: string | null;
   };
+  /**
+   * Called immediately after a tool is registered or unregistered so the
+   * Status tab reflects the change without waiting for execution to complete.
+   */
+  onToolsChanged?: () => void;
 }
 
 // ─── Shared utility functions ─────────────────────────────────────────────────

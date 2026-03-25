@@ -167,3 +167,77 @@
   cursor: text;
   user-select: text;
 }
+
+/* ── Empty state for always-visible sections ─────────────────────────────── */
+.ls-section-empty {
+  font-size: 10px;
+  font-style: italic;
+  color: var(--lumiverse-text-dim);
+  padding: 3px 2px;
+}
+
+/* ── Last Sidecar Run section ────────────────────────────────────────────── */
+.ls-sidecar-summary {
+  font-size: 11px;
+  color: var(--lumiverse-text-muted);
+  padding: 2px 0;
+}
+.ls-sidecar-noop {
+  font-style: italic;
+  color: var(--lumiverse-text-dim);
+}
+.ls-sidecar-error {
+  font-size: 11px;
+  color: #ef4444;
+  padding: 2px 0;
+}
+.ls-sidecar-calls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+.ls-sidecar-call {
+  font-size: 9px;
+  font-family: monospace;
+  padding: 1px 5px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.ls-sidecar-call-ok  { background: color-mix(in srgb, #22c55e 15%, transparent); color: #22c55e; }
+.ls-sidecar-call-err { background: color-mix(in srgb, #ef4444 15%, transparent); color: #ef4444; }
+
+/* ── Active Tools section ────────────────────────────────────────────────── */
+.ls-tool-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 2px;
+  border-bottom: 1px solid color-mix(in srgb, var(--lumiverse-border) 40%, transparent);
+}
+.ls-tool-row:last-child { border-bottom: none; }
+.ls-tool-name {
+  font-size: 11px;
+  font-family: monospace;
+  color: var(--lumiverse-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ls-tool-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.ls-tool-badge {
+  font-size: 9px;
+  font-weight: 600;
+  padding: 1px 4px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.ls-tool-council {
+  background: color-mix(in srgb, #22c55e 15%, transparent);
+  color: #22c55e;
+}
