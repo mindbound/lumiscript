@@ -611,6 +611,78 @@ export interface UtilsAPI {
     delete(url: string, options?: HttpRequestOptions): Promise<HttpResponse>;
     request(url: string, options: HttpRequestOptions): Promise<HttpResponse>;
   };
+  /**
+   * Handlebars template rendering with automatic Lumiverse macro resolution.
+   * Each script has its own isolated Handlebars environment so `registerHelper`
+   * calls do not bleed across scripts.
+   *
+   * **Two-pass rendering**: `render()` runs Lumiverse macros first (resolving
+   * `{{char}}`, `{{user}}`, `{{getvar::key}}`, time/date, etc.) then passes the
+   * result to Handlebars. The two passes compose safely because the macro engine
+   * leaves unknown tokens — Handlebars variables, `{{#if}}`, helper calls, etc.
+   * — untouched.
+   *
+   * Supports the full Handlebars syntax: `{{variable}}`, `{{#if}}`, `{{#each}}`,
+   * `{{#with}}`, triple-stash `{{{html}}}`, partials, and custom helpers.
+   */
+  template: {
+    /**
+     * Resolve Lumiverse macros then render the template as Handlebars.
+     *
+     * `chatId` and `characterId` default to the active context when omitted.
+     * Macro diagnostics are silently dropped; the string always reflects the
+     * best-effort output.
+     *
+     * @example
+     * // Lumiverse macros and Handlebars data in the same template
+     * const prompt = await api.utils.template.render(
+     *   'You are {{char}}. Personality: {{personality}}\n' +
+     *   'Today\'s task for {{user_name}}: {{task}}.',
+     *   { user_name: persona.name, task: 'summarise the chat' },
+     * );
+     *
+     * @example
+     * await api.utils.template.render(
+     *   '{{#each items}}• {{this}}\n{{/each}}',
+     *   { items: ['apples', 'bananas'] },
+     * )
+     * // → '• apples\n• bananas\n'
+     */
+    render(
+      template: string,
+      data?: Record<string, unknown>,
+      options?: {
+        /** Chat ID for context-sensitive macros. Defaults to the active chat. */
+        chatId?: string;
+        /** Character ID for character macros. Inferred from the active chat if omitted. */
+        characterId?: string;
+      }
+    ): Promise<string>;
+
+    /**
+     * Pre-compile a template string and return a reusable **synchronous** render
+     * function. No macro resolution is performed — only Handlebars expressions
+     * are evaluated. Use when the template is known at build time and macros are
+     * not needed, or when you want to resolve macros once and cache the result.
+     *
+     * @example
+     * const greet = api.utils.template.compile('Hello, {{name}}!');
+     * greet({ name: 'Alice' }) // → 'Hello, Alice!'
+     * greet({ name: 'Bob' })   // → 'Hello, Bob!'
+     */
+    compile(template: string): (data?: Record<string, unknown>) => string;
+
+    /**
+     * Register a custom helper for use in templates rendered by this script.
+     * Helpers are scoped to this script's isolated Handlebars environment.
+     *
+     * @example
+     * api.utils.template.registerHelper('upper', (s) => String(s).toUpperCase());
+     * await api.utils.template.render('{{upper name}}', { name: 'alice' })
+     * // → 'ALICE'
+     */
+    registerHelper(name: string, fn: (...args: unknown[]) => unknown): void;
+  };
 }
 
 // ─── Files API ────────────────────────────────────────────────────────────────

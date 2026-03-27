@@ -2,17 +2,22 @@
  * ============================================================================
  * LUMISCRIPT — UTILS API
  * ============================================================================
- * uuid, shortId, wait, random, http (cors-proxied)
+ * uuid, shortId, wait, random, http (cors-proxied), template (Handlebars)
  */
 
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
 
+import Handlebars from 'handlebars';
 import type { LumiScriptAPI, HttpResponse } from '../../types/script.js';
 import { generateUUID, generateShortId } from '../../utils/uuid.js';
 import { type APIBuildDeps, assertDangerous, shielded } from './shared.js';
 
 export function buildUtilsAPI(deps: APIBuildDeps): LumiScriptAPI['utils'] {
-  const { script, hasPerm } = deps;
+  const { script, hasPerm, userId, activeContext } = deps;
+
+  // Isolated Handlebars environment per script — helpers registered by one
+  // script don't pollute the template environment of any other script.
+  const hbs = Handlebars.create();
 
   function requireHttp(): void {
     assertDangerous(script);
@@ -69,6 +74,30 @@ export function buildUtilsAPI(deps: APIBuildDeps): LumiScriptAPI['utils'] {
       request: (url, opts) => {
         requireHttp();
         return shielded(spindle.cors(url, { method: opts.method ?? 'GET', headers: opts.headers, body: opts.body }) as unknown as Promise<HttpResponse>);
+      },
+    },
+
+    template: {
+      async render(
+        template: string,
+        data: Record<string, unknown> = {},
+        options: { chatId?: string; characterId?: string } = {},
+      ): Promise<string> {
+        const { text } = await spindle.macros.resolve(template, {
+          chatId:      options.chatId      ?? activeContext.chatId      ?? undefined,
+          characterId: options.characterId ?? activeContext.characterId ?? undefined,
+          userId:      userId              ?? undefined,
+        });
+        return hbs.compile(text)(data);
+      },
+
+      compile(template: string): (data?: Record<string, unknown>) => string {
+        const compiled = hbs.compile(template);
+        return (data: Record<string, unknown> = {}) => compiled(data);
+      },
+
+      registerHelper(name: string, fn: (...args: unknown[]) => unknown): void {
+        hbs.registerHelper(name, fn as Handlebars.HelperDelegate);
       },
     },
   };
