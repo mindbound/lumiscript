@@ -28,6 +28,7 @@ import { isAnyBindingSatisfied, getActiveContext } from './binding.js';
 import { executionStatusStore } from './execution-status.js';
 import { generateUUID } from '../utils/uuid.js';
 import type { ScriptStorage } from '../storage/script-storage.js';
+import { clearByScriptId as clearBroadcastByScriptId } from './broadcast-bus.js';
 
 // ─── Dependency factory ───────────────────────────────────────────────────────
 
@@ -115,6 +116,12 @@ export class TriggerRegistry {
           runId,
         });
 
+        // ── Clear stale broadcast subscriptions from the previous invocation ─
+        // Each trigger invocation is a fresh execution: subscriptions set up
+        // by api.broadcast.on() in the previous run are wiped before the new
+        // run starts, preventing handler accumulation across invocations.
+        clearBroadcastByScriptId(scriptId);
+
         // ── Execute the current script body ────────────────────────────────
         const opts: ExecutorOptions = {
           grantedPermissions,
@@ -171,6 +178,8 @@ export class TriggerRegistry {
       for (const u of entry.unsubs) u();
       this.cleanups.delete(scriptId);
     }
+    // Remove any broadcast subscriptions owned by this script.
+    clearBroadcastByScriptId(scriptId);
   }
 
   /** Remove all registered subscriptions (all scripts). */

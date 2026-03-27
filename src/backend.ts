@@ -13,6 +13,7 @@ import { resolvePendingUIRequest } from './engine/api/ui.js';
 import { generateUUID } from './utils/uuid.js';
 import { listByMode, listAll, clearEphemeral, clearByScriptId } from './engine/injection-store.js';
 import { getTool, clearByScriptId as clearToolsByScriptId, listAll as listAllTools } from './engine/tool-store.js';
+import { emit as broadcastEmit, clearByScriptId as clearBroadcastByScriptId } from './engine/broadcast-bus.js';
 
 // ─── Active user + permission tracking ───────────────────────────────────────
 
@@ -259,7 +260,16 @@ spindle.on('TOOL_INVOCATION', async (event: unknown) => {
     spindle.log.warn(`[LumiScript] TOOL_INVOCATION: no handler for tool '${toolName}'`);
     return '';
   }
-  return entry.handler(args);
+  const start = Date.now();
+  const result = await Promise.resolve(entry.handler(args));
+  broadcastEmit('ls:tool:invoked', {
+    name:     toolName,
+    args,
+    result,
+    scriptId: entry.scriptId,
+    callMs:   Date.now() - start,
+  });
+  return result;
 });
 
 // ─── Trigger registry ─────────────────────────────────────────────────────────

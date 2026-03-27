@@ -50,6 +50,7 @@ import { buildChatsAPI      } from './api/chats-session.js';
 import { buildWorldInfoAPI  } from './api/world-info.js';
 import { buildPersonasAPI  } from './api/personas.js';
 import { buildToolsAPI     } from './api/tools.js';
+import { buildBroadcastAPI } from './api/broadcast.js';
 
 // ─── Executor options ─────────────────────────────────────────────────────────
 
@@ -144,6 +145,7 @@ export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiSc
     worldInfo:  buildWorldInfoAPI(deps),
     personas:   buildPersonasAPI(deps),
     tools:      buildToolsAPI(deps, () => api),
+    broadcast:  buildBroadcastAPI(deps),
   };
   return api;
 }

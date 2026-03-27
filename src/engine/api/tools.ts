@@ -30,6 +30,7 @@ import type { LumiScriptAPI, ToolDefinition, ToolHandler, RegisteredToolInfo } f
 import type { APIBuildDeps } from './shared.js';
 import { assertPerm } from './shared.js';
 import { addTool, removeTool, getTool, listAll } from '../tool-store.js';
+import { emit as busEmit } from '../broadcast-bus.js';
 
 export function buildToolsAPI(
   deps: APIBuildDeps,
@@ -67,6 +68,7 @@ export function buildToolsAPI(
       });
       // Notify Status tab immediately so the tool appears while the script runs.
       onToolsChanged?.();
+      busEmit('ls:tool:registered', { name, scriptId: script.id });
     },
 
     unregister(name: string): void {
@@ -74,6 +76,7 @@ export function buildToolsAPI(
       if (removeTool(name, script.id)) {
         spindle.unregisterTool(name);
         onToolsChanged?.();
+        busEmit('ls:tool:unregistered', { name, scriptId: script.id });
       }
     },
 
@@ -94,7 +97,17 @@ export function buildToolsAPI(
       if (!entry) {
         return Promise.reject(new Error(`api.tools.invoke: no handler registered for tool '${name}'`));
       }
-      return Promise.resolve(entry.handler(args));
+      const start = Date.now();
+      return Promise.resolve(entry.handler(args)).then(result => {
+        busEmit('ls:tool:invoked', {
+          name,
+          args,
+          result,
+          scriptId: entry.scriptId,
+          callMs:   Date.now() - start,
+        });
+        return result;
+      });
     },
   };
 }

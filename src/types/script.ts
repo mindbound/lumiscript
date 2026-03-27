@@ -154,6 +154,8 @@ export interface LumiScriptAPI {
   files: FilesAPI;
   /** Register LLM tools invocable by Lumiverse Council and inline LLM function-calling. Requires tools permission. */
   tools: ToolsAPI;
+  /** Real-time script-to-script pub/sub broadcast bus. No permission required. */
+  broadcast: BroadcastAPI;
 }
 
 // ─── Chat API ─────────────────────────────────────────────────────────────────
@@ -1224,6 +1226,46 @@ export interface ToolsAPI {
    * Throws if no handler is registered for `name`.
    */
   invoke(name: string, args?: Record<string, unknown>): Promise<string>;
+}
+
+// ─── Broadcast API ───────────────────────────────────────────────────────────
+
+/**
+ * Real-time pub/sub bus for script-to-script communication within the
+ * LumiScript worker. No Lumiverse platform changes required — the bus is
+ * a shared singleton in the worker bundle.
+ *
+ * LumiScript reserves event names prefixed with `ls:` for internal events
+ * emitted automatically by the engine:
+ *
+ * | Event                   | Payload                                              |
+ * |-------------------------|------------------------------------------------------|
+ * | `ls:tool:invoked`       | `{ name, args, result, scriptId, callMs }`           |
+ * | `ls:tool:registered`    | `{ name, scriptId }`                                 |
+ * | `ls:tool:unregistered`  | `{ name, scriptId }`                                 |
+ *
+ * Use any other name for your own custom events.
+ */
+export interface BroadcastAPI {
+  /**
+   * Emit a named event. All subscribed handlers across all scripts receive it
+   * synchronously in registration order. Errors in individual handlers are
+   * caught so one bad handler cannot block the others.
+   */
+  emit(event: string, payload?: unknown): void;
+
+  /**
+   * Subscribe to a named event.
+   * Returns an unsubscribe function — call it to stop receiving the event.
+   * Subscriptions are also cleaned up automatically when the owning script
+   * is disabled, deleted, or finishes a one-shot execution.
+   *
+   * @example
+   * const unsub = api.broadcast.on('ls:tool:invoked', (ev) => {
+   *   console.log(ev.name, 'took', ev.callMs, 'ms');
+   * });
+   */
+  on(event: string, handler: (payload: unknown) => void): () => void;
 }
 
 // ─── Script namespace ─────────────────────────────────────────────────────────
