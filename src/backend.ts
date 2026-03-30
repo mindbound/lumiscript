@@ -311,8 +311,11 @@ spindle.onFrontendMessage(async (raw, userId) => {
   if (!scriptStorage.store.isLoaded) await scriptStorage.load();
 
   // Register trigger handlers on the first message once storage is ready.
+  // Populate context from the currently active chat BEFORE registering triggers
+  // so binding checks are correct even for the very first event after a restart.
   if (!triggersInitialized) {
     triggersInitialized = true;
+    await refreshActiveContext(activeUserId);
     void syncTriggers();
   }
 
@@ -492,6 +495,46 @@ spindle.onFrontendMessage(async (raw, userId) => {
 });
 
 // ─── Lumiverse event listeners ────────────────────────────────────────────────
+
+/**
+ * Synchronously update context from SETTINGS_UPDATED so that binding checks
+ * on trigger scripts subscribed to this event see the CURRENT context, not the
+ * stale previous one.
+ *
+ * Problem: Lumiverse fires SETTINGS_UPDATED { key: 'activeChatId', value: id }
+ * before CHAT_CHANGED. The CHAT_CHANGED handler calls setActiveContext() inside
+ * an async spindle.chats.get() callback, so context.chatId is still the OLD
+ * chat when SETTINGS_UPDATED trigger handlers run their binding check.
+ *
+ * Fix: backend.ts registers before trigger scripts (module-level code runs at
+ * startup; trigger scripts are registered on the first frontend message). This
+ * handler therefore always executes before any trigger script's SETTINGS_UPDATED
+ * handler, giving the binding gate a current chatId and characterId.
+ */
+spindle.on('SETTINGS_UPDATED', (payload: unknown) => {
+  const p = payload as { key?: string; value?: unknown } | null;
+  if (!p) return;
+
+  if (p.key === 'activeChatId') {
+    const newChatId = typeof p.value === 'string' ? p.value : null;
+
+    if (newChatId) {
+      // Opening a new chat: eagerly update chatId so binding checks on concurrent
+      // SETTINGS_UPDATED trigger handlers see the new chatId, not the stale one.
+      //
+      // characterId/characterName are intentionally left unchanged: the new chat's
+      // character is only known after CHAT_CHANGED's async spindle.chats.get() call.
+      // Leaving the previous character in place preserves character binding checks
+      // for scripts bound to the same character across multiple chats.
+      setActiveContext({ chatId: newChatId });
+      const ctx = getActiveContext();
+      send({ type: 'active_context', characterId: ctx.characterId, characterName: ctx.characterName, chatId: ctx.chatId });
+    }
+    // Closing (null): leave context unchanged so scripts bound to the chat or
+    // character being closed can still fire their handlers. CHAT_CHANGED will
+    // clear context shortly after.
+  }
+});
 
 spindle.on('CHAT_CHANGED', (payload: unknown) => {
   const p = payload as { chatId?: string } | null;

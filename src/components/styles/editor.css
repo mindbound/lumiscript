@@ -56,6 +56,7 @@
   flex-shrink: 0;
 }
 .ls-editor-monaco { flex: 1; min-height: 0; }
+.ls-editor-docs   { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 
 /* ── Metadata footer ────────────────────────────────────────────────────── */
 .ls-meta-footer {

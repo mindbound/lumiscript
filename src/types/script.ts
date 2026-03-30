@@ -570,10 +570,6 @@ export interface JSONAPI {
   flatten<T = unknown>(data: unknown[]): T[];
 }
 
-// ─── Events API ───────────────────────────────────────────────────────────────
-
-
-
 // ─── Utils API ────────────────────────────────────────────────────────────────
 
 export interface HttpRequestOptions {

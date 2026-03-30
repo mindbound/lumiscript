@@ -1,0 +1,158 @@
+/* ── Reference tab ────────────────────────────────────────────────────────── */
+.ls-ref {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px;
+  display: block;
+}
+
+/* ── Section accordion ───────────────────────────────────────────────────── */
+.ls-ref-section {
+  border: 1px solid var(--lumiverse-border);
+  border-radius: var(--lumiverse-radius);
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+.ls-ref-section:last-child { margin-bottom: 0; }
+.ls-ref-section-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 10px;
+  background: var(--lumiverse-fill-subtle);
+  border: none;
+  color: var(--lumiverse-text);
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s;
+}
+.ls-ref-section-header:hover { background: color-mix(in srgb, var(--lumiverse-fill-subtle) 80%, var(--lumiverse-accent) 20%); }
+.ls-ref-section-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ls-ref-section-body {
+  padding: 8px 10px;
+  background: var(--lumiverse-fill);
+  border-top: 1px solid var(--lumiverse-border);
+}
+
+/* ── Reference table ─────────────────────────────────────────────────────── */
+.ls-ref-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.ls-ref-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--lumiverse-text-muted);
+  padding: 3px 6px 5px 0;
+  border-bottom: 1px solid var(--lumiverse-border);
+  white-space: nowrap;
+}
+.ls-ref-table td {
+  padding: 4px 6px 4px 0;
+  color: var(--lumiverse-text);
+  vertical-align: top;
+  border-bottom: 1px solid color-mix(in srgb, var(--lumiverse-border) 50%, transparent 50%);
+  line-height: 1.4;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+.ls-ref-table tr:last-child td { border-bottom: none; }
+.ls-ref-table td:first-child { white-space: nowrap; }
+
+/* ── Inline code ─────────────────────────────────────────────────────────── */
+.ls-ref-code {
+  font-family: 'Fira Code', 'Cascadia Code', Consolas, monospace;
+  font-size: 10.5px;
+  background: var(--lumiverse-fill-subtle);
+  color: var(--lumiverse-accent);
+  padding: 1px 4px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+/* ── Permission badge ────────────────────────────────────────────────────── */
+.ls-ref-perm {
+  display: inline-block;
+  font-size: 10px;
+  font-family: 'Fira Code', 'Cascadia Code', Consolas, monospace;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--lumiverse-accent) 15%, transparent 85%);
+  color: var(--lumiverse-accent);
+  border: 1px solid color-mix(in srgb, var(--lumiverse-accent) 30%, transparent 70%);
+  white-space: nowrap;
+  margin: 1px 2px 1px 0;
+}
+.ls-ref-perm.ls-ref-perm-none {
+  background: transparent;
+  color: var(--lumiverse-text-dim);
+  border-color: var(--lumiverse-border);
+}
+
+/* ── Pattern code block ──────────────────────────────────────────────────── */
+.ls-ref-pattern {
+  margin-bottom: 10px;
+}
+.ls-ref-pattern:last-child { margin-bottom: 0; }
+.ls-ref-pattern-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--lumiverse-text-muted);
+  margin-bottom: 4px;
+}
+.ls-ref-pre {
+  font-family: 'Fira Code', 'Cascadia Code', Consolas, monospace;
+  font-size: 10.5px;
+  line-height: 1.55;
+  background: var(--lumiverse-fill-subtle);
+  border: 1px solid var(--lumiverse-border);
+  border-radius: var(--lumiverse-radius);
+  padding: 8px 10px;
+  margin: 0;
+  overflow-x: auto;
+  color: var(--lumiverse-text);
+  white-space: pre;
+}
+
+/* ── Group header row (spans all columns, acts as a section divider) ─────── */
+.ls-ref-group-header {
+  background: var(--lumiverse-fill-subtle);
+  color: var(--lumiverse-text-muted);
+  font-weight: 600;
+  font-size: 10.5px;
+  padding: 4px 6px 4px 0;
+  border-top: 1px solid var(--lumiverse-border);
+  letter-spacing: 0.03em;
+  text-transform: none;
+  white-space: normal;
+  word-break: break-word;
+}
+.ls-ref-table tr:first-child .ls-ref-group-header {
+  border-top: none;
+}
+/* Note line below the type name inside a group header cell */
+.ls-ref-type-note {
+  font-weight: 400;
+  font-size: 10px;
+  color: var(--lumiverse-text-muted);
+  margin-top: 2px;
+  line-height: 1.45;
+  white-space: normal;
+  word-break: break-word;
+}
+
+/* ── Muted text helper ───────────────────────────────────────────────────── */
+.ls-ref-muted {
+  color: var(--lumiverse-text-muted);
+  font-size: 10.5px;
+}

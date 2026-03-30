@@ -1,11 +1,17 @@
 import { FC, useRef, useState, useEffect, useCallback } from 'react';
 import Editor, { type OnMount } from '@monaco-editor/react';
-import { Play, Loader2, Shield, ShieldAlert, Clock, Calendar } from 'lucide-react';
+import { Play, Loader2, Shield, ShieldAlert, Clock, Calendar, Code2, BookOpen } from 'lucide-react';
 import type { Script, ScriptBindingEntry, ConsoleEntry } from '../../types/script.js';
 import type { FrontendToBackend } from '../../types/messages.js';
 import { ScriptConsole } from './ScriptConsole.js';
 import { BindingsSection, type ActiveContext } from './BindingsSection.js';
 import { TriggersSection } from './TriggersSection.js';
+import { LUMISCRIPT_DEFS } from '../../types/editor-lib.js';
+import { ReferenceTab } from '../reference/ReferenceTab.js';
+
+// Register the LumiScript ambient type definitions with Monaco's JavaScript
+// language service once — subsequent editor mounts reuse the existing registration.
+let _defsRegistered = false;
 
 interface ScriptEditorProps {
   script: Script;
@@ -28,6 +34,7 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
   const [unsaved, setUnsaved] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(script.name);
+  const [viewMode, setViewMode] = useState<'code' | 'docs'>('code');
   const saveTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const editorRef = useRef<any>(null);
@@ -69,6 +76,39 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
 
   const handleMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
+
+    // ── IntelliSense: register LumiScript ambient types once ─────────────────
+    if (!_defsRegistered) {
+      _defsRegistered = true;
+
+      // TypeScript mode gives full object-literal field completion (e.g. typing
+      // `api.characters.create({` auto-shows all CharacterCreateInput fields).
+      // noSemanticValidation suppresses type-error squiggles so users can write
+      // plain JavaScript without type annotations. Syntax errors still show.
+      const tsDefaults = monaco.languages.typescript.typescriptDefaults;
+      const jsDefaults = monaco.languages.typescript.javascriptDefaults;
+
+      const diagnosticsOpts = { noSemanticValidation: true, noSyntaxValidation: false };
+      tsDefaults.setDiagnosticsOptions(diagnosticsOpts);
+      jsDefaults.setDiagnosticsOptions(diagnosticsOpts);   // fallback safety
+
+      const compilerOpts = {
+        target: monaco.languages.typescript.ScriptTarget.ES2020,
+        allowNonTsExtensions: true,
+        allowJs: true,
+        noEmit: true,
+      };
+      tsDefaults.setCompilerOptions(compilerOpts);
+      jsDefaults.setCompilerOptions(compilerOpts);
+
+      // Register the ambient declarations for api, script, z, data, and all
+      // public API types. This enables hover docs, autocomplete, and signature
+      // help for the entire LumiScript API without any imports in user scripts.
+      tsDefaults.addExtraLib(LUMISCRIPT_DEFS, 'ts:lumiverse/lumiscript-api.d.ts');
+      jsDefaults.addExtraLib(LUMISCRIPT_DEFS, 'ts:lumiverse/lumiscript-api.d.ts');
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
       if (saveTimeout.current) clearTimeout(saveTimeout.current);
       saveCode(editor.getValue());
@@ -140,6 +180,24 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
 
         {unsaved && <span className="ls-editor-unsaved" title="Unsaved changes" />}
 
+        {/* View mode toggle */}
+        <button
+          className={`ls-tab-pill${viewMode === 'code' ? ' ls-active' : ''}`}
+          onClick={() => setViewMode('code')}
+          title="Code editor"
+        >
+          <Code2 size={10} style={{ display: 'inline', marginRight: 3 }} />
+          Code
+        </button>
+        <button
+          className={`ls-tab-pill${viewMode === 'docs' ? ' ls-active' : ''}`}
+          onClick={() => setViewMode('docs')}
+          title="API reference"
+        >
+          <BookOpen size={10} style={{ display: 'inline', marginRight: 3 }} />
+          Docs
+        </button>
+
         {script.type !== 'library' && (
           <button className={`ls-btn${isRunning ? '' : ' ls-accent'}`} onClick={handleRun} disabled={isRunning}>
             {isRunning ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> : <Play size={13} />}
@@ -148,32 +206,43 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
         )}
       </div>
 
-      {/* Monaco editor */}
-      <div className="ls-editor-monaco">
-        <Editor
-          key={script.id}
-          height="100%"
-          defaultLanguage="javascript"
-          theme="vs-dark"
-          value={localCode}
-          onChange={handleEditorChange}
-          onMount={handleMount}
-          options={{
-            minimap: { enabled: false },
-            fontSize: 12,
-            lineNumbers: 'on',
-            wordWrap: 'on',
-            automaticLayout: true,
-            scrollBeyondLastLine: false,
-            tabSize: 2,
-            insertSpaces: true,
-            fontFamily: "'Fira Code', 'Cascadia Code', Consolas, monospace",
-          }}
-        />
-      </div>
+      {/* Monaco editor — shown in Code mode */}
+      {viewMode === 'code' && (
+        <div className="ls-editor-monaco">
+          <Editor
+            key={script.id}
+            height="100%"
+            defaultLanguage="javascript"
+            theme="vs-dark"
+            value={localCode}
+            onChange={handleEditorChange}
+            onMount={handleMount}
+            options={{
+              minimap: { enabled: false },
+              fontSize: 12,
+              lineNumbers: 'on',
+              wordWrap: 'on',
+              automaticLayout: true,
+              scrollBeyondLastLine: false,
+              tabSize: 2,
+              insertSpaces: true,
+              fontFamily: "'Fira Code', 'Cascadia Code', Consolas, monospace",
+            }}
+          />
+        </div>
+      )}
 
-      {/* Console */}
-      <ScriptConsole entries={consoleEntries} isRunning={isRunning} onClear={onClearConsole} />
+      {/* API reference docs — shown in Docs mode */}
+      {viewMode === 'docs' && (
+        <div className="ls-editor-docs">
+          <ReferenceTab />
+        </div>
+      )}
+
+      {/* Console — shown in Code mode only */}
+      {viewMode === 'code' && (
+        <ScriptConsole entries={consoleEntries} isRunning={isRunning} onClear={onClearConsole} />
+      )}
 
       {/* Triggers (trigger scripts only) */}
       {script.type !== 'library' && (

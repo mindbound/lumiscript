@@ -24,7 +24,7 @@ import type { Script } from '../types/script.js';
 import type { BackendToFrontend } from '../types/messages.js';
 import type { ExecutorOptions } from './executor.js';
 import { executeScript } from './executor.js';
-import { isAnyBindingSatisfied, getActiveContext } from './binding.js';
+import { isAnyBindingSatisfied, getActiveContext, setActiveContext } from './binding.js';
 import { executionStatusStore } from './execution-status.js';
 import { generateUUID } from '../utils/uuid.js';
 import type { ScriptStorage } from '../storage/script-storage.js';
@@ -88,6 +88,34 @@ export class TriggerRegistry {
 
         // Bail if the script has been deleted, disabled, or is no longer a trigger.
         if (!currentScript || !currentScript.enabled || currentScript.type !== 'trigger') return;
+
+        // ── Pre-resolve context for chat/character-changing events ─────────
+        // SETTINGS_UPDATED { activeChatId } fires before CHAT_CHANGED has
+        // resolved the new chat's character asynchronously. Resolve it here
+        // so both chatId and characterId are correct at binding check time.
+        // spindle.chats.get() is a lightweight IPC call (~5ms).
+        if (event === 'SETTINGS_UPDATED' || event === 'CHAT_CHANGED') {
+          let newChatId: string | null = null;
+          if (event === 'SETTINGS_UPDATED') {
+            const p = payload as { key?: string; value?: unknown } | null;
+            if (p?.key === 'activeChatId') {
+              newChatId = typeof p.value === 'string' ? p.value : null;
+            }
+          } else {
+            const p = payload as { chatId?: string } | null;
+            newChatId = p?.chatId ?? null;
+          }
+          if (newChatId) {
+            try {
+              const chat = await spindle.chats.get(newChatId, userId ?? undefined);
+              setActiveContext({
+                chatId: newChatId,
+                characterId: (chat as { character_id?: string })?.character_id ?? null,
+              });
+            } catch { /* leave current context on error */ }
+          }
+          // null (closing): leave context unchanged so bound scripts can fire
+        }
 
         // ── Binding gate ───────────────────────────────────────────────────
         if (!isAnyBindingSatisfied(currentScript.bindings)) return;
