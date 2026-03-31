@@ -1157,10 +1157,25 @@ export interface UIAPI {
    */
   prompt(message: string, defaultValue?: string): Promise<string | null>;
   /**
-   * Show a yes/no confirmation dialog. Returns true if the user confirms,
-   * false if the user cancels. Resolves after the user dismisses the dialog.
+   * Show a themed yes/no confirmation dialog using the native Lumiverse modal.
+   * Returns true if the user clicks Confirm, false if they cancel or dismiss.
+   * Resolves after the user responds.
+   * @param options.variant  Visual style for the confirm button (default: 'info')
+   * @param options.confirmLabel  Label for the confirm button (default: 'Confirm')
+   * @param options.cancelLabel   Label for the cancel button (default: 'Cancel')
    */
-  confirm(message: string, title?: string): Promise<boolean>;
+  confirm(
+    message: string,
+    title?: string,
+    options?: {
+      /** Visual variant for the confirm button. Default: 'info'. */
+      variant?: 'info' | 'warning' | 'danger' | 'success';
+      /** Label for the confirm button. Default: 'Confirm'. */
+      confirmLabel?: string;
+      /** Label for the cancel button. Default: 'Cancel'. */
+      cancelLabel?: string;
+    },
+  ): Promise<boolean>;
 }
 
 /** The `script.*` namespace available inside script bodies */

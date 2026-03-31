@@ -74,10 +74,6 @@ export function setup(ctx: SpindleFrontendContext) {
         // Use native prompt — runs synchronously in the browser.
         const value = window.prompt(msg.message, msg.defaultValue) ?? null;
         sendToBackend({ type: 'ui_response', requestId: msg.requestId, value });
-      } else if (msg.kind === 'confirm') {
-        const title = msg.title ? `${msg.title}\n\n` : '';
-        const confirmed = window.confirm(`${title}${msg.message}`);
-        sendToBackend({ type: 'ui_response', requestId: msg.requestId, value: confirmed });
       }
     }
   };

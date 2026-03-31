@@ -150,12 +150,4 @@ export type BackendToFrontend =
       kind: 'prompt';
       message: string;
       defaultValue: string;
-    }
-  | {
-      /** Request user confirmation — frontend shows a dialog and sends back ui_response. */
-      type: 'ui_request';
-      requestId: string;
-      kind: 'confirm';
-      message: string;
-      title: string;
     };

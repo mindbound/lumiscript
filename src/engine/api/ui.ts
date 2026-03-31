@@ -10,10 +10,12 @@
  * prompt()  — async text input; sends ui_request to the frontend, which shows
  *             a native dialog and sends back ui_response with the user's input.
  *
- * confirm() — async yes/no; same request-response flow as prompt().
+ * confirm() — async yes/no; calls spindle.modal.confirm() directly — no
+ *             frontend round-trip. Renders a native Lumiverse themed dialog.
  *
- * Pending requests auto-resolve with null / false after TIMEOUT_MS to prevent
+ * Pending requests auto-resolve with null after TIMEOUT_MS to prevent
  * hanging script executions when the panel is closed mid-dialog.
+ * (Only prompt() uses the pending-request pattern now.)
  */
 
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
@@ -48,7 +50,7 @@ export function resolvePendingUIRequest(
 
 // ─── API builder ──────────────────────────────────────────────────────────────
 
-export function buildUIAPI(_deps: APIBuildDeps): LumiScriptAPI['ui'] {
+export function buildUIAPI(deps: APIBuildDeps): LumiScriptAPI['ui'] {
   const sendRequest = (msg: import('../../types/messages.js').BackendToFrontend) => {
     spindle.sendToFrontend(msg);
   };
@@ -88,28 +90,24 @@ export function buildUIAPI(_deps: APIBuildDeps): LumiScriptAPI['ui'] {
       );
     },
 
-    confirm(message: string, title = ''): Promise<boolean> {
-      const requestId = generateUUID();
+    confirm(
+      message: string,
+      title = '',
+      options: {
+        variant?: 'info' | 'warning' | 'danger' | 'success';
+        confirmLabel?: string;
+        cancelLabel?: string;
+      } = {},
+    ): Promise<boolean> {
       return shielded(
-        new Promise<boolean>((resolve) => {
-          const timer = setTimeout(() => {
-            pendingUIRequests.delete(requestId);
-            resolve(false); // timeout — treat as cancelled
-          }, TIMEOUT_MS);
-
-          pendingUIRequests.set(requestId, (value) => {
-            clearTimeout(timer);
-            resolve(value as boolean);
-          });
-
-          sendRequest({
-            type: 'ui_request',
-            requestId,
-            kind: 'confirm',
-            message,
-            title,
-          });
-        }),
+        spindle.modal.confirm({
+          title: title || 'Confirm',
+          message,
+          variant: options.variant,
+          confirmLabel: options.confirmLabel,
+          cancelLabel: options.cancelLabel,
+          userId: deps.userId ?? undefined,
+        }).then(r => r.confirmed),
       );
     },
   };

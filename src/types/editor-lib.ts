@@ -517,11 +517,21 @@ interface UIAPI {
    */
   prompt(message: string, defaultValue?: string): Promise<string | null>;
   /**
-   * Show a yes/no confirmation dialog. Returns true if confirmed, false if cancelled.
+   * Show a themed yes/no confirmation dialog using the native Lumiverse modal.
+   * Returns true if the user clicks Confirm, false if they cancel or dismiss.
+   * @param options.variant  Button colour: 'info' | 'warning' | 'danger' | 'success' (default: 'info')
+   * @param options.confirmLabel  Label for the confirm button (default: 'Confirm')
+   * @param options.cancelLabel   Label for the cancel button (default: 'Cancel')
    * @example
-   * if (await api.ui.confirm('Delete all variables?')) { await api.variables.local.clear(); }
+   * if (await api.ui.confirm('Delete all variables?', 'Confirm Clear', { variant: 'danger', confirmLabel: 'Delete' })) {
+   *   await api.variables.local.clear();
+   * }
    */
-  confirm(message: string, title?: string): Promise<boolean>;
+  confirm(
+    message: string,
+    title?: string,
+    options?: { variant?: 'info' | 'warning' | 'danger' | 'success'; confirmLabel?: string; cancelLabel?: string },
+  ): Promise<boolean>;
 }
 
 // ─── Files API ────────────────────────────────────────────────────────────────
