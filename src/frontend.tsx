@@ -4,7 +4,7 @@ import { createRoot } from 'react-dom/client';
 import { PANEL_CSS } from './components/styles/index.js';
 import { LumiScriptPanel } from './components/LumiScriptPanel.js';
 import { SettingsPanel } from './components/settings/SettingsPanel.js';
-import type { BackendToFrontend, FrontendToBackend } from './types/messages.js';
+import type { FrontendToBackend } from './types/messages.js';
 
 // ─── LumiScript Frontend ──────────────────────────────────────────────────
 // Runs in the browser via dynamic import.
@@ -60,29 +60,6 @@ export function setup(ctx: SpindleFrontendContext) {
   const sendToBackend = (msg: FrontendToBackend) => {
     ctx.sendToBackend(msg);
   };
-
-  // ─── Non-React UI handler (prompt / confirm) ──────────────────────────
-  // Handles ui_request messages outside the React tree so that dialogs can
-  // use the native browser APIs.
-  // Note: toasts are now handled by spindle.toast on the backend — no
-  // frontend involvement needed.
-  const handleUIMessage = (raw: unknown) => {
-    const msg = raw as BackendToFrontend;
-
-    if (msg.type === 'ui_request') {
-      if (msg.kind === 'prompt') {
-        // Use native prompt — runs synchronously in the browser.
-        const value = window.prompt(msg.message, msg.defaultValue) ?? null;
-        sendToBackend({ type: 'ui_response', requestId: msg.requestId, value });
-      }
-    }
-  };
-
-  messageHandlers.push(handleUIMessage);
-  cleanups.push(() => {
-    const i = messageHandlers.indexOf(handleUIMessage);
-    if (i !== -1) messageHandlers.splice(i, 1);
-  });
 
   // ─── Dock Panel ─────────────────────────────────────────────────────────
   const panel = ctx.ui.requestDockPanel({

@@ -1152,10 +1152,28 @@ export interface UIAPI {
     options?: { title?: string; duration?: number },
   ): void;
   /**
-   * Show a text input prompt. Returns the entered text, or null if the user
-   * cancels. Resolves after the user dismisses the dialog.
+   * Show a themed text input dialog using the native Lumiverse prompt.
+   * Returns the entered string, or null if the user cancels or dismisses.
+   * Resolves after the user responds.
+   * @param options.placeholder  Placeholder text shown inside the empty input
+   * @param options.submitLabel  Label for the submit button (default: 'Submit')
+   * @param options.cancelLabel  Label for the cancel button (default: 'Cancel')
+   * @param options.multiline    Use a multi-line textarea instead of a single-line input
    */
-  prompt(message: string, defaultValue?: string): Promise<string | null>;
+  prompt(
+    message: string,
+    defaultValue?: string,
+    options?: {
+      /** Placeholder text shown inside the empty input. */
+      placeholder?: string;
+      /** Label for the submit button. Default: 'Submit'. */
+      submitLabel?: string;
+      /** Label for the cancel button. Default: 'Cancel'. */
+      cancelLabel?: string;
+      /** Use a multi-line textarea instead of a single-line input. */
+      multiline?: boolean;
+    },
+  ): Promise<string | null>;
   /**
    * Show a themed yes/no confirmation dialog using the native Lumiverse modal.
    * Returns true if the user clicks Confirm, false if they cancel or dismiss.

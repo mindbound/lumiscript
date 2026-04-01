@@ -511,11 +511,21 @@ interface UIAPI {
    */
   toast(message: string, type?: UINotificationType, options?: { title?: string; duration?: number }): void;
   /**
-   * Show a text input prompt. Returns the entered string, or null if cancelled.
+   * Show a themed text input dialog using the native Lumiverse prompt.
+   * Returns the entered string (trimmed), or null if the user cancels or dismisses.
+   * @param options.placeholder  Placeholder text shown inside the empty input
+   * @param options.submitLabel  Label for the submit button (default: 'Submit')
+   * @param options.cancelLabel  Label for the cancel button (default: 'Cancel')
+   * @param options.multiline    Use a multi-line textarea instead of a single-line input
    * @example
-   * const name = await api.ui.prompt('Enter your name:', 'Alice');
+   * const name = await api.ui.prompt('Enter character name:', 'Alice');
+   * const notes = await api.ui.prompt('Add notes:', '', { multiline: true });
    */
-  prompt(message: string, defaultValue?: string): Promise<string | null>;
+  prompt(
+    message: string,
+    defaultValue?: string,
+    options?: { placeholder?: string; submitLabel?: string; cancelLabel?: string; multiline?: boolean },
+  ): Promise<string | null>;
   /**
    * Show a themed yes/no confirmation dialog using the native Lumiverse modal.
    * Returns true if the user clicks Confirm, false if they cancel or dismiss.

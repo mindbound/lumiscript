@@ -62,15 +62,7 @@ export type FrontendToBackend =
       type: 'update_settings';
       patch: Partial<LumiScriptSettings>;
     }
-  | {
-      /**
-       * Response to a ui_request sent by the backend.
-       * value is the user's input (string | null for prompt, boolean for confirm).
-       */
-      type: 'ui_response';
-      requestId: string;
-      value: string | boolean | null;
-    };
+;
 
 // ─── Backend → Frontend ───────────────────────────────────────────────────────
 
@@ -143,11 +135,4 @@ export type BackendToFrontend =
       /** Error message if the sidecar loop failed. */
       error?: string;
     }
-  | {
-      /** Request user input — frontend shows a dialog and sends back ui_response. */
-      type: 'ui_request';
-      requestId: string;
-      kind: 'prompt';
-      message: string;
-      defaultValue: string;
-    };
+;

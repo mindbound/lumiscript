@@ -9,7 +9,6 @@ import { executionStatusStore } from './engine/execution-status.js';
 import { setActiveContext, getActiveContext } from './engine/binding.js';
 import { executeScript } from './engine/executor.js';
 import { TriggerRegistry } from './engine/trigger-registry.js';
-import { resolvePendingUIRequest } from './engine/api/ui.js';
 import { generateUUID } from './utils/uuid.js';
 import { listByMode, listAll, clearEphemeral, clearByScriptId } from './engine/injection-store.js';
 import { getTool, clearByScriptId as clearToolsByScriptId, listAll as listAllTools } from './engine/tool-store.js';
@@ -422,11 +421,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
         break;
       }
 
-      // ── UI responses ──────────────────────────────────────────────────────
-      case 'ui_response': {
-        resolvePendingUIRequest(msg.requestId, msg.value);
-        break;
-      }
+
 
       // ── Run ───────────────────────────────────────────────────────────────
       case 'run_script': {
