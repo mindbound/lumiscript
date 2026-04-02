@@ -8,6 +8,7 @@
     "lib": ["DOM", "DOM.Iterable", "ESNext"],
     "strict": true,
     "outDir": "./dist",
+    "rootDir": "./src",
     "declaration": false,
     "skipLibCheck": true,
     "noFallthroughCasesInSwitch": true,
