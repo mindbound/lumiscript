@@ -334,11 +334,11 @@ const KEY_TYPES: TypeDoc[] = [
   },
   {
     name: 'ModalHandle',
-    note: 'Returned by api.ui.showModal(). Await handle.result for dismissal; call handle.close() to dismiss programmatically (no-op while modal is open until platform MR lands).',
+    note: 'Returned by api.ui.showModal(). Await handle.result for dismissal; call handle.close() to dismiss programmatically.',
     fields: [
-      { field: 'openRequestId', type: 'string',               optional: false, desc: 'The spindle request ID. Only populated after result resolves.' },
+      { field: 'openRequestId', type: 'string',               optional: false, desc: 'UUID identifying this modal instance. Immediately available on the returned handle.' },
       { field: 'result',        type: 'Promise<ModalResult>',  optional: false, desc: 'Resolves with dismissal reason when the modal closes.' },
-      { field: 'close()',       type: 'Promise<void>',         optional: false, desc: 'Programmatic dismissal. No-op while modal is open (pending platform MR).' },
+      { field: 'close()',       type: 'Promise<void>',         optional: false, desc: 'Programmatically dismiss the modal.' },
     ],
   },
   // ─── LLM ─────────────────────────────────────────────────────────────────────

@@ -544,19 +544,20 @@ interface UIAPI {
   ): Promise<boolean>;
   /**
    * Open a structured read-only modal using the native Lumiverse modal system.
-   * Resolves with dismissedBy when the user closes the modal.
+   * Returns a ModalHandle — await handle.result for dismissal, or call handle.close() to dismiss programmatically.
    * Items are rendered in order: text, heading, key_value, divider, card.
    * @param options.title  Modal header title (required)
    * @param options.width  Width in pixels (default: 420)
    * @param options.maxHeight  Max height in pixels (default: 520)
    * @param options.persistent  When true, user cannot close the modal — only programmatic dismissal or cleanup
    * @example
-   * await api.ui.showModal([
+   * var handle = api.ui.showModal([
    *   { type: 'heading', content: 'Chat Stats' },
    *   { type: 'key_value', label: 'Messages', value: String(msgs.length) },
    *   { type: 'divider' },
    *   { type: 'card', items: [{ type: 'text', content: summary }] },
    * ], { title: 'Analysis Results' });
+   * var result = await handle.result;
    */
   showModal(items: ModalItem[], options: ShowModalOptions): ModalHandle;
 }
@@ -580,11 +581,11 @@ interface ModalResult {
 }
 
 interface ModalHandle {
-  /** The spindle openRequestId. Only populated after the modal has resolved. */
+  /** UUID identifying this modal instance. Immediately available on the returned handle. */
   readonly openRequestId: string;
   /** Resolves with the dismissal reason when the modal closes. */
   readonly result: Promise<ModalResult>;
-  /** Close the modal programmatically. No-op while modal is still open (pending platform MR). */
+  /** Close the modal programmatically. */
   close(): Promise<void>;
 }
 

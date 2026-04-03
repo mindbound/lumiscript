@@ -1190,21 +1190,16 @@ export interface ModalResult {
  * Handle returned by `api.ui.showModal()`.
  *
  * - `result` — awaitable promise that resolves when the modal closes.
- * - `openRequestId` — the spindle request ID; populated only after `result` resolves.
- *   Will be available at open-time once the platform adds caller-provided requestId
- *   support (`feat(spindle): accept caller-provided requestId in modal_open`).
- * - `close()` — programmatic dismissal. Currently a no-op while the modal is still open
- *   (platform limitation, same MR); works as a no-op after `result` resolves.
+ * - `openRequestId` — UUID identifying this modal instance. Immediately available
+ *   on the returned handle (not deferred until close).
+ * - `close()` — programmatic dismissal. Resolves once the modal has been dismissed.
  */
 export interface ModalHandle {
-  /** The spindle `openRequestId`. Only set after the modal has resolved. */
+  /** UUID identifying this modal instance. Immediately available on the returned handle. */
   readonly openRequestId: string;
   /** Resolves with the dismissal reason when the modal closes. */
   readonly result: Promise<ModalResult>;
-  /**
-   * Close the modal programmatically.
-   * No-op while the modal is still open (see JSDoc on `ModalHandle`).
-   */
+  /** Close the modal programmatically. */
   close(): Promise<void>;
 }
 
@@ -1266,8 +1261,8 @@ export interface UIAPI {
   ): Promise<boolean>;
   /**
    * Open a structured read-only modal using the native Lumiverse modal system.
-   * Returns a `ModalHandle` — await `handle.result` to wait for dismissal, or call
-   * `handle.close()` for programmatic close (no-op until the caller-requestId MR lands).
+   * Returns a `ModalHandle` — await `handle.result` for dismissal, or call
+   * `handle.close()` to dismiss programmatically.
    * Use `items` to build the body from `text`, `heading`, `key_value`, `divider`, `card`.
    *
    * @example
