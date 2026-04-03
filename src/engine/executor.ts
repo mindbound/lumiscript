@@ -51,6 +51,7 @@ import { buildWorldInfoAPI  } from './api/world-info.js';
 import { buildPersonasAPI  } from './api/personas.js';
 import { buildToolsAPI     } from './api/tools.js';
 import { buildBroadcastAPI } from './api/broadcast.js';
+import { buildEnclaveAPI   } from './api/enclave.js';
 
 // ─── Executor options ─────────────────────────────────────────────────────────
 
@@ -139,6 +140,7 @@ export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiSc
     chat:       buildChatAPI(deps),
     llm:        buildLLMAPI(deps),
     files:      buildFilesAPI(deps),
+    enclave:    buildEnclaveAPI(deps),
     ui:         buildUIAPI(deps),
     characters: buildCharactersAPI(deps),
     chats:      buildChatsAPI(deps),

@@ -982,6 +982,16 @@ const API_GROUPS: FnGroup[] = [
     ],
   },
   {
+    group: 'api.enclave',
+    rows: [
+      { name: 'put',    args: 'key, value', desc: 'Store or overwrite an AES-256-GCM encrypted secret. Requires allowDangerous. Key: alphanumeric + _ - . (max 128 chars); value: printable ASCII, max 64 KB.' },
+      { name: 'get',    args: 'key',        desc: 'Retrieve a decrypted secret, or null if not found. Requires allowDangerous.' },
+      { name: 'delete', args: 'key',        desc: 'Delete a secret. Returns true if it existed. Requires allowDangerous.' },
+      { name: 'has',    args: 'key',        desc: 'Check if a secret exists without decrypting it. Requires allowDangerous.' },
+      { name: 'list',   args: '—',          desc: 'List all secret keys for this user and extension. Requires allowDangerous.' },
+    ],
+  },
+  {
     group: 'script',
     rows: [
       { name: 'require', args: 'nameOrId', desc: 'Load a library script by name or ID (lazy, cached per execution).' },

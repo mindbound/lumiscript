@@ -152,6 +152,8 @@ export interface LumiScriptAPI {
   personas: PersonasAPI;
   /** Requires allowDangerous */
   files: FilesAPI;
+  /** AES-256-GCM encrypted per-user secret storage. Requires allowDangerous. */
+  enclave: EnclaveAPI;
   /** Register LLM tools invocable by Lumiverse Council and inline LLM function-calling. Requires tools permission. */
   tools: ToolsAPI;
   /** Real-time script-to-script pub/sub broadcast bus. No permission required. */
@@ -763,6 +765,52 @@ export interface FilesAPI {
   tempStat(path: string): Promise<TempStatResult>;
   /** Remove all expired ephemeral files. Returns count of files removed. Requires ephemeral_storage permission. */
   tempClearExpired(): Promise<number>;
+}
+
+// ─── Enclave API ──────────────────────────────────────────────────────────────
+
+/**
+ * AES-256-GCM encrypted per-user secret storage for API keys, OAuth tokens,
+ * and other sensitive credentials. All methods require `allowDangerous`.
+ *
+ * Keys are namespaced as `spindle:{identifier}:{key}` — extensions cannot read
+ * each other's secrets. `list()` returns bare key names without the prefix.
+ *
+ * Key constraints:  alphanumeric + `_`, `-`, `.` characters, 1–128 chars.
+ * Value constraints: printable ASCII only, max 64 KB.
+ */
+export interface EnclaveAPI {
+  /**
+   * Store or overwrite an encrypted secret.
+   * @example
+   * await api.enclave.put('api_key', 'sk-...');
+   */
+  put(key: string, value: string): Promise<void>;
+
+  /**
+   * Retrieve a decrypted secret, or `null` if the key is not found.
+   * @example
+   * const key = await api.enclave.get('api_key');
+   * if (key) { ... }
+   */
+  get(key: string): Promise<string | null>;
+
+  /**
+   * Delete a secret. Returns `true` if the key existed, `false` if not found.
+   */
+  delete(key: string): Promise<boolean>;
+
+  /**
+   * Check whether a secret exists without decrypting it.
+   * More efficient than `get()` when you only need to check presence.
+   */
+  has(key: string): Promise<boolean>;
+
+  /**
+   * List all secret keys for this user and extension.
+   * Returns bare key names (without the namespace prefix).
+   */
+  list(): Promise<string[]>;
 }
 
 // ─── Characters API ───────────────────────────────────────────────────────────

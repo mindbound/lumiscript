@@ -639,6 +639,25 @@ interface FilesAPI {
   tempClearExpired(): Promise<number>;
 }
 
+// ─── Enclave API ──────────────────────────────────────────────────────────────
+
+/**
+ * AES-256-GCM encrypted per-user secret storage. All methods require allowDangerous.
+ * Keys: alphanumeric + underscore, dash, dot — max 128 chars. Values: printable ASCII, max 64 KB.
+ */
+interface EnclaveAPI {
+  /** Store or overwrite an encrypted secret. */
+  put(key: string, value: string): Promise<void>;
+  /** Retrieve a decrypted secret, or null if not found. */
+  get(key: string): Promise<string | null>;
+  /** Delete a secret. Returns true if it existed. */
+  delete(key: string): Promise<boolean>;
+  /** Check if a secret exists without decrypting it. */
+  has(key: string): Promise<boolean>;
+  /** List all secret keys for this user and extension. */
+  list(): Promise<string[]>;
+}
+
 // ─── Characters API ───────────────────────────────────────────────────────────
 
 interface Character {
@@ -887,6 +906,8 @@ interface LumiScriptAPI {
   personas: PersonasAPI;
   /** File storage across three tiers. Requires allowDangerous. */
   files: FilesAPI;
+  /** AES-256-GCM encrypted per-user secret storage. Requires allowDangerous. */
+  enclave: EnclaveAPI;
   /** Register LLM tools for Council and inline function-calling. Requires tools permission. */
   tools: ToolsAPI;
   /** Real-time script-to-script pub/sub. No permission required. */
