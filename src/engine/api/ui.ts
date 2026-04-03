@@ -21,7 +21,7 @@
 
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
 
-import type { LumiScriptAPI, UINotificationType } from '../../types/script.js';
+import type { LumiScriptAPI, UINotificationType, ModalItem, ShowModalOptions, ModalResult, ModalHandle } from '../../types/script.js';
 import type { APIBuildDeps } from './shared.js';
 import { shielded } from './shared.js';
 
@@ -81,5 +81,37 @@ export function buildUIAPI(deps: APIBuildDeps): LumiScriptAPI['ui'] {
         }).then(r => r.confirmed),
       );
     },
+
+    showModal(
+      items: ModalItem[],
+      options: ShowModalOptions,
+    ): ModalHandle {
+      const openRequestId = crypto.randomUUID();
+
+      const result: Promise<ModalResult> = shielded(
+        spindle.modal.open({
+          title: options.title,
+          // ModalItem is structurally identical to SpindleModalItemDTO —
+          // cast to satisfy TypeScript's nominal check.
+          items: items as import('lumiverse-spindle-types').SpindleModalItemDTO[],
+          width: options.width,
+          maxHeight: options.maxHeight,
+          persistent: options.persistent,
+          modalRequestId: openRequestId,
+          userId: deps.userId ?? undefined,
+        }).then(r => ({ dismissedBy: r.dismissedBy })),
+      );
+
+      return {
+        openRequestId,
+        result,
+        close(): Promise<void> {
+          return shielded(spindle.modal.close(openRequestId, deps.userId ?? undefined));
+        },
+      };
+    },
   };
 }
+
+// Suppress unused-import warning — these types are re-exported for external consumers.
+export type { ModalItem, ShowModalOptions, ModalResult, ModalHandle };

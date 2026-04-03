@@ -542,6 +542,50 @@ interface UIAPI {
     title?: string,
     options?: { variant?: 'info' | 'warning' | 'danger' | 'success'; confirmLabel?: string; cancelLabel?: string },
   ): Promise<boolean>;
+  /**
+   * Open a structured read-only modal using the native Lumiverse modal system.
+   * Resolves with dismissedBy when the user closes the modal.
+   * Items are rendered in order: text, heading, key_value, divider, card.
+   * @param options.title  Modal header title (required)
+   * @param options.width  Width in pixels (default: 420)
+   * @param options.maxHeight  Max height in pixels (default: 520)
+   * @param options.persistent  When true, user cannot close the modal — only programmatic dismissal or cleanup
+   * @example
+   * await api.ui.showModal([
+   *   { type: 'heading', content: 'Chat Stats' },
+   *   { type: 'key_value', label: 'Messages', value: String(msgs.length) },
+   *   { type: 'divider' },
+   *   { type: 'card', items: [{ type: 'text', content: summary }] },
+   * ], { title: 'Analysis Results' });
+   */
+  showModal(items: ModalItem[], options: ShowModalOptions): ModalHandle;
+}
+
+type ModalItem =
+  | { type: 'text'; content: string; muted?: boolean }
+  | { type: 'divider' }
+  | { type: 'key_value'; label: string; value: string }
+  | { type: 'heading'; content: string }
+  | { type: 'card'; items: ModalItem[] };
+
+interface ShowModalOptions {
+  title: string;
+  width?: number;
+  maxHeight?: number;
+  persistent?: boolean;
+}
+
+interface ModalResult {
+  dismissedBy: 'user' | 'extension' | 'cleanup';
+}
+
+interface ModalHandle {
+  /** The spindle openRequestId. Only populated after the modal has resolved. */
+  readonly openRequestId: string;
+  /** Resolves with the dismissal reason when the modal closes. */
+  readonly result: Promise<ModalResult>;
+  /** Close the modal programmatically. No-op while modal is still open (pending platform MR). */
+  close(): Promise<void>;
 }
 
 // ─── Files API ────────────────────────────────────────────────────────────────

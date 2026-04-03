@@ -158,7 +158,7 @@ export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiSc
  * metadata and the TriggerRegistry, not via script.on().
  */
 export function buildScriptNamespace(
-  script: Script,
+  _script: Script,
   options: ExecutorOptions,
 ): ScriptNamespace {
   const requireCache = new Map<string, unknown>();

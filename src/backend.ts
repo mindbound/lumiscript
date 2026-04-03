@@ -12,7 +12,7 @@ import { TriggerRegistry } from './engine/trigger-registry.js';
 import { generateUUID } from './utils/uuid.js';
 import { listByMode, listAll, clearEphemeral, clearByScriptId } from './engine/injection-store.js';
 import { getTool, clearByScriptId as clearToolsByScriptId, listAll as listAllTools } from './engine/tool-store.js';
-import { emit as broadcastEmit, clearByScriptId as clearBroadcastByScriptId } from './engine/broadcast-bus.js';
+import { emit as broadcastEmit } from './engine/broadcast-bus.js';
 
 // ─── Active user + permission tracking ───────────────────────────────────────
 

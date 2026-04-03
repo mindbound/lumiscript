@@ -1140,6 +1140,76 @@ export interface WorldInfoAPI {
 
 export type UINotificationType = 'info' | 'success' | 'warning' | 'error';
 
+// ─── Modal item types (mirrors SpindleModalItemDTO) ──────────────────────────
+
+/**
+ * A single item in a `showModal()` content list.
+ * Items are rendered sequentially in the modal body using the system theme.
+ */
+export type ModalItem =
+  /** A block of text. `muted: true` renders in the dim/muted text colour. */
+  | { type: 'text'; content: string; muted?: boolean }
+  /** A horizontal divider line between sections. */
+  | { type: 'divider' }
+  /** A label–value pair in a horizontal row — useful for metadata and stats. */
+  | { type: 'key_value'; label: string; value: string }
+  /** A section heading within the modal body. */
+  | { type: 'heading'; content: string }
+  /** A themed card container that groups child items (one level deep recommended). */
+  | { type: 'card'; items: ModalItem[] };
+
+/** Options for `api.ui.showModal()`. */
+export interface ShowModalOptions {
+  /** Modal header title. Required. */
+  title: string;
+  /** Width in pixels. Default: 420. Clamped to viewport. */
+  width?: number;
+  /** Maximum height in pixels. Default: 520. Clamped to viewport. */
+  maxHeight?: number;
+  /**
+   * When `true`, the user cannot dismiss the modal — the close button, Escape key, and
+   * backdrop click are all disabled. The modal can only be closed programmatically
+   * (`api.ui.closeModal()`, pending platform MR) or via extension cleanup.
+   * Default: `false`.
+   */
+  persistent?: boolean;
+}
+
+/** Result returned when `api.ui.showModal()` resolves. */
+export interface ModalResult {
+  /**
+   * How the modal was dismissed:
+   * - `'user'` — close button, backdrop click (when not persistent), or Escape key
+   * - `'extension'` — programmatic dismissal
+   * - `'cleanup'` — extension was disabled or unloaded while modal was open
+   */
+  dismissedBy: 'user' | 'extension' | 'cleanup';
+}
+
+/**
+ * Handle returned by `api.ui.showModal()`.
+ *
+ * - `result` — awaitable promise that resolves when the modal closes.
+ * - `openRequestId` — the spindle request ID; populated only after `result` resolves.
+ *   Will be available at open-time once the platform adds caller-provided requestId
+ *   support (`feat(spindle): accept caller-provided requestId in modal_open`).
+ * - `close()` — programmatic dismissal. Currently a no-op while the modal is still open
+ *   (platform limitation, same MR); works as a no-op after `result` resolves.
+ */
+export interface ModalHandle {
+  /** The spindle `openRequestId`. Only set after the modal has resolved. */
+  readonly openRequestId: string;
+  /** Resolves with the dismissal reason when the modal closes. */
+  readonly result: Promise<ModalResult>;
+  /**
+   * Close the modal programmatically.
+   * No-op while the modal is still open (see JSDoc on `ModalHandle`).
+   */
+  close(): Promise<void>;
+}
+
+// ─── UI API ───────────────────────────────────────────────────────────────────
+
 export interface UIAPI {
   /**
    * Show a temporary notification toast via the native Lumiverse toast system.
@@ -1194,6 +1264,22 @@ export interface UIAPI {
       cancelLabel?: string;
     },
   ): Promise<boolean>;
+  /**
+   * Open a structured read-only modal using the native Lumiverse modal system.
+   * Returns a `ModalHandle` — await `handle.result` to wait for dismissal, or call
+   * `handle.close()` for programmatic close (no-op until the caller-requestId MR lands).
+   * Use `items` to build the body from `text`, `heading`, `key_value`, `divider`, `card`.
+   *
+   * @example
+   * const handle = api.ui.showModal([
+   *   { type: 'heading', content: 'Chat Stats' },
+   *   { type: 'key_value', label: 'Messages', value: String(msgs.length) },
+   *   { type: 'divider' },
+   *   { type: 'card', items: [{ type: 'text', content: summary }] },
+   * ], { title: 'Analysis Results' });
+   * const result = await handle.result;
+   */
+  showModal(items: ModalItem[], options: ShowModalOptions): ModalHandle;
 }
 
 /** The `script.*` namespace available inside script bodies */

@@ -157,6 +157,7 @@ const PERM_GROUPS: PermGroup[] = [
       { method: 'api.ui.toast', perms: [] },
       { method: 'api.ui.prompt', perms: [] },
       { method: 'api.ui.confirm', perms: [] },
+      { method: 'api.ui.showModal', perms: [] },
     ],
   },
   {
@@ -300,6 +301,44 @@ const KEY_TYPES: TypeDoc[] = [
       { field: 'depth',     type: 'number',                          optional: false, desc: 'Position from end of assembled array (intercept mode).' },
       { field: 'ephemeral', type: 'boolean',                         optional: false, desc: 'Whether the injection auto-removes after generation.' },
       { field: 'scriptId',  type: 'string',                          optional: false, desc: 'ID of the script that created this injection.' },
+    ],
+  },
+  // ─── UI ──────────────────────────────────────────────────────────────────────
+  {
+    name: 'ModalItem',
+    note: 'A single content item in an api.ui.showModal() items array. Five variants rendered in order using the system theme.',
+    fields: [
+      { field: "type: 'text'",      type: "{ content: string; muted?: boolean }",  optional: false, desc: 'A text block. muted: true renders in dim/muted colour.' },
+      { field: "type: 'heading'",   type: '{ content: string }',                   optional: false, desc: 'A section heading.' },
+      { field: "type: 'key_value'", type: '{ label: string; value: string }',       optional: false, desc: 'Label–value row (left label, right value).' },
+      { field: "type: 'divider'",   type: '{}',                                    optional: false, desc: 'A horizontal separator. No extra fields.' },
+      { field: "type: 'card'",      type: '{ items: ModalItem[] }',                optional: false, desc: 'A themed card grouping child items (1 level deep recommended).' },
+    ],
+  },
+  {
+    name: 'ShowModalOptions',
+    note: 'Options for api.ui.showModal(items, options).',
+    fields: [
+      { field: 'title',       type: 'string',  optional: false, desc: 'Modal header title. Required.' },
+      { field: 'width?',      type: 'number',  optional: true,  desc: 'Width in pixels (default: 420). Clamped to viewport.' },
+      { field: 'maxHeight?',  type: 'number',  optional: true,  desc: 'Max height in pixels (default: 520). Clamped to viewport.' },
+      { field: 'persistent?', type: 'boolean', optional: true,  desc: 'When true, user cannot close the modal (no button, Escape, or backdrop). Only programmatic dismissal or cleanup will close it. Default: false.' },
+    ],
+  },
+  {
+    name: 'ModalResult',
+    note: 'Dismissal payload inside ModalHandle.result.',
+    fields: [
+      { field: 'dismissedBy', type: "'user' | 'extension' | 'cleanup'", optional: false, desc: "'user' = close button / backdrop / Escape; 'extension' = programmatic; 'cleanup' = extension unloaded." },
+    ],
+  },
+  {
+    name: 'ModalHandle',
+    note: 'Returned by api.ui.showModal(). Await handle.result for dismissal; call handle.close() to dismiss programmatically (no-op while modal is open until platform MR lands).',
+    fields: [
+      { field: 'openRequestId', type: 'string',               optional: false, desc: 'The spindle request ID. Only populated after result resolves.' },
+      { field: 'result',        type: 'Promise<ModalResult>',  optional: false, desc: 'Resolves with dismissal reason when the modal closes.' },
+      { field: 'close()',       type: 'Promise<void>',         optional: false, desc: 'Programmatic dismissal. No-op while modal is open (pending platform MR).' },
     ],
   },
   // ─── LLM ─────────────────────────────────────────────────────────────────────
@@ -834,9 +873,10 @@ const API_GROUPS: FnGroup[] = [
   {
     group: 'api.ui',
     rows: [
-      { name: 'toast',   args: 'message, type?, options?',   desc: 'Show a native toast notification. Fire-and-forget. Rate-limited 5/10s.' },
-      { name: 'prompt',  args: 'message, defaultValue?',     desc: 'Show a text input prompt. Returns entered string or null if cancelled.' },
-      { name: 'confirm', args: 'message, title?',            desc: 'Show a yes/no dialog. Returns true if confirmed.' },
+      { name: 'toast',     args: 'message, type?, options?',         desc: 'Show a native Lumiverse toast notification. Fire-and-forget. Rate-limited 5/10s. Options: title, duration.' },
+      { name: 'prompt',    args: 'message, defaultValue?, options?', desc: 'Show a themed text input dialog. Returns entered string (trimmed) or null if cancelled. Options: placeholder, submitLabel, cancelLabel, multiline.' },
+      { name: 'confirm',   args: 'message, title?, options?',        desc: 'Show a themed confirmation dialog. Returns true if confirmed. Options: variant (info/warning/danger/success), confirmLabel, cancelLabel.' },
+      { name: 'showModal', args: 'items, options',                   desc: 'Display structured read-only content in a themed modal. Returns ModalHandle { result, openRequestId, close() }. Await handle.result for dismissal. Options: title (required), width, maxHeight, persistent.' },
     ],
   },
   {
