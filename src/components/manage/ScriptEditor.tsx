@@ -289,7 +289,7 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
           style={{ cursor: 'pointer', userSelect: 'none' }}
         >
           {copied ? <Check size={10} /> : <Copy size={10} />}
-          <span>{script.id.slice(0, 8)}</span>
+          <span>UUID {script.id.slice(0, 8)}</span>
         </span>
       </div>
     </div>
