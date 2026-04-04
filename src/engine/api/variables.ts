@@ -34,40 +34,41 @@ function deserialize<T>(raw: string, def?: T): T | undefined {
 
 function makeCharacterVarStore(
   getPath: () => string | null,
+  userId?: string,
 ): LumiScriptAPI['variables']['character'] {
   return {
     async get<T>(key: string, def?: T): Promise<T | undefined> {
       const path = getPath();
       if (!path) return def;
-      const store = await spindle.userStorage.getJson<Record<string, unknown>>(path, { fallback: {} });
+      const store = await spindle.userStorage.getJson<Record<string, unknown>>(path, { fallback: {}, userId });
       return (key in store ? store[key] as T : def);
     },
     async set<T>(_key: string, value: T): Promise<void> {
       const path = getPath();
       if (!path) return;
-      const store = await spindle.userStorage.getJson<Record<string, unknown>>(path, { fallback: {} });
+      const store = await spindle.userStorage.getJson<Record<string, unknown>>(path, { fallback: {}, userId });
       store[_key] = value;
-      await spindle.userStorage.setJson(path, store);
+      await spindle.userStorage.setJson(path, store, { userId });
     },
     async delete(key: string): Promise<boolean> {
       const path = getPath();
       if (!path) return false;
-      const store = await spindle.userStorage.getJson<Record<string, unknown>>(path, { fallback: {} });
+      const store = await spindle.userStorage.getJson<Record<string, unknown>>(path, { fallback: {}, userId });
       if (!(key in store)) return false;
       delete store[key];
-      await spindle.userStorage.setJson(path, store);
+      await spindle.userStorage.setJson(path, store, { userId });
       return true;
     },
     async has(key: string): Promise<boolean> {
       const path = getPath();
       if (!path) return false;
-      const store = await spindle.userStorage.getJson<Record<string, unknown>>(path, { fallback: {} });
+      const store = await spindle.userStorage.getJson<Record<string, unknown>>(path, { fallback: {}, userId });
       return key in store;
     },
     async clear(): Promise<void> {
       const path = getPath();
       if (!path) return;
-      await spindle.userStorage.setJson(path, {});
+      await spindle.userStorage.setJson(path, {}, { userId });
     },
   };
 }
@@ -142,6 +143,7 @@ export function buildVariablesAPI(deps: APIBuildDeps): LumiScriptAPI['variables'
       () => activeContext.characterId
         ? `variables/characters/${activeContext.characterId}.json`
         : null,
+      uid,
     ),
 
   };

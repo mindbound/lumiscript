@@ -24,6 +24,7 @@
  *   api   — the full LumiScript API
  */
 
+import { AsyncLocalStorage } from 'async_hooks';
 import * as z from 'zod';
 
 import type {
@@ -81,6 +82,21 @@ export interface ExecutorOptions {
   onToolsChanged?: () => void;
 }
 
+// ─── Cross-script console context ────────────────────────────────────────────
+
+/**
+ * AsyncLocalStorage holding the active script execution's onConsole callback.
+ *
+ * When Script B calls api.broadcast.emit() and Script A's handler fires, the
+ * handler's console.log calls should appear in Script B's console (the caller),
+ * not Script A's. AsyncLocalStorage propagates the context across await
+ * boundaries, so async handlers are covered correctly.
+ *
+ * Falls back to the registering script's own onConsole if no active context
+ * (e.g. a handler fires outside any script execution).
+ */
+const consoleContext = new AsyncLocalStorage<(e: ConsoleEntry) => void>();
+
 // ─── Async function constructor (exported for use by TriggerRegistry) ─────────
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -111,7 +127,12 @@ export async function executeScript(
       `"use strict";\nconst console = __console;\n${script.code}\n`,
     );
 
-    await fn(api, data, scriptNS, capturedConsole, z);
+    // Run inside consoleContext so broadcast handlers fired during this
+    // execution route their console output here (not to the registering script).
+    await consoleContext.run(
+      options.onConsole ?? (() => {}),
+      () => fn(api, data, scriptNS, capturedConsole, z) as Promise<unknown>,
+    );
 
     const duration = Math.round(performance.now() - startTime);
     return { success: true, duration, scriptId: script.id, runId };
@@ -162,9 +183,12 @@ export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiSc
 export function buildScriptNamespace(
   _script: Script,
   options: ExecutorOptions,
+  sharedInProgress?: Set<string>,
 ): ScriptNamespace {
   const requireCache = new Map<string, unknown>();
-  const inProgress = new Set<string>();
+  // sharedInProgress is passed by parent require() calls so circular dependency
+  // detection works across library boundaries (not just within a single namespace).
+  const inProgress = sharedInProgress ?? new Set<string>();
 
   return {
     async require(nameOrId: string): Promise<unknown> {
@@ -192,7 +216,7 @@ export function buildScriptNamespace(
         const libExports: Record<string, unknown> = {};
         const libModule = { exports: libExports };
         const libApi = buildScriptAPI(library, options);
-        const libScriptNS = buildScriptNamespace(library, options);
+        const libScriptNS = buildScriptNamespace(library, options, inProgress);
         const silentConsole = { log: () => {}, warn: () => {}, error: () => {}, info: () => {} };
 
         // eslint-disable-next-line @typescript-eslint/no-unsafe-call
@@ -225,7 +249,7 @@ export function buildCapturedConsole(
         type,
         message,
       };
-      onConsole?.(entry);
+      (consoleContext.getStore() ?? onConsole)?.(entry);
     };
 
   return {

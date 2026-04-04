@@ -1,6 +1,6 @@
 import { FC, useRef, useState, useEffect, useCallback } from 'react';
 import Editor, { type OnMount } from '@monaco-editor/react';
-import { Play, Loader2, Shield, ShieldAlert, Clock, Calendar, Code2, BookOpen } from 'lucide-react';
+import { Play, Loader2, Shield, ShieldAlert, Clock, Calendar, Code2, BookOpen, Copy, Check } from 'lucide-react';
 import type { Script, ScriptBindingEntry, ConsoleEntry } from '../../types/script.js';
 import type { FrontendToBackend } from '../../types/messages.js';
 import { ScriptConsole } from './ScriptConsole.js';
@@ -35,6 +35,7 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(script.name);
   const [viewMode, setViewMode] = useState<'code' | 'docs'>('code');
+  const [copied, setCopied] = useState(false);
   const saveTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const editorRef = useRef<any>(null);
@@ -277,6 +278,19 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
         </span>
         <span className="ls-meta-item"><Clock size={10} /><span>Updated {fmt(script.updatedAt)}</span></span>
         <span className="ls-meta-item"><Calendar size={10} /><span>Created {fmt(script.createdAt)}</span></span>
+        <span
+          className="ls-meta-item ls-meta-id"
+          title={script.id}
+          onClick={() => {
+            navigator.clipboard.writeText(script.id).catch(() => {});
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1200);
+          }}
+          style={{ cursor: 'pointer', userSelect: 'none' }}
+        >
+          {copied ? <Check size={10} /> : <Copy size={10} />}
+          <span>{script.id.slice(0, 8)}</span>
+        </span>
       </div>
     </div>
   );

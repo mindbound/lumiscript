@@ -10,6 +10,7 @@ import { ManagePanel } from './manage/ManagePanel.js';
 interface ScriptExecInfo {
   dot: ExecutionDot;
   duration?: number;
+  error?: string;
 }
 
 interface ExecState {
@@ -124,17 +125,28 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
           break;
 
         case 'execution_ended':
-          setExecState(prev => ({
-            ...prev,
-            isRunning: false,
-            scriptExecInfo: {
-              ...prev.scriptExecInfo,
-              [msg.scriptId]: {
-                dot: msg.success ? 'success' : 'error',
-                duration: msg.duration,
+          setExecState(prev => {
+            const errorEntry = !msg.success && msg.error
+              ? [{
+                  timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
+                  type: 'error' as const,
+                  message: msg.error,
+                }]
+              : [];
+            return {
+              ...prev,
+              isRunning: false,
+              entries: [...prev.entries, ...errorEntry],
+              scriptExecInfo: {
+                ...prev.scriptExecInfo,
+                [msg.scriptId]: {
+                  dot: msg.success ? 'success' : 'error',
+                  duration: msg.duration,
+                  error: msg.error,
+                },
               },
-            },
-          }));
+            };
+          });
           break;
 
         case 'error':
@@ -300,6 +312,13 @@ const StatusTab: FC<StatusTabProps> = ({ scripts, execInfo, invocationCounts, in
             ) : (
               <div className="ls-no-handlers">
                 no events selected — choose events in the editor
+              </div>
+            )}
+
+            {/* Row 3: error message (only on failure) */}
+            {dot === 'error' && info?.error && (
+              <div style={{ fontSize: '0.72rem', color: '#ef4444', fontFamily: 'monospace', marginTop: 2, wordBreak: 'break-word' }}>
+                {info.error}
               </div>
             )}
           </div>
