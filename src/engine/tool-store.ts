@@ -40,8 +40,23 @@ const store = new Map<string, ToolEntry>();
 
 // ─── Mutators ─────────────────────────────────────────────────────────────────
 
-/** Add or overwrite a tool entry. Re-registration is safe and just replaces the handler. */
+/**
+ * Register a tool entry.
+ *
+ * Re-registration by the **same** script (e.g. a trigger script re-running)
+ * is allowed and simply replaces the handler.
+ *
+ * Re-registration by a **different** script throws: allowing silent overwrites
+ * would let Script B hijack Script A's tool and receive its invocation args.
+ */
 export function addTool(entry: ToolEntry): void {
+  const existing = store.get(entry.name);
+  if (existing && existing.scriptId !== entry.scriptId) {
+    throw new Error(
+      `api.tools.register: tool name "${entry.name}" is already registered by ` +
+      `"${existing.scriptName}". Unregister it first or choose a different name.`,
+    );
+  }
   store.set(entry.name, entry);
 }
 

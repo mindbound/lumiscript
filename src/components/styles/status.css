@@ -32,6 +32,22 @@
   white-space: nowrap;
 }
 .ls-no-handlers { padding-left: 16px; font-size: 10px; color: var(--lumiverse-text-dim); font-style: italic; }
+.ls-status-error-row {
+  padding-left: 16px;
+  margin-top: 1px;
+}
+.ls-status-error-text {
+  flex: 1;
+  font-size: 10px;
+  font-family: monospace;
+  color: #ef4444;
+  padding: 3px 6px;
+  background: color-mix(in srgb, #ef4444 8%, transparent);
+  border: 1px solid color-mix(in srgb, #ef4444 22%, transparent);
+  border-radius: 3px;
+  word-break: break-word;
+  line-height: 1.45;
+}
 .ls-placeholder {
   display: flex;
   flex-direction: column;

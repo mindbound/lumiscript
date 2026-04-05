@@ -6,9 +6,14 @@
  *
  * Security model:
  * - Scripts run in `new AsyncFunction` (not eval). No direct DOM access.
+ * - `Bun` and `process` globals are shadowed to `undefined` — always blocked.
+ * - `fetch` is shadowed: allowed only when allowDangerous is set on the script.
  * - api.utils.http.* requires allowDangerous on the script AND cors_proxy permission.
  * - api.chat.* requires chat_mutation permission.
  * - api.llm.* requires generation permission.
+ * - Note: dynamic `import()` is a language keyword and cannot be parameter-shadowed;
+ *   it remains accessible in the worker (known surface, low practical risk for
+ *   single-user deployments, higher risk for multi-user operator mode).
  *
  * API modules live in src/engine/api/. This file is the thin orchestrator.
  *
@@ -102,6 +107,28 @@ const consoleContext = new AsyncLocalStorage<(e: ConsoleEntry) => void>();
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export const AsyncFunctionCtor = Object.getPrototypeOf(async function () {}).constructor as any;
 
+// ─── Sandbox globals ──────────────────────────────────────────────────────────
+
+/**
+ * Build a safe `fetch` replacement for the script sandbox.
+ *
+ * - `allowDangerous` scripts receive the real globalThis.fetch.
+ * - All other scripts receive a function that throws a descriptive error,
+ *   preventing silent bypass of the `api.utils.http.*` permission gate.
+ *
+ * `Bun` and `process` are always passed as `undefined` — neither has a
+ * legitimate use from user script code.
+ */
+function buildSafeFetch(script: Script): typeof globalThis.fetch {
+  if (script.allowDangerous) return globalThis.fetch.bind(globalThis);
+  return (() => {
+    throw new Error(
+      `"${script.name}" must enable Allow Dangerous to use fetch directly. ` +
+      `Use api.utils.http.* for HTTP requests.`,
+    );
+  }) as unknown as typeof globalThis.fetch;
+}
+
 // ─── Main entry point ─────────────────────────────────────────────────────────
 
 export async function executeScript(
@@ -117,6 +144,8 @@ export async function executeScript(
   const data = options.eventData ?? {};
 
   try {
+    const safeFetch = buildSafeFetch(script);
+
     // eslint-disable-next-line @typescript-eslint/no-unsafe-call
     const fn: (...args: unknown[]) => Promise<unknown> = new AsyncFunctionCtor(
       'api',
@@ -124,6 +153,9 @@ export async function executeScript(
       'script',
       '__console',
       'z',
+      'fetch',   // shadow: allowDangerous → real fetch; else → throws
+      'Bun',     // shadow: always undefined — no direct Bun API access
+      'process', // shadow: always undefined — no process/env access
       `"use strict";\nconst console = __console;\n${script.code}\n`,
     );
 
@@ -131,7 +163,7 @@ export async function executeScript(
     // execution route their console output here (not to the registering script).
     await consoleContext.run(
       options.onConsole ?? (() => {}),
-      () => fn(api, data, scriptNS, capturedConsole, z) as Promise<unknown>,
+      () => fn(api, data, scriptNS, capturedConsole, z, safeFetch, undefined, undefined) as Promise<unknown>,
     );
 
     const duration = Math.round(performance.now() - startTime);
@@ -218,14 +250,18 @@ export function buildScriptNamespace(
         const libApi = buildScriptAPI(library, options);
         const libScriptNS = buildScriptNamespace(library, options, inProgress);
         const silentConsole = { log: () => {}, warn: () => {}, error: () => {}, info: () => {} };
+        const libSafeFetch = buildSafeFetch(library);
 
         // eslint-disable-next-line @typescript-eslint/no-unsafe-call
         const libFn: (...args: unknown[]) => Promise<unknown> = new AsyncFunctionCtor(
           'api', 'data', 'script', '__console', 'exports', 'module',
+          'fetch',   // shadow: library's own allowDangerous flag governs access
+          'Bun',     // shadow: always undefined
+          'process', // shadow: always undefined
           `"use strict";\nconst console = __console;\n${library.code}\n`,
         );
 
-        await libFn(libApi, {}, libScriptNS, silentConsole, libExports, libModule);
+        await libFn(libApi, {}, libScriptNS, silentConsole, libExports, libModule, libSafeFetch, undefined, undefined);
         const exports = libModule.exports;
         requireCache.set(nameOrId, exports);
         return exports;

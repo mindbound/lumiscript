@@ -31,9 +31,20 @@ type Handler = (payload: unknown) => void;
 interface HandlerEntry {
   handler:  Handler;
   scriptId: string;
+  /** Event name stored on the entry so clearByScriptId can delete in O(1). */
+  event:    string;
 }
 
 const bus = new Map<string, Set<HandlerEntry>>();
+
+/**
+ * Reverse index: scriptId → Set<HandlerEntry> (entries across all events).
+ *
+ * Maintained in sync with `bus` so that clearByScriptId(scriptId) can skip
+ * the full O(events × handlers) scan and instead iterate only the entries
+ * that belong to the given script.
+ */
+const handlerIndex = new Map<string, Set<HandlerEntry>>();
 
 /**
  * Emit a named event. All handlers subscribed to `event` are called
@@ -59,19 +70,31 @@ export function emit(event: string, payload?: unknown): void {
  */
 export function on(event: string, handler: Handler, scriptId: string): () => void {
   if (!bus.has(event)) bus.set(event, new Set());
-  const entry: HandlerEntry = { handler, scriptId };
+  const entry: HandlerEntry = { handler, scriptId, event };
   bus.get(event)!.add(entry);
-  return () => bus.get(event)?.delete(entry);
+
+  // Populate reverse index so clearByScriptId can find this entry in O(1).
+  if (!handlerIndex.has(scriptId)) handlerIndex.set(scriptId, new Set());
+  handlerIndex.get(scriptId)!.add(entry);
+
+  return () => {
+    bus.get(event)?.delete(entry);
+    handlerIndex.get(scriptId)?.delete(entry);
+  };
 }
 
 /**
  * Remove all subscriptions owned by the given script. Called automatically
  * when a script is disabled, deleted, or completes a one-shot execution.
+ *
+ * Uses the reverse index for O(entries owned by scriptId) complexity instead
+ * of the previous O(events × handlers) full-bus scan.
  */
 export function clearByScriptId(scriptId: string): void {
-  for (const set of bus.values()) {
-    for (const entry of set) {
-      if (entry.scriptId === scriptId) set.delete(entry);
-    }
+  const entries = handlerIndex.get(scriptId);
+  if (!entries) return; // O(1) early exit — script has no subscriptions
+  for (const entry of entries) {
+    bus.get(entry.event)?.delete(entry); // O(1) per entry via stored event name
   }
+  handlerIndex.delete(scriptId);
 }

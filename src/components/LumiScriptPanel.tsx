@@ -69,6 +69,10 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
           setScripts(msg.scripts);
           break;
 
+        case 'script_patched':
+          setScripts(prev => prev.map(s => s.id === msg.script.id ? msg.script : s));
+          break;
+
         case 'settings_updated':
           setSettings(msg.settings);
           break;
@@ -117,12 +121,24 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
           }));
           break;
 
-        case 'console_entry':
-          setExecState(prev => ({
-            ...prev,
-            entries: [...prev.entries, msg.entry],
-          }));
+        case 'console_entry': {
+          const MAX_CONSOLE_ENTRIES = 500;
+          setExecState(prev => {
+            if (prev.entries.length >= MAX_CONSOLE_ENTRIES) return prev; // capped — drop silently
+            // When the last available slot is reached, show a truncation notice
+            // instead of the real entry so the user knows output has stopped.
+            const isLastSlot = prev.entries.length === MAX_CONSOLE_ENTRIES - 1;
+            const entry = isLastSlot
+              ? {
+                  timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
+                  type: 'warn' as const,
+                  message: '[Console output truncated at 500 entries. Clear the console to resume capture.]',
+                }
+              : msg.entry;
+            return { ...prev, entries: [...prev.entries, entry] };
+          });
           break;
+        }
 
         case 'execution_ended':
           setExecState(prev => {
@@ -317,8 +333,8 @@ const StatusTab: FC<StatusTabProps> = ({ scripts, execInfo, invocationCounts, in
 
             {/* Row 3: error message (only on failure) */}
             {dot === 'error' && info?.error && (
-              <div style={{ fontSize: '0.72rem', color: '#ef4444', fontFamily: 'monospace', marginTop: 2, wordBreak: 'break-word' }}>
-                {info.error}
+              <div className="ls-status-error-row">
+                <span className="ls-status-error-text">{info.error}</span>
               </div>
             )}
           </div>

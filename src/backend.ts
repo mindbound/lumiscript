@@ -72,6 +72,10 @@ function pushScripts(): void {
   send({ type: 'scripts_updated', scripts: scriptStorage.getScripts() });
 }
 
+function pushScript(script: import('./types/script.js').Script): void {
+  send({ type: 'script_patched', script });
+}
+
 function pushSettings(): void {
   send({ type: 'settings_updated', settings: settingsStore.get() });
 }
@@ -374,8 +378,15 @@ spindle.onFrontendMessage(async (raw, userId) => {
       }
 
       case 'update_script': {
-        await scriptStorage.updateScript(msg.id, msg.patch);
-        pushScripts();
+        const updated = await scriptStorage.updateScript(msg.id, msg.patch);
+        // Code-only autosave: send a single-script delta instead of broadcasting
+        // all scripts' code on every keystroke after the debounce period.
+        const isCodeOnly = 'code' in msg.patch && Object.keys(msg.patch).length === 1;
+        if (isCodeOnly && updated) {
+          pushScript(updated);
+        } else {
+          pushScripts();
+        }
         // Only re-register when subscriptions need to change.
         // Code / name / metadata / bindings take effect at the next invocation
         // via live storage lookup — no re-registration needed.
@@ -531,31 +542,12 @@ spindle.on('SETTINGS_UPDATED', (payload: unknown) => {
   }
 });
 
-spindle.on('CHAT_CHANGED', (payload: unknown) => {
-  const p = payload as { chatId?: string } | null;
-  const newChatId = p?.chatId ?? null;
-
-  if (newChatId) {
-    // Fetch chat DTO for character_id, then character DTO for display name.
-    const uid = activeUserId ?? undefined;
-    void spindle.chats.get(newChatId, uid).then(async chat => {
-      const charName = chat?.character_id
-        ? await spindle.characters.get(chat.character_id, uid).then(c => c?.name ?? null).catch(() => null)
-        : null;
-      setActiveContext({
-        chatId:        newChatId,
-        characterId:   chat?.character_id ?? null,
-        characterName: charName,
-      });
-      const ctx = getActiveContext();
-      send({ type: 'active_context', characterId: ctx.characterId, characterName: ctx.characterName, chatId: ctx.chatId });
-    });
-  } else {
-    setActiveContext({ chatId: null, characterId: null, characterName: null });
-    const ctx = getActiveContext();
-    send({ type: 'active_context', characterId: ctx.characterId, characterName: ctx.characterName, chatId: ctx.chatId });
-  }
-});
+// Note: CHAT_CHANGED fires when a chat is renamed or its metadata is updated —
+// NOT when the user switches between chats. Chat switching is handled by the
+// SETTINGS_UPDATED { key: 'activeChatId' } handler above. No context update
+// is needed on CHAT_CHANGED: the chatId and characterId remain the same when
+// a chat is renamed. The old handler here incorrectly treated CHAT_CHANGED as
+// a chat-switching event and cleared active context on every rename.
 
 spindle.on('CHARACTER_EDITED', (payload: unknown) => {
   const p = payload as { id?: string; character?: { name?: string } } | null;

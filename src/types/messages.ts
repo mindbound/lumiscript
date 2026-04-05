@@ -72,6 +72,15 @@ export type BackendToFrontend =
       scripts: Script[];
     }
   | {
+      /**
+       * Single-script delta sent after a code-only autosave.
+       * Cheaper than scripts_updated — avoids broadcasting all scripts'
+       * full code on every keystroke after the autosave debounce.
+       */
+      type: 'script_patched';
+      script: Script;
+    }
+  | {
       type: 'settings_updated';
       settings: LumiScriptSettings;
     }
