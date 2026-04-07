@@ -99,9 +99,10 @@ async function resolveConnection(
 
 function buildLLMParams(opts?: LLMOptions): Record<string, unknown> {
   const p: Record<string, unknown> = {};
-  if (opts?.temperature !== undefined) p.temperature = opts.temperature;
-  if (opts?.maxTokens   !== undefined) p.max_tokens  = opts.maxTokens;
-  if (opts?.model       !== undefined) p.model       = opts.model;
+  if (opts?.temperature       !== undefined) p.temperature         = opts.temperature;
+  if (opts?.maxTokens         !== undefined) p.max_tokens          = opts.maxTokens;
+  if (opts?.model             !== undefined) p.model               = opts.model;
+  if (opts?.parallelToolCalls !== undefined) p.parallel_tool_calls = opts.parallelToolCalls;
   return p;
 }
 
@@ -327,23 +328,28 @@ export function buildLLMAPI(deps: APIBuildDeps): LumiScriptAPI['llm'] {
         resolveConnection(opts, userId).then(conn => {
           const effectiveProvider = opts?.provider ?? conn?.provider;
           const effectiveModel    = opts?.model    ?? conn?.model;
+          // Strip :thinking(:\d+)? suffixes — extended-reasoning model variants
+          // reject function-calling requests on most providers (e.g. Mistral
+          // routed via NanoGPT), causing all fallbacks to fail and a 503 to be
+          // returned. Tool selection does not benefit from reasoning output; the
+          // base model handles function calling correctly.
+          const toolModel = effectiveModel?.replace(/:thinking(:\d+)?$/, '') ?? effectiveModel;
           const providerFields = {
             ...(effectiveProvider ? { provider: effectiveProvider } as Record<string, string> : {}),
-            ...(effectiveModel    ? { model:    effectiveModel    } as Record<string, string> : {}),
+            ...(toolModel         ? { model:    toolModel         } as Record<string, string> : {}),
           };
-          // Build structured-output extras when a schema is supplied
-          let extraParams: Record<string, unknown> = {};
+          // When a schema is supplied, inject it into the system prompt so the
+          // model knows the expected JSON shape.  We intentionally do NOT add
+          // response_format / output_config / responseMimeType here: combining
+          // those API-level format constraints with a tools array causes
+          // intermittent 503 rejections on multi-backend providers (NanoGPT →
+          // Mistral, etc.).  The schema-in-prompt + extractJsonFromResponse +
+          // Zod validation pipeline handles structured output reliably without
+          // the API-level constraint.
           let effectiveMessages = messages;
           if (schema) {
             const jsonSchema = toJsonSchemaObject(schema as ZodLike<unknown> | Record<string, unknown>);
             effectiveMessages = enhanceMessagesWithSchema(messages, jsonSchema);
-            if (effectiveProvider === ANTHROPIC_PROVIDER) {
-              extraParams = { output_config: { format: { type: 'json_schema', schema: strictifySchema(jsonSchema) } } };
-            } else if (effectiveProvider === GOOGLE_PROVIDER) {
-              extraParams = { responseMimeType: 'application/json', responseSchema: jsonSchema };
-            } else {
-              extraParams = { response_format: { type: 'json_object' } };
-            }
           }
           // Normalise tool parameter schemas: Anthropic requires input_schema to be
           // present; default to an empty object schema when the caller omitted it.
@@ -357,7 +363,7 @@ export function buildLLMAPI(deps: APIBuildDeps): LumiScriptAPI['llm'] {
             tools: normalisedTools,
             ...providerFields,
             ...(conn?.id ? { connection_id: conn.id } : {}),
-            parameters: { ...buildLLMParams(opts), ...extraParams },
+            parameters: buildLLMParams(opts),
             userId: userId ?? undefined,
           } as any) as Promise<{ content?: string; tool_calls?: Array<{ name: string; args: Record<string, unknown>; call_id: string }> }>).then(raw => {
             // Structured output path: parse/validate on the final step (no tool_calls returned)

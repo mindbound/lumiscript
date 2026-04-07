@@ -213,6 +213,8 @@ interface LLMOptions {
   temperature?: number;
   /** Override max tokens. */
   maxTokens?: number;
+  /** When false, forces single tool call per turn (parallel_tool_calls: false). Useful for Mistral and other providers that require serialised multi-step tool use. Only meaningful in generateWithTools(). */
+  parallelToolCalls?: boolean;
 }
 
 interface ZodLike<T> {

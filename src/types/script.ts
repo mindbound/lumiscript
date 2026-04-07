@@ -317,6 +317,14 @@ export interface LLMOptions {
   temperature?: number;
   /** Override max tokens. */
   maxTokens?: number;
+  /**
+   * When false, instructs the model to issue at most one tool call per turn
+   * (`parallel_tool_calls: false` in the request body). Useful for Mistral and
+   * other providers that require serialised multi-step tool use.
+   * Default: provider decides (usually true / model's own discretion).
+   * Only meaningful when calling `generateWithTools()`.
+   */
+  parallelToolCalls?: boolean;
 }
 
 /**

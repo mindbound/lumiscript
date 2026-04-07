@@ -548,13 +548,6 @@ spindle.on('SETTINGS_UPDATED', (payload: unknown) => {
   }
 });
 
-// Note: CHAT_CHANGED fires when a chat is renamed or its metadata is updated —
-// NOT when the user switches between chats. Chat switching is handled by the
-// SETTINGS_UPDATED { key: 'activeChatId' } handler above. No context update
-// is needed on CHAT_CHANGED: the chatId and characterId remain the same when
-// a chat is renamed. The old handler here incorrectly treated CHAT_CHANGED as
-// a chat-switching event and cleared active context on every rename.
-
 spindle.on('CHARACTER_EDITED', (payload: unknown) => {
   const p = payload as { id?: string; character?: { name?: string } } | null;
   if (p?.id) {
