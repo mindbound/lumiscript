@@ -328,15 +328,9 @@ export function buildLLMAPI(deps: APIBuildDeps): LumiScriptAPI['llm'] {
         resolveConnection(opts, userId).then(conn => {
           const effectiveProvider = opts?.provider ?? conn?.provider;
           const effectiveModel    = opts?.model    ?? conn?.model;
-          // Strip :thinking(:\d+)? suffixes — extended-reasoning model variants
-          // reject function-calling requests on most providers (e.g. Mistral
-          // routed via NanoGPT), causing all fallbacks to fail and a 503 to be
-          // returned. Tool selection does not benefit from reasoning output; the
-          // base model handles function calling correctly.
-          const toolModel = effectiveModel?.replace(/:thinking(:\d+)?$/, '') ?? effectiveModel;
           const providerFields = {
             ...(effectiveProvider ? { provider: effectiveProvider } as Record<string, string> : {}),
-            ...(toolModel         ? { model:    toolModel         } as Record<string, string> : {}),
+            ...(effectiveModel    ? { model:    effectiveModel    } as Record<string, string> : {}),
           };
           // Mistral API explicitly rejects response_format + tools in the same
           // request (error 3051: "Cannot use json response type with tools").
@@ -347,7 +341,7 @@ export function buildLLMAPI(deps: APIBuildDeps): LumiScriptAPI['llm'] {
           //     like mistral-small-2603, codestral-latest, magistral-*, etc.)
           const MISTRAL_MODEL_RE = /^(mistralai\/|mistral-|codestral-|magistral-|devstral-|ministral-|voxtral-)/;
           const isMistralModel = effectiveProvider === 'mistral'
-            || MISTRAL_MODEL_RE.test(toolModel ?? '');
+            || MISTRAL_MODEL_RE.test(effectiveModel ?? '');
           // Build structured-output extras when a schema is supplied.
           // Schema is always injected into the system prompt (universal guidance).
           // API-level format constraints (response_format, output_config, etc.)
