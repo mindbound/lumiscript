@@ -30,6 +30,19 @@ import {
   listAll,
 } from '../injection-store.js';
 
+/**
+ * Per-chat serialization queue for setMetadata.
+ *
+ * setMetadata performs a read-modify-write that spans two awaits. Without
+ * serialization, two concurrent calls for the same chat can interleave:
+ *   Script A reads { a:1 }           Script B reads { a:1 }
+ *   Script A writes { a:1, b:2 }     Script B writes { a:1, c:3 }  ← b lost
+ *
+ * Queuing per chatId ensures each write completes before the next begins.
+ * The entry is removed once the queue drains to avoid a memory leak.
+ */
+const metadataQueues = new Map<string, Promise<void>>();
+
 export function buildChatAPI(deps: APIBuildDeps): LumiScriptAPI['chat'] {
   const { script, hasPerm, activeContext, userId } = deps;
   const uid = userId ?? undefined;
@@ -87,15 +100,21 @@ export function buildChatAPI(deps: APIBuildDeps): LumiScriptAPI['chat'] {
     setMetadata: (key: string, value: unknown) => {
       assertPerm('chats', hasPerm);
       const id = requireChatId(activeContext);
-      return shielded(
-        spindle.chats.get(id, uid).then(async dto => {
-          if (!dto) throw new Error(`api.chat.setMetadata: chat "${id}" not found`);
-          // Read-modify-write: spread existing metadata and set the new key.
-          // This prevents a partial update from wiping other metadata keys.
-          const merged = { ...dto.metadata, [key]: value };
-          await spindle.chats.update(id, { metadata: merged }, uid);
-        }),
-      );
+      // Serialise via the per-chat queue so concurrent setMetadata calls for
+      // the same chat cannot interleave at the two awaits and lose each other's
+      // writes (read-modify-write TOCTOU race).
+      const queued = metadataQueues.get(id) ?? Promise.resolve();
+      const next: Promise<void> = queued.then(async () => {
+        const dto = await spindle.chats.get(id, uid);
+        if (!dto) throw new Error(`api.chat.setMetadata: chat "${id}" not found`);
+        await spindle.chats.update(id, { metadata: { ...dto.metadata, [key]: value } }, uid);
+      }).finally(() => {
+        // Remove the entry only when this is still the latest queued promise
+        // (a newer call may have already replaced it).
+        if (metadataQueues.get(id) === next) metadataQueues.delete(id);
+      });
+      metadataQueues.set(id, next);
+      return shielded(next);
     },
 
     // ── Prompt injection ────────────────────────────────────────────────────

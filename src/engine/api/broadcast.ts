@@ -24,6 +24,11 @@ export function buildBroadcastAPI(deps: APIBuildDeps): LumiScriptAPI['broadcast'
 
   return {
     emit(event: string, payload?: unknown): void {
+      if (event.startsWith('ls:')) {
+        throw new Error(
+          `api.broadcast.emit: "ls:" prefix is reserved for LumiScript internal events. Use a different event name.`,
+        );
+      }
       emit(event, payload);
     },
 

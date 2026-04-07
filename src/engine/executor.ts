@@ -234,9 +234,7 @@ export function buildScriptNamespace(
 
       const library =
         options.scriptStorage.getScript(nameOrId) ??
-        options.scriptStorage.getScripts().find(
-          s => s.type === 'library' && s.name === nameOrId,
-        );
+        options.scriptStorage.getByName(nameOrId);
 
       if (!library) throw new Error(`script.require: library "${nameOrId}" not found`);
       if (library.type !== 'library') {

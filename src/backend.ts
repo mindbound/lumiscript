@@ -10,6 +10,7 @@ import { setActiveContext, getActiveContext } from './engine/binding.js';
 import { executeScript } from './engine/executor.js';
 import { TriggerRegistry } from './engine/trigger-registry.js';
 import { generateUUID } from './utils/uuid.js';
+import { readFile } from 'fs/promises';
 import { listByMode, listAll, clearEphemeral, clearByScriptId } from './engine/injection-store.js';
 import { getTool, clearByScriptId as clearToolsByScriptId, listAll as listAllTools } from './engine/tool-store.js';
 import { emit as broadcastEmit } from './engine/broadcast-bus.js';
@@ -192,20 +193,19 @@ spindle.registerInterceptor(async (messages, context) => {
             const entry = getTool(call.name);
             if (!entry) {
               toolCallSummary.push({ name: call.name, success: false });
-              loopMessages = [...loopMessages, { role: 'user' as const, content: `[Tool not found: ${call.name}]` }];
+              loopMessages.push({ role: 'user' as const, content: `[Tool not found: ${call.name}]` });
               continue;
             }
             try {
               const toolResult = await entry.handler(call.args ?? {});
               toolCallSummary.push({ name: call.name, success: true });
-              loopMessages = [
-                ...loopMessages,
+              loopMessages.push(
                 { role: 'assistant' as const, content: `[Calling: ${call.name}]` },
                 { role: 'user'      as const, content: `[Result of ${call.name}]: ${toolResult}` },
-              ];
+              );
             } catch (err: any) {
               toolCallSummary.push({ name: call.name, success: false });
-              loopMessages = [...loopMessages, { role: 'user' as const, content: `[Error in ${call.name}]: ${err?.message ?? 'unknown'}` }];
+              loopMessages.push({ role: 'user' as const, content: `[Error in ${call.name}]: ${err?.message ?? 'unknown'}` });
             }
           }
         }
@@ -334,6 +334,12 @@ spindle.onFrontendMessage(async (raw, userId) => {
 
       case 'get_settings': {
         pushSettings();
+        // Lazily check for updates once per session (when the user actually
+        // has the panel open so they can see the toast notification).
+        if (!_updateCheckDone) {
+          _updateCheckDone = true;
+          void checkForUpdates();
+        }
         break;
       }
 
@@ -568,6 +574,82 @@ spindle.on('PERSONA_CHANGED', (payload: unknown) => {
     });
   }
 });
+
+// ─── Update availability check ───────────────────────────────────────────────
+//
+// Fires once, lazily, when the frontend first calls get_settings (which means
+// the user has the panel open and will actually see the toast). Checks if the
+// installed extension is behind its remote branch on GitHub. Fails silently on
+// any error (no .git dir, no network, non-GitHub repo, API rate limit, etc.).
+
+let _updateCheckDone = false;
+
+async function checkForUpdates(): Promise<void> {
+  try {
+    // Derive extension root from this file's URL.
+    // import.meta.url = "file:///abs/path/to/dist/backend.js"
+    // Strip filename → dist dir, strip dist dir → extension root.
+    const fileUrl = import.meta.url;
+    const distUrl = fileUrl.slice(0, fileUrl.lastIndexOf('/'));
+    const rootUrl = distUrl.slice(0, distUrl.lastIndexOf('/'));
+    // Convert file:// URL to a filesystem path (Bun uses forward slashes on all platforms)
+    const gitRoot = rootUrl.replace(/^file:\/\/\/?/, match => (match === 'file:///' ? '/' : ''));
+
+    // Read .git/HEAD to identify the current branch.
+    // Normal checkout: "ref: refs/heads/staging\n"
+    // Detached HEAD: a raw SHA — skip check.
+    const headText = (await readFile(gitRoot + '/.git/HEAD', 'utf-8')).trim();
+    const refMatch = headText.match(/^ref: refs\/heads\/(.+)$/);
+    if (!refMatch) return; // detached HEAD or unexpected format
+    const branch = refMatch[1];
+    if (!branch) return; // noUncheckedIndexedAccess guard
+
+    // Read local commit SHA from the individual ref file.
+    // Fall back to .git/packed-refs if the file has been packed by git gc.
+    let localSHA: string | null = null;
+    try {
+      localSHA = (await readFile(gitRoot + '/.git/refs/heads/' + branch, 'utf-8')).trim();
+    } catch {
+      const packed = await readFile(gitRoot + '/.git/packed-refs', 'utf-8').catch(() => '');
+      for (const line of packed.split('\n')) {
+        if (line.endsWith(' refs/heads/' + branch)) {
+          localSHA = line.split(' ')[0] ?? null;
+          break;
+        }
+      }
+    }
+    if (!localSHA) return;
+
+    // Parse owner/repo from the "github" field in spindle.json.
+    const manifest = JSON.parse(
+      await readFile(gitRoot + '/spindle.json', 'utf-8'),
+    ) as { github?: string };
+    if (!manifest.github) return;
+    const urlMatch = manifest.github.match(/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/);
+    const owner = urlMatch?.[1];
+    const repo   = urlMatch?.[2];
+    if (!owner || !repo) return;
+
+    // Ask GitHub API for the latest commit on this branch.
+    const res = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/commits/${encodeURIComponent(branch)}`,
+      { headers: { 'User-Agent': 'LumiScript/1.0 update-check' } },
+    );
+    if (!res.ok) return;
+    const data = await res.json() as { sha?: string };
+    if (!data.sha || data.sha === localSHA) return; // up to date
+
+    spindle.log.info(
+      `[LumiScript] Update available: local=${localSHA.slice(0, 7)} remote=${data.sha.slice(0, 7)} (${branch})`,
+    );
+    spindle.toast.info(
+      `A newer version is available on the "${branch}" branch. Update via the Extensions panel.`,
+      { title: 'LumiScript update available', duration: 12000 },
+    );
+  } catch {
+    // Skip silently: no .git dir (ZIP install), no network, API error, etc.
+  }
+}
 
 // ─── Permission denied handler ────────────────────────────────────────────────
 

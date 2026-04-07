@@ -102,5 +102,22 @@ export function buildCharactersAPI(deps: APIBuildDeps): LumiScriptAPI['character
       assertPerm('characters', hasPerm);
       return spindle.characters.delete(id, uid);
     },
+
+    getByName: async (name: string) => {
+      assertPerm('characters', hasPerm);
+      // Scan all pages until a match is found or the list is exhausted.
+      // Character names are not guaranteed unique in Lumiverse; the first
+      // matching character is returned. Using a page size of 100 to minimise
+      // round-trips while staying within typical Spindle limits.
+      const PAGE_SIZE = 100;
+      let offset = 0;
+      while (true) {
+        const page = await spindle.characters.list({ limit: PAGE_SIZE, offset, userId: uid });
+        const found = page.data.find(c => c.name === name);
+        if (found) return mapCharacter(found);
+        offset += PAGE_SIZE;
+        if (offset >= page.total) return null; // all pages exhausted
+      }
+    },
   };
 }

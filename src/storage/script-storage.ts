@@ -15,12 +15,26 @@ const SCRIPTS_PATH = 'scripts.json';
 export class ScriptStorage {
   readonly store: CollectionStore<Script>;
 
+  /**
+   * Name → Script index for O(1) lookup in script.require() by name.
+   * Rebuilt automatically whenever the underlying CollectionStore changes.
+   */
+  private readonly nameIndex = new Map<string, Script>();
+
   constructor(storage: UserStorageAdapter, getUserId: () => string | undefined) {
     this.store = new CollectionStore<Script>(SCRIPTS_PATH, storage, getUserId);
+    // Keep the name index in sync with all store mutations.
+    this.store.subscribe(() => this._rebuildNameIndex());
+  }
+
+  private _rebuildNameIndex(): void {
+    this.nameIndex.clear();
+    for (const s of this.store.getAll()) this.nameIndex.set(s.name, s);
   }
 
   async load(): Promise<void> {
     await this.store.load();
+    this._rebuildNameIndex();
   }
 
   // ─── Read ─────────────────────────────────────────────────────────────────
@@ -31,6 +45,11 @@ export class ScriptStorage {
 
   getScript(id: string): Script | null {
     return this.store.getById(id);
+  }
+
+  /** O(1) lookup by script name using the maintained name index. */
+  getByName(name: string): Script | undefined {
+    return this.nameIndex.get(name);
   }
 
   getTriggerScripts(): Script[] {

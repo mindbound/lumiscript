@@ -29,10 +29,40 @@ export interface InjectionEntry {
 
 const store = new Map<string, InjectionEntry>();
 
+// ─── Limits ───────────────────────────────────────────────────────────────────
+
+/** Maximum character count per injection content string (≈ 32 KB). */
+const MAX_INJECTION_CONTENT_CHARS = 32 * 1024;
+
+/**
+ * Maximum number of simultaneously active injection entries (across all scripts).
+ * Scripts should call removeInjection() or clearInjections() when injections
+ * are no longer needed.
+ */
+const MAX_INJECTIONS = 50;
+
 // ─── Mutators ─────────────────────────────────────────────────────────────────
 
-/** Add or overwrite an injection entry. */
+/**
+ * Add or overwrite an injection entry.
+ *
+ * Throws if `entry.content` exceeds the 32 KB character limit or if the total
+ * active injection count would exceed 50. The count limit is skipped when
+ * updating an existing entry (same ID) since the store size does not grow.
+ */
 export function addInjection(entry: InjectionEntry): void {
+  if (entry.content.length > MAX_INJECTION_CONTENT_CHARS) {
+    throw new Error(
+      `api.chat.inject: content too large (${entry.content.length} chars). ` +
+      `Maximum is ${MAX_INJECTION_CONTENT_CHARS} chars (32 KB).`,
+    );
+  }
+  if (!store.has(entry.id) && store.size >= MAX_INJECTIONS) {
+    throw new Error(
+      `api.chat.inject: active injection limit reached (${MAX_INJECTIONS}). ` +
+      `Call api.chat.removeInjection() or api.chat.clearInjections() to free slots.`,
+    );
+  }
   store.set(entry.id, entry);
 }
 
@@ -67,9 +97,13 @@ export function listAll(): InjectionEntry[] {
   return [...store.values()];
 }
 
-/** Return entries for a specific mode. */
+/** Return entries for a specific mode (single allocation — no intermediate spread). */
 export function listByMode(mode: 'intercept' | 'context'): InjectionEntry[] {
-  return [...store.values()].filter(e => e.mode === mode);
+  const result: InjectionEntry[] = [];
+  for (const entry of store.values()) {
+    if (entry.mode === mode) result.push(entry);
+  }
+  return result;
 }
 
 /** Return entries belonging to a specific script. */

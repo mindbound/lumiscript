@@ -36,15 +36,17 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
   const [renameValue, setRenameValue] = useState(script.name);
   const [viewMode, setViewMode] = useState<'code' | 'docs'>('code');
   const [copied, setCopied] = useState(false);
+  const [confirmDangerous, setConfirmDangerous] = useState(false);
   const saveTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const editorRef = useRef<any>(null);
 
-  // Sync local code when script changes
+  // Sync local code when script changes; also dismiss any pending dangerous confirm.
   useEffect(() => {
     setLocalCode(script.code);
     setUnsaved(false);
     setRenameValue(script.name);
+    setConfirmDangerous(false);
   }, [script.id, script.code, script.name]);
 
   // Immediately refresh context when a different script is opened.
@@ -79,33 +81,29 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
     editorRef.current = editor;
 
     // ── IntelliSense: register LumiScript ambient types once ─────────────────
+    // Runs only on the first editor mount per page session (_defsRegistered flag).
+    // The editor uses `javascript` language mode, so only jsDefaults is active.
+    // tsDefaults configuration is intentionally omitted — it is unused for JS
+    // files and would trigger two additional TypeScript worker re-analysis cycles.
     if (!_defsRegistered) {
       _defsRegistered = true;
 
-      // TypeScript mode gives full object-literal field completion (e.g. typing
-      // `api.characters.create({` auto-shows all CharacterCreateInput fields).
-      // noSemanticValidation suppresses type-error squiggles so users can write
-      // plain JavaScript without type annotations. Syntax errors still show.
-      const tsDefaults = monaco.languages.typescript.typescriptDefaults;
       const jsDefaults = monaco.languages.typescript.javascriptDefaults;
 
-      const diagnosticsOpts = { noSemanticValidation: true, noSyntaxValidation: false };
-      tsDefaults.setDiagnosticsOptions(diagnosticsOpts);
-      jsDefaults.setDiagnosticsOptions(diagnosticsOpts);   // fallback safety
+      // noSemanticValidation suppresses type-error squiggles so users can write
+      // plain JavaScript without type annotations. Syntax errors still show.
+      jsDefaults.setDiagnosticsOptions({ noSemanticValidation: true, noSyntaxValidation: false });
 
-      const compilerOpts = {
+      jsDefaults.setCompilerOptions({
         target: monaco.languages.typescript.ScriptTarget.ES2020,
         allowNonTsExtensions: true,
         allowJs: true,
         noEmit: true,
-      };
-      tsDefaults.setCompilerOptions(compilerOpts);
-      jsDefaults.setCompilerOptions(compilerOpts);
+      });
 
       // Register the ambient declarations for api, script, z, data, and all
       // public API types. This enables hover docs, autocomplete, and signature
       // help for the entire LumiScript API without any imports in user scripts.
-      tsDefaults.addExtraLib(LUMISCRIPT_DEFS, 'ts:lumiverse/lumiscript-api.d.ts');
       jsDefaults.addExtraLib(LUMISCRIPT_DEFS, 'ts:lumiverse/lumiscript-api.d.ts');
     }
     // ─────────────────────────────────────────────────────────────────────────
@@ -145,9 +143,17 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
   };
 
   const handleToggleDangerous = () => {
-    const next = !script.allowDangerous;
-    if (next && !window.confirm('Enable dangerous mode? The script will be able to make HTTP requests and access files.')) return;
-    sendToBackend({ type: 'update_script', id: script.id, patch: { allowDangerous: next } });
+    if (script.allowDangerous) {
+      // Disabling — no confirmation needed.
+      sendToBackend({ type: 'update_script', id: script.id, patch: { allowDangerous: false } });
+    } else if (confirmDangerous) {
+      // Second click inside the confirm bar — user confirmed.
+      setConfirmDangerous(false);
+      sendToBackend({ type: 'update_script', id: script.id, patch: { allowDangerous: true } });
+    } else {
+      // First click — show the inline confirmation bar.
+      setConfirmDangerous(true);
+    }
   };
 
   const fmt = (ms: number) => new Date(ms).toLocaleString();
@@ -262,6 +268,18 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
           onAdd={handleBindingAdd}
           onRemove={handleBindingRemove}
         />
+      )}
+
+      {/* Inline dangerous-mode confirmation bar (replaces browser confirm dialog) */}
+      {confirmDangerous && (
+        <div className="ls-danger-confirm">
+          <ShieldAlert size={10} />
+          <span className="ls-danger-confirm-msg">
+            Enable dangerous mode? The script can make HTTP requests and access files.
+          </span>
+          <button className="ls-danger-confirm-yes" onClick={handleToggleDangerous}>Enable</button>
+          <button className="ls-danger-confirm-no" onClick={() => setConfirmDangerous(false)}>Cancel</button>
+        </div>
       )}
 
       {/* Metadata footer */}

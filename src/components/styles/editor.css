@@ -85,3 +85,39 @@
 }
 .ls-danger-btn:hover { color: var(--lumiverse-text); }
 .ls-dangerous { color: #ef4444; }
+
+/* ── Dangerous-mode inline confirmation bar ──────────────────────────────── */
+.ls-danger-confirm {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-top: 1px solid color-mix(in srgb, #f97316 22%, transparent);
+  background: color-mix(in srgb, #f97316 8%, transparent);
+  font-size: 10px;
+  color: #f97316;
+  flex-shrink: 0;
+}
+.ls-danger-confirm-msg { flex: 1; }
+.ls-danger-confirm-yes,
+.ls-danger-confirm-no {
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-family: inherit;
+  cursor: pointer;
+  border: 1px solid;
+  background: transparent;
+  transition: background var(--lumiverse-transition-fast);
+  flex-shrink: 0;
+}
+.ls-danger-confirm-yes {
+  border-color: color-mix(in srgb, #f97316 40%, transparent);
+  color: #f97316;
+}
+.ls-danger-confirm-yes:hover { background: color-mix(in srgb, #f97316 15%, transparent); }
+.ls-danger-confirm-no {
+  border-color: var(--lumiverse-border);
+  color: var(--lumiverse-text-muted);
+}
+.ls-danger-confirm-no:hover { background: var(--lumiverse-fill-subtle); }

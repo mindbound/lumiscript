@@ -680,6 +680,13 @@ interface CharactersAPI {
   list(options?: { limit?: number; offset?: number }): Promise<{ data: Character[]; total: number }>;
   /** Get a character by ID. Returns null if not found. Requires characters permission. */
   get(id: string): Promise<Character | null>;
+  /**
+   * Find the first character whose name exactly matches the given name (case-sensitive).
+   * Scans all pages so no character is missed regardless of library size.
+   * Returns null if no character has that name. Character names are not unique
+   * in Lumiverse; the first match is returned. Requires characters permission.
+   */
+  getByName(name: string): Promise<Character | null>;
   /** Create a new character. Requires characters permission. */
   create(input: CharacterCreateInput): Promise<Character>;
   /** Update a character. Requires characters permission. */
