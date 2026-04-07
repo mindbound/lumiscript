@@ -338,18 +338,35 @@ export function buildLLMAPI(deps: APIBuildDeps): LumiScriptAPI['llm'] {
             ...(effectiveProvider ? { provider: effectiveProvider } as Record<string, string> : {}),
             ...(toolModel         ? { model:    toolModel         } as Record<string, string> : {}),
           };
-          // When a schema is supplied, inject it into the system prompt so the
-          // model knows the expected JSON shape.  We intentionally do NOT add
-          // response_format / output_config / responseMimeType here: combining
-          // those API-level format constraints with a tools array causes
-          // intermittent 503 rejections on multi-backend providers (NanoGPT →
-          // Mistral, etc.).  The schema-in-prompt + extractJsonFromResponse +
-          // Zod validation pipeline handles structured output reliably without
-          // the API-level constraint.
+          // Mistral API explicitly rejects response_format + tools in the same
+          // request (error 3051: "Cannot use json response type with tools").
+          // Detect Mistral models regardless of routing path:
+          //   - native Mistral provider connection
+          //   - NanoGPT / OpenRouter proxy  (mistralai/ prefix)
+          //   - custom provider pointing at api.mistral.ai (bare model names
+          //     like mistral-small-2603, codestral-latest, magistral-*, etc.)
+          const MISTRAL_MODEL_RE = /^(mistralai\/|mistral-|codestral-|magistral-|devstral-|ministral-|voxtral-)/;
+          const isMistralModel = effectiveProvider === 'mistral'
+            || MISTRAL_MODEL_RE.test(toolModel ?? '');
+          // Build structured-output extras when a schema is supplied.
+          // Schema is always injected into the system prompt (universal guidance).
+          // API-level format constraints (response_format, output_config, etc.)
+          // are added for providers that support them alongside tools — skipped
+          // for Mistral which rejects the combination.
+          let extraParams: Record<string, unknown> = {};
           let effectiveMessages = messages;
           if (schema) {
             const jsonSchema = toJsonSchemaObject(schema as ZodLike<unknown> | Record<string, unknown>);
             effectiveMessages = enhanceMessagesWithSchema(messages, jsonSchema);
+            if (!isMistralModel) {
+              if (effectiveProvider === ANTHROPIC_PROVIDER) {
+                extraParams = { output_config: { format: { type: 'json_schema', schema: strictifySchema(jsonSchema) } } };
+              } else if (effectiveProvider === GOOGLE_PROVIDER) {
+                extraParams = { responseMimeType: 'application/json', responseSchema: jsonSchema };
+              } else {
+                extraParams = { response_format: { type: 'json_object' } };
+              }
+            }
           }
           // Normalise tool parameter schemas: Anthropic requires input_schema to be
           // present; default to an empty object schema when the caller omitted it.
@@ -363,7 +380,7 @@ export function buildLLMAPI(deps: APIBuildDeps): LumiScriptAPI['llm'] {
             tools: normalisedTools,
             ...providerFields,
             ...(conn?.id ? { connection_id: conn.id } : {}),
-            parameters: buildLLMParams(opts),
+            parameters: { ...buildLLMParams(opts), ...extraParams },
             userId: userId ?? undefined,
           } as any) as Promise<{ content?: string; tool_calls?: Array<{ name: string; args: Record<string, unknown>; call_id: string }> }>).then(raw => {
             // Structured output path: parse/validate on the final step (no tool_calls returned)
