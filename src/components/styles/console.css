@@ -53,3 +53,10 @@
 .ls-entry-time { color: var(--lumiverse-text-muted); flex-shrink: 0; }
 .ls-entry-type { flex-shrink: 0; font-weight: 600; }
 .ls-entry-msg { word-break: break-word; white-space: pre-wrap; }
+/* Run-separator divider inserted between consecutive runs of the same script */
+.ls-entry-separator {
+  border: none;
+  border-top: 1px dashed var(--lumiverse-border);
+  margin: 4px 0;
+  opacity: 0.6;
+}

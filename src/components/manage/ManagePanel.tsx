@@ -17,8 +17,8 @@ interface ManagePanelProps {
   execInfo: Record<string, ScriptExecInfo>;
   activeRunScriptId: string | null;
   isRunning: boolean;
-  consoleEntries: ConsoleEntry[];
-  onClearConsole: () => void;
+  consoleHistory: Record<string, ConsoleEntry[]>;
+  onClearConsole: (scriptId: string) => void;
   sendToBackend: (msg: FrontendToBackend) => void;
 }
 
@@ -28,7 +28,7 @@ export const ManagePanel: FC<ManagePanelProps> = ({
   execInfo,
   activeRunScriptId,
   isRunning,
-  consoleEntries,
+  consoleHistory,
   onClearConsole,
   sendToBackend,
 }) => {
@@ -58,7 +58,7 @@ export const ManagePanel: FC<ManagePanelProps> = ({
           execInfo={execInfo}
           activeRunScriptId={activeRunScriptId}
           isRunning={isRunning}
-          consoleEntries={consoleEntries}
+          consoleHistory={consoleHistory}
           onClearConsole={onClearConsole}
           onClose={handleClose}
           sendToBackend={sendToBackend}

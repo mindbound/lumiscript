@@ -17,7 +17,8 @@ interface ExecState {
   activeScriptId: string | null;
   runId: string | null;
   isRunning: boolean;
-  entries: ConsoleEntry[];
+  /** Per-script console history, capped at MAX_CONSOLE_ENTRIES entries each. */
+  consoleHistory: Record<string, ConsoleEntry[]>;
   scriptExecInfo: Record<string, ScriptExecInfo>;
 }
 
@@ -34,7 +35,7 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
 }) => {
   const [activeTab, setActiveTab] = useState<TabId>('manage');
   const [scripts, setScripts] = useState<Script[]>([]);
-  const [_settings, setSettings] = useState<LumiScriptSettings>(DEFAULT_SETTINGS);
+  const [settings, setSettings] = useState<LumiScriptSettings>(DEFAULT_SETTINGS);
   const [activeContext, setActiveContext] = useState<ActiveContext>({
     characterId: null,
     characterName: null,
@@ -44,7 +45,7 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
     activeScriptId: null,
     runId: null,
     isRunning: false,
-    entries: [],
+    consoleHistory: {},
     scriptExecInfo: {},
   });
   const [injections, setInjections] = useState<InjectionInfo[]>([]);
@@ -102,46 +103,66 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
           });
           break;
 
-        case 'execution_started':
-          setExecState(prev => ({
-            ...prev,
-            activeScriptId: msg.scriptId,
-            runId: msg.runId,
-            isRunning: true,
-            entries: [],
-            scriptExecInfo: {
-              ...prev.scriptExecInfo,
-              [msg.scriptId]: { dot: 'running' },
-            },
-          }));
+        case 'execution_started': {
+          // Add a run-separator divider to the script's history when it already
+          // has prior output, so multiple runs are visually distinguished.
+          const sepEntry: ConsoleEntry = {
+            timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
+            type: 'separator',
+            message: '',
+          };
+          setExecState(prev => {
+            const existing = prev.consoleHistory[msg.scriptId] ?? [];
+            const updated = existing.length > 0 ? [...existing, sepEntry] : existing;
+            return {
+              ...prev,
+              activeScriptId: msg.scriptId,
+              runId: msg.runId,
+              isRunning: true,
+              consoleHistory: { ...prev.consoleHistory, [msg.scriptId]: updated },
+              scriptExecInfo: {
+                ...prev.scriptExecInfo,
+                [msg.scriptId]: { dot: 'running' },
+              },
+            };
+          });
           // Count invocations for trigger scripts
           setInvocationCounts(prev => ({
             ...prev,
             [msg.scriptId]: (prev[msg.scriptId] ?? 0) + 1,
           }));
           break;
+        }
 
         case 'console_entry': {
-          const MAX_CONSOLE_ENTRIES = 500;
+          const MAX_CONSOLE_ENTRIES = settings.consoleHistoryLimit;
           setExecState(prev => {
-            if (prev.entries.length >= MAX_CONSOLE_ENTRIES) return prev; // capped — drop silently
+            const existing = prev.consoleHistory[msg.scriptId] ?? [];
+            if (existing.length >= MAX_CONSOLE_ENTRIES) return prev; // per-script cap — drop silently
             // When the last available slot is reached, show a truncation notice
             // instead of the real entry so the user knows output has stopped.
-            const isLastSlot = prev.entries.length === MAX_CONSOLE_ENTRIES - 1;
+            const isLastSlot = existing.length === MAX_CONSOLE_ENTRIES - 1;
             const entry = isLastSlot
               ? {
                   timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
                   type: 'warn' as const,
-                  message: '[Console output truncated at 500 entries. Clear the console to resume capture.]',
+                  message: `[Console output truncated at ${MAX_CONSOLE_ENTRIES} entries. Clear the console to resume capture.]`,
                 }
               : msg.entry;
-            return { ...prev, entries: [...prev.entries, entry] };
+            return {
+              ...prev,
+              consoleHistory: {
+                ...prev.consoleHistory,
+                [msg.scriptId]: [...existing, entry],
+              },
+            };
           });
           break;
         }
 
         case 'execution_ended':
           setExecState(prev => {
+            const existing = prev.consoleHistory[msg.scriptId] ?? [];
             const errorEntry = !msg.success && msg.error
               ? [{
                   timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
@@ -152,7 +173,9 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
             return {
               ...prev,
               isRunning: false,
-              entries: [...prev.entries, ...errorEntry],
+              consoleHistory: errorEntry.length
+                ? { ...prev.consoleHistory, [msg.scriptId]: [...existing, ...errorEntry] }
+                : prev.consoleHistory,
               scriptExecInfo: {
                 ...prev.scriptExecInfo,
                 [msg.scriptId]: {
@@ -181,8 +204,11 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
     return unsub;
   }, [onBackendMessage, sendToBackend]);
 
-  const clearConsole = useCallback(() => {
-    setExecState(prev => ({ ...prev, entries: [] }));
+  const clearConsole = useCallback((scriptId: string) => {
+    setExecState(prev => ({
+      ...prev,
+      consoleHistory: { ...prev.consoleHistory, [scriptId]: [] },
+    }));
   }, []);
 
   return (
@@ -214,7 +240,7 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
             execInfo={execState.scriptExecInfo}
             activeRunScriptId={execState.activeScriptId}
             isRunning={execState.isRunning}
-            consoleEntries={execState.entries}
+            consoleHistory={execState.consoleHistory}
             onClearConsole={clearConsole}
             sendToBackend={sendToBackend}
           />

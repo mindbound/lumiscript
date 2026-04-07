@@ -23,7 +23,7 @@ declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
 import type { Script } from '../types/script.js';
 import type { BackendToFrontend } from '../types/messages.js';
 import type { ExecutorOptions } from './executor.js';
-import { executeScript } from './executor.js';
+import { executeScript, HARD_LIMIT_MS } from './executor.js';
 import { isAnyBindingSatisfied, getActiveContext } from './binding.js';
 import { executionStatusStore } from './execution-status.js';
 import { generateUUID } from '../utils/uuid.js';
@@ -38,6 +38,11 @@ export interface TriggerDeps {
   scriptStorage: ScriptStorage;
   /** Forwarded to ExecutorOptions so api.tools.register/unregister push live updates. */
   onToolsChanged?: () => void;
+  /**
+   * Per-execution async timeout in milliseconds, sourced from
+   * `LumiScriptSettings.scriptTimeoutMs`. Defaults to `SCRIPT_TIMEOUT_MS` when absent.
+   */
+  scriptTimeoutMs?: number;
 }
 
 // ─── TriggerRegistry class ────────────────────────────────────────────────────
@@ -83,7 +88,7 @@ export class TriggerRegistry {
     for (const event of events) {
       const unsub = spindle.on(event, async (payload: unknown) => {
         // ── Fetch current script from storage ──────────────────────────────
-        const { grantedPermissions, userId, scriptStorage, onToolsChanged } = this.getDeps();
+        const { grantedPermissions, userId, scriptStorage, onToolsChanged, scriptTimeoutMs } = this.getDeps();
         const currentScript = scriptStorage.getScript(scriptId);
 
         // Bail if the script has been deleted, disabled, or is no longer a trigger.
@@ -132,9 +137,21 @@ export class TriggerRegistry {
           onConsole: (entry) =>
             this.sendToFrontend({ type: 'console_entry', scriptId: currentScript.id, runId, entry }),
           onToolsChanged,
+          timeoutMs: scriptTimeoutMs,
         };
 
+        // Sync-loop watchdog: process.exit(1) is the only escape when the
+        // worker event loop is blocked by a synchronous infinite loop.
+        const syncWatchdogMs = (scriptTimeoutMs ?? HARD_LIMIT_MS) + 5_000;
+        const syncWatchdog = setTimeout(() => {
+          spindle.log.error(
+            `[LumiScript] Trigger script "${currentScript.name}" blocked the worker with a synchronous infinite loop — terminating`,
+          );
+          process.exit(1);
+        }, syncWatchdogMs);
+
         const result = await executeScript(currentScript, opts);
+        clearTimeout(syncWatchdog);
 
         // ── Update status — only when the LAST concurrent invocation finishes
         const remaining = (this.runningCounts.get(currentScript.id) ?? 1) - 1;

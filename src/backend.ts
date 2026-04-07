@@ -8,6 +8,7 @@ import { SettingsStore } from './storage/settings-store.js';
 import { executionStatusStore } from './engine/execution-status.js';
 import { setActiveContext, getActiveContext } from './engine/binding.js';
 import { executeScript } from './engine/executor.js';
+import { registerLumiScriptMacros, updateLumiScriptActiveMacro } from './macros.js';
 import { TriggerRegistry } from './engine/trigger-registry.js';
 import { generateUUID } from './utils/uuid.js';
 import { readFile } from 'fs/promises';
@@ -48,6 +49,16 @@ async function refreshActiveContext(userId: string | null): Promise<void> {
     characterId:   chat.character_id,
     characterName: char?.name ?? null,
   });
+}
+
+// ─── Macro character-ID bridge ─────────────────────────────────────────────────
+// Macro function handlers can't call spindle.chats.get() (needs userId in
+// multi-user mode). Instead, publish the characterId to globalThis so handlers
+// can read it synchronously — no IPC needed.
+function publishActiveCharId(): void {
+  const ctx = getActiveContext();
+  (globalThis as Record<string, unknown>).__lsActiveCharId = ctx.characterId ?? null;
+  (globalThis as Record<string, unknown>).__lsActiveUserId = activeUserId ?? null;
 }
 
 // ─── Storage ──────────────────────────────────────────────────────────────────
@@ -278,7 +289,13 @@ spindle.on('TOOL_INVOCATION', async (event: unknown) => {
 // ─── Trigger registry ─────────────────────────────────────────────────────────
 
 const triggerRegistry = new TriggerRegistry(
-  () => ({ grantedPermissions, userId: activeUserId, scriptStorage, onToolsChanged: pushTools }),
+  () => ({
+    grantedPermissions,
+    userId: activeUserId,
+    scriptStorage,
+    onToolsChanged: pushTools,
+    scriptTimeoutMs: settingsStore.get().scriptTimeoutMs,
+  }),
   send,
 );
 
@@ -319,7 +336,9 @@ spindle.onFrontendMessage(async (raw, userId) => {
   if (!triggersInitialized) {
     triggersInitialized = true;
     await refreshActiveContext(activeUserId);
+    publishActiveCharId();
     void syncTriggers();
+    registerLumiScriptMacros(() => settingsStore.get().enabled);
   }
 
   const msg = raw as FrontendToBackend;
@@ -365,6 +384,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
       case 'get_active_context': {
         // Always fetch live state — also resolves character name for binding display labels.
         await refreshActiveContext(userId).catch(() => {});
+        publishActiveCharId();
         const ctx = getActiveContext();
         send({
           type: 'active_context',
@@ -435,6 +455,8 @@ spindle.onFrontendMessage(async (raw, userId) => {
         await settingsStore.update(msg.patch);
         pushSettings();
         void syncTriggers(); // handles the master enabled/disabled toggle
+        // Keep {{lumiScriptActive}} macro in sync with the master toggle.
+        updateLumiScriptActiveMacro(settingsStore.get().enabled);
         break;
       }
 
@@ -451,6 +473,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
         // Refresh active context (chat + character name) before execution so api.chat.*,
         // api.variables.local/character, and script bindings all see the current state.
         await refreshActiveContext(userId).catch(() => {});
+        publishActiveCharId();
 
         const runId = generateUUID();
         const ctx = getActiveContext();
@@ -463,6 +486,18 @@ spindle.onFrontendMessage(async (raw, userId) => {
           runId,
         });
 
+        // Sync-loop watchdog: process.exit(1) is the only escape when the
+        // worker event loop is blocked by a synchronous infinite loop.
+        // The async Promise.race timeout inside executeScript fires first for
+        // async loops and clears this watchdog through the normal return path.
+        const timeoutMs = settingsStore.get().scriptTimeoutMs;
+        const syncWatchdog = setTimeout(() => {
+          spindle.log.error(
+            `[LumiScript] Script "${script.name}" blocked the worker with a synchronous infinite loop — terminating`,
+          );
+          process.exit(1);
+        }, timeoutMs + 5_000);
+
         const result = await executeScript(script, {
           grantedPermissions,
           activeContext: { chatId: ctx.chatId, characterId: ctx.characterId },
@@ -471,7 +506,9 @@ spindle.onFrontendMessage(async (raw, userId) => {
             send({ type: 'console_entry', scriptId: script.id, runId, entry });
           },
           scriptStorage,
+          timeoutMs,
         });
+        clearTimeout(syncWatchdog);
 
         if (result.success) {
           executionStatusStore.markSuccess(script.id, result.duration);

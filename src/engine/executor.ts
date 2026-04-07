@@ -85,6 +85,12 @@ export interface ExecutorOptions {
    * rather than waiting for script execution to complete.
    */
   onToolsChanged?: () => void;
+  /**
+   * Per-execution async timeout override in milliseconds.
+   * When set, overrides the module-level `SCRIPT_TIMEOUT_MS` default.
+   * Callers should derive this from `LumiScriptSettings.scriptTimeoutMs`.
+   */
+  timeoutMs?: number;
 }
 
 // ─── Cross-script console context ────────────────────────────────────────────
@@ -129,6 +135,27 @@ function buildSafeFetch(script: Script): typeof globalThis.fetch {
   }) as unknown as typeof globalThis.fetch;
 }
 
+// ─── Execution timeout constants ─────────────────────────────────────────────
+
+/**
+ * Default async-loop timeout — rejects the script execution promise after 60 s.
+ * Caught by the `catch` block in `executeScript`, producing a normal
+ * `execution_ended { success: false }` message with a descriptive error.
+ * Can be overridden at call time via `ExecutorOptions.timeoutMs` (driven by
+ * the `LumiScriptSettings.scriptTimeoutMs` user setting).
+ */
+export const SCRIPT_TIMEOUT_MS = 60_000;
+
+/**
+ * Default hard limit for the synchronous-loop watchdog set by `backend.ts`
+ * and `trigger-registry.ts` around every `executeScript` call.  If the worker
+ * event loop is blocked for this long (synchronous `while(true) {}`) the
+ * caller invokes `process.exit(1)` — the only reliable escape from a sync
+ * loop.  Always derived as the effective async timeout + 5 s buffer so the
+ * async timeout always fires first for async loops.
+ */
+export const HARD_LIMIT_MS = SCRIPT_TIMEOUT_MS + 5_000;
+
 // ─── Main entry point ─────────────────────────────────────────────────────────
 
 export async function executeScript(
@@ -159,12 +186,34 @@ export async function executeScript(
       `"use strict";\nconst console = __console;\n${script.code}\n`,
     );
 
+    // ── Async timeout guard ───────────────────────────────────────────────
+    // Races the script against a rejection timer so async infinite loops
+    // (e.g. `while(true) { await api.llm.generate(); }`) are caught and
+    // reported as a clean execution_ended { success: false } message.
+    //
+    // Synchronous loops cannot be interrupted here because they block the
+    // event loop entirely.  The process.exit(1) watchdog set by callers in
+    // backend.ts / trigger-registry.ts handles that case.
+    const effectiveTimeoutMs = options.timeoutMs ?? SCRIPT_TIMEOUT_MS;
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(
+        () => reject(new Error(
+          `Script "${script.name}" exceeded the ${effectiveTimeoutMs / 1000}s execution timeout. ` +
+          `Check for infinite loops or long-running async operations.`,
+        )),
+        effectiveTimeoutMs,
+      ),
+    );
+
     // Run inside consoleContext so broadcast handlers fired during this
     // execution route their console output here (not to the registering script).
-    await consoleContext.run(
-      options.onConsole ?? (() => {}),
-      () => fn(api, data, scriptNS, capturedConsole, z, safeFetch, undefined, undefined) as Promise<unknown>,
-    );
+    await Promise.race([
+      consoleContext.run(
+        options.onConsole ?? (() => {}),
+        () => fn(api, data, scriptNS, capturedConsole, z, safeFetch, undefined, undefined) as Promise<unknown>,
+      ),
+      timeoutPromise,
+    ]);
 
     const duration = Math.round(performance.now() - startTime);
     return { success: true, duration, scriptId: script.id, runId };

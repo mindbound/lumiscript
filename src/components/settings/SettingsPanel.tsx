@@ -1,5 +1,5 @@
 import { FC, useState, useEffect } from 'react';
-import { Code2, BookMarked, Terminal, Bot } from 'lucide-react';
+import { Code2, BookMarked, Terminal, Bot, Timer } from 'lucide-react';
 import type { Script, LumiScriptSettings } from '../../types/script.js';
 import type { BackendToFrontend, FrontendToBackend } from '../../types/messages.js';
 import { DEFAULT_SETTINGS } from '../../types/script.js';
@@ -78,6 +78,50 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
           <BookMarked size={14} style={{ color: 'var(--lumiverse-accent)', margin: '0 auto 4px' }} />
           <div className="ls-count-num">{libraryCount}</div>
           <div className="ls-count-label">Libraries</div>
+        </div>
+      </div>
+
+      {/* Script Execution */}
+      <div className="ls-settings-section">
+        <div className="ls-settings-section-label">
+          <Timer size={11} />
+          Script Execution
+        </div>
+
+        {/* Execution timeout */}
+        <div className="ls-settings-field">
+          <label className="ls-settings-field-label" title="Async execution timeout. If a script does not complete within this period it is aborted with a timeout error.">
+            Timeout (s)
+          </label>
+          <input
+            type="number"
+            className="ls-number-input"
+            min={5}
+            max={300}
+            value={Math.round(settings.scriptTimeoutMs / 1000)}
+            onChange={e => {
+              const secs = Math.max(5, Math.min(300, Number(e.target.value) || 60));
+              sendToBackend({ type: 'update_settings', patch: { scriptTimeoutMs: secs * 1000 } });
+            }}
+          />
+        </div>
+
+        {/* Console history limit */}
+        <div className="ls-settings-field">
+          <label className="ls-settings-field-label" title="Maximum console log entries kept per script. Older entries are dropped once this cap is reached.">
+            Console history
+          </label>
+          <input
+            type="number"
+            className="ls-number-input"
+            min={50}
+            max={2000}
+            value={settings.consoleHistoryLimit}
+            onChange={e => {
+              const limit = Math.max(50, Math.min(2000, Number(e.target.value) || 500));
+              sendToBackend({ type: 'update_settings', patch: { consoleHistoryLimit: limit } });
+            }}
+          />
         </div>
       </div>
 

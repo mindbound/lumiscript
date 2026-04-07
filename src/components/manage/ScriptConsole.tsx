@@ -14,6 +14,7 @@ const TYPE_CLASS: Record<string, string> = {
   error:   'ls-error',
   info:    'ls-info',
   success: 'ls-success',
+  // 'separator' entries are rendered as a divider row (handled separately below)
 };
 
 export const ScriptConsole: FC<ScriptConsoleProps> = ({ entries, isRunning, onClear }) => {
@@ -29,6 +30,7 @@ export const ScriptConsole: FC<ScriptConsoleProps> = ({ entries, isRunning, onCl
 
   const handleCopy = () => {
     const text = entries
+      .filter(e => e.type !== 'separator')
       .map(e => `[${e.timestamp}] ${e.type.toUpperCase()}: ${e.message}`)
       .join('\n');
     navigator.clipboard.writeText(text).catch(() => {});
@@ -72,11 +74,15 @@ export const ScriptConsole: FC<ScriptConsoleProps> = ({ entries, isRunning, onCl
             </div>
           ) : (
             entries.map((entry, i) => (
-              <div key={i} className={`ls-entry ${TYPE_CLASS[entry.type] ?? 'ls-log'}`}>
-                <span className="ls-entry-time">{entry.timestamp}</span>
-                <span className="ls-entry-type">{entry.type.toUpperCase()}</span>
-                <span className="ls-entry-msg">{entry.message}</span>
-              </div>
+              entry.type === 'separator'
+                ? <div key={i} className="ls-entry-separator" aria-hidden="true" />
+                : (
+                  <div key={i} className={`ls-entry ${TYPE_CLASS[entry.type] ?? 'ls-log'}`}>
+                    <span className="ls-entry-time">{entry.timestamp}</span>
+                    <span className="ls-entry-type">{entry.type.toUpperCase()}</span>
+                    <span className="ls-entry-msg">{entry.message}</span>
+                  </div>
+                )
             ))
           )}
         </div>

@@ -98,6 +98,20 @@ export interface LumiScriptSettings {
    * 1 = insert before the last message (typical: before last user message).
    */
   sidecarInjectionDepth: number;
+  // ─── Script Execution ────────────────────────────────────────────────────────
+  /**
+   * Maximum time in milliseconds a single script execution may run before it is
+   * aborted with a timeout error.  Applies to async loops — the async version of
+   * `Promise.race` is used so only awaited operations count towards this limit.
+   * Default: 60 000 (60 s).  Range: 5 000 – 300 000.
+   */
+  scriptTimeoutMs: number;
+  /**
+   * Maximum number of console log entries retained per script in the editor
+   * console.  Older entries are silently dropped once this cap is reached.
+   * Default: 500.  Range: 50 – 2 000.
+   */
+  consoleHistoryLimit: number;
 }
 
 export const DEFAULT_SETTINGS: LumiScriptSettings = {
@@ -107,11 +121,13 @@ export const DEFAULT_SETTINGS: LumiScriptSettings = {
   sidecarConnectionId: null,
   sidecarMaxTurns: 6,
   sidecarInjectionDepth: 0,
+  scriptTimeoutMs: 60_000,
+  consoleHistoryLimit: 500,
 };
 
 // ─── Execution ────────────────────────────────────────────────────────────────
 
-export type ConsoleEntryType = 'log' | 'warn' | 'error' | 'info' | 'success';
+export type ConsoleEntryType = 'log' | 'warn' | 'error' | 'info' | 'success' | 'separator';
 
 export interface ConsoleEntry {
   timestamp: string;   // Formatted time string (HH:MM:SS)

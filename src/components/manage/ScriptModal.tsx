@@ -20,8 +20,8 @@ interface ScriptModalProps {
   execInfo: Record<string, ScriptExecInfo>;
   activeRunScriptId: string | null;
   isRunning: boolean;
-  consoleEntries: ConsoleEntry[];
-  onClearConsole: () => void;
+  consoleHistory: Record<string, ConsoleEntry[]>;
+  onClearConsole: (scriptId: string) => void;
   onClose: () => void;
   sendToBackend: (msg: FrontendToBackend) => void;
 }
@@ -33,7 +33,7 @@ export const ScriptModal: FC<ScriptModalProps> = ({
   execInfo,
   activeRunScriptId,
   isRunning,
-  consoleEntries,
+  consoleHistory,
   onClearConsole,
   onClose,
   sendToBackend,
@@ -57,9 +57,13 @@ export const ScriptModal: FC<ScriptModalProps> = ({
     return () => document.removeEventListener('keydown', handler);
   }, [onClose]);
 
-  // Console entries visible only when the selected script is running/ran
-  const visibleEntries = selectedScript?.id === activeRunScriptId ? consoleEntries : [];
+  // Per-script console history: always show the selected script's own history,
+  // regardless of which script is currently running.
+  const visibleEntries = selectedScript ? (consoleHistory[selectedScript.id] ?? []) : [];
   const scriptIsRunning = isRunning && selectedScript?.id === activeRunScriptId;
+  // Bind the clear action to the currently-selected script so ScriptEditor
+  // keeps its parameterless onClearConsole: () => void interface.
+  const handleClearConsole = () => { if (selectedScript) onClearConsole(selectedScript.id); };
 
   const modal = (
     <div
@@ -100,7 +104,7 @@ export const ScriptModal: FC<ScriptModalProps> = ({
                 activeContext={activeContext}
                 isRunning={scriptIsRunning}
                 consoleEntries={visibleEntries}
-                onClearConsole={onClearConsole}
+                onClearConsole={handleClearConsole}
                 sendToBackend={sendToBackend}
               />
             ) : (
