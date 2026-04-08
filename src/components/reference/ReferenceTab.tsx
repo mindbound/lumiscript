@@ -1,5 +1,5 @@
 import { FC, useState } from 'react';
-import { Zap, Lock, Radio, List, Braces, ChevronDown, ChevronRight } from 'lucide-react';
+import { Zap, Lock, Radio, List, Braces, Hash, ChevronDown, ChevronRight } from 'lucide-react';
 
 // ─── Section accordion ────────────────────────────────────────────────────────
 
@@ -38,6 +38,10 @@ const Perm: FC<{ children: string }> = ({ children }) => (
 
 const NoPerm: FC = () => (
   <span className="ls-ref-perm ls-ref-perm-none">none</span>
+);
+
+const Silent: FC = () => (
+  <span className="ls-ref-muted" style={{ fontStyle: 'italic' }}>silent</span>
 );
 
 /** Full-width group header row spanning all table columns */
@@ -243,6 +247,121 @@ const BroadcastTable: FC = () => (
         <td><span className="ls-ref-muted">{'{ name, args, result, scriptId, callMs }'}</span></td>
         <td><span className="ls-ref-muted">api.tools.invoke() + TOOL_INVOCATION handler</span></td>
       </tr>
+    </tbody>
+  </table>
+);
+
+// ─── LumiScript macros ────────────────────────────────────────────────────────
+
+type MacroReturns = 'boolean' | 'string' | 'silent';
+
+interface LsMacroRow {
+  macro: string;
+  aliases: string;
+  returns: MacroReturns;
+  desc: string;
+}
+
+interface LsMacroGroup {
+  group: string;
+  rows: LsMacroRow[];
+}
+
+const LS_MACRO_GROUPS: LsMacroGroup[] = [
+  {
+    group: 'Presence',
+    rows: [
+      {
+        macro:   '{{lumiScriptActive}}',
+        aliases: '—',
+        returns: 'boolean',
+        desc:    'Push-model boolean. "true" when the LumiScript master toggle is on, "false" when off. Ideal for conditional preset blocks: {{if::{{lumiScriptActive}}}}…{{/if}}',
+      },
+    ],
+  },
+  {
+    group: 'Character Variables — reads/writes the active character\'s variable store. Write operations are silent.',
+    rows: [
+      {
+        macro:   '{{getcvar::key}}',
+        aliases: '{{getcharvar::key}}',
+        returns: 'string',
+        desc:    'Get a character-scoped variable. Returns "" if the key is not set or there is no active character.',
+      },
+      {
+        macro:   '{{setcvar::key::value}}',
+        aliases: '{{setcharvar::key::value}}',
+        returns: 'silent',
+        desc:    'Set a character-scoped variable to value.',
+      },
+      {
+        macro:   '{{addcvar::key::n}}',
+        aliases: '{{addcharvar::key::n}}',
+        returns: 'silent',
+        desc:    'Add the number n to a character-scoped variable (treated as 0 if unset or non-numeric).',
+      },
+      {
+        macro:   '{{inccvar::key}}',
+        aliases: '—',
+        returns: 'silent',
+        desc:    'Increment a character-scoped variable by 1.',
+      },
+      {
+        macro:   '{{deccvar::key}}',
+        aliases: '—',
+        returns: 'silent',
+        desc:    'Decrement a character-scoped variable by 1.',
+      },
+      {
+        macro:   '{{hascvar::key}}',
+        aliases: '{{hascharvar::key}}',
+        returns: 'boolean',
+        desc:    'Returns "true" if the variable exists in the active character\'s store, "false" otherwise.',
+      },
+      {
+        macro:   '{{deletecvar::key}}',
+        aliases: '{{deletecharvar::key}}',
+        returns: 'silent',
+        desc:    'Delete a character-scoped variable.',
+      },
+    ],
+  },
+];
+
+const ReturnsBadge: FC<{ type: MacroReturns }> = ({ type }) => {
+  if (type === 'silent') return <Silent />;
+  if (type === 'boolean') return <Code>{'\"true\" / \"false\"'}</Code>;
+  return <Code>string</Code>;
+};
+
+const LumiScriptMacrosTable: FC = () => (
+  <table className="ls-ref-table">
+    <thead>
+      <tr>
+        <th>Macro</th>
+        <th>Aliases</th>
+        <th>Returns</th>
+        <th>Description</th>
+      </tr>
+    </thead>
+    <tbody>
+      {LS_MACRO_GROUPS.map(group => (
+        <>
+          <GroupHeader key={`hdr-${group.group}`} label={group.group} cols={4} />
+          {group.rows.map(row => (
+            <tr key={row.macro}>
+              <td><Code>{row.macro}</Code></td>
+              <td>
+                {row.aliases === '—'
+                  ? <span className="ls-ref-muted">—</span>
+                  : <Code>{row.aliases}</Code>}
+              </td>
+              <td style={{ whiteSpace: 'nowrap' }}><ReturnsBadge type={row.returns} /></td>
+              <td><span className="ls-ref-muted">{row.desc}</span></td>
+            </tr>
+          ))}
+        </>
+      ))}
     </tbody>
   </table>
 );
@@ -1042,6 +1161,15 @@ export const ReferenceTab: FC = () => (
       <p className="ls-ref-muted" style={{ marginTop: 6 }}>
         The <Code>ls:</Code> prefix is reserved for LumiScript engine events.
         Use any other name for custom events between scripts.
+      </p>
+    </Section>
+
+    <Section icon={<Hash size={11} />} title="LumiScript Macros">
+      <LumiScriptMacrosTable />
+      <p className="ls-ref-muted" style={{ marginTop: 6 }}>
+        Character variable macros read from and write to the active character's
+        store at <Code>{'variables/characters/<id>.json'}</Code> in user storage.
+        They resolve to <Code>""</Code> when no character is active.
       </p>
     </Section>
 
