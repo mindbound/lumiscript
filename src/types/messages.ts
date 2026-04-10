@@ -28,6 +28,7 @@ export type FrontendToBackend =
   | { type: 'get_injections' }
   | { type: 'get_tools' }
   | { type: 'get_connections' }
+  | { type: 'get_variables' }
   | {
       type: 'create_script';
       name: string;
@@ -43,6 +44,7 @@ export type FrontendToBackend =
         allowDangerous?: boolean;
         bindings?: ScriptBindingEntry[];
         triggers?: string[];
+        folder?: string;
         metadata?: ScriptMetadata;
       };
     }
@@ -143,5 +145,15 @@ export type BackendToFrontend =
       injected: boolean;
       /** Error message if the sidecar loop failed. */
       error?: string;
+    }
+  | {
+      /** Current snapshot of all variable scopes for the active context. */
+      type: 'variables_updated';
+      variables: {
+        local: Record<string, unknown>;
+        global: Record<string, unknown>;
+        chat: Record<string, unknown>;
+        character: Record<string, unknown>;
+      };
     }
 ;

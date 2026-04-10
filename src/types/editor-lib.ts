@@ -575,6 +575,28 @@ interface UIAPI {
    * var result = await handle.result;
    */
   showModal(items: ModalItem[], options: ShowModalOptions): ModalHandle;
+
+  /**
+   * Open the native Lumiverse expanded text editor with macro syntax highlighting.
+   * Blocks until the user closes the editor.
+   * @returns The edited text, or null if the user cancelled.
+   * @example
+   * var text = await api.ui.editText('Edit System Prompt', currentPrompt);
+   * if (text !== null) { /* user submitted *\/ }
+   */
+  editText(title?: string, value?: string, options?: { placeholder?: string }): Promise<string | null>;
+
+  /**
+   * Send an OS-level push notification to the user's devices.
+   * Only delivered when the app is not focused. Requires push_notification permission.
+   * @returns { sent: number } — how many devices received the notification.
+   */
+  pushNotification(title: string, body: string, options?: {
+    tag?: string; url?: string; icon?: string; rawTitle?: boolean; image?: string;
+  }): Promise<{ sent: number }>;
+
+  /** Check if push notifications are available. Requires push_notification permission. */
+  getPushStatus(): Promise<{ available: boolean; subscriptionCount: number }>;
 }
 
 type ModalItem =
@@ -912,6 +934,59 @@ interface BroadcastAPI {
   on(event: string, handler: (payload: unknown) => void): () => void;
 }
 
+// ─── Commands API ──────────────────────────────────────────────────────────────
+
+type CommandScope = 'global' | 'chat' | 'chat-idle' | 'landing' | 'character';
+
+interface CommandDefinition {
+  /** Unique identifier for this command. */
+  id: string;
+  /** Display label shown in the command palette. Max 80 characters. */
+  label: string;
+  /** Description shown below the label. Max 200 characters. */
+  description: string;
+  /** Optional search keywords for fuzzy matching. */
+  keywords?: string[];
+  /** Scope controlling when the command appears. Default: 'global'. */
+  scope?: CommandScope;
+}
+
+interface CommandContext {
+  /** Current route path (e.g. "/chat/abc-123"). */
+  route: string;
+  /** Active chat ID, if in a chat view. */
+  chatId?: string;
+  /** Active character ID, if available. */
+  characterId?: string;
+  /** Whether the active chat is a group chat. */
+  isGroupChat?: boolean;
+}
+
+interface CommandsAPI {
+  /**
+   * Register command palette entries. Each call replaces the full set.
+   * Max 20 commands per extension.
+   * @example
+   * api.commands.register([
+   *   { id: 'summarize', label: 'Summarize Chat', description: 'Generate a chat summary', scope: 'chat' },
+   * ]);
+   */
+  register(commands: CommandDefinition[]): void;
+  /** Remove specific commands by ID, or all if no IDs given. */
+  unregister(commandIds?: string[]): void;
+  /**
+   * Register a handler called when the user selects a command.
+   * Returns an unsubscribe function.
+   * @example
+   * api.commands.onInvoked((id, ctx) => {
+   *   if (id === 'summarize') {
+   *     // ctx.chatId, ctx.characterId available
+   *   }
+   * });
+   */
+  onInvoked(handler: (commandId: string, context: CommandContext) => void | Promise<void>): () => void;
+}
+
 // ─── Top-level API ────────────────────────────────────────────────────────────
 
 interface LumiScriptAPI {
@@ -938,6 +1013,8 @@ interface LumiScriptAPI {
   tools: ToolsAPI;
   /** Real-time script-to-script pub/sub. No permission required. */
   broadcast: BroadcastAPI;
+  /** Register commands in the Lumiverse command palette (Cmd/Ctrl+K). No permission required. */
+  commands: CommandsAPI;
 }
 
 interface ScriptNamespace {

@@ -101,6 +101,7 @@ export const ScriptModal: FC<ScriptModalProps> = ({
             {selectedScript ? (
               <ScriptEditor
                 script={selectedScript}
+                allScripts={scripts}
                 activeContext={activeContext}
                 isRunning={scriptIsRunning}
                 consoleEntries={visibleEntries}

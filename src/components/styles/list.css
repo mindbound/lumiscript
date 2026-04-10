@@ -124,3 +124,51 @@
   color: var(--lumiverse-text-muted);
   white-space: nowrap;
 }
+
+/* ── Folder groups ─────────────────────────────────────────────────────── */
+.ls-folder-group {
+  margin-bottom: 2px;
+}
+.ls-folder-header {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  padding: 5px 10px;
+  background: var(--lumiverse-fill-subtle);
+  border: none;
+  border-bottom: 1px solid var(--lumiverse-border);
+  color: var(--lumiverse-text-muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+.ls-folder-header:hover {
+  color: var(--lumiverse-text);
+}
+.ls-folder-rename {
+  display: inline-flex;
+  opacity: 0;
+  padding: 1px;
+  border-radius: 3px;
+  transition: opacity var(--lumiverse-transition-fast, 0.15s);
+}
+.ls-folder-rename:hover {
+  background: var(--lumiverse-fill);
+}
+.ls-folder-header:hover .ls-folder-rename {
+  opacity: 1;
+}
+.ls-folder-name {
+  flex: 1;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ls-folder-count {
+  font-size: 10px;
+  color: var(--lumiverse-text-dim);
+  background: var(--lumiverse-fill);
+  border-radius: 999px;
+  padding: 1px 6px;
+}

@@ -14,6 +14,7 @@ import { clearAll as clearTools } from '../../src/engine/tool-store.js';
 import { clearAll as clearBroadcast } from '../../src/engine/broadcast-bus.js';
 import { resetContext } from '../../src/engine/binding.js';
 import { executionStatusStore } from '../../src/engine/execution-status.js';
+import { clearAllCommandHandlers } from '../../src/engine/api/commands.js';
 
 beforeEach(() => {
   // Install fresh spindle mock on globalThis so `declare const spindle` resolves
@@ -25,4 +26,5 @@ beforeEach(() => {
   clearBroadcast();
   resetContext();
   executionStatusStore.clear();
+  clearAllCommandHandlers();
 });

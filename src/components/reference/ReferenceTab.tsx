@@ -165,6 +165,9 @@ const PERM_GROUPS: PermGroup[] = [
       { method: 'api.ui.prompt', perms: [] },
       { method: 'api.ui.confirm', perms: [] },
       { method: 'api.ui.showModal', perms: [] },
+      { method: 'api.ui.editText', perms: [] },
+      { method: 'api.ui.pushNotification', perms: ['push_notification'] },
+      { method: 'api.ui.getPushStatus', perms: ['push_notification'] },
     ],
   },
   {
@@ -189,6 +192,7 @@ const PERM_GROUPS: PermGroup[] = [
     rows: [
       { method: 'api.tools.*', perms: ['tools'] },
       { method: 'api.broadcast.*', perms: [] },
+      { method: 'api.commands.*', perms: [] },
     ],
   },
 ];
@@ -1004,6 +1008,9 @@ const API_GROUPS: FnGroup[] = [
       { name: 'prompt',    args: 'message, defaultValue?, options?', desc: 'Show a themed text input dialog. Returns entered string (trimmed) or null if cancelled. Options: placeholder, submitLabel, cancelLabel, multiline.' },
       { name: 'confirm',   args: 'message, title?, options?',        desc: 'Show a themed confirmation dialog. Returns true if confirmed. Options: variant (info/warning/danger/success), confirmLabel, cancelLabel.' },
       { name: 'showModal', args: 'items, options',                   desc: 'Display structured read-only content in a themed modal. Returns ModalHandle { result, openRequestId, close() }. Await handle.result for dismissal. Options: title (required), width, maxHeight, persistent.' },
+      { name: 'editText',  args: 'title?, value?, options?',         desc: 'Open the native Lumiverse expanded text editor with macro syntax highlighting. Blocks until close. Returns edited text or null if cancelled. Options: placeholder.' },
+      { name: 'pushNotification', args: 'title, body, options?',   desc: 'Send an OS push notification. Only delivered when app is unfocused. Returns { sent }. Options: tag (dedup), url, icon, rawTitle, image. Requires push_notification.' },
+      { name: 'getPushStatus', args: '—',                          desc: 'Check if push notifications are available. Returns { available, subscriptionCount }. Requires push_notification.' },
     ],
   },
   {
@@ -1106,6 +1113,14 @@ const API_GROUPS: FnGroup[] = [
     rows: [
       { name: 'emit', args: 'event, payload?', desc: 'Fire a named event to all subscribed handlers across all scripts.' },
       { name: 'on',   args: 'event, handler',  desc: 'Subscribe to a named event. Returns an unsubscribe function.' },
+    ],
+  },
+  {
+    group: 'api.commands',
+    rows: [
+      { name: 'register',   args: 'commands[]',         desc: 'Register (or replace) command palette entries. Max 20 per extension.' },
+      { name: 'unregister',  args: 'commandIds?',       desc: 'Remove specific commands by ID, or all if no IDs given.' },
+      { name: 'onInvoked',  args: 'handler',            desc: 'Register a handler for when the user selects a command. Returns unsubscribe fn.' },
     ],
   },
   {

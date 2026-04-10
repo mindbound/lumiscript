@@ -145,3 +145,76 @@ describe('showModal', () => {
     );
   });
 });
+
+// ─── editText ────────────────────────────────────────────────────────────────
+
+describe('editText', () => {
+  test('returns text when user submits', async () => {
+    mockSpindle.textEditor.open.mockReturnValueOnce(
+      Promise.resolve({ text: 'edited content', cancelled: false }),
+    );
+    const api = buildApi();
+    expect(await api.editText('Edit Prompt', 'initial')).toBe('edited content');
+  });
+
+  test('returns null when user cancels', async () => {
+    mockSpindle.textEditor.open.mockReturnValueOnce(
+      Promise.resolve({ text: '', cancelled: true }),
+    );
+    const api = buildApi();
+    expect(await api.editText('Edit')).toBeNull();
+  });
+
+  test('passes all options through to spindle.textEditor.open', async () => {
+    mockSpindle.textEditor.open.mockReturnValueOnce(
+      Promise.resolve({ text: 'ok', cancelled: false }),
+    );
+    const api = buildApi();
+    await api.editText('Title', 'value', { placeholder: 'hint' });
+    const call = mockSpindle.textEditor.open.mock.calls[0] as any;
+    expect(call[0].title).toBe('Title');
+    expect(call[0].value).toBe('value');
+    expect(call[0].placeholder).toBe('hint');
+    expect(call[0].userId).toBe('test-user-id');
+  });
+});
+
+// ─── pushNotification ────────────────────────────────────────────────────────
+
+describe('pushNotification', () => {
+  test('delegates to spindle.push.send with title, body, and options', async () => {
+    mockSpindle.push.send.mockReturnValueOnce(Promise.resolve({ sent: 2 }));
+    const api = buildApi();
+    const result = await api.pushNotification('Alert', 'Something happened', { tag: 'alert-1' });
+    expect(result.sent).toBe(2);
+    const call = mockSpindle.push.send.mock.calls[0] as any;
+    expect(call[0].title).toBe('Alert');
+    expect(call[0].body).toBe('Something happened');
+    expect(call[0].tag).toBe('alert-1');
+    expect(call[1]).toBe('test-user-id');
+  });
+
+  test('throws when push_notification permission denied', () => {
+    const api = buildApi({ hasPerm: () => false });
+    expect(() => api.pushNotification('Hi', 'Test')).toThrow('PERMISSION_DENIED');
+  });
+});
+
+// ─── getPushStatus ───────────────────────────────────────────────────────────
+
+describe('getPushStatus', () => {
+  test('delegates to spindle.push.getStatus', async () => {
+    mockSpindle.push.getStatus.mockReturnValueOnce(
+      Promise.resolve({ available: true, subscriptionCount: 3 }),
+    );
+    const api = buildApi();
+    const status = await api.getPushStatus();
+    expect(status.available).toBe(true);
+    expect(status.subscriptionCount).toBe(3);
+  });
+
+  test('throws when push_notification permission denied', () => {
+    const api = buildApi({ hasPerm: () => false });
+    expect(() => api.getPushStatus()).toThrow('PERMISSION_DENIED');
+  });
+});

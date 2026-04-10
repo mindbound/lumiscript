@@ -1,5 +1,5 @@
 import { FC, useState, useEffect, useCallback } from 'react';
-import { Code2, Activity, Zap, ArrowDownToLine, ArrowUpToLine, Timer, ChevronDown, ChevronUp, Wrench, Bot, Syringe } from 'lucide-react';
+import { Code2, Activity, Zap, ArrowDownToLine, ArrowUpToLine, Timer, ChevronDown, ChevronUp, Wrench, Bot, Syringe, Database, RefreshCw } from 'lucide-react';
 import type { Script, LumiScriptSettings, ConsoleEntry, InjectionInfo, RegisteredToolInfo } from '../types/script.js';
 import type { BackendToFrontend, FrontendToBackend } from '../types/messages.js';
 import type { ActiveContext } from './manage/BindingsSection.js';
@@ -57,6 +57,13 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
     error?: string;
   } | null>(null);
 
+  const [variables, setVariables] = useState<{
+    local: Record<string, unknown>;
+    global: Record<string, unknown>;
+    chat: Record<string, unknown>;
+    character: Record<string, unknown>;
+  } | null>(null);
+
   /** Per-trigger invocation counter (session-local, increments on execution_started) */
   const [invocationCounts, setInvocationCounts] = useState<Record<string, number>>({});
 
@@ -84,6 +91,12 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
             characterName: msg.characterName,
             chatId: msg.chatId,
           });
+          // Auto-refresh variables when context changes
+          sendToBackend({ type: 'get_variables' });
+          break;
+
+        case 'variables_updated':
+          setVariables(msg.variables);
           break;
 
         case 'injections_updated':
@@ -252,6 +265,8 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
             injections={injections}
             tools={tools}
             sidecarResult={sidecarResult}
+            variables={variables}
+            sendToBackend={sendToBackend}
           />
         )}
       </div>
@@ -275,6 +290,13 @@ interface SidecarRunResult {
   error?: string;
 }
 
+interface VariablesSnapshot {
+  local: Record<string, unknown>;
+  global: Record<string, unknown>;
+  chat: Record<string, unknown>;
+  character: Record<string, unknown>;
+}
+
 interface StatusTabProps {
   scripts: Script[];
   execInfo: Record<string, ScriptExecInfo>;
@@ -282,9 +304,11 @@ interface StatusTabProps {
   injections: InjectionInfo[];
   tools: RegisteredToolInfo[];
   sidecarResult: SidecarRunResult | null;
+  variables: VariablesSnapshot | null;
+  sendToBackend: (msg: FrontendToBackend) => void;
 }
 
-const StatusTab: FC<StatusTabProps> = ({ scripts, execInfo, invocationCounts, injections, tools, sidecarResult }) => {
+const StatusTab: FC<StatusTabProps> = ({ scripts, execInfo, invocationCounts, injections, tools, sidecarResult, variables, sendToBackend }) => {
   const enabled = scripts.filter(s => s.type === 'trigger' && s.enabled);
 
   /** Quick lookup: scriptId → script name for injection attribution. */
@@ -395,6 +419,9 @@ const StatusTab: FC<StatusTabProps> = ({ scripts, execInfo, invocationCounts, in
         )}
       </div>
 
+      {/* ── Variables Inspector section ──────────────────────────────────── */}
+      <VariablesSection variables={variables} sendToBackend={sendToBackend} />
+
       {/* ── Last Sidecar Run section ──────────────────────────────────────── */}
       {sidecarResult && (
         <div className="ls-inject-section">
@@ -491,6 +518,97 @@ const StatusTab: FC<StatusTabProps> = ({ scripts, execInfo, invocationCounts, in
             );
           })}
         </div>
+    </div>
+  );
+};
+
+// ─── Variables Inspector component ───────────────────────────────────────────
+
+const SCOPE_LABELS: Array<{ key: keyof VariablesSnapshot; label: string; hint?: string }> = [
+  { key: 'local',     label: 'local',     hint: 'Per-chat ({{getvar}})' },
+  { key: 'global',    label: 'global',    hint: 'Cross-chat ({{getgvar}})' },
+  { key: 'chat',      label: 'chat',      hint: 'Chat metadata ({{@key}})' },
+  { key: 'character', label: 'character',  hint: 'Per-character card' },
+];
+
+function formatValue(v: unknown): string {
+  if (v === undefined) return 'undefined';
+  if (v === null) return 'null';
+  if (typeof v === 'string') return v.length > 80 ? v.slice(0, 77) + '…' : v;
+  try {
+    const s = JSON.stringify(v);
+    return s.length > 80 ? s.slice(0, 77) + '…' : s;
+  } catch { return String(v); }
+}
+
+const VariablesSection: FC<{
+  variables: VariablesSnapshot | null;
+  sendToBackend: (msg: FrontendToBackend) => void;
+}> = ({ variables, sendToBackend }) => {
+  const [expandedScopes, setExpandedScopes] = useState<Set<string>>(new Set(['local', 'global', 'chat', 'character']));
+
+  const toggleScope = (scope: string) => {
+    setExpandedScopes(prev => {
+      const next = new Set(prev);
+      if (next.has(scope)) next.delete(scope);
+      else next.add(scope);
+      return next;
+    });
+  };
+
+  const totalKeys = variables
+    ? Object.values(variables).reduce((sum, scope) => sum + Object.keys(scope).length, 0)
+    : 0;
+
+  return (
+    <div className="ls-inject-section">
+      <div className="ls-inject-header">
+        <Database size={10} />
+        Variables
+        {totalKeys > 0 && <span className="ls-inject-count">{totalKeys}</span>}
+        <button
+          className="ls-vars-refresh"
+          title="Refresh variables"
+          onClick={() => sendToBackend({ type: 'get_variables' })}
+        >
+          <RefreshCw size={10} />
+        </button>
+      </div>
+
+      {!variables ? (
+        <div className="ls-section-empty">Click refresh to load variables</div>
+      ) : totalKeys === 0 ? (
+        <div className="ls-section-empty">No variables in active context</div>
+      ) : (
+        SCOPE_LABELS.map(({ key, label, hint }) => {
+          const scope = variables[key];
+          const keys = Object.keys(scope);
+          const isExpanded = expandedScopes.has(key);
+          if (keys.length === 0) return null;
+          return (
+            <div key={key} className="ls-vars-scope">
+              <button className="ls-vars-scope-header" onClick={() => toggleScope(key)}>
+                {isExpanded ? <ChevronDown size={10} /> : <ChevronUp size={10} />}
+                <span className="ls-vars-scope-name">{label}</span>
+                {hint && <span className="ls-vars-scope-hint">{hint}</span>}
+                <span className="ls-vars-scope-count">{keys.length}</span>
+              </button>
+              {isExpanded && (
+                <div className="ls-vars-scope-body">
+                  {keys.sort().map(k => (
+                    <div key={k} className="ls-vars-entry">
+                      <span className="ls-vars-key">{k}</span>
+                      <span className="ls-vars-value" title={String(scope[k])}>
+                        {formatValue(scope[k])}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })
+      )}
     </div>
   );
 };

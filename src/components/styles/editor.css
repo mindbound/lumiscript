@@ -121,3 +121,32 @@
   color: var(--lumiverse-text-muted);
 }
 .ls-danger-confirm-no:hover { background: var(--lumiverse-fill-subtle); }
+
+/* ── Folder select (inside metadata footer) ────────────────────────────── */
+.ls-meta-folder {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.ls-folder-select {
+  background: transparent;
+  border: none;
+  border-radius: 3px;
+  color: var(--lumiverse-text-muted);
+  font-size: 10px;
+  padding: 0 14px 0 0;
+  outline: none;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 2px center;
+}
+.ls-folder-select:hover {
+  color: var(--lumiverse-text);
+}
+.ls-folder-select option {
+  background: var(--lumiverse-fill);
+  color: var(--lumiverse-text);
+}

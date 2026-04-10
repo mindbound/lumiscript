@@ -267,6 +267,13 @@ export function createMockSpindle() {
       close: mock(() => Promise.resolve()),
     },
 
+    // ─── Commands ──────────────────────────────────────────────────────
+    commands: {
+      register: mock(() => {}),
+      unregister: mock(() => {}),
+      onInvoked: mock(() => mock(() => {})),
+    },
+
     // ─── Manifest ──────────────────────────────────────────────────────
     manifest: {
       version: '0.10.1',

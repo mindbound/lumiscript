@@ -58,6 +58,7 @@ import { buildPersonasAPI  } from './api/personas.js';
 import { buildToolsAPI     } from './api/tools.js';
 import { buildBroadcastAPI } from './api/broadcast.js';
 import { buildEnclaveAPI   } from './api/enclave.js';
+import { buildCommandsAPI  } from './api/commands.js';
 
 // ─── Executor options ─────────────────────────────────────────────────────────
 
@@ -250,6 +251,7 @@ export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiSc
     personas:   buildPersonasAPI(deps),
     tools:      buildToolsAPI(deps, () => api),
     broadcast:  buildBroadcastAPI(deps),
+    commands:   buildCommandsAPI(deps),
   };
   return api;
 }

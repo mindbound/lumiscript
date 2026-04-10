@@ -110,6 +110,51 @@ function pushTools(): void {
   });
 }
 
+/**
+ * Fetch all variable scopes for the active context and push a snapshot
+ * to the frontend for the Variable Inspector.
+ */
+async function pushVariables(userId: string | null): Promise<void> {
+  const ctx = getActiveContext();
+  const uid = userId ?? undefined;
+
+  // Deserialize JSON-encoded Spindle variable values back to native types.
+  function deserializeAll(raw: Record<string, string>): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(raw)) {
+      if (v === '') { out[k] = v; continue; }
+      try { out[k] = JSON.parse(v); } catch { out[k] = v; }
+    }
+    return out;
+  }
+
+  const [local, global, chat, character] = await Promise.all([
+    ctx.chatId
+      ? spindle.variables.local.list(ctx.chatId).catch(() => ({}))
+      : Promise.resolve({}),
+    spindle.variables.global.list(uid).catch(() => ({})),
+    ctx.chatId
+      ? spindle.variables.chat.list(ctx.chatId).catch(() => ({}))
+      : Promise.resolve({}),
+    ctx.characterId
+      ? spindle.userStorage.getJson<Record<string, unknown>>(
+          `variables/characters/${ctx.characterId}.json`,
+          { fallback: {}, userId: uid },
+        ).catch(() => ({}))
+      : Promise.resolve({}),
+  ]);
+
+  send({
+    type: 'variables_updated',
+    variables: {
+      local:     deserializeAll(local as Record<string, string>),
+      global:    deserializeAll(global as Record<string, string>),
+      chat:      deserializeAll(chat as Record<string, string>),
+      character: character as Record<string, unknown>,
+    },
+  });
+}
+
 // ─── Prompt injection handlers ────────────────────────────────────────────────
 //
 // Registered unconditionally at module load so that any script calling
@@ -381,6 +426,11 @@ spindle.onFrontendMessage(async (raw, userId) => {
         break;
       }
 
+      case 'get_variables': {
+        await pushVariables(userId);
+        break;
+      }
+
       case 'get_active_context': {
         // Always fetch live state — also resolves character name for binding display labels.
         await refreshActiveContext(userId).catch(() => {});
@@ -592,6 +642,27 @@ spindle.on('CHARACTER_EDITED', (payload: unknown) => {
       characterId: p.id,
       characterName: p.character?.name ?? null,
     });
+
+    // Refresh stale binding display names: if a character was renamed, update
+    // all scripts that have a binding to this character so the UI shows the
+    // new name without requiring manual re-binding.
+    const newName = p.character?.name;
+    if (newName && scriptStorage?.store.isLoaded) {
+      for (const script of scriptStorage.getScripts()) {
+        if (!script.bindings?.length) continue;
+        let changed = false;
+        const updated = script.bindings.map(b => {
+          if (b.type === 'character' && b.characterId === p.id && b.displayName !== newName) {
+            changed = true;
+            return { ...b, displayName: newName };
+          }
+          return b;
+        });
+        if (changed) {
+          scriptStorage.updateScript(script.id, { bindings: updated }).catch(() => {});
+        }
+      }
+    }
   }
 });
 

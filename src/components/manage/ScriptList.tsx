@@ -1,5 +1,5 @@
 import { FC, useState } from 'react';
-import { Code2, BookMarked, Plus, FileCode2 } from 'lucide-react';
+import { Code2, BookMarked, Plus, FileCode2, FolderOpen, ChevronDown, ChevronRight, Pencil } from 'lucide-react';
 import type { Script, ScriptType } from '../../types/script.js';
 import type { FrontendToBackend } from '../../types/messages.js';
 import { ScriptListItem, type ExecutionDot } from './ScriptListItem.js';
@@ -18,6 +18,22 @@ interface ScriptListProps {
   sendToBackend: (msg: FrontendToBackend) => void;
 }
 
+/** Group scripts by folder. Scripts without a folder go into the '' group. */
+function groupByFolder(scripts: Script[]): Map<string, Script[]> {
+  const groups = new Map<string, Script[]>();
+  for (const s of scripts) {
+    const folder = s.folder ?? '';
+    if (!groups.has(folder)) groups.set(folder, []);
+    groups.get(folder)!.push(s);
+  }
+  // Sort: unfiled first, then alphabetical folder names
+  const sorted = new Map<string, Script[]>();
+  if (groups.has('')) sorted.set('', groups.get('')!);
+  const folderNames = [...groups.keys()].filter(k => k !== '').sort();
+  for (const name of folderNames) sorted.set(name, groups.get(name)!);
+  return sorted;
+}
+
 export const ScriptList: FC<ScriptListProps> = ({
   scripts,
   selectedId,
@@ -27,13 +43,41 @@ export const ScriptList: FC<ScriptListProps> = ({
   sendToBackend,
 }) => {
   const [activeType, setActiveType] = useState<ScriptType>('trigger');
+  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set());
 
   const filtered = scripts.filter(s => s.type === activeType);
+  const grouped = groupByFolder(filtered);
+  const hasFolders = grouped.size > 1 || (grouped.size === 1 && !grouped.has(''));
+
+  const toggleFolder = (folder: string) => {
+    setCollapsedFolders(prev => {
+      const next = new Set(prev);
+      if (next.has(folder)) next.delete(folder);
+      else next.add(folder);
+      return next;
+    });
+  };
 
   const handleNew = () => {
     const name = window.prompt(activeType === 'library' ? 'Library name:' : 'Script name:');
     if (!name?.trim()) return;
     sendToBackend({ type: 'create_script', name: name.trim(), scriptType: activeType });
+  };
+
+  const renderItem = (script: Script) => {
+    const info = execInfo[script.id];
+    return (
+      <ScriptListItem
+        key={script.id}
+        script={script}
+        selected={script.id === selectedId}
+        dot={info?.dot ?? 'idle'}
+        duration={info?.duration}
+        onSelect={() => onSelect(script.id)}
+        onEdit={() => onEdit(script.id)}
+        sendToBackend={sendToBackend}
+      />
+    );
   };
 
   return (
@@ -71,22 +115,48 @@ export const ScriptList: FC<ScriptListProps> = ({
               Click + to create one
             </p>
           </div>
-        ) : (
-          filtered.map(script => {
-            const info = execInfo[script.id];
-            return (
-              <ScriptListItem
-                key={script.id}
-                script={script}
-                selected={script.id === selectedId}
-                dot={info?.dot ?? 'idle'}
-                duration={info?.duration}
-                onSelect={() => onSelect(script.id)}
-                onEdit={() => onEdit(script.id)}
-                sendToBackend={sendToBackend}
-              />
+        ) : hasFolders ? (
+          /* Grouped by folder with collapsible headers */
+          [...grouped.entries()].map(([folder, folderScripts]) => {
+            const isCollapsed = collapsedFolders.has(folder);
+            return folder === '' ? (
+              /* Unfiled scripts — no header, always visible */
+              <div key="__unfiled">{folderScripts.map(renderItem)}</div>
+            ) : (
+              <div key={`folder-${folder}`} className="ls-folder-group">
+                <button
+                  className="ls-folder-header"
+                  onClick={() => toggleFolder(folder)}
+                >
+                  {isCollapsed
+                    ? <ChevronRight size={11} />
+                    : <ChevronDown size={11} />}
+                  <FolderOpen size={11} />
+                  <span className="ls-folder-name">{folder}</span>
+                  <span
+                    className="ls-folder-rename"
+                    title="Rename folder"
+                    role="button"
+                    onClick={e => {
+                      e.stopPropagation();
+                      const newName = window.prompt('Rename folder:', folder);
+                      if (newName === null || newName.trim() === '' || newName.trim() === folder) return;
+                      for (const s of folderScripts) {
+                        sendToBackend({ type: 'update_script', id: s.id, patch: { folder: newName.trim() } });
+                      }
+                    }}
+                  >
+                    <Pencil size={10} />
+                  </span>
+                  <span className="ls-folder-count">{folderScripts.length}</span>
+                </button>
+                {!isCollapsed && folderScripts.map(renderItem)}
+              </div>
             );
           })
+        ) : (
+          /* Flat list (no folders used) */
+          filtered.map(renderItem)
         )}
       </div>
     </div>

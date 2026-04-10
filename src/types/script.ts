@@ -68,6 +68,8 @@ export interface Script {
    * injected as top-level variables. Library scripts ignore this field.
    */
   triggers?: string[];
+  /** Virtual folder for organizing scripts in the UI. No OS-level directory. */
+  folder?: string;
   createdAt: number;   // Unix ms
   updatedAt: number;   // Unix ms
   metadata?: ScriptMetadata;
@@ -174,6 +176,8 @@ export interface LumiScriptAPI {
   tools: ToolsAPI;
   /** Real-time script-to-script pub/sub broadcast bus. No permission required. */
   broadcast: BroadcastAPI;
+  /** Command palette registration. No permission required. */
+  commands: CommandsAPI;
 }
 
 // ─── Chat API ─────────────────────────────────────────────────────────────────
@@ -1383,6 +1387,110 @@ export interface UIAPI {
    * const result = await handle.result;
    */
   showModal(items: ModalItem[], options: ShowModalOptions): ModalHandle;
+
+  /**
+   * Open the native Lumiverse expanded text editor with macro syntax highlighting.
+   * Blocks until the user closes the editor.
+   * Returns the edited text, or null if the user cancelled.
+   */
+  editText(
+    title?: string,
+    value?: string,
+    options?: { placeholder?: string },
+  ): Promise<string | null>;
+
+  /**
+   * Send an OS-level push notification to the user's registered devices.
+   * Only delivered when the app is not focused (avoids double-notification).
+   * Requires push_notification permission.
+   * @returns The number of devices the notification was sent to.
+   */
+  pushNotification(
+    title: string,
+    body: string,
+    options?: {
+      /** Deduplication tag — replaces a previous notification with the same tag. */
+      tag?: string;
+      /** URL to open when the notification is clicked. */
+      url?: string;
+      /** Relative URL path to an icon image. Must start with '/'. */
+      icon?: string;
+      /** When true, the title is used as-is without the extension name prefix. */
+      rawTitle?: boolean;
+      /** Relative URL path to a large image in the notification body. Must start with '/'. */
+      image?: string;
+    },
+  ): Promise<{ sent: number }>;
+
+  /**
+   * Check if push notifications are available for the current user.
+   * Requires push_notification permission.
+   */
+  getPushStatus(): Promise<{
+    available: boolean;
+    subscriptionCount: number;
+  }>;
+}
+
+// ─── Commands API ──────────────────────────────────────────────────────────────
+
+/** Scope controlling when a command appears in the Lumiverse command palette. */
+export type CommandScope = 'global' | 'chat' | 'chat-idle' | 'landing' | 'character';
+
+/** A command registration entry for the Lumiverse command palette (Cmd/Ctrl+K). */
+export interface CommandDefinition {
+  /** Unique identifier for this command within the script. */
+  id: string;
+  /** Display label shown in the command palette. Max 80 characters. */
+  label: string;
+  /** Description shown below the label. Max 200 characters. */
+  description: string;
+  /** Optional search keywords for fuzzy matching. Max 10 keywords, 30 chars each. */
+  keywords?: string[];
+  /**
+   * Scope controlling when the command appears.
+   * - `'global'` (default) — always visible
+   * - `'chat'` — only when viewing a chat
+   * - `'chat-idle'` — only when in a chat and not streaming
+   * - `'landing'` — only on the home page
+   * - `'character'` — only on character pages
+   */
+  scope?: CommandScope;
+}
+
+/** Context snapshot provided to command invocation handlers. */
+export interface CommandContext {
+  /** Current route path (e.g. "/chat/abc-123", "/"). */
+  route: string;
+  /** Active chat ID, if the user is in a chat view. */
+  chatId?: string;
+  /** Active character ID, if available. */
+  characterId?: string;
+  /** Whether the active chat is a group chat. */
+  isGroupChat?: boolean;
+}
+
+/**
+ * Command palette API — register discoverable actions in Lumiverse's Cmd/Ctrl+K palette.
+ * No permission required (free tier).
+ */
+export interface CommandsAPI {
+  /**
+   * Register (or replace) command palette entries for this script.
+   * Each call replaces the full set — pass the complete list of commands you want visible.
+   * Max 20 commands per extension (shared across all scripts).
+   */
+  register(commands: CommandDefinition[]): void;
+  /**
+   * Remove specific commands by ID, or all commands registered by this script if no IDs given.
+   */
+  unregister(commandIds?: string[]): void;
+  /**
+   * Register a handler called when the user selects a command from the palette.
+   * The handler receives the command ID and a context snapshot.
+   * Returns an unsubscribe function.
+   */
+  onInvoked(handler: (commandId: string, context: CommandContext) => void | Promise<void>): () => void;
 }
 
 /** The `script.*` namespace available inside script bodies */

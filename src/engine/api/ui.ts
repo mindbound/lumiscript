@@ -23,7 +23,7 @@ declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
 
 import type { LumiScriptAPI, UINotificationType, ModalItem, ShowModalOptions, ModalResult, ModalHandle } from '../../types/script.js';
 import type { APIBuildDeps } from './shared.js';
-import { shielded } from './shared.js';
+import { shielded, assertPerm } from './shared.js';
 
 // ─── API builder ──────────────────────────────────────────────────────────────
 
@@ -82,6 +82,21 @@ export function buildUIAPI(deps: APIBuildDeps): LumiScriptAPI['ui'] {
       );
     },
 
+    editText(
+      title?: string,
+      value?: string,
+      options: { placeholder?: string } = {},
+    ): Promise<string | null> {
+      return shielded(
+        spindle.textEditor.open({
+          title,
+          value,
+          placeholder: options.placeholder,
+          userId: deps.userId ?? undefined,
+        }).then(r => r.cancelled ? null : r.text),
+      );
+    },
+
     showModal(
       items: ModalItem[],
       options: ShowModalOptions,
@@ -109,6 +124,32 @@ export function buildUIAPI(deps: APIBuildDeps): LumiScriptAPI['ui'] {
           return shielded(spindle.modal.close(openRequestId, deps.userId ?? undefined));
         },
       };
+    },
+
+    // ── Push notifications ─────────────────────────────────────────────────
+
+    pushNotification(
+      title: string,
+      body: string,
+      options: { tag?: string; url?: string; icon?: string; rawTitle?: boolean; image?: string } = {},
+    ): Promise<{ sent: number }> {
+      assertPerm('push_notification', deps.hasPerm);
+      return shielded(
+        spindle.push.send({
+          title,
+          body,
+          tag:      options.tag,
+          url:      options.url,
+          icon:     options.icon,
+          rawTitle: options.rawTitle,
+          image:    options.image,
+        }, deps.userId ?? undefined),
+      );
+    },
+
+    getPushStatus(): Promise<{ available: boolean; subscriptionCount: number }> {
+      assertPerm('push_notification', deps.hasPerm);
+      return shielded(spindle.push.getStatus(deps.userId ?? undefined));
     },
   };
 }

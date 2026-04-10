@@ -1,6 +1,6 @@
 import { FC, useRef, useState, useEffect, useCallback } from 'react';
 import Editor, { type OnMount } from '@monaco-editor/react';
-import { Play, Loader2, Shield, ShieldAlert, Clock, Calendar, Code2, BookOpen, Copy, Check } from 'lucide-react';
+import { Play, Loader2, Shield, ShieldAlert, Clock, Calendar, Code2, BookOpen, Copy, Check, FolderOpen } from 'lucide-react';
 import type { Script, ScriptBindingEntry, ConsoleEntry } from '../../types/script.js';
 import type { FrontendToBackend } from '../../types/messages.js';
 import { ScriptConsole } from './ScriptConsole.js';
@@ -15,6 +15,7 @@ let _defsRegistered = false;
 
 interface ScriptEditorProps {
   script: Script;
+  allScripts: Script[];
   activeContext: ActiveContext;
   isRunning: boolean;
   consoleEntries: ConsoleEntry[];
@@ -24,6 +25,7 @@ interface ScriptEditorProps {
 
 export const ScriptEditor: FC<ScriptEditorProps> = ({
   script,
+  allScripts,
   activeContext,
   isRunning,
   consoleEntries,
@@ -293,6 +295,30 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
               {script.allowDangerous ? 'Dangerous' : 'Safe'}
             </span>
           </button>
+        </span>
+        <span className="ls-meta-item ls-meta-folder">
+          <FolderOpen size={10} />
+          <select
+            className="ls-folder-select"
+            value={script.folder ?? ''}
+            onChange={e => {
+              const val = e.target.value;
+              if (val === '__new__') {
+                const name = window.prompt('New folder name:');
+                if (name?.trim()) {
+                  sendToBackend({ type: 'update_script', id: script.id, patch: { folder: name.trim() } });
+                }
+              } else {
+                sendToBackend({ type: 'update_script', id: script.id, patch: { folder: val } });
+              }
+            }}
+          >
+            <option value="">No folder</option>
+            {[...new Set(allScripts.map(s => s.folder).filter((f): f is string => !!f))].sort().map(f => (
+              <option key={f} value={f}>{f}</option>
+            ))}
+            <option value="__new__">+ New folder...</option>
+          </select>
         </span>
         <span className="ls-meta-item"><Clock size={10} /><span>Updated {fmt(script.updatedAt)}</span></span>
         <span className="ls-meta-item"><Calendar size={10} /><span>Created {fmt(script.createdAt)}</span></span>

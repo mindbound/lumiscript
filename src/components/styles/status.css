@@ -257,3 +257,90 @@
   background: color-mix(in srgb, #22c55e 15%, transparent);
   color: #22c55e;
 }
+
+/* ── Variables Inspector ───────────────────────────────────────────────── */
+.ls-vars-refresh {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: var(--lumiverse-text-dim);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+}
+.ls-vars-refresh:hover {
+  color: var(--lumiverse-accent);
+  background: var(--lumiverse-fill-subtle);
+}
+
+.ls-vars-scope {
+  margin-bottom: 1px;
+}
+.ls-vars-scope-header {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  padding: 4px 10px;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--lumiverse-border);
+  color: var(--lumiverse-text-muted);
+  font-size: 10px;
+  cursor: pointer;
+  text-align: left;
+}
+.ls-vars-scope-header:hover {
+  color: var(--lumiverse-text);
+}
+.ls-vars-scope-name {
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.ls-vars-scope-hint {
+  color: var(--lumiverse-text-dim);
+  font-size: 9px;
+}
+.ls-vars-scope-count {
+  margin-left: auto;
+  font-size: 9px;
+  background: var(--lumiverse-fill-subtle);
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 999px;
+  padding: 0 5px;
+  color: var(--lumiverse-text-dim);
+}
+
+.ls-vars-scope-body {
+  padding: 2px 0;
+}
+.ls-vars-entry {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 10px 2px 24px;
+  font-size: 10px;
+  font-family: monospace;
+}
+.ls-vars-entry:hover {
+  background: var(--lumiverse-fill-subtle);
+}
+.ls-vars-key {
+  color: var(--lumiverse-accent);
+  flex-shrink: 0;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ls-vars-value {
+  color: var(--lumiverse-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}

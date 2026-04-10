@@ -200,11 +200,12 @@ describe('executeScript', () => {
 // ─── buildScriptAPI ──────────────────────────────────────────────────────────
 
 describe('buildScriptAPI', () => {
-  test('returns an object with all 14 API namespaces', () => {
+  test('returns an object with all 15 API namespaces', () => {
     const api = buildScriptAPI(makeScript(), makeOptions());
     const namespaces = [
       'utils', 'json', 'variables', 'chat', 'llm', 'files', 'enclave',
       'ui', 'characters', 'chats', 'worldInfo', 'personas', 'tools', 'broadcast',
+      'commands',
     ];
     for (const ns of namespaces) {
       expect(api[ns as keyof LumiScriptAPI]).toBeDefined();
