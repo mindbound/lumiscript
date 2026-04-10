@@ -1,0 +1,3 @@
+[test]
+preload = ["./tests/_infra/setup.ts"]
+root = "./tests"

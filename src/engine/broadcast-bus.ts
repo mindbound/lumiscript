@@ -98,3 +98,9 @@ export function clearByScriptId(scriptId: string): void {
   }
   handlerIndex.delete(scriptId);
 }
+
+/** Remove all subscriptions across all events and scripts. Used by test harness. */
+export function clearAll(): void {
+  bus.clear();
+  handlerIndex.clear();
+}

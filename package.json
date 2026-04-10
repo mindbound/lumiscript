@@ -1,27 +1,31 @@
 {
   "name": "lumiscript",
-  "version": "0.10.1",
+  "version": "0.10.5",
   "private": true,
   "type": "module",
   "scripts": {
     "build:backend": "bun build src/backend.ts --minify --outfile dist/backend.js --target bun",
     "build:frontend": "bun build src/frontend.tsx --minify --outfile dist/frontend.js --target browser",
     "typecheck": "bunx tsc --noEmit",
-    "build": "bun run typecheck && bun run build:backend && bun run build:frontend"
+    "typecheck:test": "bunx tsc --noEmit -p tsconfig.test.json",
+    "build": "bun run typecheck && bun run build:backend && bun run build:frontend",
+    "test": "bun test",
+    "test:watch": "bun test --watch"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
     "handlebars": "^4.7.9",
-    "lucide-react": "^1.7.0",
-    "react": "^19.2.4",
-    "react-dom": "^19.2.4",
+    "lucide-react": "^1.8.0",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@types/node": "^25.5.2",
+    "bun-types": "^1.2.0",
+    "@types/node": "^25.6.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
-    "lumiverse-spindle-types": "^0.4.13",
+    "lumiverse-spindle-types": "^0.4.18",
     "typescript": "^6.0.2"
   }
 }

@@ -44,6 +44,13 @@ export function setActiveContext(ctx: Partial<ActiveContext>): void {
   if ('chatId' in ctx) context.chatId = ctx.chatId ?? null;
 }
 
+/** Reset context to initial null state. Used by test harness. */
+export function resetContext(): void {
+  context.characterId = null;
+  context.characterName = null;
+  context.chatId = null;
+}
+
 // ─── Getters ──────────────────────────────────────────────────────────────────
 
 export function getActiveContext(): Readonly<ActiveContext> {
