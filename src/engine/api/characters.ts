@@ -37,6 +37,7 @@ function mapCharacter(dto: import('lumiverse-spindle-types').CharacterDTO): Char
     alternateGreetings:      dto.alternate_greetings,
     creator:                 dto.creator,
     imageId:                 dto.image_id,
+    worldBookIds:            dto.world_book_ids,
     createdAt:               dto.created_at,
     updatedAt:               dto.updated_at,
   };
@@ -58,6 +59,7 @@ function toCreateDTO(
     tags:                      input.tags,
     alternate_greetings:       input.alternateGreetings,
     creator:                   input.creator,
+    world_book_ids:            input.worldBookIds,
   };
 }
 

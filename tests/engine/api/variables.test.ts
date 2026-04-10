@@ -190,3 +190,63 @@ describe('global (additional coverage)', () => {
     expect(mockSpindle.variables.global.delete).toHaveBeenCalledTimes(3);
   });
 });
+
+// ─── chat (chat-metadata persisted) ──────────────────────────────────────────
+
+describe('chat', () => {
+  test('get delegates to spindle.variables.chat.get with deserialization', async () => {
+    mockSpindle.variables.chat.get.mockReturnValueOnce(Promise.resolve('42'));
+    const api = buildApi();
+    const result = await api.chat.get<number>('key');
+    expect(result).toBe(42);
+    expect(mockSpindle.variables.chat.get).toHaveBeenCalledWith('test-chat-id', 'key');
+  });
+
+  test('get returns default when no active chatId', async () => {
+    const api = buildApi({ activeContext: { chatId: null, characterId: null } });
+    const result = await api.chat.get('key', 'fallback');
+    expect(result).toBe('fallback');
+  });
+
+  test('get returns string values as-is (non-JSON)', async () => {
+    mockSpindle.variables.chat.get.mockReturnValueOnce(Promise.resolve('plain text'));
+    const api = buildApi();
+    expect(await api.chat.get<string>('key')).toBe('plain text');
+  });
+
+  test('set serializes and delegates to spindle.variables.chat.set', async () => {
+    const api = buildApi();
+    await api.chat.set('key', { complex: true });
+    expect(mockSpindle.variables.chat.set).toHaveBeenCalledWith(
+      'test-chat-id', 'key', '{"complex":true}',
+    );
+  });
+
+  test('delete returns true when key exists', async () => {
+    mockSpindle.variables.chat.has.mockReturnValueOnce(Promise.resolve(true));
+    const api = buildApi();
+    expect(await api.chat.delete('key')).toBe(true);
+    expect(mockSpindle.variables.chat.delete).toHaveBeenCalled();
+  });
+
+  test('delete returns false when key does not exist', async () => {
+    mockSpindle.variables.chat.has.mockReturnValueOnce(Promise.resolve(false));
+    const api = buildApi();
+    expect(await api.chat.delete('key')).toBe(false);
+  });
+
+  test('has delegates to spindle.variables.chat.has', async () => {
+    mockSpindle.variables.chat.has.mockReturnValueOnce(Promise.resolve(true));
+    const api = buildApi();
+    expect(await api.chat.has('key')).toBe(true);
+  });
+
+  test('clear deletes all keys from the chat scope', async () => {
+    mockSpindle.variables.chat.list.mockReturnValueOnce(
+      Promise.resolve({ a: '1', b: '2' }),
+    );
+    const api = buildApi();
+    await api.chat.clear();
+    expect(mockSpindle.variables.chat.delete).toHaveBeenCalledTimes(2);
+  });
+});

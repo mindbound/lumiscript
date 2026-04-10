@@ -18,6 +18,7 @@ const charDTO = {
   scenario: 'test', first_mes: 'Hi!', mes_example: '', creator_notes: '',
   system_prompt: '', post_history_instructions: '', tags: ['tag1'],
   alternate_greetings: [], creator: 'me', image_id: null,
+  world_book_ids: ['wb-1', 'wb-2'],
   created_at: '2026-01-01', updated_at: '2026-01-02',
 };
 
@@ -30,7 +31,7 @@ describe('list', () => {
     const result = await api.list();
     expect(result.total).toBe(1);
     expect(result.data[0]!.firstMessage).toBe('Hi!');
-    expect(result.data[0]!.firstMessage).toBe('Hi!');
+    expect(result.data[0]!.worldBookIds).toEqual(['wb-1', 'wb-2']);
   });
 
   test('throws when characters permission denied', async () => {
@@ -59,11 +60,12 @@ describe('create', () => {
   test('maps input to snake_case DTO and returns mapped result', async () => {
     mockSpindle.characters.create.mockReturnValueOnce(Promise.resolve(charDTO));
     const api = buildApi();
-    const result = await api.create({ name: 'Alice', firstMessage: 'Hi!' });
+    const result = await api.create({ name: 'Alice', firstMessage: 'Hi!', worldBookIds: ['wb-1'] });
     expect(result.name).toBe('Alice');
     // Verify the create call used snake_case
     const call = mockSpindle.characters.create.mock.calls[0] as any;
     expect(call[0].first_mes).toBe('Hi!');
+    expect(call[0].world_book_ids).toEqual(['wb-1']);
   });
 });
 

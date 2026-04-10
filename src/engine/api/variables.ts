@@ -2,7 +2,7 @@
  * ============================================================================
  * LUMISCRIPT — VARIABLES API
  * ============================================================================
- * flow (in-memory), local (chat-scoped), global (cross-chat), character (per-character)
+ * local (chat-scoped), global (cross-chat), chat (chat-metadata persisted), character (per-character)
  *
  * local and global now use spindle.variables — the same storage as Lumiverse's
  * built-in {{getvar}}/{{setvar}} macros.  Values are JSON-serialized so scripts
@@ -135,6 +135,40 @@ export function buildVariablesAPI(deps: APIBuildDeps): LumiScriptAPI['variables'
       async clear(): Promise<void> {
         const all = await spindle.variables.global.list(uid);
         await Promise.all(Object.keys(all).map(k => spindle.variables.global.delete(k, uid)));
+      },
+    },
+
+    // ── chat: spindle.variables.chat (persisted in chat.metadata.chat_variables) ─
+    chat: {
+      async get<T>(key: string, def?: T): Promise<T | undefined> {
+        const chatId = activeContext.chatId;
+        if (!chatId) return def;
+        const raw = await spindle.variables.chat.get(chatId, key);
+        return deserialize<T>(raw, def);
+      },
+      async set<T>(key: string, value: T): Promise<void> {
+        const chatId = activeContext.chatId;
+        if (!chatId) return;
+        await spindle.variables.chat.set(chatId, key, serialize(value));
+      },
+      async delete(key: string): Promise<boolean> {
+        const chatId = activeContext.chatId;
+        if (!chatId) return false;
+        const exists = await spindle.variables.chat.has(chatId, key);
+        if (!exists) return false;
+        await spindle.variables.chat.delete(chatId, key);
+        return true;
+      },
+      async has(key: string): Promise<boolean> {
+        const chatId = activeContext.chatId;
+        if (!chatId) return false;
+        return spindle.variables.chat.has(chatId, key);
+      },
+      async clear(): Promise<void> {
+        const chatId = activeContext.chatId;
+        if (!chatId) return;
+        const all = await spindle.variables.chat.list(chatId);
+        await Promise.all(Object.keys(all).map(k => spindle.variables.chat.delete(chatId, k)));
       },
     },
 

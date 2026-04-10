@@ -183,6 +183,10 @@ export interface ChatMessage {
   content: string;
   role: 'user' | 'assistant' | 'system';
   metadata?: Record<string, unknown>;
+  /** Index of the active swipe variant. `0` when the message has no alternates. */
+  swipeId: number;
+  /** All swipe variants for this message. `swipes[swipeId]` equals `content`. */
+  swipes: string[];
 }
 
 export interface GetMessagesOptions {
@@ -288,6 +292,23 @@ export interface ChatAPI {
    * Requires `interceptor` permission + `allowDangerous`.
    */
   clearAllInjections(): void;
+
+  /**
+   * Mark a single message as hidden or visible. Hidden messages are excluded
+   * from chat-memory embeddings (vector retrieval) but still included in
+   * prompt-assembly chat history. Requires chat_mutation permission.
+   */
+  setMessageHidden(id: string, hidden: boolean): Promise<void>;
+  /**
+   * Bulk variant — mark multiple messages as hidden or visible.
+   * Capped at 500 IDs per call. Requires chat_mutation permission.
+   */
+  setMessagesHidden(ids: string[], hidden: boolean): Promise<void>;
+  /**
+   * Check whether a message is hidden. Returns false for messages that have
+   * never had the flag set. Requires chat_mutation permission.
+   */
+  isMessageHidden(id: string): Promise<boolean>;
 }
 
 // ─── LLM API ─────────────────────────────────────────────────────────────────
@@ -572,12 +593,14 @@ export interface VariableStore {
 }
 
 export interface VariablesAPI {
-  /** Per-chat persistence (stored under chatId) */
+  /** Per-chat persistence (stored under chatId via spindle.variables.local) */
   local: VariableStore;
-  /** Cross-chat persistence (stored in shared file) */
+  /** Cross-chat persistence (stored via spindle.variables.global) */
   global: VariableStore;
-  /** Per-character persistence (stored under characterId) */
+  /** Per-character persistence (stored under characterId via userStorage) */
   character: VariableStore;
+  /** Chat-metadata persisted variables (stored in chat.metadata.chat_variables). Accessible via {{@key}} macros. */
+  chat: VariableStore;
 }
 
 // ─── JSON API ─────────────────────────────────────────────────────────────────
@@ -859,6 +882,8 @@ export interface Character {
   alternateGreetings: string[];
   creator: string;
   imageId: string | null;
+  /** World book IDs attached to this character. */
+  worldBookIds: string[];
   createdAt: number;
   updatedAt: number;
 }
@@ -876,6 +901,8 @@ export interface CharacterCreateInput {
   tags?: string[];
   alternateGreetings?: string[];
   creator?: string;
+  /** Replace the character's world book attachments. Pass [] to detach all. Omit to leave unchanged. */
+  worldBookIds?: string[];
 }
 
 export interface CharacterUpdateInput extends Partial<CharacterCreateInput> {}

@@ -55,9 +55,17 @@ export function buildChatAPI(deps: APIBuildDeps): LumiScriptAPI['chat'] {
       const id = requireChatId(activeContext);
       return shielded(
         spindle.chat.getMessages(id).then(msgs => {
-          if (opts?.last  !== undefined) return msgs.slice(-opts.last);
-          if (opts?.first !== undefined) return msgs.slice(0, opts.first);
-          return msgs;
+          let mapped = msgs.map(m => ({
+            id:       m.id,
+            content:  m.content,
+            role:     m.role,
+            metadata: m.metadata,
+            swipeId:  m.swipe_id,
+            swipes:   m.swipes,
+          }));
+          if (opts?.last  !== undefined) mapped = mapped.slice(-opts.last);
+          if (opts?.first !== undefined) mapped = mapped.slice(0, opts.first);
+          return mapped;
         }),
       );
     },
@@ -157,6 +165,26 @@ export function buildChatAPI(deps: APIBuildDeps): LumiScriptAPI['chat'] {
       assertPerm('interceptor', hasPerm);
       assertDangerous(script);
       clearAll();
+    },
+
+    // ── Message hiding ─────────────────────────────────────────────────────
+
+    setMessageHidden: (msgId: string, hidden: boolean) => {
+      assertPerm('chat_mutation', hasPerm);
+      const id = requireChatId(activeContext);
+      return shielded(spindle.chat.setMessageHidden(id, msgId, hidden));
+    },
+
+    setMessagesHidden: (msgIds: string[], hidden: boolean) => {
+      assertPerm('chat_mutation', hasPerm);
+      const id = requireChatId(activeContext);
+      return shielded(spindle.chat.setMessagesHidden(id, msgIds, hidden));
+    },
+
+    isMessageHidden: (msgId: string) => {
+      assertPerm('chat_mutation', hasPerm);
+      const id = requireChatId(activeContext);
+      return shielded(spindle.chat.isMessageHidden(id, msgId));
     },
   };
 }

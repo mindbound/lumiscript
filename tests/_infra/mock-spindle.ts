@@ -109,6 +109,9 @@ export function createMockSpindle() {
       appendMessage: mock(() => Promise.resolve({ id: 'mock-msg-id' })),
       updateMessage: mock(() => Promise.resolve()),
       deleteMessage: mock(() => Promise.resolve()),
+      setMessageHidden: mock(() => Promise.resolve()),
+      setMessagesHidden: mock(() => Promise.resolve()),
+      isMessageHidden: mock(() => Promise.resolve(false)),
     },
 
     // ─── Connections ───────────────────────────────────────────────────

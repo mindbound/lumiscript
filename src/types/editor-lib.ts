@@ -105,6 +105,10 @@ interface ChatMessage {
   content: string;
   role: 'user' | 'assistant' | 'system';
   metadata?: Record<string, unknown>;
+  /** Index of the active swipe variant. 0 when the message has no alternates. */
+  swipeId: number;
+  /** All swipe variants for this message. swipes[swipeId] equals content. */
+  swipes: string[];
 }
 
 interface GetMessagesOptions {
@@ -185,6 +189,13 @@ interface ChatAPI {
   clearInjections(): void;
   /** Remove ALL injections across all scripts. Requires interceptor permission + allowDangerous. */
   clearAllInjections(): void;
+
+  /** Mark a single message as hidden or visible. Hidden messages are excluded from vector retrieval but still included in prompt assembly. Requires chat_mutation permission. */
+  setMessageHidden(id: string, hidden: boolean): Promise<void>;
+  /** Bulk variant — mark multiple messages as hidden or visible. Max 500 IDs per call. Requires chat_mutation permission. */
+  setMessagesHidden(ids: string[], hidden: boolean): Promise<void>;
+  /** Check whether a message is hidden. Returns false for messages that have never had the flag set. Requires chat_mutation permission. */
+  isMessageHidden(id: string): Promise<boolean>;
 }
 
 // ─── LLM API ─────────────────────────────────────────────────────────────────
@@ -392,6 +403,8 @@ interface VariablesAPI {
   global: VariableStore;
   /** Per-character variables. Scoped to the current character ID. */
   character: VariableStore;
+  /** Chat-metadata persisted variables. Stored in chat.metadata.chat_variables. Accessible via {{@key}} / {{getchatvar}} macros. Persists across generations within the same chat. */
+  chat: VariableStore;
 }
 
 // ─── JSON API ─────────────────────────────────────────────────────────────────
@@ -667,6 +680,8 @@ interface Character {
   scenario: string; firstMessage: string; mesExample: string; creatorNotes: string;
   systemPrompt: string; postHistoryInstructions: string; tags: string[];
   alternateGreetings: string[]; creator: string; imageId: string | null;
+  /** World book IDs attached to this character. */
+  worldBookIds: string[];
   createdAt: number; updatedAt: number;
 }
 interface CharacterCreateInput {
@@ -674,6 +689,8 @@ interface CharacterCreateInput {
   firstMessage?: string; mesExample?: string; creatorNotes?: string;
   systemPrompt?: string; postHistoryInstructions?: string;
   tags?: string[]; alternateGreetings?: string[]; creator?: string;
+  /** Replace the character's world book attachments. Pass [] to detach all. Omit to leave unchanged. */
+  worldBookIds?: string[];
 }
 interface CharacterUpdateInput extends Partial<CharacterCreateInput> {}
 

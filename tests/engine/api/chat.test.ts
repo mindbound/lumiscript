@@ -29,14 +29,17 @@ describe('getChatId', () => {
 // ─── getMessages ─────────────────────────────────────────────────────────────
 
 describe('getMessages', () => {
-  test('delegates to spindle.chat.getMessages', async () => {
+  test('delegates to spindle.chat.getMessages and maps to camelCase', async () => {
     const msgs = [
-      { id: 'm1', role: 'user' as const, content: 'hi', swipe_id: 0, swipes: ['hi'] },
+      { id: 'm1', role: 'user' as const, content: 'hi', metadata: undefined, swipe_id: 0, swipes: ['hi'] },
     ];
     mockSpindle.chat.getMessages.mockReturnValueOnce(Promise.resolve(msgs) as any);
     const api = buildApi();
     const result = await api.getMessages();
-    expect(result).toEqual(msgs);
+    expect(result).toHaveLength(1);
+    expect(result[0]!.swipeId).toBe(0);   // mapped from swipe_id
+    expect(result[0]!.swipes).toEqual(['hi']);
+    expect((result[0] as any).swipe_id).toBeUndefined(); // snake_case removed
   });
 
   test('supports last option to slice from end', async () => {
@@ -273,5 +276,64 @@ describe('getInjections', () => {
   test('returns empty array when no injections exist', () => {
     const api = buildApi();
     expect(api.getInjections()).toEqual([]);
+  });
+});
+
+// ─── setMessageHidden ────────────────────────────────────────────────────────
+
+describe('setMessageHidden', () => {
+  test('delegates to spindle.chat.setMessageHidden', async () => {
+    const api = buildApi();
+    await api.setMessageHidden('msg-1', true);
+    expect(mockSpindle.chat.setMessageHidden).toHaveBeenCalledWith('test-chat-id', 'msg-1', true);
+  });
+
+  test('throws when chat_mutation permission denied', () => {
+    const api = buildApi({ hasPerm: () => false });
+    expect(() => api.setMessageHidden('msg-1', true)).toThrow('PERMISSION_DENIED');
+  });
+
+  test('throws when no active chat', () => {
+    const api = buildApi({ activeContext: { chatId: null, characterId: null } });
+    expect(() => api.setMessageHidden('msg-1', true)).toThrow('no active chat');
+  });
+});
+
+// ─── setMessagesHidden ───────────────────────────────────────────────────────
+
+describe('setMessagesHidden', () => {
+  test('delegates to spindle.chat.setMessagesHidden with array of ids', async () => {
+    const api = buildApi();
+    await api.setMessagesHidden(['msg-1', 'msg-2', 'msg-3'], false);
+    expect(mockSpindle.chat.setMessagesHidden).toHaveBeenCalledWith(
+      'test-chat-id', ['msg-1', 'msg-2', 'msg-3'], false,
+    );
+  });
+
+  test('throws when chat_mutation permission denied', () => {
+    const api = buildApi({ hasPerm: () => false });
+    expect(() => api.setMessagesHidden(['msg-1'], true)).toThrow('PERMISSION_DENIED');
+  });
+});
+
+// ─── isMessageHidden ─────────────────────────────────────────────────────────
+
+describe('isMessageHidden', () => {
+  test('delegates to spindle.chat.isMessageHidden and returns result', async () => {
+    mockSpindle.chat.isMessageHidden.mockReturnValueOnce(Promise.resolve(true));
+    const api = buildApi();
+    expect(await api.isMessageHidden('msg-1')).toBe(true);
+    expect(mockSpindle.chat.isMessageHidden).toHaveBeenCalledWith('test-chat-id', 'msg-1');
+  });
+
+  test('returns false for non-hidden messages', async () => {
+    mockSpindle.chat.isMessageHidden.mockReturnValueOnce(Promise.resolve(false));
+    const api = buildApi();
+    expect(await api.isMessageHidden('msg-2')).toBe(false);
+  });
+
+  test('throws when chat_mutation permission denied', () => {
+    const api = buildApi({ hasPerm: () => false });
+    expect(() => api.isMessageHidden('msg-1')).toThrow('PERMISSION_DENIED');
   });
 });

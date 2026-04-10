@@ -57,7 +57,7 @@ const EVENTS: Array<{ name: string; group: string; payload: string }> = [
   { group: 'Chat',       name: 'MESSAGE_SENT',               payload: '{ chatId, message }' },
   { group: 'Chat',       name: 'MESSAGE_EDITED',             payload: '{ chatId, message }' },
   { group: 'Chat',       name: 'MESSAGE_DELETED',            payload: '{ chatId, messageId }' },
-  { group: 'Chat',       name: 'MESSAGE_SWIPED',             payload: '{ chatId, messageId, swipeId }' },
+  { group: 'Chat',       name: 'MESSAGE_SWIPED',             payload: '{ chatId, message, action, swipeId, previousSwipeId? }' },
   { group: 'Chat',       name: 'CHARACTER_MESSAGE_RENDERED', payload: '{ chatId, messageId }' },
   { group: 'Chat',       name: 'USER_MESSAGE_RENDERED',      payload: '{ chatId, messageId }' },
   { group: 'Generation', name: 'GENERATION_STARTED',         payload: '{ generationId, chatId, model }' },
@@ -133,6 +133,9 @@ const PERM_GROUPS: PermGroup[] = [
       { method: 'api.chat.getInjections', perms: [] },
       { method: 'api.chat.clearInjections', perms: ['interceptor'] },
       { method: 'api.chat.clearAllInjections', perms: ['interceptor'], note: '+ allowDangerous' },
+      { method: 'api.chat.setMessageHidden', perms: ['chat_mutation'] },
+      { method: 'api.chat.setMessagesHidden', perms: ['chat_mutation'] },
+      { method: 'api.chat.isMessageHidden', perms: ['chat_mutation'] },
     ],
   },
   {
@@ -381,6 +384,8 @@ const KEY_TYPES: TypeDoc[] = [
       { field: 'content',   type: 'string',                          optional: false, desc: 'Plain-text message content.' },
       { field: 'role',      type: "'user' | 'assistant' | 'system'", optional: false, desc: 'Sender role.' },
       { field: 'metadata?', type: 'Record<string, unknown>',         optional: true,  desc: 'Arbitrary metadata attached to the message.' },
+      { field: 'swipeId',   type: 'number',                          optional: false, desc: 'Index of the active swipe variant. 0 when the message has no alternates.' },
+      { field: 'swipes',    type: 'string[]',                        optional: false, desc: 'All swipe variants. swipes[swipeId] equals content.' },
     ],
   },
   {
@@ -645,6 +650,7 @@ const KEY_TYPES: TypeDoc[] = [
       { field: 'tags',                    type: 'string[]', optional: false, desc: 'Searchable tags.' },
       { field: 'alternateGreetings',      type: 'string[]', optional: false, desc: 'Additional greeting variants.' },
       { field: 'imageId',                 type: 'string | null', optional: false, desc: 'Avatar image ID. Null if no avatar.' },
+      { field: 'worldBookIds',            type: 'string[]',     optional: false, desc: 'World book IDs attached to this character.' },
       { field: 'createdAt',               type: 'number',   optional: false, desc: 'Creation timestamp (Unix ms).' },
       { field: 'updatedAt',               type: 'number',   optional: false, desc: 'Last update timestamp (Unix ms).' },
     ],
@@ -663,6 +669,7 @@ const KEY_TYPES: TypeDoc[] = [
       { field: 'tags?',                   type: 'string[]', optional: true,  desc: 'Searchable tags.' },
       { field: 'alternateGreetings?',     type: 'string[]', optional: true,  desc: 'Additional greeting variants.' },
       { field: 'creator?',                type: 'string',   optional: true,  desc: 'Creator name / attribution.' },
+      { field: 'worldBookIds?',           type: 'string[]', optional: true,  desc: 'World book IDs to attach. Pass [] to detach all. Omit to leave unchanged.' },
     ],
   },
   {
@@ -679,6 +686,7 @@ const KEY_TYPES: TypeDoc[] = [
       { field: 'tags?',                   type: 'string[]', optional: true,  desc: 'Searchable tags.' },
       { field: 'alternateGreetings?',     type: 'string[]', optional: true,  desc: 'Additional greeting variants.' },
       { field: 'creator?',                type: 'string',   optional: true,  desc: 'Creator name / attribution.' },
+      { field: 'worldBookIds?',           type: 'string[]', optional: true,  desc: 'Replace world book attachments. Pass [] to detach all.' },
     ],
   },
   // ─── Chats ───────────────────────────────────────────────────────────────────
