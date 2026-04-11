@@ -12,30 +12,7 @@
 import type { LumiScriptAPI, EventTrackOptions, EventQueryFilter, EventRecord } from '../../types/script.js';
 import type { APIBuildDeps } from './shared.js';
 
-declare const spindle: {
-  events: {
-    track(
-      eventName: string,
-      payload?: Record<string, unknown>,
-      options?: { level?: string; chatId?: string; retentionDays?: number },
-    ): Promise<void>;
-    query(filter?: {
-      eventName?: string; chatId?: string; since?: string; until?: string;
-      level?: string; limit?: number;
-    }): Promise<Array<{
-      id: string; ts: string; eventName: string; level: string;
-      chatId?: string; payload?: Record<string, unknown>;
-    }>>;
-    replay(filter?: {
-      eventName?: string; chatId?: string; since?: string; until?: string;
-      level?: string; limit?: number;
-    }): Promise<Array<{
-      id: string; ts: string; eventName: string; level: string;
-      chatId?: string; payload?: Record<string, unknown>;
-    }>>;
-    getLatestState(keys: string[]): Promise<Record<string, unknown>>;
-  };
-};
+declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
 
 export function buildEventsAPI(deps: APIBuildDeps): LumiScriptAPI['events'] {
   const { hasPerm, activeContext } = deps;
