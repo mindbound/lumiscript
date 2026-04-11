@@ -11,6 +11,7 @@
 import type {
   Script,
   ScriptType,
+  ScriptPackEntry,
   ScriptBindingEntry,
   ScriptMetadata,
   ConsoleEntry,
@@ -63,6 +64,10 @@ export type FrontendToBackend =
   | {
       type: 'update_settings';
       patch: Partial<LumiScriptSettings>;
+    }
+  | {
+      type: 'import_scripts';
+      entries: ScriptPackEntry[];
     }
 ;
 

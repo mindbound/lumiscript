@@ -178,6 +178,116 @@ describe('duplicateScript', () => {
   });
 });
 
+// ─── importScripts ──────────────────────────────────────────────────────────
+
+describe('importScripts', () => {
+  test('imports an array of entries and returns created scripts', async () => {
+    await storage.load();
+    const results = await storage.importScripts([
+      { name: 'Script A', code: 'console.log("a")', type: 'trigger' },
+      { name: 'Script B', code: 'console.log("b")', type: 'library' },
+    ]);
+
+    expect(results).toHaveLength(2);
+    expect(storage.getScripts()).toHaveLength(2);
+    expect(results[0]!.name).toBe('Script A');
+    expect(results[1]!.name).toBe('Script B');
+  });
+
+  test('forces enabled to false on all imported scripts', async () => {
+    await storage.load();
+    const results = await storage.importScripts([
+      { name: 'Dangerous', code: '', type: 'trigger' },
+    ]);
+    expect(results[0]!.enabled).toBe(false);
+  });
+
+  test('forces allowDangerous to false on all imported scripts', async () => {
+    await storage.load();
+    const results = await storage.importScripts([
+      { name: 'Sneaky', code: '', type: 'trigger' },
+    ]);
+    expect(results[0]!.allowDangerous).toBe(false);
+  });
+
+  test('generates fresh UUIDs (not from input)', async () => {
+    await storage.load();
+    const results = await storage.importScripts([
+      { name: 'A', code: '', type: 'trigger' },
+      { name: 'B', code: '', type: 'trigger' },
+    ]);
+    // Each script gets a unique ID
+    expect(results[0]!.id).toBeDefined();
+    expect(results[1]!.id).toBeDefined();
+    expect(results[0]!.id).not.toBe(results[1]!.id);
+  });
+
+  test('sets fresh timestamps', async () => {
+    await storage.load();
+    const before = Date.now();
+    const results = await storage.importScripts([
+      { name: 'Timestamped', code: '', type: 'trigger' },
+    ]);
+    expect(results[0]!.createdAt).toBeGreaterThanOrEqual(before);
+    expect(results[0]!.updatedAt).toBeGreaterThanOrEqual(before);
+  });
+
+  test('deduplicates names against existing scripts', async () => {
+    await storage.load();
+    await storage.createScript('Existing');
+    const results = await storage.importScripts([
+      { name: 'Existing', code: '', type: 'trigger' },
+    ]);
+    expect(results[0]!.name).toBe('Existing (2)');
+  });
+
+  test('deduplicates names within the import batch', async () => {
+    await storage.load();
+    const results = await storage.importScripts([
+      { name: 'Same', code: 'a', type: 'trigger' },
+      { name: 'Same', code: 'b', type: 'trigger' },
+    ]);
+    expect(results[0]!.name).toBe('Same');
+    expect(results[1]!.name).toBe('Same (2)');
+  });
+
+  test('validates type — invalid value falls back to trigger', async () => {
+    await storage.load();
+    const results = await storage.importScripts([
+      { name: 'Bad Type', code: '', type: 'invalid' as any },
+    ]);
+    expect(results[0]!.type).toBe('trigger');
+  });
+
+  test('preserves optional fields when present', async () => {
+    await storage.load();
+    const results = await storage.importScripts([
+      {
+        name: 'Full',
+        code: 'api.chat.sendMessage("hi")',
+        type: 'trigger',
+        triggers: ['MESSAGE_SENT'],
+        bindings: [{ type: 'character', characterId: 'abc', displayName: 'Test' }],
+        folder: 'Utils',
+        metadata: { author: 'Someone', version: '1.0.0' },
+      },
+    ]);
+    expect(results[0]!.triggers).toEqual(['MESSAGE_SENT']);
+    expect(results[0]!.bindings).toEqual([{ type: 'character', characterId: 'abc', displayName: 'Test' }]);
+    expect(results[0]!.folder).toBe('Utils');
+    expect(results[0]!.metadata?.author).toBe('Someone');
+  });
+
+  test('defaults optional arrays to empty when omitted', async () => {
+    await storage.load();
+    const results = await storage.importScripts([
+      { name: 'Minimal', code: '', type: 'trigger' },
+    ]);
+    expect(results[0]!.bindings).toEqual([]);
+    expect(results[0]!.triggers).toEqual([]);
+  });
+});
+
 // ─── getUniqueName ───────────────────────────────────────────────────────────
 
 describe('getUniqueName', () => {

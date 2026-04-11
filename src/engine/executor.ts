@@ -59,6 +59,7 @@ import { buildToolsAPI     } from './api/tools.js';
 import { buildBroadcastAPI } from './api/broadcast.js';
 import { buildEnclaveAPI   } from './api/enclave.js';
 import { buildCommandsAPI  } from './api/commands.js';
+import { buildEventsAPI   } from './api/events.js';
 
 // ─── Executor options ─────────────────────────────────────────────────────────
 
@@ -252,6 +253,7 @@ export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiSc
     tools:      buildToolsAPI(deps, () => api),
     broadcast:  buildBroadcastAPI(deps),
     commands:   buildCommandsAPI(deps),
+    events:     buildEventsAPI(deps),
   };
   return api;
 }

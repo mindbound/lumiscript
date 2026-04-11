@@ -500,6 +500,13 @@ spindle.onFrontendMessage(async (raw, userId) => {
         break;
       }
 
+      case 'import_scripts': {
+        await scriptStorage.importScripts(msg.entries);
+        pushScripts();
+        void syncTriggers();
+        break;
+      }
+
       // ── Settings ─────────────────────────────────────────────────────────
       case 'update_settings': {
         await settingsStore.update(msg.patch);

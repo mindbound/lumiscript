@@ -987,6 +987,81 @@ interface CommandsAPI {
   onInvoked(handler: (commandId: string, context: CommandContext) => void | Promise<void>): () => void;
 }
 
+// ─── Events API ──────────────────────────────────────────────────────────────
+
+/** Severity level for tracked events. */
+type EventLevel = 'debug' | 'info' | 'warn' | 'error';
+
+/** Options for api.events.track(). */
+interface EventTrackOptions {
+  /** Severity level (default: 'info'). */
+  level?: EventLevel;
+  /** Associate with a specific chat (defaults to active chat). */
+  chatId?: string;
+  /** Auto-expire after this many days. */
+  retentionDays?: number;
+}
+
+/** Filter for api.events.query() and api.events.replay(). */
+interface EventQueryFilter {
+  /** Filter by event name. */
+  eventName?: string;
+  /** Filter by chat. */
+  chatId?: string;
+  /** ISO 8601 — only events after this timestamp. */
+  since?: string;
+  /** ISO 8601 — only events before this timestamp. */
+  until?: string;
+  /** Filter by severity level. */
+  level?: EventLevel;
+  /** Maximum number of results. */
+  limit?: number;
+}
+
+/** A single tracked event record. */
+interface EventRecord {
+  id: string;
+  /** ISO 8601 timestamp. */
+  ts: string;
+  eventName: string;
+  level: EventLevel;
+  chatId?: string;
+  payload?: Record<string, unknown>;
+}
+
+interface EventsAPI {
+  /**
+   * Record a named event with optional payload and options.
+   * Requires event_tracking permission.
+   * @example
+   * await api.events.track('user_action', { action: 'clicked_button' });
+   * await api.events.track('error_occurred', { msg: 'timeout' }, { level: 'error' });
+   */
+  track(eventName: string, payload?: Record<string, unknown>, options?: EventTrackOptions): Promise<void>;
+  /**
+   * Query persisted events (newest-first).
+   * Requires event_tracking permission.
+   * @example
+   * const recent = await api.events.query({ eventName: 'user_action', limit: 10 });
+   */
+  query(filter?: EventQueryFilter): Promise<EventRecord[]>;
+  /**
+   * Replay persisted events in chronological order (oldest-first).
+   * Requires event_tracking permission.
+   * @example
+   * const history = await api.events.replay({ since: '2026-01-01' });
+   */
+  replay(filter?: EventQueryFilter): Promise<EventRecord[]>;
+  /**
+   * Retrieve the latest known state for a set of keys.
+   * Useful for resuming stateful scripts after restarts.
+   * Requires event_tracking permission.
+   * @example
+   * const state = await api.events.getLatestState(['counter', 'lastSeen']);
+   */
+  getLatestState(keys: string[]): Promise<Record<string, unknown>>;
+}
+
 // ─── Top-level API ────────────────────────────────────────────────────────────
 
 interface LumiScriptAPI {
@@ -1015,6 +1090,8 @@ interface LumiScriptAPI {
   broadcast: BroadcastAPI;
   /** Register commands in the Lumiverse command palette (Cmd/Ctrl+K). No permission required. */
   commands: CommandsAPI;
+  /** Persistent event tracking (track, query, replay). Requires event_tracking permission. */
+  events: EventsAPI;
 }
 
 interface ScriptNamespace {

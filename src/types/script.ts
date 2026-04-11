@@ -75,6 +75,21 @@ export interface Script {
   metadata?: ScriptMetadata;
 }
 
+/**
+ * A script entry as serialized in a script pack ZIP.
+ * Contains only the fields meaningful for sharing — no id, enabled, allowDangerous,
+ * or timestamps (all regenerated on import with safe defaults).
+ */
+export interface ScriptPackEntry {
+  name: string;
+  code: string;
+  type: ScriptType;
+  triggers?: string[];
+  bindings?: ScriptBindingEntry[];
+  folder?: string;
+  metadata?: ScriptMetadata;
+}
+
 // ─── LumiScript global settings ──────────────────────────────────────────────
 
 export interface LumiScriptSettings {
@@ -178,6 +193,8 @@ export interface LumiScriptAPI {
   broadcast: BroadcastAPI;
   /** Command palette registration. No permission required. */
   commands: CommandsAPI;
+  /** Persistent event tracking (track, query, replay). Requires event_tracking permission. */
+  events: EventsAPI;
 }
 
 // ─── Chat API ─────────────────────────────────────────────────────────────────
@@ -1491,6 +1508,73 @@ export interface CommandsAPI {
    * Returns an unsubscribe function.
    */
   onInvoked(handler: (commandId: string, context: CommandContext) => void | Promise<void>): () => void;
+}
+
+// ─── Events API ──────────────────────────────────────────────────────────────
+
+/** Severity level for tracked events. */
+export type EventLevel = 'debug' | 'info' | 'warn' | 'error';
+
+/** Options for api.events.track(). */
+export interface EventTrackOptions {
+  /** Severity level (default: 'info'). */
+  level?: EventLevel;
+  /** Associate event with a specific chat (defaults to active chat). */
+  chatId?: string;
+  /** Auto-expire after this many days. Omit for default retention. */
+  retentionDays?: number;
+}
+
+/** Filter used by api.events.query() and api.events.replay(). */
+export interface EventQueryFilter {
+  /** Filter by event name. */
+  eventName?: string;
+  /** Filter by chat. */
+  chatId?: string;
+  /** ISO 8601 date string — only events after this timestamp. */
+  since?: string;
+  /** ISO 8601 date string — only events before this timestamp. */
+  until?: string;
+  /** Filter by severity level. */
+  level?: EventLevel;
+  /** Maximum number of results (default depends on host). */
+  limit?: number;
+}
+
+/** A single tracked event record returned by query/replay. */
+export interface EventRecord {
+  id: string;
+  /** ISO 8601 timestamp. */
+  ts: string;
+  eventName: string;
+  level: EventLevel;
+  chatId?: string;
+  payload?: Record<string, unknown>;
+}
+
+export interface EventsAPI {
+  /**
+   * Record a named event with optional payload and options.
+   * Events are persisted by the host and can be queried later.
+   * Requires event_tracking permission.
+   */
+  track(eventName: string, payload?: Record<string, unknown>, options?: EventTrackOptions): Promise<void>;
+  /**
+   * Query persisted events (newest-first).
+   * Requires event_tracking permission.
+   */
+  query(filter?: EventQueryFilter): Promise<EventRecord[]>;
+  /**
+   * Replay persisted events in chronological order (oldest-first).
+   * Requires event_tracking permission.
+   */
+  replay(filter?: EventQueryFilter): Promise<EventRecord[]>;
+  /**
+   * Retrieve the latest known state for a set of keys.
+   * Useful for resuming stateful scripts after restarts.
+   * Requires event_tracking permission.
+   */
+  getLatestState(keys: string[]): Promise<Record<string, unknown>>;
 }
 
 /** The `script.*` namespace available inside script bodies */

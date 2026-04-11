@@ -1,5 +1,5 @@
 import { FC, useState } from 'react';
-import { Zap, Lock, Radio, List, Braces, Hash, ChevronDown, ChevronRight } from 'lucide-react';
+import { Zap, Lock, Radio, List, Braces, Hash, Package, ChevronDown, ChevronRight } from 'lucide-react';
 
 // ─── Section accordion ────────────────────────────────────────────────────────
 
@@ -193,6 +193,7 @@ const PERM_GROUPS: PermGroup[] = [
       { method: 'api.tools.*', perms: ['tools'] },
       { method: 'api.broadcast.*', perms: [] },
       { method: 'api.commands.*', perms: [] },
+      { method: 'api.events.*', perms: ['event_tracking'] },
     ],
   },
 ];
@@ -884,6 +885,40 @@ const KEY_TYPES: TypeDoc[] = [
       { field: 'scriptName',       type: 'string',  optional: false, desc: 'Name of the script that registered this tool.' },
     ],
   },
+  // ─── Events ──────────────────────────────────────────────────────────────────
+  {
+    name: 'EventTrackOptions',
+    note: 'Options for api.events.track().',
+    fields: [
+      { field: 'level?',         type: "'debug'|'info'|'warn'|'error'", optional: true, desc: 'Severity level (default: info).' },
+      { field: 'chatId?',        type: 'string',  optional: true, desc: 'Associate with a specific chat (defaults to active chat).' },
+      { field: 'retentionDays?', type: 'number',  optional: true, desc: 'Auto-expire after this many days.' },
+    ],
+  },
+  {
+    name: 'EventQueryFilter',
+    note: 'Filter for api.events.query() and api.events.replay().',
+    fields: [
+      { field: 'eventName?', type: 'string',  optional: true, desc: 'Filter by event name.' },
+      { field: 'chatId?',    type: 'string',  optional: true, desc: 'Filter by chat.' },
+      { field: 'since?',     type: 'string',  optional: true, desc: 'ISO 8601 — only events after this timestamp.' },
+      { field: 'until?',     type: 'string',  optional: true, desc: 'ISO 8601 — only events before this timestamp.' },
+      { field: 'level?',     type: "'debug'|'info'|'warn'|'error'", optional: true, desc: 'Filter by severity level.' },
+      { field: 'limit?',     type: 'number',  optional: true, desc: 'Maximum number of results.' },
+    ],
+  },
+  {
+    name: 'EventRecord',
+    note: 'Returned by api.events.query() and api.events.replay().',
+    fields: [
+      { field: 'id',        type: 'string',  optional: false, desc: 'Unique event ID.' },
+      { field: 'ts',        type: 'string',  optional: false, desc: 'ISO 8601 timestamp.' },
+      { field: 'eventName', type: 'string',  optional: false, desc: 'Name of the tracked event.' },
+      { field: 'level',     type: "'debug'|'info'|'warn'|'error'", optional: false, desc: 'Severity level.' },
+      { field: 'chatId?',   type: 'string',  optional: true,  desc: 'Chat this event was associated with.' },
+      { field: 'payload?',  type: 'Record<string, unknown>', optional: true, desc: 'Arbitrary event data.' },
+    ],
+  },
 ];
 
 const KeyTypesTable: FC = () => (
@@ -1124,6 +1159,15 @@ const API_GROUPS: FnGroup[] = [
     ],
   },
   {
+    group: 'api.events',
+    rows: [
+      { name: 'track',          args: 'eventName, payload?, options?', desc: 'Record a named event. Options: level, chatId, retentionDays.' },
+      { name: 'query',          args: 'filter?',                      desc: 'Query events (newest-first). Filter by name, chat, date range, level, limit.' },
+      { name: 'replay',         args: 'filter?',                      desc: 'Replay events (oldest-first). Same filter options as query.' },
+      { name: 'getLatestState', args: 'keys[]',                       desc: 'Retrieve latest known state for a set of keys. Useful for resuming after restarts.' },
+    ],
+  },
+  {
     group: 'api.enclave',
     rows: [
       { name: 'put',    args: 'key, value', desc: 'Store or overwrite an AES-256-GCM encrypted secret. Requires allowDangerous. Key: alphanumeric + _ - . (max 128 chars); value: printable ASCII, max 64 KB.' },
@@ -1202,6 +1246,23 @@ export const ReferenceTab: FC = () => (
 
     <Section icon={<List size={11} />} title="API Functions">
       <ApiFunctionsTable />
+    </Section>
+
+    <Section icon={<Package size={11} />} title="Script Packs">
+      <p className="ls-ref-muted">
+        <strong>Export</strong> — click the <Code>↓</Code> button in the script list header to
+        download the currently filtered scripts as a <Code>.lumiscript.zip</Code> file.
+        The pack contains a <Code>pack.json</Code> with script names, code, triggers,
+        bindings, folders, and metadata. IDs, timestamps, enabled state, and
+        the allowDangerous flag are <em>not</em> included.
+      </p>
+      <p className="ls-ref-muted" style={{ marginTop: 6 }}>
+        <strong>Import</strong> — click the <Code>↑</Code> button to pick a <Code>.lumiscript.zip</Code>.
+        After validation (format version, schema, 1 MB decompressed size limit, max 100 scripts per pack),
+        a confirmation dialog shows the script list. Imported scripts are always created
+        with <Code>enabled: false</Code> and <Code>allowDangerous: false</Code> — review and enable
+        them manually.
+      </p>
     </Section>
   </div>
 );

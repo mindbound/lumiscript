@@ -1,8 +1,10 @@
-import { FC, useState } from 'react';
-import { Code2, BookMarked, Plus, FileCode2, FolderOpen, ChevronDown, ChevronRight, Pencil } from 'lucide-react';
+import { FC, useRef, useState } from 'react';
+import { Code2, BookMarked, Plus, Upload, Download, FileCode2, FolderOpen, ChevronDown, ChevronRight, Pencil } from 'lucide-react';
 import type { Script, ScriptType } from '../../types/script.js';
 import type { FrontendToBackend } from '../../types/messages.js';
 import { ScriptListItem, type ExecutionDot } from './ScriptListItem.js';
+import { exportScriptPack } from '../../utils/pack-export.js';
+import { parseScriptPack } from '../../utils/pack-import.js';
 
 interface ScriptExecInfo {
   dot: ExecutionDot;
@@ -44,6 +46,7 @@ export const ScriptList: FC<ScriptListProps> = ({
 }) => {
   const [activeType, setActiveType] = useState<ScriptType>('trigger');
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set());
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const filtered = scripts.filter(s => s.type === activeType);
   const grouped = groupByFolder(filtered);
@@ -62,6 +65,35 @@ export const ScriptList: FC<ScriptListProps> = ({
     const name = window.prompt(activeType === 'library' ? 'Library name:' : 'Script name:');
     if (!name?.trim()) return;
     sendToBackend({ type: 'create_script', name: name.trim(), scriptType: activeType });
+  };
+
+  const handleExport = () => {
+    if (filtered.length === 0) return;
+    const packName = window.prompt('Pack name:', 'my-scripts');
+    if (!packName?.trim()) return;
+    exportScriptPack(filtered, packName.trim());
+  };
+
+  const handleImportClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    // Reset the input so the same file can be re-selected if needed
+    e.target.value = '';
+    try {
+      const entries = await parseScriptPack(file);
+      const names = entries.map(s => `  ${s.type === 'library' ? '[L]' : '[T]'} ${s.name}`).join('\n');
+      const confirmed = window.confirm(
+        `Import ${entries.length} script${entries.length > 1 ? 's' : ''}?\n\n${names}\n\nImported scripts will be disabled. Review and enable them manually.`,
+      );
+      if (!confirmed) return;
+      sendToBackend({ type: 'import_scripts', entries });
+    } catch (err) {
+      window.alert(`Import failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   };
 
   const renderItem = (script: Script) => {
@@ -88,21 +120,39 @@ export const ScriptList: FC<ScriptListProps> = ({
           <button
             className={`ls-type-tab${activeType === 'trigger' ? ' ls-active' : ''}`}
             onClick={() => setActiveType('trigger')}
+            title="Scripts"
           >
-            <Code2 size={11} style={{ display: 'inline', marginRight: 4 }} />
-            Scripts
+            <Code2 size={13} />
           </button>
           <button
             className={`ls-type-tab${activeType === 'library' ? ' ls-active' : ''}`}
             onClick={() => setActiveType('library')}
+            title="Libraries"
           >
-            <BookMarked size={11} style={{ display: 'inline', marginRight: 4 }} />
-            Libraries
+            <BookMarked size={13} />
           </button>
         </div>
+        <button className="ls-icon-btn" onClick={handleImportClick} title="Import script pack">
+          <Upload size={14} />
+        </button>
+        <button
+          className="ls-icon-btn"
+          onClick={handleExport}
+          title="Export current scripts as pack"
+          disabled={filtered.length === 0}
+        >
+          <Download size={14} />
+        </button>
         <button className="ls-icon-btn" onClick={handleNew} title="New script">
           <Plus size={15} />
         </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".zip"
+          style={{ display: 'none' }}
+          onChange={handleImportFile}
+        />
       </div>
 
       {/* List */}

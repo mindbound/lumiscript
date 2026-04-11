@@ -1,5 +1,5 @@
 {
-  "version": "0.10.7",
+  "version": "0.11.0",
   "name": "LumiScript",
   "identifier": "lumiscript",
   "author": "mindbound",
@@ -19,7 +19,8 @@
     "personas",
     "context_handler",
     "tools",
-    "push_notification"
+    "push_notification",
+    "event_tracking"
   ],
   "entry_backend": "dist/backend.js",
   "entry_frontend": "dist/frontend.js",

@@ -6,7 +6,7 @@
  * Provides script-specific helpers (create with defaults, getUniqueName, duplicate).
  */
 
-import type { Script, ScriptType } from '../types/script.js';
+import type { Script, ScriptType, ScriptPackEntry } from '../types/script.js';
 import { CollectionStore, type UserStorageAdapter } from './collection-store.js';
 import { generateUUID } from '../utils/uuid.js';
 
@@ -104,6 +104,40 @@ export class ScriptStorage {
       createdAt: now,
       updatedAt: now,
     });
+  }
+
+  /**
+   * Bulk-import scripts from a script pack.
+   * All security-relevant fields are forced to safe defaults:
+   *   - Fresh UUID (never from input)
+   *   - enabled = false (user must review and enable)
+   *   - allowDangerous = false (user must grant separately)
+   *   - Fresh timestamps
+   *   - Validated type (invalid values fall back to 'trigger')
+   *   - Name deduplicated against existing scripts
+   */
+  async importScripts(entries: ScriptPackEntry[]): Promise<Script[]> {
+    const results: Script[] = [];
+    const now = Date.now();
+    for (const entry of entries) {
+      const uniqueName = await this.getUniqueName(entry.name);
+      const script = await this.store.create({
+        id: generateUUID(),
+        name: uniqueName,
+        code: entry.code,
+        type: entry.type === 'library' ? 'library' : 'trigger',
+        enabled: false,
+        allowDangerous: false,
+        bindings: entry.bindings ?? [],
+        triggers: entry.triggers ?? [],
+        folder: entry.folder,
+        metadata: entry.metadata,
+        createdAt: now,
+        updatedAt: now,
+      });
+      results.push(script);
+    }
+    return results;
   }
 
   async flush(): Promise<void> {
