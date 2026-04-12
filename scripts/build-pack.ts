@@ -112,9 +112,6 @@ if (!dirPath) {
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 const resolvedDir = resolve(dirPath);
-const stat = await Bun.file(resolvedDir).exists()
-  ? undefined // Bun.file doesn't stat directories well, use node:fs
-  : undefined;
 
 // Verify directory exists
 import { readdirSync, statSync } from 'fs';
