@@ -496,6 +496,7 @@ const KEY_TYPES: TypeDoc[] = [
       { field: 'update(html)', type: 'void',                                    optional: false, desc: 'Replace the inner HTML of the injected element.' },
       { field: 'remove()',    type: 'void',                                     optional: false, desc: 'Remove the element from the DOM and detach all listeners.' },
       { field: 'on(event, handler)', type: '() => void',                        optional: false, desc: 'Attach a DOM event listener. Handler receives DOMEventData. Returns an unsubscribe function.' },
+      { field: 'makeDraggable(handleSelector?)', type: 'void',               optional: false, desc: 'Enable frontend-only drag. Optional CSS selector picks a drag handle child; the root element moves. Without a selector, the whole element is draggable.' },
     ],
   },
   {

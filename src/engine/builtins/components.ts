@@ -501,6 +501,7 @@ export const createComponentsLibrary: BuiltinLibraryFactory = (api) => {
       update: handle.update.bind(handle),
       remove: handle.remove.bind(handle),
       on: handle.on.bind(handle),
+      makeDraggable: handle.makeDraggable.bind(handle),
       setValue(newValue: number, newLabel?: string): void {
         if (newLabel !== undefined) currentLabel = newLabel;
         handle.update(buildProgressHtml(
@@ -558,7 +559,7 @@ export const createComponentsLibrary: BuiltinLibraryFactory = (api) => {
     });
 
     if (options?.draggable) {
-      api.ui.dom._makeDraggable(handle.id);
+      handle.makeDraggable();
     }
 
     return handle;

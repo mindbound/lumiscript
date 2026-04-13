@@ -360,60 +360,81 @@ export function installDOMHandler(
 
       // ── Make Draggable ──────────────────────────────────────────────
       case 'dom_make_draggable': {
-        const { elementId } = msg;
-        const wrapper = elementMap.get(elementId);
+        const { elementId, handleSelector } = msg;
+        const wrapper = elementMap.get(elementId) as HTMLElement | undefined;
         if (!wrapper) break;
 
-        // The wrapper is the data-ls-el container; the actual button is inside.
-        const el = (wrapper.querySelector('button') ?? wrapper) as HTMLElement;
-        el.style.touchAction = 'none';
+        // DOM nesting: ctx.dom.inject returns a Spindle wrapper
+        // (<div data-spindle-ext>) which contains our LS wrapper
+        // (<div data-ls-el>) which contains the user's actual content.
+        // The user's positioned root is two levels deep.
 
         let dragging = false;
         let didMove = false;
-        let offsetX = 0;
-        let offsetY = 0;
 
-        const onPointerDown = (e: PointerEvent) => {
+        wrapper.addEventListener('pointerdown', (e: PointerEvent) => {
           if (e.button !== 0) return;
+
+          // With a handle selector, only start drag from that element.
+          if (handleSelector && !(e.target as Element).closest(handleSelector)) return;
+
+          // Resolve the user's positioned content root (two levels deep:
+          // Spindle wrapper → LS wrapper → user root).
+          const moveEl = (
+            wrapper.firstElementChild?.firstElementChild
+            ?? wrapper.firstElementChild
+            ?? wrapper
+          ) as HTMLElement;
+
+          // Neutralise CSS transforms and percentage positioning so that
+          // pixel top/left values correspond directly to screen coords.
+          const rect = moveEl.getBoundingClientRect();
+          moveEl.style.transform = 'none';
+          moveEl.style.top = `${rect.top}px`;
+          moveEl.style.left = `${rect.left}px`;
+          moveEl.style.bottom = 'auto';
+          moveEl.style.right = 'auto';
+
           dragging = true;
           didMove = false;
-          offsetX = e.clientX - el.getBoundingClientRect().left;
-          offsetY = e.clientY - el.getBoundingClientRect().top;
-          el.style.cursor = 'grabbing';
-          el.setPointerCapture(e.pointerId);
+          const startOffsetX = e.clientX - rect.left;
+          const startOffsetY = e.clientY - rect.top;
+          moveEl.style.cursor = 'grabbing';
+
+          // Use document-level listeners for move/end — avoids pointer
+          // capture quirks on wrapper elements that may be zero-sized.
+          const onMove = (ev: PointerEvent) => {
+            if (!dragging) return;
+            didMove = true;
+            moveEl.style.top = `${ev.clientY - startOffsetY}px`;
+            moveEl.style.left = `${ev.clientX - startOffsetX}px`;
+          };
+
+          const onEnd = () => {
+            if (!dragging) return;
+            dragging = false;
+            moveEl.style.cursor = '';
+            document.removeEventListener('pointermove', onMove);
+            document.removeEventListener('pointerup', onEnd);
+            document.removeEventListener('pointercancel', onEnd);
+          };
+
+          document.addEventListener('pointermove', onMove);
+          document.addEventListener('pointerup', onEnd);
+          document.addEventListener('pointercancel', onEnd);
           e.preventDefault();
-        };
-
-        const onPointerMove = (e: PointerEvent) => {
-          if (!dragging) return;
-          didMove = true;
-          el.style.top = `${e.clientY - offsetY}px`;
-          el.style.left = `${e.clientX - offsetX}px`;
-          el.style.bottom = 'auto';
-          el.style.right = 'auto';
-        };
-
-        const onPointerUp = () => {
-          if (!dragging) return;
-          dragging = false;
-          el.style.cursor = '';
-        };
+        });
 
         // Suppress the click event that fires after a drag so script
         // click handlers don't trigger on release.
-        const onClickCapture = (e: MouseEvent) => {
+        wrapper.addEventListener('click', (e: MouseEvent) => {
           if (didMove) {
             e.stopImmediatePropagation();
             e.preventDefault();
             didMove = false;
           }
-        };
+        }, true);
 
-        el.addEventListener('pointerdown', onPointerDown);
-        el.addEventListener('pointermove', onPointerMove);
-        el.addEventListener('pointerup', onPointerUp);
-        el.addEventListener('pointercancel', onPointerUp);
-        el.addEventListener('click', onClickCapture, true);
         break;
       }
     }

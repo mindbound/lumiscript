@@ -80,6 +80,11 @@ export function buildDOMAPI(deps: APIBuildDeps): LumiScriptAPI['ui']['dom'] {
           send({ type: 'dom_unlisten', elementId, listenerId, event });
         };
       },
+
+      makeDraggable(handleSelector?: string): void {
+        gate();
+        send({ type: 'dom_make_draggable', elementId, handleSelector });
+      },
     };
   }
 
@@ -182,9 +187,5 @@ export function buildDOMAPI(deps: APIBuildDeps): LumiScriptAPI['ui']['dom'] {
       }
     },
 
-    _makeDraggable(elementId: string): void {
-      gate();
-      send({ type: 'dom_make_draggable', elementId });
-    },
   };
 }

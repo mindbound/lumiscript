@@ -1520,6 +1520,13 @@ export interface DOMHandle {
    * Returns an unsubscribe function that detaches the listener.
    */
   on(event: string, handler: (data: DOMEventData) => void): () => void;
+  /**
+   * Enable frontend-only drag on this element.
+   * @param handleSelector  Optional CSS selector for the drag handle within the element.
+   *                        When provided, only that child initiates drag; the root element moves.
+   *                        When omitted, the entire element is both handle and move target.
+   */
+  makeDraggable(handleSelector?: string): void;
 }
 
 /** DOM injection and styling API exposed as `api.ui.dom`. */
@@ -1560,8 +1567,6 @@ export interface DOMAPI {
   /** Remove all DOM injections and styles created by this script. */
   cleanup(): void;
 
-  /** @internal Enable frontend-only drag on an injected element. Used by built-in libraries. */
-  _makeDraggable(elementId: string): void;
 }
 
 // ─── Commands API ──────────────────────────────────────────────────────────────

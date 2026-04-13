@@ -693,6 +693,16 @@ interface DOMHandle {
    * // Later: unsub();
    */
   on(event: string, handler: (data: DOMEventData) => void): () => void;
+  /**
+   * Enable frontend-only drag on this element.
+   * @param handleSelector Optional CSS selector for the drag handle.
+   *   When provided, only that child initiates drag; the root element moves.
+   *   When omitted, the entire element is both handle and move target.
+   * @example
+   * const panel = api.ui.dom.inject('body', panelHtml, { id: 'my-panel' });
+   * panel.makeDraggable('.title-bar');
+   */
+  makeDraggable(handleSelector?: string): void;
 }
 
 type ModalItem =
