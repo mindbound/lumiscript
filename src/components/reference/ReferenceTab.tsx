@@ -168,6 +168,7 @@ const PERM_GROUPS: PermGroup[] = [
       { method: 'api.ui.editText', perms: [] },
       { method: 'api.ui.pushNotification', perms: ['push_notification'] },
       { method: 'api.ui.getPushStatus', perms: ['push_notification'] },
+      { method: 'api.ui.dom.*', perms: ['app_manipulation'] },
     ],
   },
   {
@@ -468,6 +469,37 @@ const KEY_TYPES: TypeDoc[] = [
       { field: 'openRequestId', type: 'string',               optional: false, desc: 'UUID identifying this modal instance. Immediately available on the returned handle.' },
       { field: 'result',        type: 'Promise<ModalResult>',  optional: false, desc: 'Resolves with dismissal reason when the modal closes.' },
       { field: 'close()',       type: 'Promise<void>',         optional: false, desc: 'Programmatically dismiss the modal.' },
+    ],
+  },
+  // ─── DOM Injection ───────────────────────────────────────────────────────────
+  {
+    name: 'DOMInjectOptions',
+    note: 'Options for api.ui.dom.inject(target, html, options?).',
+    fields: [
+      { field: 'position?', type: "'beforebegin' | 'afterbegin' | 'beforeend' | 'afterend'", optional: true, desc: "Insertion position relative to the target element. Default: 'beforeend'." },
+      { field: 'id?',       type: 'string',                                                   optional: true, desc: 'Stable ID for idempotent injection. Re-using the same ID updates the existing element instead of creating a duplicate.' },
+    ],
+  },
+  {
+    name: 'DOMHandle',
+    note: 'Returned by api.ui.dom.inject(). All methods are fire-and-forget.',
+    fields: [
+      { field: 'id',          type: 'string',                                   optional: false, desc: 'Unique element ID (generated or from stable ID).' },
+      { field: 'update(html)', type: 'void',                                    optional: false, desc: 'Replace the inner HTML of the injected element.' },
+      { field: 'remove()',    type: 'void',                                     optional: false, desc: 'Remove the element from the DOM and detach all listeners.' },
+      { field: 'on(event, handler)', type: '() => void',                        optional: false, desc: 'Attach a DOM event listener. Handler receives DOMEventData. Returns an unsubscribe function.' },
+    ],
+  },
+  {
+    name: 'DOMEventData',
+    note: 'Serialized event data passed to DOM event handlers. A safe subset of the browser Event object.',
+    fields: [
+      { field: 'type',           type: 'string',                    optional: false, desc: "Event type (e.g. 'click', 'input', 'change')." },
+      { field: 'targetId?',      type: 'string',                    optional: true,  desc: 'The id attribute of the event target element.' },
+      { field: 'targetValue?',   type: 'string',                    optional: true,  desc: 'The value property (for input/select elements).' },
+      { field: 'targetChecked?', type: 'boolean',                   optional: true,  desc: 'The checked property (for checkbox/radio elements).' },
+      { field: 'dataset?',       type: 'Record<string, string>',    optional: true,  desc: 'All data-* attributes on the event target.' },
+      { field: 'detail?',        type: 'unknown',                   optional: true,  desc: 'CustomEvent.detail (must be JSON-serializable).' },
     ],
   },
   // ─── LLM ─────────────────────────────────────────────────────────────────────
@@ -1047,6 +1079,14 @@ const API_GROUPS: FnGroup[] = [
       { name: 'editText',  args: 'title?, value?, options?',         desc: 'Open the native Lumiverse expanded text editor with macro syntax highlighting. Blocks until close. Returns edited text or null if cancelled. Options: placeholder.' },
       { name: 'pushNotification', args: 'title, body, options?',   desc: 'Send an OS push notification. Only delivered when app is unfocused. Returns { sent }. Options: tag (dedup), url, icon, rawTitle, image. Requires push_notification.' },
       { name: 'getPushStatus', args: '—',                          desc: 'Check if push notifications are available. Returns { available, subscriptionCount }. Requires push_notification.' },
+    ],
+  },
+  {
+    group: 'api.ui.dom',
+    rows: [
+      { name: 'inject',   args: 'target, html, options?',  desc: 'Inject sanitized HTML at a CSS selector. Returns DOMHandle { id, update, remove, on }. Options: position (default "beforeend"), id (stable ID for idempotent injection). Requires app_manipulation.' },
+      { name: 'addStyle',  args: 'css',                    desc: 'Add a <style> element scoped to this script via @scope. Returns { remove() }. Use --lumiverse-* CSS variables for theming. Requires app_manipulation.' },
+      { name: 'cleanup',   args: '—',                      desc: 'Remove all DOM injections and styles created by this script. Requires app_manipulation.' },
     ],
   },
   {

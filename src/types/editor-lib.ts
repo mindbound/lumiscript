@@ -609,6 +609,74 @@ interface UIAPI {
 
   /** Check if push notifications are available. Requires push_notification permission. */
   getPushStatus(): Promise<{ available: boolean; subscriptionCount: number }>;
+
+  /**
+   * DOM injection sub-API. Inject HTML and CSS into the Lumiverse frontend and
+   * receive DOM events back. Requires the app_manipulation permission.
+   */
+  dom: DOMAPI;
+}
+
+// ─── DOM Injection API ───────────────────────────────────────────────────────
+
+interface DOMInjectOptions {
+  /** Insertion position. Default: 'beforeend'. */
+  position?: 'beforebegin' | 'afterbegin' | 'beforeend' | 'afterend';
+  /**
+   * Stable ID for idempotent injection. Re-using the same ID updates the
+   * existing element instead of creating a duplicate.
+   */
+  id?: string;
+}
+
+/** Serialized subset of a DOM event. */
+interface DOMEventData {
+  type: string;
+  targetId?: string;
+  targetValue?: string;
+  targetChecked?: boolean;
+  dataset?: Record<string, string>;
+  detail?: unknown;
+}
+
+/**
+ * Handle to an injected DOM element.
+ * All methods are fire-and-forget (send a message to the frontend).
+ */
+interface DOMHandle {
+  readonly id: string;
+  /** Replace the element's inner HTML. */
+  update(html: string): void;
+  /** Remove the element and its listeners. */
+  remove(): void;
+  /**
+   * Attach a DOM event listener. Returns an unsubscribe function.
+   * @example
+   * const unsub = handle.on('click', (data) => {
+   *   console.log('Clicked element:', data.targetId, data.dataset);
+   * });
+   * // Later: unsub();
+   */
+  on(event: string, handler: (data: DOMEventData) => void): () => void;
+}
+
+/** DOM injection and styling API. Requires the app_manipulation permission. */
+interface DOMAPI {
+  /**
+   * Inject sanitized HTML at a CSS selector target.
+   * Returns a DOMHandle for updating, removing, or attaching event listeners.
+   */
+  inject(target: string, html: string, options?: DOMInjectOptions): DOMHandle;
+
+  /**
+   * Add a style element scoped to this script via CSS at-scope.
+   * Returns an object with remove() to remove the style.
+   * Use --lumiverse-* CSS variables for theming.
+   */
+  addStyle(css: string): { remove(): void };
+
+  /** Remove all DOM injections and styles created by this script. */
+  cleanup(): void;
 }
 
 type ModalItem =

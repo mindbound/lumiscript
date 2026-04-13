@@ -1449,6 +1449,87 @@ export interface UIAPI {
     available: boolean;
     subscriptionCount: number;
   }>;
+
+  /**
+   * DOM injection sub-API. Allows scripts to inject HTML and CSS into the
+   * Lumiverse frontend and receive DOM events back.
+   * Requires the `app_manipulation` permission.
+   */
+  dom: DOMAPI;
+}
+
+// ─── DOM Injection API ───────────────────────────────────────────────────────
+
+/** Options for `api.ui.dom.inject()`. */
+export interface DOMInjectOptions {
+  /** Insertion position relative to the target element. Default: 'beforeend'. */
+  position?: 'beforebegin' | 'afterbegin' | 'beforeend' | 'afterend';
+  /**
+   * Stable ID for idempotent injection. If an element with this ID was already
+   * injected by this script, its content is updated instead of creating a duplicate.
+   * Essential for trigger scripts that fire repeatedly.
+   */
+  id?: string;
+}
+
+/** Serialized subset of a DOM event, safe to transfer across the message channel. */
+export interface DOMEventData {
+  /** Event type (e.g. 'click', 'input', 'change'). */
+  type: string;
+  /** `event.target.id`, if present. */
+  targetId?: string;
+  /** `event.target.value`, for input/select elements. */
+  targetValue?: string;
+  /** `event.target.checked`, for checkbox/radio elements. */
+  targetChecked?: boolean;
+  /** All `data-*` attributes on the event target, as a flat record. */
+  dataset?: Record<string, string>;
+  /** `event.detail` for CustomEvents (must be JSON-serializable). */
+  detail?: unknown;
+}
+
+/**
+ * Handle returned by `api.ui.dom.inject()`.
+ * All methods are fire-and-forget — they send a message to the frontend and return immediately.
+ */
+export interface DOMHandle {
+  /** Unique element ID (generated or stable). */
+  readonly id: string;
+  /** Replace the element's inner HTML with new sanitized content. */
+  update(html: string): void;
+  /** Remove the element from the DOM and clean up listeners. */
+  remove(): void;
+  /**
+   * Attach a DOM event listener on the injected element.
+   * The handler receives a serialized `DOMEventData` subset (not the raw Event).
+   * Returns an unsubscribe function that detaches the listener.
+   */
+  on(event: string, handler: (data: DOMEventData) => void): () => void;
+}
+
+/** DOM injection and styling API exposed as `api.ui.dom`. */
+export interface DOMAPI {
+  /**
+   * Inject sanitized HTML into the page at the target CSS selector.
+   * Returns a `DOMHandle` for updating, removing, or attaching event listeners.
+   *
+   * If `options.id` is provided and an element with that ID was already injected
+   * by this script, its content is updated and old event listeners are cleared.
+   *
+   * @param target CSS selector for the injection target (e.g. '#chat-container')
+   * @param html HTML string (sanitized via DOMPurify on the frontend)
+   * @param options Injection options (position, stable ID)
+   */
+  inject(target: string, html: string, options?: DOMInjectOptions): DOMHandle;
+
+  /**
+   * Add a `<style>` element scoped to this script via `@scope`.
+   * Returns an object with a `remove()` method to remove the style.
+   */
+  addStyle(css: string): { remove(): void };
+
+  /** Remove all DOM injections and styles created by this script. */
+  cleanup(): void;
 }
 
 // ─── Commands API ──────────────────────────────────────────────────────────────

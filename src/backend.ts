@@ -15,6 +15,7 @@ import { readFile } from 'fs/promises';
 import { listByMode, listAll, clearEphemeral, clearByScriptId } from './engine/injection-store.js';
 import { getTool, clearByScriptId as clearToolsByScriptId, listAll as listAllTools } from './engine/tool-store.js';
 import { emit as broadcastEmit } from './engine/broadcast-bus.js';
+import { dispatchEvent as dispatchDOMEvent, cleanupScript as cleanupDOMScript } from './engine/dom-registry.js';
 
 // ─── Active user + permission tracking ───────────────────────────────────────
 
@@ -469,24 +470,28 @@ spindle.onFrontendMessage(async (raw, userId) => {
         if ('enabled' in msg.patch || 'triggers' in msg.patch) {
           void syncTriggers();
         }
-        // Clear injections and tools when a script is disabled so stale entries don't linger.
+        // Clear injections, tools, and DOM when a script is disabled so stale entries don't linger.
         if ('enabled' in msg.patch && !msg.patch.enabled) {
           clearByScriptId(msg.id);
           pushInjections();
           const clearedTools = clearToolsByScriptId(msg.id);
           for (const name of clearedTools) spindle.unregisterTool(name);
           pushTools();
+          cleanupDOMScript(msg.id);
+          send({ type: 'dom_cleanup_script', scriptId: msg.id });
         }
         break;
       }
 
       case 'delete_script': {
-        // Clear injections and tools this script registered before removing it.
+        // Clear injections, tools, and DOM this script registered before removing it.
         clearByScriptId(msg.id);
         pushInjections();
         const clearedTools = clearToolsByScriptId(msg.id);
         for (const name of clearedTools) spindle.unregisterTool(name);
         pushTools();
+        cleanupDOMScript(msg.id);
+        send({ type: 'dom_cleanup_script', scriptId: msg.id });
         await scriptStorage.deleteScript(msg.id);
         pushScripts();
         void syncTriggers();
@@ -504,6 +509,12 @@ spindle.onFrontendMessage(async (raw, userId) => {
         await scriptStorage.importScripts(msg.entries);
         pushScripts();
         void syncTriggers();
+        break;
+      }
+
+      // ── DOM events (from frontend) ──────────────────────────────────────
+      case 'dom_event': {
+        dispatchDOMEvent(msg.listenerId, msg.data);
         break;
       }
 

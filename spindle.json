@@ -20,7 +20,8 @@
     "context_handler",
     "tools",
     "push_notification",
-    "event_tracking"
+    "event_tracking",
+    "app_manipulation"
   ],
   "entry_backend": "dist/backend.js",
   "entry_frontend": "dist/frontend.js",

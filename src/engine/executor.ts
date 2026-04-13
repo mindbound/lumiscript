@@ -60,6 +60,7 @@ import { buildBroadcastAPI } from './api/broadcast.js';
 import { buildEnclaveAPI   } from './api/enclave.js';
 import { buildCommandsAPI  } from './api/commands.js';
 import { buildEventsAPI   } from './api/events.js';
+import { buildDOMAPI      } from './api/dom.js';
 
 // ─── Executor options ─────────────────────────────────────────────────────────
 
@@ -245,7 +246,7 @@ export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiSc
     llm:        buildLLMAPI(deps),
     files:      buildFilesAPI(deps),
     enclave:    buildEnclaveAPI(deps),
-    ui:         buildUIAPI(deps),
+    ui:         { ...buildUIAPI(deps), dom: buildDOMAPI(deps) },
     characters: buildCharactersAPI(deps),
     chats:      buildChatsAPI(deps),
     worldInfo:  buildWorldInfoAPI(deps),

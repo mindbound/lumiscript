@@ -18,6 +18,7 @@ import type {
   LumiScriptSettings,
   InjectionInfo,
   RegisteredToolInfo,
+  DOMEventData,
 } from './script.js';
 
 // ─── Frontend → Backend ───────────────────────────────────────────────────────
@@ -68,6 +69,15 @@ export type FrontendToBackend =
   | {
       type: 'import_scripts';
       entries: ScriptPackEntry[];
+    }
+  // ─── DOM events (frontend → backend) ──────────────────────────────
+  | {
+      /** Fired by the frontend when a DOM event occurs on an injected element. */
+      type: 'dom_event';
+      elementId: string;
+      listenerId: string;
+      event: string;
+      data: DOMEventData;
     }
 ;
 
@@ -161,4 +171,13 @@ export type BackendToFrontend =
         character: Record<string, unknown>;
       };
     }
+  // ─── DOM injection commands (backend → frontend) ──────────────────
+  | { type: 'dom_inject';          scriptId: string; elementId: string; target: string; html: string; position: string; stableId?: string }
+  | { type: 'dom_update';          elementId: string; html: string }
+  | { type: 'dom_remove';          elementId: string }
+  | { type: 'dom_add_style';       scriptId: string; styleId: string; css: string }
+  | { type: 'dom_remove_style';    styleId: string }
+  | { type: 'dom_listen';          elementId: string; listenerId: string; event: string }
+  | { type: 'dom_unlisten';        elementId: string; listenerId: string; event: string }
+  | { type: 'dom_cleanup_script';  scriptId: string }
 ;

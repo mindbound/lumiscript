@@ -27,7 +27,7 @@ import { shielded, assertPerm } from './shared.js';
 
 // ─── API builder ──────────────────────────────────────────────────────────────
 
-export function buildUIAPI(deps: APIBuildDeps): LumiScriptAPI['ui'] {
+export function buildUIAPI(deps: APIBuildDeps): Omit<LumiScriptAPI['ui'], 'dom'> {
   return {
     toast(
       message: string,

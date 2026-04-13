@@ -15,6 +15,7 @@ import { clearAll as clearBroadcast } from '../../src/engine/broadcast-bus.js';
 import { resetContext } from '../../src/engine/binding.js';
 import { executionStatusStore } from '../../src/engine/execution-status.js';
 import { clearAllCommandHandlers } from '../../src/engine/api/commands.js';
+import { __reset as resetDOMRegistry } from '../../src/engine/dom-registry.js';
 
 beforeEach(() => {
   // Install fresh spindle mock on globalThis so `declare const spindle` resolves
@@ -27,4 +28,5 @@ beforeEach(() => {
   resetContext();
   executionStatusStore.clear();
   clearAllCommandHandlers();
+  resetDOMRegistry();
 });

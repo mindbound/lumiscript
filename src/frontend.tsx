@@ -5,6 +5,7 @@ import { PANEL_CSS } from './components/styles/index.js';
 import { LumiScriptPanel } from './components/LumiScriptPanel.js';
 import { SettingsPanel } from './components/settings/SettingsPanel.js';
 import type { FrontendToBackend } from './types/messages.js';
+import { installDOMHandler } from './dom-handler.js';
 
 // ─── LumiScript Frontend ──────────────────────────────────────────────────
 // Runs in the browser via dynamic import.
@@ -60,6 +61,10 @@ export function setup(ctx: SpindleFrontendContext) {
   const sendToBackend = (msg: FrontendToBackend) => {
     ctx.sendToBackend(msg);
   };
+
+  // ─── DOM injection handler ──────────────────────────────────────────────
+  const cleanupDOM = installDOMHandler(ctx, virtualOnBackendMessage, sendToBackend);
+  cleanups.push(cleanupDOM);
 
   // ─── Dock Panel ─────────────────────────────────────────────────────────
   const panel = ctx.ui.requestDockPanel({
