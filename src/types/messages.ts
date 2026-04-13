@@ -181,4 +181,5 @@ export type BackendToFrontend =
   | { type: 'dom_listen';          elementId: string; listenerId: string; event: string }
   | { type: 'dom_unlisten';        elementId: string; listenerId: string; event: string }
   | { type: 'dom_cleanup_script';  scriptId: string }
+  | { type: 'dom_make_draggable';  elementId: string }
 ;

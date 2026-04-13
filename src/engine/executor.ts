@@ -61,6 +61,7 @@ import { buildEnclaveAPI   } from './api/enclave.js';
 import { buildCommandsAPI  } from './api/commands.js';
 import { buildEventsAPI   } from './api/events.js';
 import { buildDOMAPI      } from './api/dom.js';
+import { resolveBuiltin, isBuiltinName } from './builtin-library-registry.js';
 
 // ─── Executor options ─────────────────────────────────────────────────────────
 
@@ -278,6 +279,22 @@ export function buildScriptNamespace(
 
   return {
     async require(nameOrId: string): Promise<unknown> {
+      // ── Built-in libraries (ls:*) — resolved before user storage ─────
+      if (isBuiltinName(nameOrId)) {
+        if (requireCache.has(nameOrId)) return requireCache.get(nameOrId);
+        const factory = resolveBuiltin(nameOrId);
+        if (!factory) {
+          throw new Error(`script.require: built-in library "${nameOrId}" not found`);
+        }
+        // Build API from the CALLING script — so DOM elements, permissions,
+        // and scriptId all belong to the caller, not a synthetic script.
+        const callerApi = buildScriptAPI(_script, options);
+        const exports = factory(callerApi);
+        requireCache.set(nameOrId, exports);
+        return exports;
+      }
+
+      // ── User libraries (from storage) ────────────────────────────────
       if (!options.scriptStorage) {
         throw new Error('script.require: ScriptStorage not available');
       }

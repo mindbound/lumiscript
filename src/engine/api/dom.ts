@@ -181,5 +181,10 @@ export function buildDOMAPI(deps: APIBuildDeps): LumiScriptAPI['ui']['dom'] {
         send({ type: 'dom_cleanup_script', scriptId });
       }
     },
+
+    _makeDraggable(elementId: string): void {
+      gate();
+      send({ type: 'dom_make_draggable', elementId });
+    },
   };
 }

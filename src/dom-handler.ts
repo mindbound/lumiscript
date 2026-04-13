@@ -26,6 +26,7 @@ type DOMMessage = Extract<BackendToFrontend,
   | { type: 'dom_listen' }
   | { type: 'dom_unlisten' }
   | { type: 'dom_cleanup_script' }
+  | { type: 'dom_make_draggable' }
 >;
 
 function isDOMMessage(msg: unknown): msg is DOMMessage {
@@ -213,8 +214,24 @@ export function installDOMHandler(
 
         const doInject = (bubbleEl: Element) => {
           const wrappedHtml = `<div data-ls-script="${scriptId}" data-ls-el="${elementId}">${html}</div>`;
-          const insertPos: InsertPosition = position === 'header' ? 'afterbegin' : 'beforeend';
-          const el = ctx.dom.inject(bubbleEl as any, wrappedHtml, insertPos);
+          // For 'header', inject right before the bubble's _header_ div
+          // (avatar / name / meta-pill row), so our header sits above the
+          // chat bubble header and clear of the actions pill.
+          // For 'footer', append to the bubble itself.
+          let target: Element = bubbleEl;
+          let insertPos: InsertPosition;
+          if (position === 'header') {
+            const headerEl = bubbleEl.querySelector('[class*="_header_"]');
+            if (headerEl) {
+              target = headerEl;
+              insertPos = 'beforebegin';
+            } else {
+              insertPos = 'afterbegin';
+            }
+          } else {
+            insertPos = 'beforeend';
+          }
+          const el = ctx.dom.inject(target as any, wrappedHtml, insertPos);
           elementMap.set(elementId, el);
           elementScripts.set(elementId, scriptId);
           if (stableId) {
@@ -338,6 +355,65 @@ export function installDOMHandler(
         for (const [key] of stableIndex) {
           if (key.startsWith(scriptId + ':')) stableIndex.delete(key);
         }
+        break;
+      }
+
+      // ── Make Draggable ──────────────────────────────────────────────
+      case 'dom_make_draggable': {
+        const { elementId } = msg;
+        const wrapper = elementMap.get(elementId);
+        if (!wrapper) break;
+
+        // The wrapper is the data-ls-el container; the actual button is inside.
+        const el = (wrapper.querySelector('button') ?? wrapper) as HTMLElement;
+        el.style.touchAction = 'none';
+
+        let dragging = false;
+        let didMove = false;
+        let offsetX = 0;
+        let offsetY = 0;
+
+        const onPointerDown = (e: PointerEvent) => {
+          if (e.button !== 0) return;
+          dragging = true;
+          didMove = false;
+          offsetX = e.clientX - el.getBoundingClientRect().left;
+          offsetY = e.clientY - el.getBoundingClientRect().top;
+          el.style.cursor = 'grabbing';
+          el.setPointerCapture(e.pointerId);
+          e.preventDefault();
+        };
+
+        const onPointerMove = (e: PointerEvent) => {
+          if (!dragging) return;
+          didMove = true;
+          el.style.top = `${e.clientY - offsetY}px`;
+          el.style.left = `${e.clientX - offsetX}px`;
+          el.style.bottom = 'auto';
+          el.style.right = 'auto';
+        };
+
+        const onPointerUp = () => {
+          if (!dragging) return;
+          dragging = false;
+          el.style.cursor = '';
+        };
+
+        // Suppress the click event that fires after a drag so script
+        // click handlers don't trigger on release.
+        const onClickCapture = (e: MouseEvent) => {
+          if (didMove) {
+            e.stopImmediatePropagation();
+            e.preventDefault();
+            didMove = false;
+          }
+        };
+
+        el.addEventListener('pointerdown', onPointerDown);
+        el.addEventListener('pointermove', onPointerMove);
+        el.addEventListener('pointerup', onPointerUp);
+        el.addEventListener('pointercancel', onPointerUp);
+        el.addEventListener('click', onClickCapture, true);
         break;
       }
     }

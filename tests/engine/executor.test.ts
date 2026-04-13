@@ -313,6 +313,45 @@ describe('buildScriptNamespace', () => {
     const ns = buildScriptNamespace(makeScript(), makeOptions({ scriptStorage }));
     await expect(ns.require('my-trigger')).rejects.toThrow('not a library');
   });
+
+  // ── Built-in libraries (ls:*) ──────────────────────────────────────────────
+
+  test('resolves ls:components to a built-in library with exports', async () => {
+    const ns = buildScriptNamespace(
+      makeScript(),
+      makeOptions({ scriptStorage }),
+    );
+    const lib = await ns.require('ls:components') as Record<string, unknown>;
+    expect(typeof lib.messageFooter).toBe('function');
+  });
+
+  test('caches ls:components on second require', async () => {
+    const ns = buildScriptNamespace(
+      makeScript(),
+      makeOptions({ scriptStorage }),
+    );
+    const first = await ns.require('ls:components');
+    const second = await ns.require('ls:components');
+    expect(first).toBe(second); // same object reference
+  });
+
+  test('throws for unknown ls: built-in', async () => {
+    const ns = buildScriptNamespace(
+      makeScript(),
+      makeOptions({ scriptStorage }),
+    );
+    await expect(ns.require('ls:nonexistent')).rejects.toThrow('not found');
+  });
+
+  test('resolves ls:* without needing scriptStorage', async () => {
+    const ns = buildScriptNamespace(
+      makeScript(),
+      makeOptions({ scriptStorage: undefined }),
+    );
+    // ls:components should resolve even without storage
+    const lib = await ns.require('ls:components') as Record<string, unknown>;
+    expect(typeof lib.messageFooter).toBe('function');
+  });
 });
 
 // ─── buildCapturedConsole ────────────────────────────────────────────────────

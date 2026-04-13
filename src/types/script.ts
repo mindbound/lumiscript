@@ -1559,6 +1559,9 @@ export interface DOMAPI {
 
   /** Remove all DOM injections and styles created by this script. */
   cleanup(): void;
+
+  /** @internal Enable frontend-only drag on an injected element. Used by built-in libraries. */
+  _makeDraggable(elementId: string): void;
 }
 
 // ─── Commands API ──────────────────────────────────────────────────────────────
@@ -1867,7 +1870,157 @@ export interface BroadcastAPI {
 export interface ScriptNamespace {
   /**
    * Load a library script by name or ID (lazy, cached per execution).
+   * Built-in libraries use the `ls:` prefix (e.g. `'ls:components'`).
    * Throws if the library is not found or if a circular dependency is detected.
+   *
+   * Type-safe overloads for built-in libraries are declared in editor-lib.ts
+   * (Monaco autocomplete only). The runtime signature returns `Promise<unknown>`.
    */
   require(nameOrId: string): Promise<unknown>;
+}
+
+// ─── Built-in library: ls:components ──────────────────────────────────────────
+
+// ── Shared component options ──────────────────────────────────────────────
+
+/** Options for the `messageFooter` component from `ls:components`. */
+export interface MessageFooterOptions {
+  /** Stable ID for idempotent injection (forwarded to `injectAtMessage`). */
+  id?: string;
+  /** Additional CSS class applied to the footer wrapper div. */
+  className?: string;
+}
+
+/** Options for the `messageHeader` component from `ls:components`. */
+export interface MessageHeaderOptions {
+  /** Stable ID for idempotent injection (forwarded to `injectAtMessage`). */
+  id?: string;
+  /** Additional CSS class applied to the header wrapper div. */
+  className?: string;
+}
+
+/** Options for `badgeHtml()` from `ls:components`. */
+export interface BadgeHtmlOptions {
+  /** Color variant. Default: `'default'`. */
+  variant?: 'default' | 'success' | 'warning' | 'danger' | 'info' | 'accent';
+  /** Size preset. Default: `'md'`. */
+  size?: 'sm' | 'md';
+  /** Prepend a colored dot indicator. Default: `false`. */
+  dot?: boolean;
+  /** Additional CSS class on the badge span. */
+  className?: string;
+}
+
+/** Options for `statBarHtml()` from `ls:components`. */
+export interface StatBarHtmlOptions {
+  /** Maximum value for the display label (bar always maps to 0–100%). Default: `100`. */
+  max?: number;
+  /** CSS color or gradient for the fill. Default: `var(--lumiverse-accent)`. */
+  color?: string;
+  /** Show the numeric value text. Default: `true`. */
+  showValue?: boolean;
+  /** Bar height in pixels. Default: `6`. */
+  height?: number;
+  /** Additional CSS class on the wrapper. */
+  className?: string;
+}
+
+/** Options for `keyValueHtml()` from `ls:components`. */
+export interface KeyValueHtmlOptions {
+  /** Dim the value text. Default: `false`. */
+  muted?: boolean;
+  /** Additional CSS class on the wrapper. */
+  className?: string;
+}
+
+/** Options for `progressBar()` from `ls:components`. */
+export interface ProgressBarOptions {
+  /** Initial value (0–100). Default: `0`. */
+  value?: number;
+  /** Text label above the bar. */
+  label?: string;
+  /** CSS color or gradient for the fill. Default: `var(--lumiverse-accent)`. */
+  color?: string;
+  /** Show percentage text. Default: `true`. */
+  showPercent?: boolean;
+  /** Bar height in pixels. Default: `8`. */
+  height?: number;
+  /** Stable ID for idempotent injection. */
+  id?: string;
+  /** Additional CSS class on the wrapper. */
+  className?: string;
+}
+
+/** Extended handle returned by `progressBar()`. */
+export interface ProgressBarHandle extends DOMHandle {
+  /** Update the bar value (0–100) and optionally the label text. */
+  setValue(value: number, label?: string): void;
+}
+
+/** CSS position coordinates for `floatingButton()`. */
+export interface FloatingButtonPosition {
+  top?: string;
+  right?: string;
+  bottom?: string;
+  left?: string;
+}
+
+/** Options for `floatingButton()` from `ls:components`. */
+export interface FloatingButtonOptions {
+  /** Fixed position on screen. Defaults to `{ bottom: '80px', right: '16px' }`. */
+  position?: FloatingButtonPosition;
+  /** HTML string for an icon (e.g. SVG). Sanitized by DOMPurify. */
+  icon?: string;
+  /** Visual variant. Default: `'default'`. */
+  variant?: 'default' | 'accent' | 'ghost';
+  /** Size preset. Default: `'md'`. */
+  size?: 'sm' | 'md';
+  /** Enable drag-to-reposition. Drag is handled entirely on the frontend for smooth UX. Default: false. */
+  draggable?: boolean;
+  /** Stable ID for idempotent injection. */
+  id?: string;
+  /** Additional CSS class on the button element. */
+  className?: string;
+}
+
+// ── Library exports ──────────────────────────────────────────────────────
+
+/** Exports of the `ls:components` built-in library. */
+export interface LSComponentsExports {
+  // ── Injection functions (return DOMHandle) ─────────────────────────────
+
+  /**
+   * Attach a styled footer section below a message bubble.
+   * Wraps `api.ui.dom.injectAtMessage()` with built-in footer styling.
+   */
+  messageFooter(messageId: string, html: string, options?: MessageFooterOptions): DOMHandle;
+
+  /**
+   * Attach a styled header section above message content inside the bubble.
+   * Wraps `api.ui.dom.injectAtMessage()` with built-in header styling.
+   */
+  messageHeader(messageId: string, html: string, options?: MessageHeaderOptions): DOMHandle;
+
+  /**
+   * Inject a standalone progress bar with a live `setValue()` method.
+   * Useful for long-running operations.
+   */
+  progressBar(target: string, options?: ProgressBarOptions): ProgressBarHandle;
+
+  /**
+   * Inject a fixed-position action button. Defaults to bottom-right.
+   * Attach click handlers via `handle.on('click', handler)`.
+   */
+  floatingButton(label: string, options?: FloatingButtonOptions): DOMHandle;
+
+  // ── HTML string builders (composable) ──────────────────────────────────
+
+  /** Return a styled badge/pill HTML string. Composable inside other components. */
+  badgeHtml(text: string, options?: BadgeHtmlOptions): string;
+
+  /** Return a labeled stat bar HTML string. Composable inside other components. */
+  statBarHtml(label: string, value: number, options?: StatBarHtmlOptions): string;
+
+  /** Return a label–value pair HTML string. Composable inside other components. */
+  keyValueHtml(label: string, value: string, options?: KeyValueHtmlOptions): string;
 }

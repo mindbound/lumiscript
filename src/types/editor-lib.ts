@@ -594,7 +594,7 @@ interface UIAPI {
    * @returns The edited text, or null if the user cancelled.
    * @example
    * var text = await api.ui.editText('Edit System Prompt', currentPrompt);
-   * if (text !== null) { /* user submitted *\/ }
+   * if (text !== null) { // user submitted }
    */
   editText(title?: string, value?: string, options?: { placeholder?: string }): Promise<string | null>;
 
@@ -614,7 +614,34 @@ interface UIAPI {
    * DOM injection sub-API. Inject HTML and CSS into the Lumiverse frontend and
    * receive DOM events back. Requires the app_manipulation permission.
    */
-  dom: DOMAPI;
+  dom: {
+    /**
+     * Inject sanitized HTML at a CSS selector target.
+     * Returns a DOMHandle for updating, removing, or attaching event listeners.
+     */
+    inject(target: string, html: string, options?: DOMInjectOptions): DOMHandle;
+
+    /**
+     * Inject sanitized HTML into a chat message's bubble container.
+     * Handles timing automatically (waits up to 5s for the element to appear).
+     * Resolves the correct target based on chat layout (Bubble or Minimal).
+     *
+     * @param messageId UUID of the target message
+     * @param html HTML string (sanitized on frontend)
+     * @param options Position and stable ID
+     */
+    injectAtMessage(messageId: string, html: string, options?: DOMMessageInjectOptions): DOMHandle;
+
+    /**
+     * Add a style element scoped to this script via CSS at-scope.
+     * Returns an object with remove() to remove the style.
+     * Use --lumiverse-* CSS variables for theming.
+     */
+    addStyle(css: string): { remove(): void };
+
+    /** Remove all DOM injections and styles created by this script. */
+    cleanup(): void;
+  };
 }
 
 // ─── DOM Injection API ───────────────────────────────────────────────────────
@@ -666,36 +693,6 @@ interface DOMHandle {
    * // Later: unsub();
    */
   on(event: string, handler: (data: DOMEventData) => void): () => void;
-}
-
-/** DOM injection and styling API. Requires the app_manipulation permission. */
-interface DOMAPI {
-  /**
-   * Inject sanitized HTML at a CSS selector target.
-   * Returns a DOMHandle for updating, removing, or attaching event listeners.
-   */
-  inject(target: string, html: string, options?: DOMInjectOptions): DOMHandle;
-
-  /**
-   * Inject sanitized HTML into a chat message's bubble container.
-   * Handles timing automatically (waits up to 5s for the element to appear).
-   * Resolves the correct target based on chat layout (Bubble or Minimal).
-   *
-   * @param messageId UUID of the target message
-   * @param html HTML string (sanitized on frontend)
-   * @param options Position and stable ID
-   */
-  injectAtMessage(messageId: string, html: string, options?: DOMMessageInjectOptions): DOMHandle;
-
-  /**
-   * Add a style element scoped to this script via CSS at-scope.
-   * Returns an object with remove() to remove the style.
-   * Use --lumiverse-* CSS variables for theming.
-   */
-  addStyle(css: string): { remove(): void };
-
-  /** Remove all DOM injections and styles created by this script. */
-  cleanup(): void;
 }
 
 type ModalItem =
@@ -1196,12 +1193,170 @@ interface LumiScriptAPI {
 interface ScriptNamespace {
   /**
    * Load a library script by name or ID (lazy, cached per execution).
+   * Built-in libraries use the ls: prefix (e.g. 'ls:components').
    * Throws if the library is not found or if a circular dependency is detected.
    * @example
    * const myLib = await script.require('My Helper Library');
    * const result = myLib.processData(input);
+   * @example
+   * const { messageFooter } = await script.require('ls:components');
    */
   require(nameOrId: string): Promise<unknown>;
+  /** Type-safe overload for the built-in components library. */
+  require(nameOrId: 'ls:components'): Promise<LSComponentsExports>;
+}
+
+// ─── Built-in library: ls:components ────────────────────────────────────────
+
+/** Options for messageFooter() from ls:components. */
+interface MessageFooterOptions {
+  /** Stable ID for idempotent injection. */
+  id?: string;
+  /** Additional CSS class on the footer wrapper. */
+  className?: string;
+}
+
+/** Options for messageHeader() from ls:components. */
+interface MessageHeaderOptions {
+  /** Stable ID for idempotent injection. */
+  id?: string;
+  /** Additional CSS class on the header wrapper. */
+  className?: string;
+}
+
+/** Options for badgeHtml() from ls:components. */
+interface BadgeHtmlOptions {
+  /** Color variant. Default: 'default'. */
+  variant?: 'default' | 'success' | 'warning' | 'danger' | 'info' | 'accent';
+  /** Size preset. Default: 'md'. */
+  size?: 'sm' | 'md';
+  /** Prepend a colored dot indicator. Default: false. */
+  dot?: boolean;
+  /** Additional CSS class on the badge span. */
+  className?: string;
+}
+
+/** Options for statBarHtml() from ls:components. */
+interface StatBarHtmlOptions {
+  /** Max value for display label (bar maps 0-100%). Default: 100. */
+  max?: number;
+  /** CSS color or gradient for the fill. Default: var(--lumiverse-accent). */
+  color?: string;
+  /** Show numeric value text. Default: true. */
+  showValue?: boolean;
+  /** Bar height in pixels. Default: 6. */
+  height?: number;
+  /** Additional CSS class on the wrapper. */
+  className?: string;
+}
+
+/** Options for keyValueHtml() from ls:components. */
+interface KeyValueHtmlOptions {
+  /** Dim the value text. Default: false. */
+  muted?: boolean;
+  /** Additional CSS class on the wrapper. */
+  className?: string;
+}
+
+/** Options for progressBar() from ls:components. */
+interface ProgressBarOptions {
+  /** Initial value (0-100). Default: 0. */
+  value?: number;
+  /** Text label above the bar. */
+  label?: string;
+  /** CSS color or gradient for the fill. */
+  color?: string;
+  /** Show percentage text. Default: true. */
+  showPercent?: boolean;
+  /** Bar height in pixels. Default: 8. */
+  height?: number;
+  /** Stable ID for idempotent injection. */
+  id?: string;
+  /** Additional CSS class on the wrapper. */
+  className?: string;
+}
+
+/** Extended handle returned by progressBar(). */
+interface ProgressBarHandle extends DOMHandle {
+  /** Update the bar value (0-100) and optionally the label. */
+  setValue(value: number, label?: string): void;
+}
+
+/** CSS position for floatingButton(). */
+interface FloatingButtonPosition {
+  top?: string;
+  right?: string;
+  bottom?: string;
+  left?: string;
+}
+
+/** Options for floatingButton() from ls:components. */
+interface FloatingButtonOptions {
+  /** Fixed position on screen. Defaults to bottom-right above chat input. */
+  position?: FloatingButtonPosition;
+  /** HTML string for an icon (e.g. SVG). Sanitized by DOMPurify. */
+  icon?: string;
+  /** Visual variant. Default: 'default'. */
+  variant?: 'default' | 'accent' | 'ghost';
+  /** Size preset. Default: 'md'. */
+  size?: 'sm' | 'md';
+  /** Enable drag-to-reposition. Drag handled on the frontend for smooth UX. Default: false. */
+  draggable?: boolean;
+  /** Stable ID for idempotent injection. */
+  id?: string;
+  /** Additional CSS class on the button. */
+  className?: string;
+}
+
+/** Exports of the ls:components built-in library. */
+interface LSComponentsExports {
+  // ── Injection functions (return DOMHandle) ─────────────────────────
+
+  /** Styled footer below a message bubble. */
+  messageFooter(messageId: string, html: string, options?: MessageFooterOptions): DOMHandle;
+
+  /** Styled header above message content inside the bubble. */
+  messageHeader(messageId: string, html: string, options?: MessageHeaderOptions): DOMHandle;
+
+  /**
+   * Standalone progress bar with live setValue().
+   * @example
+   * const bar = progressBar('#chat', { label: 'Loading...', id: 'load' });
+   * bar.setValue(50, 'Halfway...');
+   * bar.setValue(100, 'Done');
+   */
+  progressBar(target: string, options?: ProgressBarOptions): ProgressBarHandle;
+
+  /**
+   * Fixed-position action button. Attach click handlers via handle.on('click', handler).
+   * @example
+   * const btn = floatingButton('Analyze', { variant: 'accent', id: 'fab' });
+   * btn.on('click', () => api.ui.toast('Clicked!'));
+   */
+  floatingButton(label: string, options?: FloatingButtonOptions): DOMHandle;
+
+  // ── HTML string builders (composable) ──────────────────────────────
+
+  /**
+   * Styled badge/pill HTML string. Composable inside messageFooter/messageHeader.
+   * @example
+   * badgeHtml('Online', { variant: 'success', dot: true })
+   */
+  badgeHtml(text: string, options?: BadgeHtmlOptions): string;
+
+  /**
+   * Labeled stat bar HTML string. Composable inside messageFooter/messageHeader.
+   * @example
+   * statBarHtml('Health', 75, { color: '#e74c3c', max: 100 })
+   */
+  statBarHtml(label: string, value: number, options?: StatBarHtmlOptions): string;
+
+  /**
+   * Label-value pair HTML string. Composable inside messageFooter/messageHeader.
+   * @example
+   * keyValueHtml('Location', 'Castle Throne Room')
+   */
+  keyValueHtml(label: string, value: string, options?: KeyValueHtmlOptions): string;
 }
 
 // ─── Globals injected into every script sandbox ───────────────────────────────
@@ -1209,7 +1364,7 @@ interface ScriptNamespace {
 /** Full LumiScript API. Use api.chat, api.llm, api.tools, etc. */
 declare const api: LumiScriptAPI;
 
-/** Script utilities. Use script.require() to load library scripts. */
+/** Script utilities. Use script.require() to load library scripts and built-in libraries (ls:*). */
 declare const script: ScriptNamespace;
 
 /**

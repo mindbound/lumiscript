@@ -1,5 +1,5 @@
 import { FC, useState } from 'react';
-import { Zap, Lock, Radio, List, Braces, Hash, Package, ChevronDown, ChevronRight } from 'lucide-react';
+import { Zap, Lock, Radio, List, Braces, Hash, Package, Blocks, ChevronDown, ChevronRight } from 'lucide-react';
 
 // ─── Section accordion ────────────────────────────────────────────────────────
 
@@ -1230,7 +1230,7 @@ const API_GROUPS: FnGroup[] = [
   {
     group: 'script',
     rows: [
-      { name: 'require', args: 'nameOrId', desc: 'Load a library script by name or ID (lazy, cached per execution).' },
+      { name: 'require', args: 'nameOrId', desc: "Load a library by name/ID, or a built-in library by ls: prefix (e.g. 'ls:components')." },
     ],
   },
 ];
@@ -1259,6 +1259,135 @@ const ApiFunctionsTable: FC = () => (
       ))}
     </tbody>
   </table>
+);
+
+// ─── Built-in libraries ──────────────────────────────────────────────────────
+
+const BUILTIN_COMPONENTS: FnRow[] = [
+  { name: 'messageFooter',  args: 'messageId, html, options?',  desc: 'Attach a styled footer below a message bubble. Returns DOMHandle. Options: { id?, className? }.' },
+  { name: 'messageHeader',  args: 'messageId, html, options?',  desc: 'Attach a styled header above message content. Returns DOMHandle. Options: { id?, className? }.' },
+  { name: 'progressBar',    args: 'target, options?',           desc: 'Inject a progress bar with live setValue(). Returns ProgressBarHandle. Options: { value?, label?, color?, showPercent?, height?, id?, className? }.' },
+  { name: 'floatingButton', args: 'label, options?',            desc: 'Fixed-position action button. Returns DOMHandle. Options: { position?, icon?, variant?, size?, id?, className? }.' },
+  { name: 'badgeHtml',      args: 'text, options?',             desc: 'Returns badge/pill HTML string for composing inside other injections.' },
+  { name: 'statBarHtml',    args: 'label, value, options?',     desc: 'Returns labeled stat bar HTML string. Options: { max?, color?, showValue?, height?, className? }.' },
+  { name: 'keyValueHtml',   args: 'label, value, options?',     desc: 'Returns label-value pair HTML string. Options: { muted?, className? }.' },
+];
+
+const BUILTIN_TYPES: TypeDoc[] = [
+  {
+    name: 'MessageFooterOptions / MessageHeaderOptions',
+    note: 'Options for messageFooter() and messageHeader().',
+    fields: [
+      { field: 'id?',        type: 'string', optional: true, desc: 'Stable ID for idempotent injection (forwarded to injectAtMessage).' },
+      { field: 'className?', type: 'string', optional: true, desc: 'Additional CSS class applied to the wrapper div.' },
+    ],
+  },
+  {
+    name: 'BadgeHtmlOptions',
+    note: 'Options for badgeHtml().',
+    fields: [
+      { field: 'variant?',   type: "'default'|'success'|'warning'|'danger'|'info'|'accent'", optional: true, desc: "Color variant. Default: 'default'." },
+      { field: 'size?',      type: "'sm' | 'md'",  optional: true, desc: "Size preset. Default: 'md'." },
+      { field: 'dot?',       type: 'boolean',       optional: true, desc: 'Prepend a colored dot indicator. Default: false.' },
+      { field: 'className?', type: 'string',        optional: true, desc: 'Additional CSS class on the badge span.' },
+    ],
+  },
+  {
+    name: 'StatBarHtmlOptions',
+    note: 'Options for statBarHtml().',
+    fields: [
+      { field: 'max?',       type: 'number',  optional: true, desc: 'Max value for percentage calc. Default: 100.' },
+      { field: 'color?',     type: 'string',  optional: true, desc: 'CSS color or gradient for the fill.' },
+      { field: 'showValue?', type: 'boolean', optional: true, desc: 'Show numeric value label. Default: true.' },
+      { field: 'height?',    type: 'number',  optional: true, desc: 'Bar height in px. Default: 6.' },
+      { field: 'className?', type: 'string',  optional: true, desc: 'Additional CSS class.' },
+    ],
+  },
+  {
+    name: 'ProgressBarOptions',
+    note: 'Options for progressBar(). Returns ProgressBarHandle (extends DOMHandle + setValue).',
+    fields: [
+      { field: 'value?',       type: 'number',  optional: true, desc: 'Initial value (0-100). Default: 0.' },
+      { field: 'label?',       type: 'string',  optional: true, desc: 'Text label above the bar.' },
+      { field: 'color?',       type: 'string',  optional: true, desc: 'CSS color or gradient for the fill.' },
+      { field: 'showPercent?', type: 'boolean', optional: true, desc: 'Show percentage text. Default: true.' },
+      { field: 'height?',      type: 'number',  optional: true, desc: 'Bar height in px. Default: 8.' },
+      { field: 'id?',          type: 'string',  optional: true, desc: 'Stable ID for idempotent injection.' },
+      { field: 'className?',   type: 'string',  optional: true, desc: 'Additional CSS class.' },
+    ],
+  },
+  {
+    name: 'FloatingButtonOptions',
+    note: 'Options for floatingButton().',
+    fields: [
+      { field: 'position?', type: '{ top?, right?, bottom?, left? }', optional: true, desc: "Fixed position. Defaults to { bottom: '80px', right: '16px' }." },
+      { field: 'icon?',      type: 'string',                           optional: true, desc: 'HTML string for an icon (e.g. SVG).' },
+      { field: 'variant?',   type: "'default' | 'accent' | 'ghost'",   optional: true, desc: "Visual variant. Default: 'default'." },
+      { field: 'size?',      type: "'sm' | 'md'",                      optional: true, desc: "Size preset. Default: 'md'." },
+      { field: 'draggable?', type: 'boolean',                          optional: true, desc: 'Enable drag-to-reposition. Handled on the frontend for smooth UX. Default: false.' },
+      { field: 'id?',        type: 'string',                           optional: true, desc: 'Stable ID for idempotent injection.' },
+      { field: 'className?', type: 'string',                           optional: true, desc: 'Additional CSS class.' },
+    ],
+  },
+];
+
+const BuiltinLibrariesSection: FC = () => (
+  <>
+    <p className="ls-ref-muted" style={{ marginBottom: 8 }}>
+      Built-in libraries are loaded via <Code>{"script.require('ls:components')"}</Code>.
+      All DOM operations are attributed to the calling script. Injection components
+      require <Code>app_manipulation</Code>; HTML builders return strings and need no permission.
+    </p>
+
+    <table className="ls-ref-table">
+      <thead>
+        <tr>
+          <th>Method</th>
+          <th>Arguments</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+        <GroupHeader label="ls:components" cols={3} />
+        {BUILTIN_COMPONENTS.map(row => (
+          <tr key={row.name}>
+            <td><Code>{row.name}</Code></td>
+            <td><span className="ls-ref-muted">{row.args}</span></td>
+            <td><span className="ls-ref-muted">{row.desc}</span></td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+
+    <table className="ls-ref-table" style={{ marginTop: 12 }}>
+      <thead>
+        <tr>
+          <th>Field</th>
+          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+        {BUILTIN_TYPES.map(type => (
+          <>
+            <tr key={`hdr-${type.name}`}>
+              <td colSpan={3} className="ls-ref-group-header">
+                {type.name}
+                {type.note && <div className="ls-ref-type-note">{type.note}</div>}
+              </td>
+            </tr>
+            {type.fields.map(f => (
+              <tr key={`${type.name}-${f.field}`}>
+                <td><Code>{f.optional && !f.field.endsWith('?') ? `${f.field}?` : f.field}</Code></td>
+                <td><span className="ls-ref-muted">{f.type}</span></td>
+                <td><span className="ls-ref-muted">{f.desc}</span></td>
+              </tr>
+            ))}
+          </>
+        ))}
+      </tbody>
+    </table>
+  </>
 );
 
 // ─── Reference tab root ───────────────────────────────────────────────────────
@@ -1296,6 +1425,10 @@ export const ReferenceTab: FC = () => (
 
     <Section icon={<List size={11} />} title="API Functions">
       <ApiFunctionsTable />
+    </Section>
+
+    <Section icon={<Blocks size={11} />} title="Built-in Libraries">
+      <BuiltinLibrariesSection />
     </Section>
 
     <Section icon={<Package size={11} />} title="Script Packs">
