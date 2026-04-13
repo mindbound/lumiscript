@@ -428,6 +428,18 @@ interface JSONAPI {
   sort<T = unknown>(data: T[], key: string, direction?: 'asc' | 'desc'): T[];
   uniq<T = unknown>(data: T[]): T[];
   flatten<T = unknown>(data: unknown[]): T[];
+  /**
+   * Run a jsonquery pipeline against data.
+   * Uses the jsonquery text query language (pipe-based, jq-like).
+   * @see https://jsonquerylang.org
+   * @example
+   * // Filter and pick fields
+   * const names = api.json.query(users, '.friends | filter(.age >= 18) | sort(.name) | pick(.name)');
+   *
+   * // Nested access + transformation
+   * const totals = api.json.query(orders, '.items | groupBy(.category) | map(sum(.price))');
+   */
+  query<T = unknown>(data: unknown, queryString: string): T;
 }
 
 // ─── Utils API ────────────────────────────────────────────────────────────────

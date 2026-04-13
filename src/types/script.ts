@@ -638,6 +638,8 @@ export interface JSONAPI {
   sort<T = unknown>(data: T[], key: string, direction?: 'asc' | 'desc'): T[];
   uniq<T = unknown>(data: T[]): T[];
   flatten<T = unknown>(data: unknown[]): T[];
+  /** Run a jsonquery pipeline against data. See https://jsonquerylang.org */
+  query<T = unknown>(data: unknown, queryString: string): T;
 }
 
 // ─── Utils API ────────────────────────────────────────────────────────────────

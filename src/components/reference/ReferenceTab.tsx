@@ -1012,6 +1012,7 @@ const API_GROUPS: FnGroup[] = [
       { name: 'sort',      args: 'data, key, direction?',       desc: 'Sort array by key (asc or desc).' },
       { name: 'uniq',      args: 'data',                        desc: 'Deduplicate array.' },
       { name: 'flatten',   args: 'data',                        desc: 'Flatten a nested array.' },
+      { name: 'query',     args: 'data, queryString',             desc: 'Run a jsonquery pipeline (jq-like). See jsonquerylang.org.' },
     ],
   },
   {

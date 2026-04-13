@@ -7,6 +7,7 @@
  */
 
 import type { LumiScriptAPI } from '../../types/script.js';
+import { jsonquery } from '@jsonquerylang/jsonquery';
 
 export function buildJSONAPI(): LumiScriptAPI['json'] {
   return {
@@ -53,5 +54,6 @@ export function buildJSONAPI(): LumiScriptAPI['json'] {
 
     uniq: <T>(data: T[]) => [...new Set(data)],
     flatten: <T>(data: unknown[]): T[] => data.flat(Infinity) as T[],
+    query: <T>(data: unknown, queryString: string): T => jsonquery(data, queryString) as T,
   };
 }

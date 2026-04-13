@@ -254,3 +254,76 @@ describe('flatten', () => {
     expect(json.flatten([])).toEqual([]);
   });
 });
+
+// ─── query ──────────────────────────────────────────────────────────────────
+
+describe('query', () => {
+  const users = {
+    friends: [
+      { name: 'Alice', age: 25, city: 'New York' },
+      { name: 'Bob', age: 35, city: 'London' },
+      { name: 'Charlie', age: 30, city: 'New York' },
+    ],
+  };
+
+  test('accesses nested property', () => {
+    expect(json.query({ a: { b: 42 } }, '.a.b')).toBe(42);
+  });
+
+  test('filters and sorts via pipe', () => {
+    const result = json.query(users, '.friends | filter(.city == "New York") | sort(.age)');
+    expect(result).toEqual([
+      { name: 'Alice', age: 25, city: 'New York' },
+      { name: 'Charlie', age: 30, city: 'New York' },
+    ]);
+  });
+
+  test('pick selects specific fields', () => {
+    const result = json.query(users, '.friends | pick(.name, .age)');
+    expect(result).toEqual([
+      { name: 'Alice', age: 25 },
+      { name: 'Bob', age: 35 },
+      { name: 'Charlie', age: 30 },
+    ]);
+  });
+
+  test('map extracts a single field', () => {
+    const result = json.query(users, '.friends | map(.name)');
+    expect(result).toEqual(['Alice', 'Bob', 'Charlie']);
+  });
+
+  test('aggregate functions work (sum, min, max, size)', () => {
+    expect(json.query([1, 2, 3, 4], 'sum()')).toBe(10);
+    expect(json.query([1, 5, 3], 'min()')).toBe(1);
+    expect(json.query([1, 5, 3], 'max()')).toBe(5);
+    expect(json.query([1, 2, 3], 'size()')).toBe(3);
+  });
+
+  test('uniq deduplicates', () => {
+    expect(json.query([1, 2, 2, 3, 1], 'uniq()')).toEqual([1, 2, 3]);
+  });
+
+  test('groupBy groups by key', () => {
+    const items = [
+      { cat: 'a', val: 1 },
+      { cat: 'b', val: 2 },
+      { cat: 'a', val: 3 },
+    ];
+    expect(json.query(items, 'groupBy(.cat)')).toEqual({
+      a: [{ cat: 'a', val: 1 }, { cat: 'a', val: 3 }],
+      b: [{ cat: 'b', val: 2 }],
+    });
+  });
+
+  test('throws SyntaxError on invalid query', () => {
+    expect(() => json.query({}, 'invalid|||')).toThrow(SyntaxError);
+  });
+
+  test('chained pipe with filter, sort, and pick', () => {
+    const result = json.query(users, '.friends | filter(.age >= 30) | sort(.name) | pick(.name)');
+    expect(result).toEqual([
+      { name: 'Bob' },
+      { name: 'Charlie' },
+    ]);
+  });
+});
