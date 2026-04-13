@@ -18,6 +18,7 @@ import type { DOMEventData } from './types/script.js';
 
 type DOMMessage = Extract<BackendToFrontend,
   | { type: 'dom_inject' }
+  | { type: 'dom_inject_at_message' }
   | { type: 'dom_update' }
   | { type: 'dom_remove' }
   | { type: 'dom_add_style' }
@@ -98,6 +99,80 @@ function scopeCSS(css: string, scriptId: string): string {
   return `@scope ([data-ls-script="${scriptId}"]) {\n${css}\n}`;
 }
 
+// ─── Message-aware injection helpers ────────────────────────────────────────
+
+/**
+ * Wait for an element matching `selector` to appear in the DOM.
+ * Checks immediately; falls back to a MutationObserver that resolves when the
+ * element appears or rejects after `timeoutMs`.
+ */
+function waitForElement(selector: string, timeoutMs = 5000): Promise<Element> {
+  const existing = document.querySelector(selector);
+  if (existing) return Promise.resolve(existing);
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+
+    const observer = new MutationObserver(() => {
+      const el = document.querySelector(selector);
+      if (el && !settled) {
+        settled = true;
+        observer.disconnect();
+        resolve(el);
+      }
+    });
+
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        observer.disconnect();
+        reject(new Error(`waitForElement: timeout for "${selector}"`));
+      }
+    }, timeoutMs);
+  });
+}
+
+/**
+ * Find the bubble (content container) div inside a message element.
+ * Both BubbleMessage and MinimalMessage use a CSS module `.bubble` class
+ * whose mangled name contains `_bubble_`.
+ */
+function findBubble(messageEl: Element): Element | null {
+  return messageEl.querySelector('[class*="_bubble_"]');
+}
+
+/** Pending message injection awaiting a MutationObserver. */
+interface PendingMessageInjection {
+  scriptId: string;
+  cancel: () => void;
+}
+
+const pendingInjections = new Map<string, PendingMessageInjection>();
+const MAX_PENDING_INJECTIONS = 50;
+
+function trackPending(elementId: string, scriptId: string, cancel: () => void): void {
+  if (pendingInjections.size >= MAX_PENDING_INJECTIONS) {
+    // Evict oldest (Maps iterate in insertion order)
+    const oldestKey = pendingInjections.keys().next().value;
+    if (oldestKey) {
+      pendingInjections.get(oldestKey)?.cancel();
+      pendingInjections.delete(oldestKey);
+    }
+  }
+  pendingInjections.set(elementId, { scriptId, cancel });
+}
+
+function cancelPendingForScript(scriptId: string): void {
+  for (const [elId, entry] of pendingInjections) {
+    if (entry.scriptId === scriptId) {
+      entry.cancel();
+      pendingInjections.delete(elId);
+    }
+  }
+}
+
 // ─── Handler ─────────────────────────────────────────────────────────────────
 
 /**
@@ -129,6 +204,48 @@ export function installDOMHandler(
         if (stableId) {
           stableIndex.set(stableKey(scriptId, stableId), elementId);
         }
+        break;
+      }
+
+      // ── Inject at Message ────────────────────────────────────────────
+      case 'dom_inject_at_message': {
+        const { scriptId, elementId, messageId, html, position, stableId } = msg;
+
+        const doInject = (bubbleEl: Element) => {
+          const wrappedHtml = `<div data-ls-script="${scriptId}" data-ls-el="${elementId}">${html}</div>`;
+          const insertPos: InsertPosition = position === 'header' ? 'afterbegin' : 'beforeend';
+          const el = ctx.dom.inject(bubbleEl as any, wrappedHtml, insertPos);
+          elementMap.set(elementId, el);
+          elementScripts.set(elementId, scriptId);
+          if (stableId) {
+            stableIndex.set(stableKey(scriptId, stableId), elementId);
+          }
+        };
+
+        const selector = `[data-message-id="${messageId}"]`;
+        const messageEl = document.querySelector(selector);
+
+        if (messageEl) {
+          const bubble = findBubble(messageEl);
+          if (bubble) doInject(bubble);
+          break;
+        }
+
+        // Message element not in DOM yet — wait for it
+        let cancelled = false;
+        const cancel = () => { cancelled = true; };
+        trackPending(elementId, scriptId, cancel);
+
+        waitForElement(selector)
+          .then((msgEl) => {
+            pendingInjections.delete(elementId);
+            if (cancelled) return;
+            const bubble = findBubble(msgEl);
+            if (bubble) doInject(bubble);
+          })
+          .catch(() => {
+            pendingInjections.delete(elementId);
+          });
         break;
       }
 
@@ -199,6 +316,9 @@ export function installDOMHandler(
       case 'dom_cleanup_script': {
         const { scriptId } = msg;
 
+        // Cancel any pending MutationObserver waits for this script
+        cancelPendingForScript(scriptId);
+
         // Remove all elements for this script
         for (const [elId, sid] of elementScripts) {
           if (sid === scriptId) removeElement(elId);
@@ -226,6 +346,12 @@ export function installDOMHandler(
   // ── Cleanup ────────────────────────────────────────────────────────────
   return () => {
     unsubMessages();
+
+    // Cancel all pending message injections
+    for (const [, entry] of pendingInjections) {
+      entry.cancel();
+    }
+    pendingInjections.clear();
 
     // Remove all listeners
     for (const [, entry] of listenerMap) {

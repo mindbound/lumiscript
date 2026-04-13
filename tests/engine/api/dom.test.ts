@@ -163,6 +163,92 @@ describe('handle.on', () => {
   });
 });
 
+// ─── injectAtMessage ───────────────────────────────────────────────────────
+
+describe('injectAtMessage', () => {
+  test('sends dom_inject_at_message message and returns handle', () => {
+    const dom = buildDOMAPI(createTestDeps());
+    const handle = dom.injectAtMessage('msg-123', '<p>Footer</p>');
+
+    expect(handle.id).toBeTruthy();
+    const msgs = messagesOfType('dom_inject_at_message');
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].scriptId).toBe('test-script-id');
+    expect(msgs[0].messageId).toBe('msg-123');
+    expect(msgs[0].html).toBe('<p>Footer</p>');
+    expect(msgs[0].position).toBe('footer');
+  });
+
+  test('respects position option', () => {
+    const dom = buildDOMAPI(createTestDeps());
+    dom.injectAtMessage('msg-123', '<p>Header</p>', { position: 'header' });
+    expect(messagesOfType('dom_inject_at_message')[0].position).toBe('header');
+  });
+
+  test('registers element in registry', () => {
+    const dom = buildDOMAPI(createTestDeps());
+    const handle = dom.injectAtMessage('msg-123', '<p>Hi</p>');
+    expect(getElement(handle.id)).toBeDefined();
+  });
+
+  test('stable ID: first call creates, second call updates', () => {
+    const dom = buildDOMAPI(createTestDeps());
+
+    const h1 = dom.injectAtMessage('msg-123', '<p>V1</p>', { id: 'msg-widget' });
+    const injectMsgs = messagesOfType('dom_inject_at_message');
+    expect(injectMsgs).toHaveLength(1);
+
+    const h2 = dom.injectAtMessage('msg-123', '<p>V2</p>', { id: 'msg-widget' });
+
+    // Second call should update, not create a new inject
+    expect(h2.id).toBe(h1.id);
+    const updateMsgs = messagesOfType('dom_update');
+    expect(updateMsgs).toHaveLength(1);
+    expect(updateMsgs[0].html).toBe('<p>V2</p>');
+  });
+
+  test('stable ID update clears old listeners', () => {
+    const dom = buildDOMAPI(createTestDeps());
+
+    const h1 = dom.injectAtMessage('msg-123', '<p>V1</p>', { id: 'msg-widget' });
+    h1.on('click', () => {});
+    expect(getElement(h1.id)!.listeners.size).toBe(1);
+
+    dom.injectAtMessage('msg-123', '<p>V2</p>', { id: 'msg-widget' });
+
+    expect(getElement(h1.id)!.listeners.size).toBe(0);
+    const unlistenMsgs = messagesOfType('dom_unlisten');
+    expect(unlistenMsgs.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test('throws without app_manipulation', () => {
+    const dom = buildDOMAPI(createTestDeps({ hasPerm: () => false }));
+    expect(() => dom.injectAtMessage('msg-123', '<p>hi</p>')).toThrow('PERMISSION_DENIED');
+  });
+
+  test('handle.update sends dom_update message', () => {
+    const dom = buildDOMAPI(createTestDeps());
+    const handle = dom.injectAtMessage('msg-123', '<p>Old</p>');
+
+    handle.update('<p>New</p>');
+    const msgs = messagesOfType('dom_update');
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].elementId).toBe(handle.id);
+    expect(msgs[0].html).toBe('<p>New</p>');
+  });
+
+  test('handle.remove sends dom_remove and unregisters', () => {
+    const dom = buildDOMAPI(createTestDeps());
+    const handle = dom.injectAtMessage('msg-123', '<p>Hi</p>');
+
+    handle.remove();
+    const msgs = messagesOfType('dom_remove');
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].elementId).toBe(handle.id);
+    expect(getElement(handle.id)).toBeUndefined();
+  });
+});
+
 // ─── addStyle ───────────────────────────────────────────────────────────────
 
 describe('addStyle', () => {

@@ -1472,6 +1472,21 @@ export interface DOMInjectOptions {
   id?: string;
 }
 
+/** Options for `api.ui.dom.injectAtMessage()`. */
+export interface DOMMessageInjectOptions {
+  /**
+   * Semantic injection position within the message.
+   * - 'footer' (default): end of the bubble container, after content and controls.
+   * - 'header': beginning of the bubble container, before all content.
+   */
+  position?: 'header' | 'footer';
+  /**
+   * Stable ID for idempotent injection. If an element with this ID was already
+   * injected by this script, its content is updated instead of creating a duplicate.
+   */
+  id?: string;
+}
+
 /** Serialized subset of a DOM event, safe to transfer across the message channel. */
 export interface DOMEventData {
   /** Event type (e.g. 'click', 'input', 'change'). */
@@ -1521,6 +1536,20 @@ export interface DOMAPI {
    * @param options Injection options (position, stable ID)
    */
   inject(target: string, html: string, options?: DOMInjectOptions): DOMHandle;
+
+  /**
+   * Inject sanitized HTML into a specific chat message's bubble container.
+   * Handles timing automatically — if the message element is not yet in the DOM
+   * (e.g. after a chat switch), waits for it via MutationObserver (up to 5 s).
+   *
+   * Resolves the correct injection target internally based on the active chat
+   * layout (Bubble or Minimal), so scripts do not need to know the DOM structure.
+   *
+   * @param messageId  UUID of the target message (from event data or api.chat.*)
+   * @param html       HTML string (sanitized via DOMPurify on the frontend)
+   * @param options    Position ('header'/'footer') and optional stable ID
+   */
+  injectAtMessage(messageId: string, html: string, options?: DOMMessageInjectOptions): DOMHandle;
 
   /**
    * Add a `<style>` element scoped to this script via `@scope`.

@@ -16,7 +16,7 @@
 
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
 
-import type { LumiScriptAPI, DOMEventData, DOMHandle, DOMInjectOptions } from '../../types/script.js';
+import type { LumiScriptAPI, DOMEventData, DOMHandle, DOMInjectOptions, DOMMessageInjectOptions } from '../../types/script.js';
 import type { BackendToFrontend } from '../../types/messages.js';
 import type { APIBuildDeps } from './shared.js';
 import { assertPerm } from './shared.js';
@@ -114,6 +114,42 @@ export function buildDOMAPI(deps: APIBuildDeps): LumiScriptAPI['ui']['dom'] {
         scriptId,
         elementId,
         target,
+        html,
+        position,
+        stableId,
+      });
+      return createHandle(elementId);
+    },
+
+    injectAtMessage(
+      messageId: string,
+      html: string,
+      options: DOMMessageInjectOptions = {},
+    ): DOMHandle {
+      gate();
+      const { position = 'footer', id: stableId } = options;
+
+      // ── Idempotent injection via stable ID ───────────────────────────
+      if (stableId) {
+        const existingId = resolveStableId(scriptId, stableId);
+        if (existingId) {
+          const cleared = clearListeners(existingId);
+          for (const { listenerId, event } of cleared) {
+            send({ type: 'dom_unlisten', elementId: existingId, listenerId, event });
+          }
+          send({ type: 'dom_update', elementId: existingId, html });
+          return createHandle(existingId);
+        }
+      }
+
+      // ── New injection ────────────────────────────────────────────────
+      const elementId = nextId('de');
+      registerElement(elementId, scriptId, stableId);
+      send({
+        type: 'dom_inject_at_message',
+        scriptId,
+        elementId,
+        messageId,
         html,
         position,
         stableId,

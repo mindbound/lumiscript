@@ -173,6 +173,7 @@ export type BackendToFrontend =
     }
   // ─── DOM injection commands (backend → frontend) ──────────────────
   | { type: 'dom_inject';          scriptId: string; elementId: string; target: string; html: string; position: string; stableId?: string }
+  | { type: 'dom_inject_at_message'; scriptId: string; elementId: string; messageId: string; html: string; position: 'header' | 'footer'; stableId?: string }
   | { type: 'dom_update';          elementId: string; html: string }
   | { type: 'dom_remove';          elementId: string }
   | { type: 'dom_add_style';       scriptId: string; styleId: string; css: string }

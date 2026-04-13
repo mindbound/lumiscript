@@ -122,10 +122,13 @@ export class TriggerRegistry {
           runId,
         });
 
-        // ── Clear stale broadcast subscriptions from the previous invocation ─
+        // ── Clear stale broadcast/command handlers from previous invocation ─
         // Each trigger invocation is a fresh execution: subscriptions set up
         // by api.broadcast.on() in the previous run are wiped before the new
         // run starts, preventing handler accumulation across invocations.
+        // NOTE: DOM state is NOT cleaned here — scripts that early-return
+        // (e.g. SETTINGS_UPDATED guard) must keep their DOM intact. Scripts
+        // should call api.ui.dom.cleanup() explicitly when re-injecting.
         clearBroadcastByScriptId(scriptId);
         clearCommandHandlerByScriptId(scriptId);
 

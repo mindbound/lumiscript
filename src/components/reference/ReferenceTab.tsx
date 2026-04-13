@@ -481,8 +481,16 @@ const KEY_TYPES: TypeDoc[] = [
     ],
   },
   {
+    name: 'DOMMessageInjectOptions',
+    note: 'Options for api.ui.dom.injectAtMessage(messageId, html, options?).',
+    fields: [
+      { field: 'position?', type: "'header' | 'footer'", optional: true, desc: "Semantic position within the message bubble. 'footer' (default): after content/controls. 'header': before all content." },
+      { field: 'id?',       type: 'string',              optional: true, desc: 'Stable ID for idempotent injection. Re-using the same ID updates the existing element instead of creating a duplicate.' },
+    ],
+  },
+  {
     name: 'DOMHandle',
-    note: 'Returned by api.ui.dom.inject(). All methods are fire-and-forget.',
+    note: 'Returned by api.ui.dom.inject() and api.ui.dom.injectAtMessage(). All methods are fire-and-forget.',
     fields: [
       { field: 'id',          type: 'string',                                   optional: false, desc: 'Unique element ID (generated or from stable ID).' },
       { field: 'update(html)', type: 'void',                                    optional: false, desc: 'Replace the inner HTML of the injected element.' },
@@ -1084,9 +1092,10 @@ const API_GROUPS: FnGroup[] = [
   {
     group: 'api.ui.dom',
     rows: [
-      { name: 'inject',   args: 'target, html, options?',  desc: 'Inject sanitized HTML at a CSS selector. Returns DOMHandle { id, update, remove, on }. Options: position (default "beforeend"), id (stable ID for idempotent injection). Requires app_manipulation.' },
-      { name: 'addStyle',  args: 'css',                    desc: 'Add a <style> element scoped to this script via @scope. Returns { remove() }. Use --lumiverse-* CSS variables for theming. Requires app_manipulation.' },
-      { name: 'cleanup',   args: '—',                      desc: 'Remove all DOM injections and styles created by this script. Requires app_manipulation.' },
+      { name: 'inject',          args: 'target, html, options?',     desc: 'Inject sanitized HTML at a CSS selector. Returns DOMHandle { id, update, remove, on }. Options: position (default "beforeend"), id (stable ID for idempotent injection). Requires app_manipulation.' },
+      { name: 'injectAtMessage', args: 'messageId, html, options?', desc: 'Inject sanitized HTML into a message bubble. Waits up to 5 s for the element if not yet rendered. Options: position ("footer" default / "header"), id (stable ID). Returns DOMHandle. Requires app_manipulation.' },
+      { name: 'addStyle',         args: 'css',                      desc: 'Add a <style> element scoped to this script via @scope. Returns { remove() }. Use --lumiverse-* CSS variables for theming. Requires app_manipulation.' },
+      { name: 'cleanup',          args: '—',                        desc: 'Remove all DOM injections and styles created by this script. Requires app_manipulation.' },
     ],
   },
   {
