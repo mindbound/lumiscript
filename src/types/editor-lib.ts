@@ -348,7 +348,7 @@ interface LLMAPI {
    * const schemas = api.tools.list().map(t => ({ name: t.name, description: t.description, parameters: t.parameters }));
    * let msgs = [...history];
    * for (let i = 0; i < 8; i++) {
-   *   const r = await api.llm.generateWithTools(msgs, schemas, { connectionName: 'sidecar' });
+   *   const r = await api.llm.generateWithTools(msgs, schemas, { connectionName: 'tools' });
    *   if (!r.tool_calls?.length) { if (r.content) api.chat.inject('res', r.content); break; }
    *   for (const call of r.tool_calls) {
    *     const result = await api.tools.invoke(call.name, call.args);

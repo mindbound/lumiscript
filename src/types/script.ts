@@ -95,26 +95,6 @@ export interface ScriptPackEntry {
 export interface LumiScriptSettings {
   /** Master on/off toggle */
   enabled: boolean;
-  /** Show a toast notification when a trigger script completes */
-  showExecutionNotifications: boolean;
-  // ─── Tool Sidecar ───────────────────────────────────────────────────────────
-  /**
-   * Automatically run registered tools in an agentic sidecar loop before each
-   * main generation. The loop runs inside the Lumiverse interceptor pipeline,
-   * which stalls generation until it completes.
-   * Skipped for generation types: 'quiet', 'impersonate', 'continue'.
-   */
-  sidecarEnabled: boolean;
-  /** Connection profile ID to use for the sidecar LLM calls. Null = disabled. */
-  sidecarConnectionId: string | null;
-  /** Maximum number of tool-call turns before the loop is cut off (default: 6). */
-  sidecarMaxTurns: number;
-  /**
-   * Injection depth for the sidecar result message.
-   * 0 = append after all assembled messages.
-   * 1 = insert before the last message (typical: before last user message).
-   */
-  sidecarInjectionDepth: number;
   // ─── Script Execution ────────────────────────────────────────────────────────
   /**
    * Maximum time in milliseconds a single script execution may run before it is
@@ -129,17 +109,61 @@ export interface LumiScriptSettings {
    * Default: 500.  Range: 50 – 2 000.
    */
   consoleHistoryLimit: number;
+  // ─── Editor ──────────────────────────────────────────────────────────────────
+  /**
+   * Monaco editor font size in pixels.  Affects the code editor only; reference
+   * docs and console output are unchanged.
+   * Default: 12.  Range: 10 – 24.
+   */
+  editorFontSize: number;
+  /**
+   * Debounce (in milliseconds) between the last keystroke and autosave.
+   * Larger values reduce backend round-trips while typing, at the cost of
+   * waiting longer before unsaved edits are persisted.
+   * Default: 1 200.  Range: 300 – 5 000.
+   */
+  autosaveDebounceMs: number;
+  // ─── Templates ───────────────────────────────────────────────────────────────
+  /**
+   * Starter code pre-seeded into newly created trigger scripts.
+   * Typically used to stub the pack-import frontmatter directives.
+   */
+  defaultTriggerTemplate: string;
+  /**
+   * Starter code pre-seeded into newly created library scripts.
+   * Typically used to stub the pack-import frontmatter directives plus a
+   * placeholder `module.exports`.
+   */
+  defaultLibraryTemplate: string;
 }
+
+export const DEFAULT_TRIGGER_TEMPLATE =
+`// @description
+// @author
+// @version     1.0.0
+// @tags
+
+`;
+
+export const DEFAULT_LIBRARY_TEMPLATE =
+`// @description
+// @author
+// @version     1.0.0
+// @tags
+
+module.exports = {
+
+};
+`;
 
 export const DEFAULT_SETTINGS: LumiScriptSettings = {
   enabled: true,
-  showExecutionNotifications: true,
-  sidecarEnabled: false,
-  sidecarConnectionId: null,
-  sidecarMaxTurns: 6,
-  sidecarInjectionDepth: 0,
   scriptTimeoutMs: 60_000,
   consoleHistoryLimit: 500,
+  editorFontSize: 12,
+  autosaveDebounceMs: 1_200,
+  defaultTriggerTemplate: DEFAULT_TRIGGER_TEMPLATE,
+  defaultLibraryTemplate: DEFAULT_LIBRARY_TEMPLATE,
 };
 
 // ─── Execution ────────────────────────────────────────────────────────────────
@@ -552,7 +576,7 @@ export interface LLMAPI {
    * }));
    * let msgs = [...history];
    * for (let i = 0; i < 8; i++) {
-   *   const r = await api.llm.generateWithTools(msgs, schemas, { connection: 'sidecar' });
+   *   const r = await api.llm.generateWithTools(msgs, schemas, { connection: 'tools' });
    *   if (!r.tool_calls?.length) {
    *     if (r.content) api.chat.inject('result', r.content, { mode: 'intercept' });
    *     break;
@@ -1766,7 +1790,7 @@ export interface RegisteredToolInfo {
 
 /**
  * `api.tools` — register LLM tools that Lumiverse can invoke via Council
- * (sidecar or inline modes) or native LLM function-calling.
+ * (inline mode) or native LLM function-calling.
  *
  * Requires the `tools` permission in `spindle.json`.
  */
@@ -1795,7 +1819,7 @@ export interface ToolsAPI {
    *   council_eligible: true,
    * }, async (args, api) => {
    *   // api.llm.generate() uses the script-configured LLM connection —
-   *   // independent of Lumiverse's Council sidecar LLM.
+   *   // independent of Lumiverse's Council LLM.
    *   return api.llm.generate([
    *     { role: 'system', content: 'Summarise the weather data concisely.' },
    *     { role: 'user',   content: `City: ${args.city}\nContext: ${args.context}` },

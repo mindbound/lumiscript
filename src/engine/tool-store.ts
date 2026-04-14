@@ -21,7 +21,7 @@ export interface ToolEntry {
   name: string;
   displayName: string;
   description: string;
-  /** JSON Schema for the tool's input parameters (used by the auto-sidecar loop). */
+  /** JSON Schema for the tool's input parameters. */
   parameters?: Record<string, unknown>;
   councilEligible: boolean;
   /**

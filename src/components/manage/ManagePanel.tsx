@@ -18,6 +18,8 @@ interface ManagePanelProps {
   activeRunScriptId: string | null;
   isRunning: boolean;
   consoleHistory: Record<string, ConsoleEntry[]>;
+  editorFontSize: number;
+  autosaveDebounceMs: number;
   onClearConsole: (scriptId: string) => void;
   sendToBackend: (msg: FrontendToBackend) => void;
 }
@@ -29,6 +31,8 @@ export const ManagePanel: FC<ManagePanelProps> = ({
   activeRunScriptId,
   isRunning,
   consoleHistory,
+  editorFontSize,
+  autosaveDebounceMs,
   onClearConsole,
   sendToBackend,
 }) => {
@@ -59,6 +63,8 @@ export const ManagePanel: FC<ManagePanelProps> = ({
           activeRunScriptId={activeRunScriptId}
           isRunning={isRunning}
           consoleHistory={consoleHistory}
+          editorFontSize={editorFontSize}
+          autosaveDebounceMs={autosaveDebounceMs}
           onClearConsole={onClearConsole}
           onClose={handleClose}
           sendToBackend={sendToBackend}

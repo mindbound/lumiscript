@@ -3,8 +3,8 @@
  * LUMISCRIPT — TOOLS API
  * ============================================================================
  * Implements api.tools — the LumiScript interface for registering LLM tools
- * that Lumiverse can invoke via Council (sidecar or inline modes) or direct
- * LLM function-calling (inline tool calls from the primary LLM).
+ * that Lumiverse can invoke via Council (inline mode) or direct LLM
+ * function-calling (inline tool calls from the primary LLM).
  *
  * Permission required: 'tools'
  *

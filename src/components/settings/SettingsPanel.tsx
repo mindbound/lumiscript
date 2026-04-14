@@ -1,5 +1,5 @@
 import { FC, useState, useEffect } from 'react';
-import { Code2, BookMarked, Terminal, Bot, Timer } from 'lucide-react';
+import { Code2, BookMarked, Terminal, Timer, Type, FileCode2 } from 'lucide-react';
 import type { Script, LumiScriptSettings } from '../../types/script.js';
 import type { BackendToFrontend, FrontendToBackend } from '../../types/messages.js';
 import { DEFAULT_SETTINGS } from '../../types/script.js';
@@ -7,29 +7,24 @@ import { DEFAULT_SETTINGS } from '../../types/script.js';
 interface SettingsPanelProps {
   onBackendMessage: (handler: (msg: unknown) => void) => () => void;
   sendToBackend: (msg: FrontendToBackend) => void;
-  onOpenPanel: () => void;
 }
 
 export const SettingsPanel: FC<SettingsPanelProps> = ({
   onBackendMessage,
   sendToBackend,
-  onOpenPanel,
 }) => {
   const [settings, setSettings] = useState<LumiScriptSettings>(DEFAULT_SETTINGS);
   const [scripts, setScripts] = useState<Script[]>([]);
-  const [connections, setConnections] = useState<Array<{ id: string; name: string; provider: string }>>([]);
 
   useEffect(() => {
     const unsub = onBackendMessage((raw) => {
       const msg = raw as BackendToFrontend;
       if (msg.type === 'scripts_updated') setScripts(msg.scripts);
       if (msg.type === 'settings_updated') setSettings(msg.settings);
-      if (msg.type === 'connections_updated') setConnections(msg.connections);
     });
 
     sendToBackend({ type: 'get_settings' });
     sendToBackend({ type: 'get_scripts' });
-    sendToBackend({ type: 'get_connections' });
 
     return unsub;
   }, [onBackendMessage, sendToBackend]);
@@ -49,9 +44,6 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
           <Terminal size={14} style={{ color: 'var(--lumiverse-accent)' }} />
           LumiScript
         </span>
-        <button className="ls-btn" onClick={onOpenPanel} title="Open Script Manager">
-          Open
-        </button>
       </div>
 
       {/* Master enable */}
@@ -67,14 +59,14 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
         <span style={{ fontSize: 12 }}>Master Enable</span>
       </div>
 
-      {/* Script / library count cards */}
+      {/* Script / library count cards — informational only */}
       <div className="ls-settings-counts">
-        <div className="ls-count-card" onClick={onOpenPanel} title="Open Script Manager">
+        <div className="ls-count-card">
           <Code2 size={14} style={{ color: 'var(--lumiverse-accent)', margin: '0 auto 4px' }} />
           <div className="ls-count-num">{triggerCount}</div>
           <div className="ls-count-label">Scripts</div>
         </div>
-        <div className="ls-count-card" onClick={onOpenPanel} title="Open Script Manager">
+        <div className="ls-count-card">
           <BookMarked size={14} style={{ color: 'var(--lumiverse-accent)', margin: '0 auto 4px' }} />
           <div className="ls-count-num">{libraryCount}</div>
           <div className="ls-count-label">Libraries</div>
@@ -125,79 +117,89 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
         </div>
       </div>
 
-      {/* Tool Sidecar */}
+      {/* Editor */}
       <div className="ls-settings-section">
         <div className="ls-settings-section-label">
-          <Bot size={11} />
-          Tool Sidecar
+          <Type size={11} />
+          Editor
         </div>
 
-        {/* Enable toggle */}
-        <div className="ls-toggle-row" style={{ marginBottom: 6 }}>
-          <label className="ls-toggle">
-            <input
-              type="checkbox"
-              checked={settings.sidecarEnabled}
-              onChange={e => sendToBackend({ type: 'update_settings', patch: { sidecarEnabled: e.target.checked } })}
-            />
-            <span className="ls-toggle-slider" />
+        {/* Monaco font size */}
+        <div className="ls-settings-field">
+          <label className="ls-settings-field-label" title="Font size (in pixels) used by the Monaco code editor. Affects the code editor only; reference docs and console output are unchanged.">
+            Font size
           </label>
-          <span style={{ fontSize: 12 }}>Auto-run tools before generation</span>
+          <input
+            type="number"
+            className="ls-number-input"
+            min={10}
+            max={24}
+            value={settings.editorFontSize}
+            onChange={e => {
+              const size = Math.max(10, Math.min(24, Number(e.target.value) || 12));
+              sendToBackend({ type: 'update_settings', patch: { editorFontSize: size } });
+            }}
+          />
         </div>
 
-        {settings.sidecarEnabled && (
-          <>
-            {/* Connection picker */}
-            <div className="ls-settings-field">
-              <label className="ls-settings-field-label">Connection</label>
-              <select
-                className="ls-select"
-                value={settings.sidecarConnectionId ?? ''}
-                onChange={e => sendToBackend({
-                  type: 'update_settings',
-                  patch: { sidecarConnectionId: e.target.value || null },
-                })}
-              >
-                <option value="">— select a connection —</option>
-                {connections.map(c => (
-                  <option key={c.id} value={c.id}>{c.name} ({c.provider})</option>
-                ))}
-              </select>
-            </div>
+        {/* Autosave debounce */}
+        <div className="ls-settings-field">
+          <label className="ls-settings-field-label" title="Delay (in milliseconds) between the last keystroke and autosave. Larger values reduce backend round-trips while typing.">
+            Autosave (ms)
+          </label>
+          <input
+            type="number"
+            className="ls-number-input"
+            min={300}
+            max={5000}
+            step={100}
+            value={settings.autosaveDebounceMs}
+            onChange={e => {
+              const ms = Math.max(300, Math.min(5000, Number(e.target.value) || 1200));
+              sendToBackend({ type: 'update_settings', patch: { autosaveDebounceMs: ms } });
+            }}
+          />
+        </div>
+      </div>
 
-            {/* Max turns */}
-            <div className="ls-settings-field">
-              <label className="ls-settings-field-label">Max turns</label>
-              <input
-                type="number"
-                className="ls-number-input"
-                min={1}
-                max={20}
-                value={settings.sidecarMaxTurns}
-                onChange={e => sendToBackend({
-                  type: 'update_settings',
-                  patch: { sidecarMaxTurns: Math.max(1, Math.min(20, Number(e.target.value))) },
-                })}
-              />
-            </div>
+      {/* Templates — pre-seeded starter code for new scripts */}
+      <div className="ls-settings-section">
+        <div className="ls-settings-section-label">
+          <FileCode2 size={11} />
+          New-Script Templates
+        </div>
 
-            {/* Injection depth */}
-            <div className="ls-settings-field">
-              <label className="ls-settings-field-label">Inject result</label>
-              <select
-                className="ls-select"
-                value={settings.sidecarInjectionDepth}
-                onChange={e => sendToBackend({
-                  type: 'update_settings',
-                  patch: { sidecarInjectionDepth: Number(e.target.value) },
-                })}
-              >
-                <option value={0}>After all messages</option>
-                <option value={1}>Before last message</option>
-              </select>
-            </div>
-          </>
-        )}
+        <div className="ls-settings-template-field">
+          <label className="ls-settings-template-label" title="Starter code inserted into newly created trigger scripts.">
+            Trigger
+          </label>
+          <textarea
+            className="ls-textarea"
+            rows={6}
+            spellCheck={false}
+            value={settings.defaultTriggerTemplate}
+            onChange={e => sendToBackend({
+              type: 'update_settings',
+              patch: { defaultTriggerTemplate: e.target.value },
+            })}
+          />
+        </div>
+
+        <div className="ls-settings-template-field">
+          <label className="ls-settings-template-label" title="Starter code inserted into newly created library scripts.">
+            Library
+          </label>
+          <textarea
+            className="ls-textarea"
+            rows={8}
+            spellCheck={false}
+            value={settings.defaultLibraryTemplate}
+            onChange={e => sendToBackend({
+              type: 'update_settings',
+              patch: { defaultLibraryTemplate: e.target.value },
+            })}
+          />
+        </div>
       </div>
     </div>
   );

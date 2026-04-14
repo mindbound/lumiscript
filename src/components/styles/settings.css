@@ -65,15 +65,12 @@
   padding: 8px;
   border-radius: var(--lumiverse-radius);
   border: 1px solid var(--lumiverse-border);
-  cursor: pointer;
   text-align: center;
-  transition: background 0.1s;
 }
-.ls-count-card:hover { background: var(--lumiverse-fill); }
 .ls-count-num { font-size: 18px; font-weight: 600; color: var(--lumiverse-accent); }
 .ls-count-label { font-size: 11px; color: var(--lumiverse-text-muted); }
 
-/* ── Settings sub-sections (Tool Sidecar etc.) ──────────────────────────── */
+/* ── Settings sub-sections ─────────────────────────────────────────────── */
 .ls-settings-section {
   margin-top: 12px;
   padding-top: 10px;
@@ -125,3 +122,31 @@
   text-align: right;
 }
 .ls-number-input:focus { outline: none; border-color: var(--lumiverse-accent); }
+
+/* ── Template textareas (stacked, full-width) ──────────────────────────── */
+.ls-settings-template-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.ls-settings-template-field:last-child { margin-bottom: 0; }
+.ls-settings-template-label {
+  font-size: 11px;
+  color: var(--lumiverse-text-muted);
+}
+.ls-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 6px 8px;
+  border-radius: var(--lumiverse-radius);
+  border: 1px solid var(--lumiverse-border);
+  background: var(--lumiverse-fill);
+  color: var(--lumiverse-text);
+  resize: vertical;
+  tab-size: 2;
+}
+.ls-textarea:focus { outline: none; border-color: var(--lumiverse-accent); }

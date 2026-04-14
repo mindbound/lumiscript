@@ -66,13 +66,17 @@ export class ScriptStorage {
 
   // ─── Write ────────────────────────────────────────────────────────────────
 
-  async createScript(name: string, type: ScriptType = 'trigger'): Promise<Script> {
+  async createScript(
+    name: string,
+    type: ScriptType = 'trigger',
+    initialCode = '',
+  ): Promise<Script> {
     const uniqueName = await this.getUniqueName(name);
     const now = Date.now();
     return this.store.create({
       id: generateUUID(),
       name: uniqueName,
-      code: '',
+      code: initialCode,
       enabled: true,
       allowDangerous: false,
       type,

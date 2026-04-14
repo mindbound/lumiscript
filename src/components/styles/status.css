@@ -192,37 +192,6 @@
   padding: 3px 2px;
 }
 
-/* ── Last Sidecar Run section ────────────────────────────────────────────── */
-.ls-sidecar-summary {
-  font-size: 11px;
-  color: var(--lumiverse-text-muted);
-  padding: 2px 0;
-}
-.ls-sidecar-noop {
-  font-style: italic;
-  color: var(--lumiverse-text-dim);
-}
-.ls-sidecar-error {
-  font-size: 11px;
-  color: #ef4444;
-  padding: 2px 0;
-}
-.ls-sidecar-calls {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-top: 4px;
-}
-.ls-sidecar-call {
-  font-size: 9px;
-  font-family: monospace;
-  padding: 1px 5px;
-  border-radius: 3px;
-  white-space: nowrap;
-}
-.ls-sidecar-call-ok  { background: color-mix(in srgb, #22c55e 15%, transparent); color: #22c55e; }
-.ls-sidecar-call-err { background: color-mix(in srgb, #ef4444 15%, transparent); color: #ef4444; }
-
 /* ── Active Tools section ────────────────────────────────────────────────── */
 .ls-tool-row {
   display: flex;

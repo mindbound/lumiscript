@@ -19,6 +19,8 @@ interface ScriptEditorProps {
   activeContext: ActiveContext;
   isRunning: boolean;
   consoleEntries: ConsoleEntry[];
+  editorFontSize: number;
+  autosaveDebounceMs: number;
   onClearConsole: () => void;
   sendToBackend: (msg: FrontendToBackend) => void;
 }
@@ -29,6 +31,8 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
   activeContext,
   isRunning,
   consoleEntries,
+  editorFontSize,
+  autosaveDebounceMs,
   onClearConsole,
   sendToBackend,
 }) => {
@@ -76,7 +80,7 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
     setLocalCode(value);
     setUnsaved(value !== script.code);
     if (saveTimeout.current) clearTimeout(saveTimeout.current);
-    saveTimeout.current = setTimeout(() => saveCode(value), 1200);
+    saveTimeout.current = setTimeout(() => saveCode(value), autosaveDebounceMs);
   };
 
   const handleMount: OnMount = (editor, monaco) => {
@@ -228,7 +232,7 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
             onMount={handleMount}
             options={{
               minimap: { enabled: false },
-              fontSize: 12,
+              fontSize: editorFontSize,
               lineNumbers: 'on',
               wordWrap: 'on',
               automaticLayout: true,

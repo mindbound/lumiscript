@@ -1,5 +1,5 @@
 import { FC, useState, useEffect, useCallback } from 'react';
-import { Code2, Activity, Zap, ArrowDownToLine, ArrowUpToLine, Timer, ChevronDown, ChevronUp, Wrench, Bot, Syringe, Database, RefreshCw } from 'lucide-react';
+import { Code2, Activity, Zap, ArrowDownToLine, ArrowUpToLine, Timer, ChevronDown, ChevronUp, Wrench, Syringe, Database, RefreshCw } from 'lucide-react';
 import type { Script, LumiScriptSettings, ConsoleEntry, InjectionInfo, RegisteredToolInfo } from '../types/script.js';
 import type { BackendToFrontend, FrontendToBackend } from '../types/messages.js';
 import type { ActiveContext } from './manage/BindingsSection.js';
@@ -50,12 +50,6 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
   });
   const [injections, setInjections] = useState<InjectionInfo[]>([]);
   const [tools, setTools] = useState<RegisteredToolInfo[]>([]);
-  const [sidecarResult, setSidecarResult] = useState<{
-    turns: number;
-    toolCalls: Array<{ name: string; success: boolean }>;
-    injected: boolean;
-    error?: string;
-  } | null>(null);
 
   const [variables, setVariables] = useState<{
     local: Record<string, unknown>;
@@ -105,15 +99,6 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
 
         case 'tools_updated':
           setTools(msg.tools);
-          break;
-
-        case 'sidecar_run_result':
-          setSidecarResult({
-            turns:     msg.turns,
-            toolCalls: msg.toolCalls,
-            injected:  msg.injected,
-            error:     msg.error,
-          });
           break;
 
         case 'execution_started': {
@@ -254,6 +239,8 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
             activeRunScriptId={execState.activeScriptId}
             isRunning={execState.isRunning}
             consoleHistory={execState.consoleHistory}
+            editorFontSize={settings.editorFontSize}
+            autosaveDebounceMs={settings.autosaveDebounceMs}
             onClearConsole={clearConsole}
             sendToBackend={sendToBackend}
           />
@@ -264,7 +251,6 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
             invocationCounts={invocationCounts}
             injections={injections}
             tools={tools}
-            sidecarResult={sidecarResult}
             variables={variables}
             sendToBackend={sendToBackend}
           />
@@ -283,13 +269,6 @@ const DOT_TITLE: Record<ExecutionDot, string> = {
   error:   'Last run failed',
 };
 
-interface SidecarRunResult {
-  turns: number;
-  toolCalls: Array<{ name: string; success: boolean }>;
-  injected: boolean;
-  error?: string;
-}
-
 interface VariablesSnapshot {
   local: Record<string, unknown>;
   global: Record<string, unknown>;
@@ -303,12 +282,11 @@ interface StatusTabProps {
   invocationCounts: Record<string, number>;
   injections: InjectionInfo[];
   tools: RegisteredToolInfo[];
-  sidecarResult: SidecarRunResult | null;
   variables: VariablesSnapshot | null;
   sendToBackend: (msg: FrontendToBackend) => void;
 }
 
-const StatusTab: FC<StatusTabProps> = ({ scripts, execInfo, invocationCounts, injections, tools, sidecarResult, variables, sendToBackend }) => {
+const StatusTab: FC<StatusTabProps> = ({ scripts, execInfo, invocationCounts, injections, tools, variables, sendToBackend }) => {
   const enabled = scripts.filter(s => s.type === 'trigger' && s.enabled);
 
   /** Quick lookup: scriptId → script name for injection attribution. */
@@ -421,42 +399,6 @@ const StatusTab: FC<StatusTabProps> = ({ scripts, execInfo, invocationCounts, in
 
       {/* ── Variables Inspector section ──────────────────────────────────── */}
       <VariablesSection variables={variables} sendToBackend={sendToBackend} />
-
-      {/* ── Last Sidecar Run section ──────────────────────────────────────── */}
-      {sidecarResult && (
-        <div className="ls-inject-section">
-          <div className="ls-inject-header">
-            <Bot size={10} />
-            Last Sidecar Run
-            {sidecarResult.injected && (
-              <span className="ls-inject-count" title="Result injected into prompt">✓</span>
-            )}
-          </div>
-          {sidecarResult.error ? (
-            <div className="ls-sidecar-error">{sidecarResult.error}</div>
-          ) : (
-            <div className="ls-sidecar-summary">
-              {sidecarResult.toolCalls.length === 0
-                ? <span className="ls-sidecar-noop">No tool calls — sidecar loop skipped</span>
-                : <span>{sidecarResult.toolCalls.length} call{sidecarResult.toolCalls.length !== 1 ? 's' : ''} in {sidecarResult.turns} turn{sidecarResult.turns !== 1 ? 's' : ''}</span>
-              }
-            </div>
-          )}
-          {sidecarResult.toolCalls.length > 0 && (
-            <div className="ls-sidecar-calls">
-              {sidecarResult.toolCalls.map((call, i) => (
-                <span
-                  key={i}
-                  className={`ls-sidecar-call ${call.success ? 'ls-sidecar-call-ok' : 'ls-sidecar-call-err'}`}
-                  title={call.success ? `${call.name}: success` : `${call.name}: failed`}
-                >
-                  {call.name}
-                </span>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
 
       {/* ── Active Injections section — always visible ──────────────────────── */}
       <div className="ls-inject-section">

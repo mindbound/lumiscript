@@ -97,7 +97,6 @@ export function setup(ctx: SpindleFrontendContext) {
       <SettingsPanel
         onBackendMessage={virtualOnBackendMessage}
         sendToBackend={sendToBackend}
-        onOpenPanel={() => panel.expand()}
       />
     </StrictMode>,
   );

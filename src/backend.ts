@@ -175,108 +175,19 @@ spindle.registerContextHandler(async (ctx) => {
   };
 }, 50);
 
-// Interceptor (post-assembly) — three responsibilities, in order:
+// Interceptor (post-assembly) — two responsibilities, in order:
 //
-//  1. Auto-sidecar: if sidecarEnabled + connection configured + tools registered,
-//     run an agentic LLM tool loop on the assembled messages and splice the final
-//     result into the array before returning. Mirrors TavernScript's external-mode
-//     interceptor (index.tsx:337–394). Skipped for quiet/impersonate/continue.
-//     No cycle detection needed — spindle.generate.raw() bypasses the interceptor.
-//
-//  2. mode:'context' injections: reads _lumiScriptInjections from the spindle
+//  1. mode:'context' injections: reads _lumiScriptInjections from the spindle
 //     context (populated by the context handler above) and PREPENDS them at index
 //     0, before all assembled content. Ephemeral context entries are cleared here.
 //
-//  3. mode:'intercept' injections: splices each entry at depth from the END of
+//  2. mode:'intercept' injections: splices each entry at depth from the END of
 //     the message array. Ephemeral entries cleared after.
 spindle.registerInterceptor(async (messages, context) => {
   let result = [...messages];
   const ctx = context as Record<string, unknown>;
 
-  // ── 1. Auto-sidecar agentic loop ─────────────────────────────────────────
-  // Only runs when: sidecarEnabled + connection configured + tools registered
-  // + generation type is not quiet/impersonate/continue.
-  // No cycle detection needed — spindle.generate.raw() bypasses the interceptor.
-  if (settingsStore.isLoaded) {
-    const settings = settingsStore.get();
-    const genType = ctx.generationType as string | undefined;
-    const skipTypes = ['quiet', 'impersonate', 'continue'];
-    const sidecarTools = listAllTools();
-
-    if (
-      settings.sidecarEnabled &&
-      settings.sidecarConnectionId &&
-      !skipTypes.includes(genType ?? '') &&
-      sidecarTools.length > 0
-    ) {
-      const schemas = sidecarTools.map(t => ({
-        name:        t.name,
-        description: t.description,
-        parameters:  t.parameters ?? {},
-      }));
-
-      let loopMessages = [...result];
-      let turnCount = 0;
-      const toolCallSummary: Array<{ name: string; success: boolean }> = [];
-      let sidecarInjected = false;
-      let sidecarError: string | undefined;
-
-      try {
-        const maxTurns = settings.sidecarMaxTurns ?? 6;
-        for (let i = 0; i < maxTurns; i++) {
-          type RawResult = { content?: string; tool_calls?: Array<{ name: string; args: Record<string, unknown>; call_id: string }> };
-          const raw = await (spindle.generate.raw({
-            type:          'raw' as const,
-            messages:      loopMessages,
-            tools:         schemas,
-            connection_id: settings.sidecarConnectionId!,
-          } as any)) as RawResult;
-
-          turnCount = i + 1;
-
-          if (!raw.tool_calls?.length) {
-            // LLM produced final text — inject into the assembled messages
-            if (raw.content) {
-              const depth = settings.sidecarInjectionDepth ?? 0;
-              const idx = Math.max(0, result.length - depth);
-              result.splice(idx, 0, { role: 'system' as const, content: raw.content });
-              sidecarInjected = true;
-            }
-            break;
-          }
-
-          // LLM made tool calls — execute handlers and append results
-          for (const call of raw.tool_calls) {
-            const entry = getTool(call.name);
-            if (!entry) {
-              toolCallSummary.push({ name: call.name, success: false });
-              loopMessages.push({ role: 'user' as const, content: `[Tool not found: ${call.name}]` });
-              continue;
-            }
-            try {
-              const toolResult = await entry.handler(call.args ?? {});
-              toolCallSummary.push({ name: call.name, success: true });
-              loopMessages.push(
-                { role: 'assistant' as const, content: `[Calling: ${call.name}]` },
-                { role: 'user'      as const, content: `[Result of ${call.name}]: ${toolResult}` },
-              );
-            } catch (err: any) {
-              toolCallSummary.push({ name: call.name, success: false });
-              loopMessages.push({ role: 'user' as const, content: `[Error in ${call.name}]: ${err?.message ?? 'unknown'}` });
-            }
-          }
-        }
-      } catch (err: any) {
-        sidecarError = err?.message ?? 'Sidecar loop failed';
-        spindle.log.warn(`[LumiScript] Sidecar loop error: ${sidecarError}`);
-      }
-
-      // Report run stats to the Status tab
-      send({ type: 'sidecar_run_result', turns: turnCount, toolCalls: toolCallSummary, injected: sidecarInjected, error: sidecarError });
-    }
-  }
-
-  // ── 2. Context-mode: prepend before all assembled content (index 0) ───────
+  // ── 1. Context-mode: prepend before all assembled content (index 0) ───────
   const ctxInjections = ctx?._lumiScriptInjections as Array<{ content: string; role: string }> | undefined;
   if (ctxInjections && ctxInjections.length > 0) {
     result = [
@@ -289,7 +200,7 @@ spindle.registerInterceptor(async (messages, context) => {
     clearEphemeral('context');
   }
 
-  // ── 3. Intercept-mode: splice at depth from end of assembled array ─────────
+  // ── 2. Intercept-mode: splice at depth from end of assembled array ─────────
   const interceptEntries = listByMode('intercept');
   for (const e of interceptEntries) {
     const idx = Math.max(0, result.length - e.depth);
@@ -303,8 +214,8 @@ spindle.registerInterceptor(async (messages, context) => {
 // ─── Tool invocation dispatch ─────────────────────────────────────────────────
 //
 // Registered once at startup. Receives TOOL_INVOCATION messages for ALL tools
-// registered by LumiScript scripts — both Council (sidecar/inline modes) and
-// native LLM function-calling paths.
+// registered by LumiScript scripts — both Council (inline mode) and native LLM
+// function-calling paths.
 //
 // The handler dispatches to the script's stored handler function. The handler
 // was already wrapped in buildToolsAPI to inject the `api` reference lazily,
@@ -418,15 +329,6 @@ spindle.onFrontendMessage(async (raw, userId) => {
         break;
       }
 
-      case 'get_connections': {
-        const connections = await spindle.connections.list(userId ?? undefined).catch(() => []);
-        send({
-          type: 'connections_updated',
-          connections: connections.map(c => ({ id: c.id, name: c.name, provider: c.provider })),
-        });
-        break;
-      }
-
       case 'get_variables': {
         await pushVariables(userId);
         break;
@@ -448,7 +350,11 @@ spindle.onFrontendMessage(async (raw, userId) => {
 
       // ── CRUD ────────────────────────────────────────────────────────────
       case 'create_script': {
-        await scriptStorage.createScript(msg.name, msg.scriptType);
+        const s = settingsStore.get();
+        const template = msg.scriptType === 'library'
+          ? s.defaultLibraryTemplate
+          : s.defaultTriggerTemplate;
+        await scriptStorage.createScript(msg.name, msg.scriptType, template);
         pushScripts();
         void syncTriggers();
         break;
