@@ -11,6 +11,11 @@
   display: flex;
   gap: 2px;
 }
+.ls-list-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
 .ls-type-tab {
   display: inline-flex;
   align-items: center;

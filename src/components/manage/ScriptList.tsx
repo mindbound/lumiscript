@@ -122,30 +122,32 @@ export const ScriptList: FC<ScriptListProps> = ({
             onClick={() => setActiveType('trigger')}
             title="Scripts"
           >
-            <Code2 size={13} />
+            <Code2 size={15} />
           </button>
           <button
             className={`ls-type-tab${activeType === 'library' ? ' ls-active' : ''}`}
             onClick={() => setActiveType('library')}
             title="Libraries"
           >
-            <BookMarked size={13} />
+            <BookMarked size={15} />
           </button>
         </div>
-        <button className="ls-icon-btn" onClick={handleImportClick} title="Import script pack">
-          <Upload size={14} />
-        </button>
-        <button
-          className="ls-icon-btn"
-          onClick={handleExport}
-          title="Export current scripts as pack"
-          disabled={filtered.length === 0}
-        >
-          <Download size={14} />
-        </button>
-        <button className="ls-icon-btn" onClick={handleNew} title="New script">
-          <Plus size={15} />
-        </button>
+        <div className="ls-list-actions">
+          <button className="ls-icon-btn" onClick={handleImportClick} title="Import script pack">
+            <Upload size={15} />
+          </button>
+          <button
+            className="ls-icon-btn"
+            onClick={handleExport}
+            title="Export current scripts as pack"
+            disabled={filtered.length === 0}
+          >
+            <Download size={15} />
+          </button>
+          <button className="ls-icon-btn" onClick={handleNew} title="New script">
+            <Plus size={15} />
+          </button>
+        </div>
         <input
           ref={fileInputRef}
           type="file"
