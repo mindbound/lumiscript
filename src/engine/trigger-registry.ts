@@ -61,6 +61,22 @@ export class TriggerRegistry {
    */
   private runningCounts = new Map<string, number>();
 
+  /**
+   * Per-script batch-aggregation state for concurrent invocations. Without
+   * this, only the LAST-finishing closure's result would be reported — which
+   * is usually a fast no-op guard-return (rounding to 0 ms) and hides the
+   * real invocation's duration, or swallows failures in earlier invocations
+   * that later ones happen to succeed over.
+   *
+   * Semantics across a batch (multiple concurrent invocations of the same
+   * trigger, delimited by runningCounts going 0 → N → 0):
+   *   - duration: max across invocations ("slowest invocation in the burst")
+   *   - success: AND — any failure marks the batch as failed
+   *   - error:   first failure encountered (earliest is usually root cause)
+   */
+  private batchMaxDuration = new Map<string, number>();
+  private batchFirstError  = new Map<string, { message: string; runId: string }>();
+
   constructor(
     private readonly getDeps: () => TriggerDeps,
     private readonly sendToFrontend: (msg: BackendToFrontend) => void,
@@ -113,6 +129,14 @@ export class TriggerRegistry {
         const prevCount = this.runningCounts.get(currentScript.id) ?? 0;
         this.runningCounts.set(currentScript.id, prevCount + 1);
 
+        // Initialize batch aggregates when this is the first invocation of a
+        // new batch. Every subsequent concurrent invocation will fold its
+        // result into these maps, and the last one out flushes them.
+        if (prevCount === 0) {
+          this.batchMaxDuration.set(currentScript.id, 0);
+          this.batchFirstError.delete(currentScript.id);
+        }
+
         // ── Notify frontend ────────────────────────────────────────────────
         executionStatusStore.markRunning(currentScript.id);
         this.sendToFrontend({
@@ -158,35 +182,56 @@ export class TriggerRegistry {
         const result = await executeScript(currentScript, opts);
         clearTimeout(syncWatchdog);
 
-        // ── Update status — only when the LAST concurrent invocation finishes
+        // ── Fold this invocation's result into the batch aggregates ───────
+        const prevMax = this.batchMaxDuration.get(currentScript.id) ?? 0;
+        this.batchMaxDuration.set(currentScript.id, Math.max(prevMax, result.duration));
+        if (!result.success && !this.batchFirstError.has(currentScript.id)) {
+          this.batchFirstError.set(currentScript.id, {
+            message: result.error?.message ?? 'Unknown error',
+            runId: result.runId,
+          });
+        }
+
+        // ── Flush — only when the LAST concurrent invocation finishes ────
         const remaining = (this.runningCounts.get(currentScript.id) ?? 1) - 1;
         this.runningCounts.set(currentScript.id, remaining);
 
         if (remaining === 0) {
-          if (result.success) {
-            executionStatusStore.markSuccess(currentScript.id, result.duration);
+          const batchDuration = this.batchMaxDuration.get(currentScript.id) ?? result.duration;
+          const batchError    = this.batchFirstError.get(currentScript.id);
+          const batchSuccess  = !batchError;
+          // Drop batch state before dispatching so the next concurrent burst
+          // starts clean even if a synchronous handler re-fires during send.
+          this.batchMaxDuration.delete(currentScript.id);
+          this.batchFirstError.delete(currentScript.id);
+
+          if (batchSuccess) {
+            executionStatusStore.markSuccess(currentScript.id, batchDuration);
           } else {
             executionStatusStore.markError(
               currentScript.id,
-              result.duration,
-              result.error?.message ?? 'Unknown error',
+              batchDuration,
+              batchError.message,
             );
           }
 
           this.sendToFrontend({
             type: 'execution_ended',
             scriptId: currentScript.id,
-            runId: result.runId,
-            success: result.success,
-            duration: result.duration,
-            error: result.error?.message,
+            // Report the failing invocation's runId when the batch failed so
+            // the console entry that gets appended ties back to the run that
+            // actually produced the error. Otherwise use the closing run.
+            runId: batchError?.runId ?? result.runId,
+            success: batchSuccess,
+            duration: batchDuration,
+            error: batchError?.message,
           });
           // Surface failures as a user-visible toast. The sidebar dot and the
           // editor console already reflect the error, but those require the
           // user to be looking at the extension panel — a toast gives
           // immediate feedback regardless of which Lumiverse view is active.
-          if (!result.success) {
-            spindle.toast.error(result.error?.message ?? 'Unknown error', {
+          if (!batchSuccess) {
+            spindle.toast.error(batchError.message, {
               title: `LumiScript — ${currentScript.name}`,
               duration: 10_000,
             });

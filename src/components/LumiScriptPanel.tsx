@@ -196,6 +196,21 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
             const displayDot: ExecutionDot = !msg.success || stickyError
               ? 'error'
               : 'success';
+            // Preserve a meaningful prior duration across trailing no-op
+            // batches. The trigger-registry aggregator already reports the
+            // correct max duration for any single burst of concurrent fires,
+            // but consecutive *separate* batches still each dispatch their
+            // own execution_ended — so a later solo SETTINGS_UPDATED that
+            // the script guard-returns in <1 ms would otherwise clobber the
+            // real duration from a prior meaningful batch. We only carry
+            // duration forward when the incoming run succeeds with a
+            // rounded-to-zero duration AND we have a non-zero historical
+            // value; any meaningful duration or failure dispatches through
+            // normally.
+            const incomingDuration = msg.duration ?? 0;
+            const preserveDuration =
+              msg.success && incomingDuration === 0 && (existingInfo?.duration ?? 0) > 0;
+            const duration = preserveDuration ? existingInfo!.duration : msg.duration;
             return {
               ...prev,
               isRunning: false,
@@ -206,7 +221,7 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
                 ...prev.scriptExecInfo,
                 [msg.scriptId]: {
                   dot: displayDot,
-                  duration: msg.duration,
+                  duration,
                   error: msg.error ?? existingInfo?.error,
                   stickyError,
                 },
