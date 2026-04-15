@@ -1265,8 +1265,8 @@ const ApiFunctionsTable: FC = () => (
 // ─── Built-in libraries ──────────────────────────────────────────────────────
 
 const BUILTIN_COMPONENTS: FnRow[] = [
-  { name: 'messageFooter',  args: 'messageId, html, options?',  desc: 'Attach a styled footer below a message bubble. Returns DOMHandle. Options: { id?, className? }.' },
-  { name: 'messageHeader',  args: 'messageId, html, options?',  desc: 'Attach a styled header above message content. Returns DOMHandle. Options: { id?, className? }.' },
+  { name: 'messageFooter',  args: 'messageId, html, options?',  desc: 'Attach a styled footer below a message bubble. Returns DOMHandle, or CollapsibleDOMHandle when options.collapsible is true. Options: { id?, className?, collapsible?, title?, defaultCollapsed? }.' },
+  { name: 'messageHeader',  args: 'messageId, html, options?',  desc: 'Attach a styled header above message content. Returns DOMHandle, or CollapsibleDOMHandle when options.collapsible is true. Options: { id?, className?, collapsible?, title?, defaultCollapsed? }.' },
   { name: 'progressBar',    args: 'target, options?',           desc: 'Inject a progress bar with live setValue(). Returns ProgressBarHandle. Options: { value?, label?, color?, showPercent?, height?, id?, className? }.' },
   { name: 'floatingButton', args: 'label, options?',            desc: 'Fixed-position action button. Returns DOMHandle. Options: { position?, icon?, variant?, size?, id?, className? }.' },
   { name: 'badgeHtml',      args: 'text, options?',             desc: 'Returns badge/pill HTML string for composing inside other injections.' },
@@ -1279,8 +1279,22 @@ const BUILTIN_TYPES: TypeDoc[] = [
     name: 'MessageFooterOptions / MessageHeaderOptions',
     note: 'Options for messageFooter() and messageHeader().',
     fields: [
-      { field: 'id?',        type: 'string', optional: true, desc: 'Stable ID for idempotent injection (forwarded to injectAtMessage).' },
-      { field: 'className?', type: 'string', optional: true, desc: 'Additional CSS class applied to the wrapper div.' },
+      { field: 'id?',               type: 'string',  optional: true, desc: 'Stable ID for idempotent injection (forwarded to injectAtMessage).' },
+      { field: 'className?',        type: 'string',  optional: true, desc: 'Additional CSS class applied to the wrapper div.' },
+      { field: 'collapsible?',      type: 'boolean', optional: true, desc: 'Render a persistent title bar with a click-to-toggle chevron. Default: false.' },
+      { field: 'title?',            type: 'string',  optional: true, desc: 'HTML shown in the persistent title bar (visible when collapsed). Composable with badgeHtml / keyValueHtml. Only meaningful when collapsible is true.' },
+      { field: 'defaultCollapsed?', type: 'boolean', optional: true, desc: 'Initial collapsed state. Default: false (expanded). Only meaningful when collapsible is true.' },
+    ],
+  },
+  {
+    name: 'CollapsibleDOMHandle',
+    note: 'Extends DOMHandle. Returned by messageHeader() / messageFooter() when collapsible is true.',
+    fields: [
+      { field: 'isCollapsed()',          type: '() => boolean',          optional: false, desc: 'Current collapsed state (false = body visible).' },
+      { field: 'setCollapsed(collapsed)', type: '(boolean) => void',     optional: false, desc: 'Set collapsed state explicitly. Re-renders the inner content.' },
+      { field: 'toggle()',               type: '() => void',             optional: false, desc: 'Flip the collapsed state.' },
+      { field: 'setTitle(title)',        type: '(string) => void',       optional: false, desc: 'Replace the persistent title. Preserves collapsed state and body.' },
+      { field: 'update(bodyHtml)',       type: '(string) => void',       optional: false, desc: 'Replace the body HTML. Preserves collapsed state and title. Overrides DOMHandle.update() — for collapsible handles, update() means "replace body", not "replace wrapper".' },
     ],
   },
   {

@@ -1218,20 +1218,58 @@ interface ScriptNamespace {
 
 // ─── Built-in library: ls:components ────────────────────────────────────────
 
-/** Options for messageFooter() from ls:components. */
+// Options for messageFooter() from ls:components.
 interface MessageFooterOptions {
-  /** Stable ID for idempotent injection. */
+  // Stable ID for idempotent injection.
   id?: string;
-  /** Additional CSS class on the footer wrapper. */
+  // Additional CSS class on the footer wrapper.
   className?: string;
+  // When true, renders a persistent title bar with a click-to-toggle chevron.
+  // The body HTML collapses/expands; the title remains visible in both states.
+  collapsible?: boolean;
+  // HTML shown in the persistent title bar. Accepts the same HTML vocabulary
+  // as the body parameter (composable with badgeHtml / keyValueHtml).
+  // Only meaningful when collapsible is true; omitted → chevron-only bar.
+  title?: string;
+  // Initial collapsed state. Only meaningful when collapsible is true.
+  // Default: false (expanded).
+  defaultCollapsed?: boolean;
 }
 
-/** Options for messageHeader() from ls:components. */
+// Options for messageHeader() from ls:components.
 interface MessageHeaderOptions {
-  /** Stable ID for idempotent injection. */
+  // Stable ID for idempotent injection.
   id?: string;
-  /** Additional CSS class on the header wrapper. */
+  // Additional CSS class on the header wrapper.
   className?: string;
+  // When true, renders a persistent title bar with a click-to-toggle chevron.
+  // The body HTML collapses/expands; the title remains visible in both states.
+  collapsible?: boolean;
+  // HTML shown in the persistent title bar. Accepts the same HTML vocabulary
+  // as the body parameter (composable with badgeHtml / keyValueHtml).
+  // Only meaningful when collapsible is true; omitted → chevron-only bar.
+  title?: string;
+  // Initial collapsed state. Only meaningful when collapsible is true.
+  // Default: false (expanded).
+  defaultCollapsed?: boolean;
+}
+
+// Extended handle returned by messageHeader() / messageFooter() when called
+// with collapsible: true. Adds imperative controls and overrides update() so
+// it replaces only the body (not the whole wrapper).
+interface CollapsibleDOMHandle extends DOMHandle {
+  // Current collapsed state (false = body visible).
+  isCollapsed(): boolean;
+  // Set collapsed state explicitly. Re-renders the inner content.
+  setCollapsed(collapsed: boolean): void;
+  // Flip the collapsed state.
+  toggle(): void;
+  // Replace the persistent title. Preserves collapsed state and body.
+  setTitle(title: string): void;
+  // Replace the body HTML. Preserves collapsed state and title.
+  // Overrides DOMHandle.update() — for collapsible handles, update() means
+  // "replace body HTML", not "replace the whole wrapper".
+  update(bodyHtml: string): void;
 }
 
 /** Options for badgeHtml() from ls:components. */
@@ -1322,10 +1360,32 @@ interface FloatingButtonOptions {
 interface LSComponentsExports {
   // ── Injection functions (return DOMHandle) ─────────────────────────
 
-  /** Styled footer below a message bubble. */
+  // Styled footer below a message bubble.
+  // With collapsible: true → returns CollapsibleDOMHandle
+  // (imperative toggle/setCollapsed/setTitle/isCollapsed, body-only update()).
+  // @example
+  // const f = messageFooter(msg.id, bodyHtml, {
+  //   collapsible: true,
+  //   title: badgeHtml('AI', { dot: true }) + ' ' + words + ' words',
+  //   defaultCollapsed: true,
+  // });
+  // f.toggle();         // flip collapsed state
+  // f.update(newBody);  // replace body, keep title + state
+  messageFooter(
+    messageId: string,
+    html: string,
+    options: MessageFooterOptions & { collapsible: true },
+  ): CollapsibleDOMHandle;
   messageFooter(messageId: string, html: string, options?: MessageFooterOptions): DOMHandle;
 
-  /** Styled header above message content inside the bubble. */
+  // Styled header above message content inside the bubble.
+  // With collapsible: true → returns CollapsibleDOMHandle
+  // (imperative toggle/setCollapsed/setTitle/isCollapsed, body-only update()).
+  messageHeader(
+    messageId: string,
+    html: string,
+    options: MessageHeaderOptions & { collapsible: true },
+  ): CollapsibleDOMHandle;
   messageHeader(messageId: string, html: string, options?: MessageHeaderOptions): DOMHandle;
 
   /**

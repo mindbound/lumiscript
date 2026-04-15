@@ -469,3 +469,326 @@ describe('floatingButton', () => {
     expect(() => lib.floatingButton('Test')).toThrow('PERMISSION_DENIED');
   });
 });
+
+// ─── messageHeader / messageFooter — collapsible ────────────────────────────
+
+/**
+ * Simulate a frontend click on the toggle bar by invoking the click listener
+ * directly from the dom-registry. This is the same path `dispatchEvent()`
+ * takes when a real `dom_event` message arrives from the browser.
+ */
+function simulateToggleClick(elementId: string): void {
+  const entry = getElement(elementId);
+  if (!entry) throw new Error(`no element ${elementId}`);
+  for (const { event, handler } of entry.listeners.values()) {
+    if (event === 'click') {
+      handler({ type: 'click', dataset: { lsToggle: '1' } });
+      return;
+    }
+  }
+  throw new Error(`no click listener on ${elementId}`);
+}
+
+describe('messageHeader — collapsible', () => {
+  test('injects wrapper with modifier class, toggle bar, and body', () => {
+    const lib = createLib();
+    lib.messageHeader('msg-1', '<span>Body</span>', {
+      collapsible: true,
+      title: 'Stats',
+    });
+
+    const html = messagesOfType('dom_inject_at_message')[0].html;
+    expect(html).toContain('ls-comp-msg-header--collapsible');
+    expect(html).toContain('ls-comp-msg-header__toggle');
+    expect(html).toContain('data-ls-toggle="1"');
+    expect(html).toContain('aria-expanded="true"');
+    expect(html).toContain('ls-comp-msg-header__title');
+    expect(html).toContain('Stats');
+    expect(html).toContain('ls-comp-msg-header__chevron');
+    expect(html).toContain('ls-comp-msg-header__body');
+    expect(html).toContain('Body');
+    // Expanded initially — no ls-collapsed class on body
+    expect(html).not.toContain('ls-comp-msg-header__body ls-collapsed');
+  });
+
+  test('defaultCollapsed: true starts with body hidden and down chevron', () => {
+    const lib = createLib();
+    lib.messageHeader('msg-1', '<span>Body</span>', {
+      collapsible: true,
+      title: 'T',
+      defaultCollapsed: true,
+    });
+
+    const html = messagesOfType('dom_inject_at_message')[0].html;
+    expect(html).toContain('ls-comp-msg-header__body ls-collapsed');
+    expect(html).toContain('aria-expanded="false"');
+    // Down-chevron SVG path fragment
+    expect(html).toContain('m6 9 6 6 6-6');
+  });
+
+  test('expanded initial state uses up-chevron', () => {
+    const lib = createLib();
+    lib.messageHeader('msg-1', '<span>Body</span>', {
+      collapsible: true, title: 'T',
+    });
+    const html = messagesOfType('dom_inject_at_message')[0].html;
+    // Up-chevron SVG path fragment
+    expect(html).toContain('m18 15-6-6-6 6');
+  });
+
+  test('returns CollapsibleDOMHandle with imperative methods', () => {
+    const lib = createLib();
+    const h = lib.messageHeader('msg-1', 'Body', { collapsible: true, title: 'T' });
+
+    expect(typeof h.id).toBe('string');
+    expect(typeof h.update).toBe('function');
+    expect(typeof h.remove).toBe('function');
+    expect(typeof h.on).toBe('function');
+    expect(typeof h.isCollapsed).toBe('function');
+    expect(typeof h.setCollapsed).toBe('function');
+    expect(typeof h.toggle).toBe('function');
+    expect(typeof h.setTitle).toBe('function');
+  });
+
+  test('isCollapsed reflects initial and toggled state', () => {
+    const lib = createLib();
+    const h = lib.messageHeader('msg-1', 'Body', {
+      collapsible: true, title: 'T', defaultCollapsed: true,
+    });
+    expect(h.isCollapsed()).toBe(true);
+    h.toggle();
+    expect(h.isCollapsed()).toBe(false);
+    h.toggle();
+    expect(h.isCollapsed()).toBe(true);
+  });
+
+  test('setCollapsed sets explicit state and emits dom_update', () => {
+    const lib = createLib();
+    const h = lib.messageHeader('msg-1', 'Body', { collapsible: true, title: 'T' });
+
+    h.setCollapsed(true);
+    const updates = messagesOfType('dom_update');
+    expect(updates).toHaveLength(1);
+    expect(updates[0].html).toContain('ls-collapsed');
+    expect(updates[0].html).toContain('aria-expanded="false"');
+
+    h.setCollapsed(false);
+    expect(messagesOfType('dom_update')).toHaveLength(2);
+    expect(messagesOfType('dom_update')[1].html).toContain('aria-expanded="true"');
+  });
+
+  test('toggle() flips state and re-renders', () => {
+    const lib = createLib();
+    const h = lib.messageHeader('msg-1', 'Body', { collapsible: true, title: 'T' });
+    h.toggle();
+    const update = messagesOfType('dom_update')[0];
+    expect(update.html).toContain('ls-collapsed');
+    expect(h.isCollapsed()).toBe(true);
+  });
+
+  test('setTitle replaces the title, preserves collapsed state and body', () => {
+    const lib = createLib();
+    const h = lib.messageHeader('msg-1', 'OriginalBody', {
+      collapsible: true, title: 'Old', defaultCollapsed: true,
+    });
+    h.setTitle('New');
+
+    const update = messagesOfType('dom_update')[0];
+    expect(update.html).toContain('New');
+    expect(update.html).not.toContain('>Old<');
+    expect(update.html).toContain('OriginalBody');
+    expect(update.html).toContain('ls-collapsed');
+    expect(h.isCollapsed()).toBe(true);
+  });
+
+  test('update(body) replaces the body, preserves title and collapsed state', () => {
+    const lib = createLib();
+    const h = lib.messageHeader('msg-1', 'Body-v1', {
+      collapsible: true, title: 'MyTitle', defaultCollapsed: true,
+    });
+    h.update('Body-v2');
+
+    const update = messagesOfType('dom_update')[0];
+    expect(update.html).toContain('Body-v2');
+    expect(update.html).not.toContain('Body-v1');
+    expect(update.html).toContain('MyTitle');
+    expect(update.html).toContain('ls-collapsed');
+    expect(h.isCollapsed()).toBe(true);
+  });
+
+  test('simulated click with data-ls-toggle flips state via delegation', () => {
+    const lib = createLib();
+    const h = lib.messageHeader('msg-1', 'Body', { collapsible: true, title: 'T' });
+    expect(h.isCollapsed()).toBe(false);
+
+    simulateToggleClick(h.id);
+    expect(h.isCollapsed()).toBe(true);
+    // First dom_update fired by the delegated handler
+    expect(messagesOfType('dom_update')[0].html).toContain('ls-collapsed');
+
+    simulateToggleClick(h.id);
+    expect(h.isCollapsed()).toBe(false);
+  });
+
+  test('every dom_update preserves the wrapper modifier class', () => {
+    // Regression: the Lumiverse frontend dom_update handler does
+    //   inner.innerHTML = msg.html
+    // on the data-ls-el container, so any state-change re-render MUST include
+    // the .ls-comp-msg-header--collapsible wrapper div — otherwise our
+    // descendant-scoped CSS (flex layout, font inheritance, pointer-events)
+    // stops matching on the second render and layout/click both break.
+    const lib = createLib();
+    const h = lib.messageHeader('msg-1', 'Body', {
+      collapsible: true, title: 'T',
+    });
+
+    h.toggle();
+    h.setTitle('New title');
+    h.update('New body');
+    h.setCollapsed(true);
+
+    const updates = messagesOfType('dom_update');
+    expect(updates.length).toBeGreaterThanOrEqual(4);
+    for (const update of updates) {
+      expect(update.html).toContain('ls-comp-msg-header--collapsible');
+      expect(update.html).toContain('ls-comp-msg-header__toggle');
+      expect(update.html).toContain('ls-comp-msg-header__body');
+    }
+
+    // Also assert the initial inject carries it, for symmetry.
+    const inject = messagesOfType('dom_inject_at_message')[0];
+    expect(inject.html).toContain('ls-comp-msg-header--collapsible');
+  });
+
+  test('click without data-ls-toggle does not toggle', () => {
+    const lib = createLib();
+    const h = lib.messageHeader('msg-1', 'Body', { collapsible: true, title: 'T' });
+
+    const entry = getElement(h.id);
+    for (const { event, handler } of entry!.listeners.values()) {
+      if (event === 'click') handler({ type: 'click' }); // no dataset
+    }
+    expect(h.isCollapsed()).toBe(false);
+    expect(messagesOfType('dom_update')).toHaveLength(0);
+  });
+
+  test('missing title renders empty title span (chevron-only bar)', () => {
+    const lib = createLib();
+    lib.messageHeader('msg-1', 'Body', { collapsible: true });
+    const html = messagesOfType('dom_inject_at_message')[0].html;
+    expect(html).toContain('ls-comp-msg-header__title');
+    expect(html).toContain('ls-comp-msg-header__chevron');
+  });
+
+  test('collapsible CSS is part of the injected style block', () => {
+    const lib = createLib();
+    lib.messageHeader('msg-1', 'Body', { collapsible: true, title: 'T' });
+    const css = messagesOfType('dom_add_style')[0].css;
+    expect(css).toContain('ls-comp-msg-header--collapsible');
+    expect(css).toContain('ls-comp-msg-header__toggle');
+    expect(css).toContain('ls-comp-msg-header__body.ls-collapsed');
+    expect(css).toContain('pointer-events: none');
+  });
+
+  test('user-supplied className still lands on the wrapper', () => {
+    const lib = createLib();
+    lib.messageHeader('msg-1', 'Body', {
+      collapsible: true, title: 'T', className: 'my-extra',
+    });
+    const html = messagesOfType('dom_inject_at_message')[0].html;
+    expect(html).toContain('my-extra');
+    expect(html).toContain('ls-comp-msg-header--collapsible');
+  });
+
+  test('permissions still enforced on the collapsible path', () => {
+    const lib = createLib({ hasPerm: () => false });
+    expect(() =>
+      lib.messageHeader('msg-1', 'Body', { collapsible: true, title: 'T' }),
+    ).toThrow('PERMISSION_DENIED');
+  });
+
+  test('regression: non-collapsible path emits no wrapper modifier class', () => {
+    const lib = createLib();
+    lib.messageHeader('msg-1', '<span>Plain</span>');
+    const html = messagesOfType('dom_inject_at_message')[0].html;
+    expect(html).toContain('ls-comp-msg-header');
+    expect(html).not.toContain('ls-comp-msg-header--collapsible');
+    expect(html).not.toContain('ls-comp-msg-header__toggle');
+    expect(html).not.toContain('data-ls-toggle');
+  });
+});
+
+describe('messageFooter — collapsible', () => {
+  test('injects wrapper with footer-scoped modifier class and toggle bar', () => {
+    const lib = createLib();
+    lib.messageFooter('msg-1', '<span>Body</span>', {
+      collapsible: true, title: 'Stats',
+    });
+
+    const msg = messagesOfType('dom_inject_at_message')[0];
+    expect(msg.position).toBe('footer');
+    expect(msg.html).toContain('ls-comp-msg-footer--collapsible');
+    expect(msg.html).toContain('ls-comp-msg-footer__toggle');
+    expect(msg.html).toContain('ls-comp-msg-footer__body');
+    expect(msg.html).toContain('Stats');
+  });
+
+  test('imperative methods work the same as on the header variant', () => {
+    const lib = createLib();
+    const h = lib.messageFooter('msg-1', 'Body-v1', {
+      collapsible: true, title: 'Old',
+    });
+
+    h.setTitle('New');
+    h.update('Body-v2');
+    h.setCollapsed(true);
+
+    const updates = messagesOfType('dom_update');
+    // Last update should reflect all three mutations composed via closure.
+    const final = updates[updates.length - 1].html;
+    expect(final).toContain('New');
+    expect(final).toContain('Body-v2');
+    expect(final).toContain('ls-collapsed');
+    expect(h.isCollapsed()).toBe(true);
+  });
+
+  test('simulated click toggles footer state', () => {
+    const lib = createLib();
+    const h = lib.messageFooter('msg-1', 'Body', {
+      collapsible: true, title: 'T', defaultCollapsed: true,
+    });
+    expect(h.isCollapsed()).toBe(true);
+    simulateToggleClick(h.id);
+    expect(h.isCollapsed()).toBe(false);
+  });
+
+  test('every dom_update preserves the wrapper modifier class (footer)', () => {
+    const lib = createLib();
+    const h = lib.messageFooter('msg-1', 'Body', {
+      collapsible: true, title: 'T',
+    });
+    h.toggle();
+    h.setTitle('New');
+    h.update('Body2');
+    for (const update of messagesOfType('dom_update')) {
+      expect(update.html).toContain('ls-comp-msg-footer--collapsible');
+      expect(update.html).toContain('ls-comp-msg-footer__toggle');
+    }
+  });
+
+  test('regression: non-collapsible footer path unchanged', () => {
+    const lib = createLib();
+    lib.messageFooter('msg-1', '<span>Plain</span>');
+    const html = messagesOfType('dom_inject_at_message')[0].html;
+    expect(html).toContain('ls-comp-msg-footer');
+    expect(html).not.toContain('ls-comp-msg-footer--collapsible');
+    expect(html).not.toContain('ls-comp-msg-footer__toggle');
+  });
+
+  test('permissions still enforced on the collapsible footer path', () => {
+    const lib = createLib({ hasPerm: () => false });
+    expect(() =>
+      lib.messageFooter('msg-1', 'Body', { collapsible: true, title: 'T' }),
+    ).toThrow('PERMISSION_DENIED');
+  });
+});

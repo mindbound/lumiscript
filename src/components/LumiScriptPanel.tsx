@@ -11,6 +11,16 @@ interface ScriptExecInfo {
   dot: ExecutionDot;
   duration?: number;
   error?: string;
+  /**
+   * True when the most recent error for this script has not yet been
+   * acknowledged by the user. While set, the displayed `dot` stays red
+   * through subsequent successful runs — this prevents no-op trigger
+   * spam (e.g. non-matching SETTINGS_UPDATED fires that early-return
+   * cleanly) from silently overwriting a real failure. Cleared when the
+   * user opens the editor for this script, at which point `dot` drops
+   * to `'idle'` and the next real run determines the displayed state.
+   */
+  stickyError?: boolean;
 }
 
 interface ExecState {
@@ -120,7 +130,13 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
               consoleHistory: { ...prev.consoleHistory, [msg.scriptId]: updated },
               scriptExecInfo: {
                 ...prev.scriptExecInfo,
-                [msg.scriptId]: { dot: 'running' },
+                [msg.scriptId]: {
+                  // Preserve stickyError + error across the running state so
+                  // a fresh run that succeeds can restore the sticky red dot
+                  // in the execution_ended handler below.
+                  ...prev.scriptExecInfo[msg.scriptId],
+                  dot: 'running',
+                },
               },
             };
           });
@@ -161,6 +177,7 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
         case 'execution_ended':
           setExecState(prev => {
             const existing = prev.consoleHistory[msg.scriptId] ?? [];
+            const existingInfo = prev.scriptExecInfo[msg.scriptId];
             const errorEntry = !msg.success && msg.error
               ? [{
                   timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
@@ -168,6 +185,17 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
                   message: msg.error,
                 }]
               : [];
+            // Sticky-error semantics: once a run fails, keep the dot red
+            // through subsequent successes until the user opens the editor
+            // (which acknowledges and clears the sticky flag). Preserves
+            // the prior error message across success runs so the Console
+            // tab can still surface it when the user eventually looks.
+            const stickyError = !msg.success
+              ? true
+              : existingInfo?.stickyError ?? false;
+            const displayDot: ExecutionDot = !msg.success || stickyError
+              ? 'error'
+              : 'success';
             return {
               ...prev,
               isRunning: false,
@@ -177,9 +205,10 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
               scriptExecInfo: {
                 ...prev.scriptExecInfo,
                 [msg.scriptId]: {
-                  dot: msg.success ? 'success' : 'error',
+                  dot: displayDot,
                   duration: msg.duration,
-                  error: msg.error,
+                  error: msg.error ?? existingInfo?.error,
+                  stickyError,
                 },
               },
             };
@@ -207,6 +236,30 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
       ...prev,
       consoleHistory: { ...prev.consoleHistory, [scriptId]: [] },
     }));
+  }, []);
+
+  /**
+   * Clear the sticky-error flag for a script once the user opens its editor.
+   * Dropping the dot to `'idle'` signals that the user has seen the error;
+   * the next real run will repaint the dot according to its actual result.
+   * No-op if the script has no sticky error.
+   */
+  const handleScriptOpened = useCallback((scriptId: string) => {
+    setExecState(prev => {
+      const existing = prev.scriptExecInfo[scriptId];
+      if (!existing?.stickyError) return prev;
+      return {
+        ...prev,
+        scriptExecInfo: {
+          ...prev.scriptExecInfo,
+          [scriptId]: {
+            ...existing,
+            dot: 'idle',
+            stickyError: false,
+          },
+        },
+      };
+    });
   }, []);
 
   return (
@@ -242,6 +295,7 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
             editorFontSize={settings.editorFontSize}
             autosaveDebounceMs={settings.autosaveDebounceMs}
             onClearConsole={clearConsole}
+            onScriptOpened={handleScriptOpened}
             sendToBackend={sendToBackend}
           />
         ) : (

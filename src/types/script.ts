@@ -1918,6 +1918,22 @@ export interface MessageFooterOptions {
   id?: string;
   /** Additional CSS class applied to the footer wrapper div. */
   className?: string;
+  /**
+   * When true, renders a persistent title bar with a click-to-toggle chevron.
+   * The body HTML collapses/expands; the title remains visible in both states.
+   */
+  collapsible?: boolean;
+  /**
+   * HTML shown in the persistent title bar. Accepts the same HTML vocabulary
+   * as the `html` body parameter (composable with `badgeHtml` / `keyValueHtml`).
+   * Only meaningful when `collapsible: true`; omitted → chevron-only bar.
+   */
+  title?: string;
+  /**
+   * Initial collapsed state. Only meaningful when `collapsible: true`.
+   * Default: `false` (expanded).
+   */
+  defaultCollapsed?: boolean;
 }
 
 /** Options for the `messageHeader` component from `ls:components`. */
@@ -1926,6 +1942,49 @@ export interface MessageHeaderOptions {
   id?: string;
   /** Additional CSS class applied to the header wrapper div. */
   className?: string;
+  /**
+   * When true, renders a persistent title bar with a click-to-toggle chevron.
+   * The body HTML collapses/expands; the title remains visible in both states.
+   */
+  collapsible?: boolean;
+  /**
+   * HTML shown in the persistent title bar. Accepts the same HTML vocabulary
+   * as the `html` body parameter (composable with `badgeHtml` / `keyValueHtml`).
+   * Only meaningful when `collapsible: true`; omitted → chevron-only bar.
+   */
+  title?: string;
+  /**
+   * Initial collapsed state. Only meaningful when `collapsible: true`.
+   * Default: `false` (expanded).
+   */
+  defaultCollapsed?: boolean;
+}
+
+/**
+ * Extended handle returned by `messageHeader()` / `messageFooter()` when
+ * called with `collapsible: true`. Adds imperative controls for collapsed
+ * state and title updates. `update(bodyHtml)` overrides the base
+ * `DOMHandle.update()` so callers can replace only the body without
+ * destroying the title bar or resetting the collapsed state.
+ */
+export interface CollapsibleDOMHandle extends DOMHandle {
+  /** Current collapsed state (`false` = body visible). */
+  isCollapsed(): boolean;
+  /** Set collapsed state explicitly. Re-renders the inner content. */
+  setCollapsed(collapsed: boolean): void;
+  /** Flip the collapsed state. */
+  toggle(): void;
+  /**
+   * Replace the persistent title. Preserves collapsed state and body.
+   * Accepts HTML — same vocabulary as the constructor's `title` option.
+   */
+  setTitle(title: string): void;
+  /**
+   * Replace the body HTML. Preserves collapsed state and title.
+   * Overrides `DOMHandle.update()` — for collapsible handles, `update()`
+   * means "replace body HTML", not "replace the whole wrapper".
+   */
+  update(bodyHtml: string): void;
 }
 
 /** Options for `badgeHtml()` from `ls:components`. */
@@ -2021,13 +2080,31 @@ export interface LSComponentsExports {
   /**
    * Attach a styled footer section below a message bubble.
    * Wraps `api.ui.dom.injectAtMessage()` with built-in footer styling.
+   *
+   * When called with `collapsible: true`, returns a `CollapsibleDOMHandle`
+   * with imperative controls (`toggle`, `setCollapsed`, `setTitle`,
+   * `isCollapsed`) and a body-only `update(bodyHtml)` method.
    */
+  messageFooter(
+    messageId: string,
+    html: string,
+    options: MessageFooterOptions & { collapsible: true },
+  ): CollapsibleDOMHandle;
   messageFooter(messageId: string, html: string, options?: MessageFooterOptions): DOMHandle;
 
   /**
    * Attach a styled header section above message content inside the bubble.
    * Wraps `api.ui.dom.injectAtMessage()` with built-in header styling.
+   *
+   * When called with `collapsible: true`, returns a `CollapsibleDOMHandle`
+   * with imperative controls (`toggle`, `setCollapsed`, `setTitle`,
+   * `isCollapsed`) and a body-only `update(bodyHtml)` method.
    */
+  messageHeader(
+    messageId: string,
+    html: string,
+    options: MessageHeaderOptions & { collapsible: true },
+  ): CollapsibleDOMHandle;
   messageHeader(messageId: string, html: string, options?: MessageHeaderOptions): DOMHandle;
 
   /**

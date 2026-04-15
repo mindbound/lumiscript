@@ -181,6 +181,16 @@ export class TriggerRegistry {
             duration: result.duration,
             error: result.error?.message,
           });
+          // Surface failures as a user-visible toast. The sidebar dot and the
+          // editor console already reflect the error, but those require the
+          // user to be looking at the extension panel — a toast gives
+          // immediate feedback regardless of which Lumiverse view is active.
+          if (!result.success) {
+            spindle.toast.error(result.error?.message ?? 'Unknown error', {
+              title: `LumiScript — ${currentScript.name}`,
+              duration: 10_000,
+            });
+          }
         }
       });
 

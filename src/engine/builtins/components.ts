@@ -22,7 +22,13 @@
  * elements are owned by (and cleaned up with) the calling script.
  */
 
-import type { DOMHandle, ProgressBarHandle } from '../../types/script.js';
+import type {
+  CollapsibleDOMHandle,
+  DOMHandle,
+  MessageFooterOptions,
+  MessageHeaderOptions,
+  ProgressBarHandle,
+} from '../../types/script.js';
 import type { BuiltinLibraryFactory } from '../builtin-library-registry.js';
 
 // ─── Internal utilities ──────────────────────────────────────────────────────
@@ -39,6 +45,18 @@ function escapeHtml(s: string): string {
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
+
+// Lucide chevron paths — MIT-licensed. Server-side rendered as inline SVG so
+// the component output is self-contained and safe to inject via DOMPurify.
+const CHEVRON_UP_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" ' +
+  'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+  'stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>';
+
+const CHEVRON_DOWN_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" ' +
+  'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+  'stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>';
 
 // ─── CSS constants ───────────────────────────────────────────────────────────
 
@@ -60,6 +78,71 @@ const MESSAGE_FOOTER_CSS = `
 .ls-comp-msg-footer:hover {
   opacity: 1;
 }
+/* Collapsible variant: rather than override the base display: flex with
+   display: block (which in practice loses the cascade against <button>
+   UA styles in some engines and leaves the button sized to its intrinsic
+   content width), keep the wrapper as flex and reconfigure it into a
+   vertical stack. flex-direction: column + align-items: stretch makes
+   the toggle bar and the body each fill the full cross-axis width
+   automatically, without relying on width: 100% on the button. */
+.ls-comp-msg-footer--collapsible {
+  flex-direction: column;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: 0;
+}
+.ls-comp-msg-footer--collapsible .ls-comp-msg-footer__toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 0;
+  margin: 0;
+  background: none;
+  border: none;
+  /* Explicit per-property inheritance instead of the 'font' shorthand —
+     some browsers drift on individual font sub-properties (notably
+     line-height and letter-spacing) inside <button> when the shorthand
+     is used, which made the plain-text portion of the title render
+     slightly differently than the badge pill. */
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  font-style: inherit;
+  line-height: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+  user-select: none;
+  transition: opacity var(--lumiverse-transition-fast, 0.15s);
+}
+.ls-comp-msg-footer--collapsible .ls-comp-msg-footer__toggle:hover {
+  opacity: 0.85;
+}
+/* Make ALL descendants of the toggle click-transparent — not just direct
+   children. If a user passes composed HTML for the title (e.g. a badge
+   with its own nested spans), clicks on those deep descendants would
+   otherwise target the descendant (no data-ls-toggle) and our handler
+   would reject them, breaking the re-collapse path. */
+.ls-comp-msg-footer--collapsible .ls-comp-msg-footer__toggle * {
+  pointer-events: none;
+}
+.ls-comp-msg-footer__title {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+}
+.ls-comp-msg-footer__chevron {
+  display: inline-flex;
+  align-items: center;
+  color: var(--lumiverse-text-muted, #a0a0a0);
+}
+.ls-comp-msg-footer__body.ls-collapsed {
+  display: none;
+}
+.ls-comp-msg-footer__body:not(.ls-collapsed) {
+  margin-top: 6px;
+}
 `;
 
 const MESSAGE_HEADER_CSS = `
@@ -79,6 +162,71 @@ const MESSAGE_HEADER_CSS = `
 }
 .ls-comp-msg-header:hover {
   opacity: 1;
+}
+/* Collapsible variant: rather than override the base display: flex with
+   display: block (which in practice loses the cascade against <button>
+   UA styles in some engines and leaves the button sized to its intrinsic
+   content width), keep the wrapper as flex and reconfigure it into a
+   vertical stack. flex-direction: column + align-items: stretch makes
+   the toggle bar and the body each fill the full cross-axis width
+   automatically, without relying on width: 100% on the button. */
+.ls-comp-msg-header--collapsible {
+  flex-direction: column;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: 0;
+}
+.ls-comp-msg-header--collapsible .ls-comp-msg-header__toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 0;
+  margin: 0;
+  background: none;
+  border: none;
+  /* Explicit per-property inheritance instead of the 'font' shorthand —
+     some browsers drift on individual font sub-properties (notably
+     line-height and letter-spacing) inside <button> when the shorthand
+     is used, which made the plain-text portion of the title render
+     slightly differently than the badge pill. */
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  font-style: inherit;
+  line-height: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+  user-select: none;
+  transition: opacity var(--lumiverse-transition-fast, 0.15s);
+}
+.ls-comp-msg-header--collapsible .ls-comp-msg-header__toggle:hover {
+  opacity: 0.85;
+}
+/* Make ALL descendants of the toggle click-transparent — not just direct
+   children. If a user passes composed HTML for the title (e.g. a badge
+   with its own nested spans), clicks on those deep descendants would
+   otherwise target the descendant (no data-ls-toggle) and our handler
+   would reject them, breaking the re-collapse path. */
+.ls-comp-msg-header--collapsible .ls-comp-msg-header__toggle * {
+  pointer-events: none;
+}
+.ls-comp-msg-header__title {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+}
+.ls-comp-msg-header__chevron {
+  display: inline-flex;
+  align-items: center;
+  color: var(--lumiverse-text-muted, #a0a0a0);
+}
+.ls-comp-msg-header__body.ls-collapsed {
+  display: none;
+}
+.ls-comp-msg-header__body:not(.ls-collapsed) {
+  margin-top: 6px;
 }
 `;
 
@@ -340,17 +488,121 @@ export const createComponentsLibrary: BuiltinLibraryFactory = (api) => {
 
   // ── messageFooter ──────────────────────────────────────────────────────
 
+  /**
+   * Shared implementation for messageHeader / messageFooter. The two components
+   * differ only by their CSS base class (`ls-comp-msg-header` vs `-msg-footer`)
+   * and their injection position (`'header'` vs `'footer'`). Everything else —
+   * non-collapsible pass-through, collapsible branch with toggle bar, chevron
+   * SVGs, click delegation, state closure, handle wrapping — is identical.
+   */
+  function messageBoundary(
+    messageId: string,
+    html: string,
+    options: MessageHeaderOptions | MessageFooterOptions | undefined,
+    baseClass: 'ls-comp-msg-header' | 'ls-comp-msg-footer',
+    position: 'header' | 'footer',
+    styleCss: string,
+    styleFlag: { v: boolean },
+  ): DOMHandle | CollapsibleDOMHandle {
+    ensureStyles(styleCss, styleFlag);
+
+    // ── Non-collapsible path: same behaviour as before ────────────────
+    if (!options?.collapsible) {
+      const classes = [baseClass, options?.className].filter(Boolean).join(' ');
+      return api.ui.dom.injectAtMessage(messageId, `<div class="${classes}">${html}</div>`, {
+        position,
+        id: options?.id,
+      });
+    }
+
+    // ── Collapsible path: toggle bar + body, state held in closure ────
+    let collapsed = options.defaultCollapsed ?? false;
+    let currentTitle = options.title ?? '';
+    let currentBody = html;
+
+    const wrapperClasses = [
+      baseClass,
+      `${baseClass}--collapsible`,
+      options.className,
+    ].filter(Boolean).join(' ');
+
+    // Render the COMPLETE injection payload, wrapper and all. The frontend's
+    // dom_update handler does `inner.innerHTML = msg.html` on the Lumiverse
+    // `data-ls-el` container, which replaces everything inside it — including
+    // our modifier-classed wrapper div. If we rendered just the button + body
+    // here, the very first state change would destroy `.ls-comp-msg-*--collapsible`
+    // and our descendant-scoped CSS (flex layout, font inheritance,
+    // pointer-events gating) would stop matching, breaking re-collapse,
+    // chevron alignment, and title font sizing on the second render onward.
+    const renderFullHtml = (): string => {
+      const chevron = collapsed ? CHEVRON_DOWN_SVG : CHEVRON_UP_SVG;
+      const bodyClass = `${baseClass}__body${collapsed ? ' ls-collapsed' : ''}`;
+      return (
+        `<div class="${wrapperClasses}">` +
+          `<button type="button" class="${baseClass}__toggle" ` +
+            `data-ls-toggle="1" aria-expanded="${!collapsed}">` +
+            `<span class="${baseClass}__title">${currentTitle}</span>` +
+            `<span class="${baseClass}__chevron">${chevron}</span>` +
+          `</button>` +
+          `<div class="${bodyClass}">${currentBody}</div>` +
+        `</div>`
+      );
+    };
+
+    const handle = api.ui.dom.injectAtMessage(
+      messageId,
+      renderFullHtml(),
+      { position, id: options.id },
+    );
+
+    // Click delegation — the click handler fires for any click inside the
+    // wrapper; we identify toggle clicks by the `data-ls-toggle="1"` attribute
+    // on the button. The CSS rule `pointer-events: none` on button children
+    // guarantees `event.target` is the button itself, not a nested span.
+    handle.on('click', (data) => {
+      if (data.dataset?.lsToggle === '1') {
+        collapsed = !collapsed;
+        handle.update(renderFullHtml());
+      }
+    });
+
+    const collapsibleHandle: CollapsibleDOMHandle = {
+      get id() { return handle.id; },
+      remove: handle.remove.bind(handle),
+      on: handle.on.bind(handle),
+      makeDraggable: handle.makeDraggable.bind(handle),
+      isCollapsed: () => collapsed,
+      setCollapsed(next: boolean) {
+        collapsed = next;
+        handle.update(renderFullHtml());
+      },
+      toggle() {
+        collapsed = !collapsed;
+        handle.update(renderFullHtml());
+      },
+      setTitle(title: string) {
+        currentTitle = title;
+        handle.update(renderFullHtml());
+      },
+      // Overrides DOMHandle.update() semantics: replace only the body HTML,
+      // preserving title, chevron state, and aria-expanded.
+      update(bodyHtml: string) {
+        currentBody = bodyHtml;
+        handle.update(renderFullHtml());
+      },
+    };
+    return collapsibleHandle;
+  }
+
   function messageFooter(
     messageId: string,
     html: string,
-    options?: { id?: string; className?: string },
-  ): DOMHandle {
-    ensureStyles(MESSAGE_FOOTER_CSS, footerFlag);
-    const classes = ['ls-comp-msg-footer', options?.className].filter(Boolean).join(' ');
-    return api.ui.dom.injectAtMessage(messageId, `<div class="${classes}">${html}</div>`, {
-      position: 'footer',
-      id: options?.id,
-    });
+    options?: MessageFooterOptions,
+  ): DOMHandle | CollapsibleDOMHandle {
+    return messageBoundary(
+      messageId, html, options,
+      'ls-comp-msg-footer', 'footer', MESSAGE_FOOTER_CSS, footerFlag,
+    );
   }
 
   // ── messageHeader ─────────────────────────────────────────────────────
@@ -358,14 +610,12 @@ export const createComponentsLibrary: BuiltinLibraryFactory = (api) => {
   function messageHeader(
     messageId: string,
     html: string,
-    options?: { id?: string; className?: string },
-  ): DOMHandle {
-    ensureStyles(MESSAGE_HEADER_CSS, headerFlag);
-    const classes = ['ls-comp-msg-header', options?.className].filter(Boolean).join(' ');
-    return api.ui.dom.injectAtMessage(messageId, `<div class="${classes}">${html}</div>`, {
-      position: 'header',
-      id: options?.id,
-    });
+    options?: MessageHeaderOptions,
+  ): DOMHandle | CollapsibleDOMHandle {
+    return messageBoundary(
+      messageId, html, options,
+      'ls-comp-msg-header', 'header', MESSAGE_HEADER_CSS, headerFlag,
+    );
   }
 
   // ── badgeHtml ─────────────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-import { FC, useState } from 'react';
+import { FC, useState, useEffect } from 'react';
 import type { Script, ConsoleEntry } from '../../types/script.js';
 import type { FrontendToBackend } from '../../types/messages.js';
 import type { ActiveContext } from './BindingsSection.js';
@@ -21,6 +21,12 @@ interface ManagePanelProps {
   editorFontSize: number;
   autosaveDebounceMs: number;
   onClearConsole: (scriptId: string) => void;
+  /**
+   * Fires whenever the user opens the editor modal for a script (i.e. whenever
+   * `openScriptId` transitions to a non-null value). Parent uses this to clear
+   * sticky-error state — opening the editor is the acknowledgment signal.
+   */
+  onScriptOpened?: (scriptId: string) => void;
   sendToBackend: (msg: FrontendToBackend) => void;
 }
 
@@ -34,10 +40,19 @@ export const ManagePanel: FC<ManagePanelProps> = ({
   editorFontSize,
   autosaveDebounceMs,
   onClearConsole,
+  onScriptOpened,
   sendToBackend,
 }) => {
   // openScriptId: the script whose Edit button was clicked; null = modal closed
   const [openScriptId, setOpenScriptId] = useState<string | null>(null);
+
+  // Notify the parent whenever the editor opens for a given script. The parent
+  // (LumiScriptPanel) uses this to clear sticky-error state — opening the
+  // editor is the "user has seen it" acknowledgment. Guarded on transition
+  // to non-null so repeated renders with the same openScriptId don't re-fire.
+  useEffect(() => {
+    if (openScriptId && onScriptOpened) onScriptOpened(openScriptId);
+  }, [openScriptId, onScriptOpened]);
 
   const handleClose = () => setOpenScriptId(null);
 

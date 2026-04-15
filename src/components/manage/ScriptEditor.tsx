@@ -98,12 +98,17 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
 
       // noSemanticValidation suppresses type-error squiggles so users can write
       // plain JavaScript without type annotations. Syntax errors still show.
-      jsDefaults.setDiagnosticsOptions({ noSemanticValidation: true, noSyntaxValidation: false });
+      jsDefaults.setDiagnosticsOptions({
+        noSemanticValidation: true,
+        noSyntaxValidation: false,
+        diagnosticCodesToIgnore: [80001],
+      });
 
       jsDefaults.setCompilerOptions({
         target: monaco.languages.typescript.ScriptTarget.ES2020,
         allowNonTsExtensions: true,
         allowJs: true,
+        checkJs: true,
         noEmit: true,
       });
 
