@@ -36,7 +36,7 @@ export function buildToolsAPI(
   deps: APIBuildDeps,
   getApi: () => LumiScriptAPI,
 ): LumiScriptAPI['tools'] {
-  const { script, hasPerm, onToolsChanged } = deps;
+  const { script, hasPerm, onToolsChanged, toolsRegisteredThisRun } = deps;
 
   return {
     register(name: string, def: ToolDefinition, handler: ToolHandler): void {
@@ -66,6 +66,9 @@ export function buildToolsAPI(
         parameters:      def.parameters as any,
         council_eligible: def.council_eligible ?? false,
       });
+      // Track this name so the post-execution auto-cleanup pass can
+      // diff it against the pre-run snapshot and unregister stale tools.
+      toolsRegisteredThisRun?.add(name);
       // Notify Status tab immediately so the tool appears while the script runs.
       onToolsChanged?.();
       busEmit('ls:tool:registered', { name, scriptId: script.id });

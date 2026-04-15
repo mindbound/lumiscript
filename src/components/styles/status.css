@@ -226,6 +226,32 @@
   background: color-mix(in srgb, #22c55e 15%, transparent);
   color: #22c55e;
 }
+/* Per-row removal action. Admin-override: drops a single Spindle tool
+   registration without disabling the owning script. Hover swaps the icon
+   colour to the shared danger tone so the destructive intent reads. */
+.ls-tool-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  margin-left: 2px;
+  background: none;
+  border: none;
+  border-radius: 3px;
+  color: var(--lumiverse-text-muted);
+  cursor: pointer;
+  transition: background var(--lumiverse-transition-fast), color var(--lumiverse-transition-fast);
+}
+.ls-tool-remove:hover {
+  background: color-mix(in srgb, var(--lumiverse-danger, #ef4444) 15%, transparent);
+  color: var(--lumiverse-danger, #ef4444);
+}
+.ls-tool-remove:focus-visible {
+  outline: 1px solid var(--lumiverse-accent);
+  outline-offset: 1px;
+}
 
 /* ── Variables Inspector ───────────────────────────────────────────────── */
 .ls-vars-refresh {

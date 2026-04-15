@@ -95,6 +95,13 @@ export interface ExecutorOptions {
    * Callers should derive this from `LumiScriptSettings.scriptTimeoutMs`.
    */
   timeoutMs?: number;
+  /**
+   * When provided, every `api.tools.register(name, ...)` call during this
+   * execution adds `name` to this set. After execution the caller can diff
+   * the set against a pre-run snapshot (from `listNamesByScriptId`) to
+   * detect and unregister stale tools that the updated code no longer creates.
+   */
+  toolsRegisteredThisRun?: Set<string>;
 }
 
 // ─── Cross-script console context ────────────────────────────────────────────
@@ -211,7 +218,10 @@ export async function executeScript(
 
     // Run inside consoleContext so broadcast handlers fired during this
     // execution route their console output here (not to the registering script).
-    await Promise.race([
+    // The resolved value of the script body is captured and returned in the
+    // ScriptExecutionResult. Callers may use it to obtain a script's
+    // computed result (e.g. the TOOL_INVOCATION handler's output string).
+    const returnValue = await Promise.race([
       consoleContext.run(
         options.onConsole ?? (() => {}),
         () => fn(api, data, scriptNS, capturedConsole, z, safeFetch, undefined, undefined) as Promise<unknown>,
@@ -220,7 +230,7 @@ export async function executeScript(
     ]);
 
     const duration = Math.round(performance.now() - startTime);
-    return { success: true, duration, scriptId: script.id, runId };
+    return { success: true, duration, scriptId: script.id, runId, returnValue };
   } catch (err: unknown) {
     const duration = Math.round(performance.now() - startTime);
     const error = err instanceof Error ? err : new Error(String(err));
@@ -231,10 +241,10 @@ export async function executeScript(
 // ─── API assembler (exported for use by TriggerRegistry) ──────────────────────
 
 export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiScriptAPI {
-  const { grantedPermissions, activeContext, userId, onToolsChanged } = options;
+  const { grantedPermissions, activeContext, userId, onToolsChanged, toolsRegisteredThisRun } = options;
   const hasPerm = (p: string) => grantedPermissions.has(p);
 
-  const deps: APIBuildDeps = { script, hasPerm, userId, activeContext, onToolsChanged };
+  const deps: APIBuildDeps = { script, hasPerm, userId, activeContext, onToolsChanged, toolsRegisteredThisRun };
 
   // api is captured in a variable so that buildToolsAPI can receive a lazy
   // getter (() => api) that resolves to the fully-constructed object at

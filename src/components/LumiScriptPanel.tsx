@@ -1,5 +1,5 @@
 import { FC, useState, useEffect, useCallback } from 'react';
-import { Code2, Activity, Zap, ArrowDownToLine, ArrowUpToLine, Timer, ChevronDown, ChevronUp, Wrench, Syringe, Database, RefreshCw } from 'lucide-react';
+import { Code2, Activity, Zap, ArrowDownToLine, ArrowUpToLine, Timer, ChevronDown, ChevronUp, Wrench, Syringe, Database, RefreshCw, Trash2 } from 'lucide-react';
 import type { Script, LumiScriptSettings, ConsoleEntry, InjectionInfo, RegisteredToolInfo } from '../types/script.js';
 import type { BackendToFrontend, FrontendToBackend } from '../types/messages.js';
 import type { ActiveContext } from './manage/BindingsSection.js';
@@ -460,6 +460,19 @@ const StatusTab: FC<StatusTabProps> = ({ scripts, execInfo, invocationCounts, in
                 <span className="ls-inject-script" title={tool.scriptId}>
                   {tool.scriptName}
                 </span>
+                <button
+                  type="button"
+                  className="ls-tool-remove"
+                  aria-label={`Unregister tool ${tool.name}`}
+                  title={
+                    `Unregister "${tool.name}" from Lumiverse.\n` +
+                    `The owning script is not disabled — the next script edit/enable ` +
+                    `will re-register declaratively-defined tools.`
+                  }
+                  onClick={() => sendToBackend({ type: 'unregister_tool', name: tool.name })}
+                >
+                  <Trash2 size={11} />
+                </button>
               </div>
             </div>
           ))

@@ -125,11 +125,15 @@ export class ScriptStorage {
     const now = Date.now();
     for (const entry of entries) {
       const uniqueName = await this.getUniqueName(entry.name);
+      // Validate type: only trigger/library are legal; anything else
+      // (including undefined from older pack formats) falls back to trigger.
+      const type: 'trigger' | 'library' =
+        entry.type === 'library' ? entry.type : 'trigger';
       const script = await this.store.create({
         id: generateUUID(),
         name: uniqueName,
         code: entry.code,
-        type: entry.type === 'library' ? 'library' : 'trigger',
+        type,
         enabled: false,
         allowDangerous: false,
         bindings: entry.bindings ?? [],

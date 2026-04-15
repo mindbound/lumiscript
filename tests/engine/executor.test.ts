@@ -84,6 +84,39 @@ describe('executeScript', () => {
     expect(typeof result.duration).toBe('number');
   });
 
+  test('captures the script body\'s return value on success', async () => {
+    // Tool-script dispatch relies on this: the last-expression return is
+    // picked up by the TOOL_INVOCATION handler as the tool's result string.
+    const script = makeScript({ code: 'return "the answer: " + (40 + 2);' });
+    const result = await executeScript(script, makeOptions());
+    expect(result.success).toBe(true);
+    expect(result.returnValue).toBe('the answer: 42');
+  });
+
+  test('returnValue is undefined when the script body returns nothing', async () => {
+    const script = makeScript({ code: 'const x = 1 + 1;' });  // no return
+    const result = await executeScript(script, makeOptions());
+    expect(result.success).toBe(true);
+    expect(result.returnValue).toBeUndefined();
+  });
+
+  test('returnValue is absent on failure', async () => {
+    const script = makeScript({ code: 'throw new Error("fail");' });
+    const result = await executeScript(script, makeOptions());
+    expect(result.success).toBe(false);
+    expect(result.returnValue).toBeUndefined();
+  });
+
+  test('returnValue surfaces non-string values verbatim for caller coercion', async () => {
+    // The tool-invocation handler coerces non-string return values via
+    // String(), but the executor does not — it hands back whatever the
+    // script produced so callers decide.
+    const script = makeScript({ code: 'return { ok: true, n: 42 };' });
+    const result = await executeScript(script, makeOptions());
+    expect(result.success).toBe(true);
+    expect(result.returnValue).toEqual({ ok: true, n: 42 });
+  });
+
   test('captures console output via onConsole callback', async () => {
     const entries: ConsoleEntry[] = [];
     const script = makeScript({ code: 'console.log("hello"); console.warn("warning");' });

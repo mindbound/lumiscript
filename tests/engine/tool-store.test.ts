@@ -2,10 +2,13 @@ import { describe, test, expect, beforeEach, mock } from 'bun:test';
 import {
   addTool,
   removeTool,
+  removeByName,
   clearByScriptId,
   clearAll,
   getTool,
   listAll,
+  listNamesByScriptId,
+  diffAndCleanStaleTools,
   type ToolEntry,
 } from '../../src/engine/tool-store.js';
 
@@ -71,6 +74,30 @@ describe('removeTool', () => {
   });
 });
 
+// ─── removeByName ────────────────────────────────────────────────────────────
+
+describe('removeByName', () => {
+  // Admin-override removal: forgets ownership entirely. Backs the Status-tab
+  // "Remove" action, which drops a single Spindle registration without
+  // touching the owning script.
+  test('removes the tool regardless of scriptId and returns true', () => {
+    addTool(entry({ scriptId: 'script-1' }));
+    expect(removeByName('test-tool')).toBe(true);
+    expect(getTool('test-tool')).toBeUndefined();
+  });
+
+  test('returns false when the tool does not exist', () => {
+    expect(removeByName('nonexistent')).toBe(false);
+  });
+
+  test('removes an entry owned by a different script (admin override)', () => {
+    // Contrast with removeTool, which gates on scriptId ownership.
+    addTool(entry({ scriptId: 'script-1' }));
+    expect(removeByName('test-tool')).toBe(true);
+    expect(listAll()).toHaveLength(0);
+  });
+});
+
 // ─── clearByScriptId ─────────────────────────────────────────────────────────
 
 describe('clearByScriptId', () => {
@@ -129,5 +156,75 @@ describe('listAll', () => {
 
   test('returns empty array when store is empty', () => {
     expect(listAll()).toEqual([]);
+  });
+});
+
+// ─── listNamesByScriptId ────────────────────────────────────────────────────
+
+describe('listNamesByScriptId', () => {
+  test('returns names of tools owned by the given script', () => {
+    addTool(entry({ name: 'a', scriptId: 'script-1' }));
+    addTool(entry({ name: 'b', scriptId: 'script-1' }));
+    addTool(entry({ name: 'c', scriptId: 'script-2' }));
+    expect(listNamesByScriptId('script-1').sort()).toEqual(['a', 'b']);
+  });
+
+  test('returns empty array for unknown scriptId', () => {
+    addTool(entry({ name: 'a' }));
+    expect(listNamesByScriptId('nonexistent')).toEqual([]);
+  });
+});
+
+// ─── diffAndCleanStaleTools ─────────────────────────────────────────────────
+
+describe('diffAndCleanStaleTools', () => {
+  // Simulates: script owned roll_dice + flip_coin before, now only registers
+  // roll_d20. The diff should remove roll_dice and flip_coin.
+  test('removes tools present before the run but not registered during it', () => {
+    addTool(entry({ name: 'roll_dice',  scriptId: 'script-1' }));
+    addTool(entry({ name: 'flip_coin',  scriptId: 'script-1' }));
+    addTool(entry({ name: 'other_tool', scriptId: 'script-2' }));
+
+    // Script ran and only registered roll_d20 (added manually to store first).
+    addTool(entry({ name: 'roll_d20', scriptId: 'script-1' }));
+    const registeredThisRun = new Set(['roll_d20']);
+    const preRun = ['roll_dice', 'flip_coin'];
+
+    const stale = diffAndCleanStaleTools('script-1', preRun, registeredThisRun);
+    expect(stale.sort()).toEqual(['flip_coin', 'roll_dice']);
+    expect(getTool('roll_dice')).toBeUndefined();
+    expect(getTool('flip_coin')).toBeUndefined();
+    // The new tool and the other script's tool are untouched.
+    expect(getTool('roll_d20')).toBeDefined();
+    expect(getTool('other_tool')).toBeDefined();
+  });
+
+  test('no-op when the script re-registered all its previous tools', () => {
+    addTool(entry({ name: 'roll_dice', scriptId: 'script-1' }));
+    const stale = diffAndCleanStaleTools('script-1', ['roll_dice'], new Set(['roll_dice']));
+    expect(stale).toEqual([]);
+    expect(getTool('roll_dice')).toBeDefined();
+  });
+
+  test('no-op when the script had no previous tools', () => {
+    const stale = diffAndCleanStaleTools('script-1', [], new Set(['new_tool']));
+    expect(stale).toEqual([]);
+  });
+
+  test('does not remove a tool if ownership has changed to another script', () => {
+    // Edge case: script-1 owned roll_dice, but script-2 re-registered it
+    // between snapshot and diff. diffAndCleanStaleTools should skip it.
+    addTool(entry({ name: 'roll_dice', scriptId: 'script-2' }));
+    const stale = diffAndCleanStaleTools('script-1', ['roll_dice'], new Set());
+    expect(stale).toEqual([]);
+    expect(getTool('roll_dice')).toBeDefined();
+  });
+
+  test('removes all tools when script re-run registers nothing (error or code change)', () => {
+    addTool(entry({ name: 'a', scriptId: 'script-1' }));
+    addTool(entry({ name: 'b', scriptId: 'script-1' }));
+    const stale = diffAndCleanStaleTools('script-1', ['a', 'b'], new Set());
+    expect(stale.sort()).toEqual(['a', 'b']);
+    expect(listAll()).toHaveLength(0);
   });
 });

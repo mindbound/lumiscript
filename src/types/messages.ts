@@ -69,6 +69,21 @@ export type FrontendToBackend =
       type: 'import_scripts';
       entries: ScriptPackEntry[];
     }
+  | {
+      /**
+       * Admin-override removal of a single tool registration. Dispatched from
+       * the Status-tab "Remove" action on an Active Tools row. Drops the entry
+       * from `tool-store`, forgets the name in `tool-script-registry` if it
+       * was declaratively registered, and calls `spindle.unregisterTool(name)`.
+       *
+       * Does NOT disable or edit the owning script — the next script mutation
+       * that triggers `syncAll()` will re-register a declarative tool whose
+       * source script is still present and enabled. This action is a stop-gap
+       * for stale registrations, not a persistent disable.
+       */
+      type: 'unregister_tool';
+      name: string;
+    }
   // ─── DOM events (frontend → backend) ──────────────────────────────
   | {
       /** Fired by the frontend when a DOM event occurs on an injected element. */

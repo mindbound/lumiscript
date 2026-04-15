@@ -30,6 +30,7 @@ import { generateUUID } from '../utils/uuid.js';
 import type { ScriptStorage } from '../storage/script-storage.js';
 import { clearByScriptId as clearBroadcastByScriptId } from './broadcast-bus.js';
 import { clearCommandHandlerByScriptId } from './api/commands.js';
+import { listNamesByScriptId as toolNamesByScript, diffAndCleanStaleTools } from './tool-store.js';
 
 // ─── Dependency factory ───────────────────────────────────────────────────────
 
@@ -157,6 +158,10 @@ export class TriggerRegistry {
         clearCommandHandlerByScriptId(scriptId);
 
         // ── Execute the current script body ────────────────────────────────
+        // Snapshot tool names before execution for the auto-cleanup diff.
+        const preRunToolNames = toolNamesByScript(scriptId);
+        const toolsRegisteredThisRun = new Set<string>();
+
         const opts: ExecutorOptions = {
           grantedPermissions,
           userId,
@@ -167,6 +172,7 @@ export class TriggerRegistry {
             this.sendToFrontend({ type: 'console_entry', scriptId: currentScript.id, runId, entry }),
           onToolsChanged,
           timeoutMs: scriptTimeoutMs,
+          toolsRegisteredThisRun,
         };
 
         // Sync-loop watchdog: process.exit(1) is the only escape when the
@@ -181,6 +187,12 @@ export class TriggerRegistry {
 
         const result = await executeScript(currentScript, opts);
         clearTimeout(syncWatchdog);
+
+        // ── Auto-cleanup stale tools ──────────────────────────────────────
+        const staleTools = diffAndCleanStaleTools(scriptId, preRunToolNames, toolsRegisteredThisRun);
+        for (const name of staleTools) {
+          try { spindle.unregisterTool(name); } catch { /* swallow */ }
+        }
 
         // ── Fold this invocation's result into the batch aggregates ───────
         const prevMax = this.batchMaxDuration.get(currentScript.id) ?? 0;

@@ -30,6 +30,11 @@ export interface APIBuildDeps {
    * Status tab reflects the change without waiting for execution to complete.
    */
   onToolsChanged?: () => void;
+  /**
+   * Per-execution tool-registration tracker. See ExecutorOptions for details.
+   * When present, `buildToolsAPI` adds every tool name to this set on register.
+   */
+  toolsRegisteredThisRun?: Set<string>;
 }
 
 // ─── Shared utility functions ─────────────────────────────────────────────────

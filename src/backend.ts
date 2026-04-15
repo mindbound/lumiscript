@@ -13,7 +13,14 @@ import { TriggerRegistry } from './engine/trigger-registry.js';
 import { generateUUID } from './utils/uuid.js';
 import { readFile } from 'fs/promises';
 import { listByMode, listAll, clearEphemeral, clearByScriptId } from './engine/injection-store.js';
-import { getTool, clearByScriptId as clearToolsByScriptId, listAll as listAllTools } from './engine/tool-store.js';
+import {
+  getTool,
+  clearByScriptId as clearToolsByScriptId,
+  listAll as listAllTools,
+  removeByName as removeToolByName,
+  listNamesByScriptId as toolNamesByScript,
+  diffAndCleanStaleTools,
+} from './engine/tool-store.js';
 import { emit as broadcastEmit } from './engine/broadcast-bus.js';
 import { dispatchEvent as dispatchDOMEvent, cleanupScript as cleanupDOMScript } from './engine/dom-registry.js';
 
@@ -75,6 +82,14 @@ const settingsStore = new SettingsStore<LumiScriptSettings>(
   DEFAULT_SETTINGS,
 );
 
+// Register {{lumiScriptActive}} + character-var macros at module scope so they
+// are available to the macro engine the instant the worker boots. The
+// isEnabled callback reads from settingsStore.get(), which returns the
+// defaults (enabled=true) until settingsStore.load() runs on the first
+// frontend message. After load() we call updateLumiScriptActiveMacro() to
+// reconcile with the persisted value.
+registerLumiScriptMacros(() => settingsStore.get().enabled);
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function send(msg: import('./types/messages.js').BackendToFrontend): void {
@@ -98,17 +113,15 @@ function pushInjections(): void {
 }
 
 function pushTools(): void {
-  send({
-    type: 'tools_updated',
-    tools: listAllTools().map(e => ({
-      name:             e.name,
-      display_name:     e.displayName,
-      description:      e.description,
-      council_eligible: e.councilEligible,
-      scriptId:         e.scriptId,
-      scriptName:       e.scriptName,
-    })),
-  });
+  const tools = listAllTools().map(e => ({
+    name:             e.name,
+    display_name:     e.displayName,
+    description:      e.description,
+    council_eligible: e.councilEligible,
+    scriptId:         e.scriptId,
+    scriptName:       e.scriptName,
+  }));
+  send({ type: 'tools_updated', tools });
 }
 
 /**
@@ -226,21 +239,31 @@ spindle.registerInterceptor(async (messages, context) => {
 // (uppercase), and spindle.on() stores keys as-is without normalisation.
 spindle.on('TOOL_INVOCATION', async (event: unknown) => {
   const { toolName, args } = event as { toolName: string; args: Record<string, unknown> };
-  const entry = getTool(toolName);
-  if (!entry) {
-    spindle.log.warn(`[LumiScript] TOOL_INVOCATION: no handler for tool '${toolName}'`);
-    return '';
+
+  // Council routes qualified names like "lumiscript:roll_dice" while direct
+  // LLM tool calls use bare names. Normalize by stripping any "extensionId:"
+  // prefix so a single handler dispatch works for both paths. Mirrors the
+  // same normalization Spotify Controls does at its TOOL_INVOCATION site.
+  const bareName = toolName.includes(':') ? toolName.split(':').pop()! : toolName;
+
+  // (1) Imperative path — tools registered at runtime via api.tools.register().
+  const entry = getTool(bareName);
+  if (entry) {
+    const start = Date.now();
+    const result = await Promise.resolve(entry.handler(args));
+    broadcastEmit('ls:tool:invoked', {
+      name:     bareName,
+      args,
+      result,
+      scriptId: entry.scriptId,
+      callMs:   Date.now() - start,
+    });
+    return result;
   }
-  const start = Date.now();
-  const result = await Promise.resolve(entry.handler(args));
-  broadcastEmit('ls:tool:invoked', {
-    name:     toolName,
-    args,
-    result,
-    scriptId: entry.scriptId,
-    callMs:   Date.now() - start,
-  });
-  return result;
+
+  // No handler matched.
+  spindle.log.warn(`[LumiScript] TOOL_INVOCATION: no handler for tool '${bareName}'`);
+  return '';
 });
 
 // ─── Trigger registry ─────────────────────────────────────────────────────────
@@ -284,18 +307,30 @@ spindle.onFrontendMessage(async (raw, userId) => {
   // Lazy-load storage on the first message so userId is known before any read or write.
   // This matches the pattern used by other Lumiverse extensions (e.g. silly_sim_tracker)
   // and avoids a read/write path mismatch caused by loading before userId is available.
-  if (!settingsStore.isLoaded) await settingsStore.load();
-  if (!scriptStorage.store.isLoaded) await scriptStorage.load();
+  // Loads are independent so we run them in parallel to minimise the "status dot
+  // green" latency observable at cold start.
+  const loadPromises: Promise<unknown>[] = [];
+  if (!settingsStore.isLoaded) loadPromises.push(settingsStore.load());
+  if (!scriptStorage.store.isLoaded) loadPromises.push(scriptStorage.load());
+  if (loadPromises.length > 0) {
+    await Promise.all(loadPromises);
+    // Reconcile the {{lumiScriptActive}} macro with the just-loaded settings.
+    // The macro was registered at module scope with the default (enabled=true);
+    // if the user had persisted `enabled: false`, push it through now.
+    updateLumiScriptActiveMacro(settingsStore.get().enabled);
+  }
 
   // Register trigger handlers on the first message once storage is ready.
-  // Populate context from the currently active chat BEFORE registering triggers
-  // so binding checks are correct even for the very first event after a restart.
+  // refreshActiveContext runs in parallel with the trigger/tool registration
+  // passes because neither sync step reads the active-context state — bindings
+  // only fire on subsequent Lumiverse events, by which point the awaited
+  // context has already landed.
   if (!triggersInitialized) {
     triggersInitialized = true;
-    await refreshActiveContext(activeUserId);
-    publishActiveCharId();
+    const contextPromise = refreshActiveContext(activeUserId);
     void syncTriggers();
-    registerLumiScriptMacros(() => settingsStore.get().enabled);
+    await contextPromise;
+    publishActiveCharId();
   }
 
   const msg = raw as FrontendToBackend;
@@ -351,12 +386,13 @@ spindle.onFrontendMessage(async (raw, userId) => {
       // ── CRUD ────────────────────────────────────────────────────────────
       case 'create_script': {
         const s = settingsStore.get();
-        const template = msg.scriptType === 'library'
-          ? s.defaultLibraryTemplate
+        const template =
+          msg.scriptType === 'library' ? s.defaultLibraryTemplate
           : s.defaultTriggerTemplate;
         await scriptStorage.createScript(msg.name, msg.scriptType, template);
         pushScripts();
         void syncTriggers();
+        pushTools();
         break;
       }
 
@@ -375,6 +411,12 @@ spindle.onFrontendMessage(async (raw, userId) => {
         // via live storage lookup — no re-registration needed.
         if ('enabled' in msg.patch || 'triggers' in msg.patch) {
           void syncTriggers();
+        }
+        if (
+          'enabled' in msg.patch ||
+          'name'    in msg.patch
+        ) {
+          pushTools();
         }
         // Clear injections, tools, and DOM when a script is disabled so stale entries don't linger.
         if ('enabled' in msg.patch && !msg.patch.enabled) {
@@ -401,6 +443,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
         await scriptStorage.deleteScript(msg.id);
         pushScripts();
         void syncTriggers();
+        pushTools();
         break;
       }
 
@@ -408,6 +451,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
         await scriptStorage.duplicateScript(msg.id);
         pushScripts();
         void syncTriggers();
+        pushTools();
         break;
       }
 
@@ -415,6 +459,28 @@ spindle.onFrontendMessage(async (raw, userId) => {
         await scriptStorage.importScripts(msg.entries);
         pushScripts();
         void syncTriggers();
+        pushTools();
+        break;
+      }
+
+      // ── Tools ────────────────────────────────────────────────────────────
+      case 'unregister_tool': {
+        // Admin-override removal from the Status-tab "Remove" action.
+        // Mirrors the cleanup dance done by disable-script and delete-script,
+        // but scoped to a single tool name without touching the owning script.
+        const name = msg.name;
+        const removedImperative = removeToolByName(name);
+        if (removedImperative) {
+          try {
+            spindle.unregisterTool(name);
+          } catch (err) {
+            spindle.log.warn(
+              `[LumiScript] unregisterTool("${name}") failed: ` +
+              (err instanceof Error ? err.message : String(err)),
+            );
+          }
+        }
+        pushTools();
         break;
       }
 
@@ -472,6 +538,12 @@ spindle.onFrontendMessage(async (raw, userId) => {
           process.exit(1);
         }, timeoutMs + 5_000);
 
+        // Snapshot tool names owned by this script BEFORE execution so we
+        // can diff afterwards and auto-unregister anything the new code no
+        // longer creates (e.g. user renamed `roll_dice` → `roll_d20`).
+        const preRunToolNames = toolNamesByScript(script.id);
+        const toolsRegisteredThisRun = new Set<string>();
+
         const result = await executeScript(script, {
           grantedPermissions,
           activeContext: { chatId: ctx.chatId, characterId: ctx.characterId },
@@ -481,8 +553,17 @@ spindle.onFrontendMessage(async (raw, userId) => {
           },
           scriptStorage,
           timeoutMs,
+          toolsRegisteredThisRun,
         });
         clearTimeout(syncWatchdog);
+
+        // ── Auto-cleanup stale tools ──────────────────────────────────────
+        // Anything the script owned before this run but did NOT re-register
+        // during this execution is stale. Remove from the store + Spindle.
+        const staleTools = diffAndCleanStaleTools(script.id, preRunToolNames, toolsRegisteredThisRun);
+        for (const name of staleTools) {
+          try { spindle.unregisterTool(name); } catch { /* swallow */ }
+        }
 
         if (result.success) {
           executionStatusStore.markSuccess(script.id, result.duration);

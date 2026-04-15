@@ -263,7 +263,7 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
       )}
 
       {/* Triggers (trigger scripts only) */}
-      {script.type !== 'library' && (
+      {script.type === 'trigger' && (
         <TriggersSection
           scriptId={script.id}
           triggers={script.triggers ?? []}
@@ -272,7 +272,7 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
       )}
 
       {/* Bindings (trigger scripts only) */}
-      {script.type !== 'library' && (
+      {script.type === 'trigger' && (
         <BindingsSection
           bindings={script.bindings ?? []}
           activeContext={activeContext}

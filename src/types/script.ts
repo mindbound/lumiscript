@@ -65,7 +65,7 @@ export interface Script {
    * Lumiverse event names this trigger script listens to.
    * Selected in the editor UI. When any declared event fires, the entire script
    * body is executed with `data` (event payload + `__event` name) and `api`
-   * injected as top-level variables. Library scripts ignore this field.
+   * injected as top-level variables. Library and tool scripts ignore this field.
    */
   triggers?: string[];
   /** Virtual folder for organizing scripts in the UI. No OS-level directory. */
@@ -182,6 +182,12 @@ export interface ScriptExecutionResult {
   duration: number;    // ms — measured inside the executor
   scriptId: string;
   runId: string;
+  /**
+   * The resolved value of the script's body (the last-expression return).
+   * Populated only on successful execution; undefined on failure or timeout.
+   * Callers may use this value to obtain a script's computed result.
+   */
+  returnValue?: unknown;
 }
 
 // ─── Script API ───────────────────────────────────────────────────────────────

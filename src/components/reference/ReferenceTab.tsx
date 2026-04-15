@@ -1,5 +1,5 @@
 import { FC, useState } from 'react';
-import { Zap, Lock, Radio, List, Braces, Hash, Package, Blocks, ChevronDown, ChevronRight } from 'lucide-react';
+import { Zap, Lock, Radio, List, Braces, Hash, Package, Blocks, Wrench, ChevronDown, ChevronRight } from 'lucide-react';
 
 // ─── Section accordion ────────────────────────────────────────────────────────
 
@@ -1444,6 +1444,45 @@ export const ReferenceTab: FC = () => (
 
     <Section icon={<Blocks size={11} />} title="Built-in Libraries">
       <BuiltinLibrariesSection />
+    </Section>
+
+    <Section icon={<Wrench size={11} />} title="Tool Scripts">
+      <p className="ls-ref-muted" style={{ marginBottom: 6 }}>
+        A <strong>tool script</strong> declares a Council-eligible tool that LumiScript
+        registers with Spindle at boot. The tool appears in the Council panel
+        from the moment Lumiverse launches — no trigger event required. When
+        the tool is invoked (by a Council member or by direct LLM function
+        calling), LumiScript runs the script body as the handler.
+      </p>
+      <p className="ls-ref-muted" style={{ marginBottom: 6 }}>
+        <strong>Metadata</strong> (set in the editor sidebar's Tool section, not
+        frontmatter): <Code>Display name</Code>, <Code>Description</Code>,
+        <Code> Parameters</Code> (JSON Schema), <Code>Council eligible</Code>.
+        The script's <Code>name</Code> is the tool's registration name passed
+        to <Code>spindle.registerTool()</Code>.
+      </p>
+      <p className="ls-ref-muted" style={{ marginBottom: 6 }}>
+        <strong>Body contract</strong> — invocation args arrive in <Code>data</Code>:
+      </p>
+      <ul className="ls-ref-muted" style={{ marginBottom: 6, marginLeft: 14, listStyle: 'disc' }}>
+        <li><Code>data.&lt;param&gt;</Code> — parameters declared in the tool's schema</li>
+        <li><Code>data.context</Code> — formatted chat context (Council invocations only)</li>
+        <li><Code>data.__userId</Code>, <Code>data.__deadlineMs</Code> — host-injected metadata</li>
+      </ul>
+      <p className="ls-ref-muted" style={{ marginBottom: 6 }}>
+        The script's <strong>last-expression return value</strong> becomes the tool's
+        result string (non-string values are coerced via <Code>String()</Code>;
+        <Code> undefined</Code> becomes <Code>""</Code>). Throwing an error marks
+        the invocation as failed and dispatches the standard LumiScript failure
+        toast + sticky red dot.
+      </p>
+      <p className="ls-ref-muted">
+        <strong>Contrast with <Code>api.tools.register()</Code></strong> — imperative
+        registration from inside any script still works unchanged. That path
+        is runtime (the tool exists only while/after the owning script has
+        run since Lumiverse boot). Tool scripts are the declarative,
+        startup-persistent alternative.
+      </p>
     </Section>
 
     <Section icon={<Package size={11} />} title="Script Packs">

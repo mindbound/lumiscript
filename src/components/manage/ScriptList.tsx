@@ -62,7 +62,10 @@ export const ScriptList: FC<ScriptListProps> = ({
   };
 
   const handleNew = () => {
-    const name = window.prompt(activeType === 'library' ? 'Library name:' : 'Script name:');
+    const promptLabel =
+      activeType === 'library' ? 'Library name:'
+      : 'Script name:';
+    const name = window.prompt(promptLabel);
     if (!name?.trim()) return;
     sendToBackend({ type: 'create_script', name: name.trim(), scriptType: activeType });
   };
@@ -85,7 +88,9 @@ export const ScriptList: FC<ScriptListProps> = ({
     e.target.value = '';
     try {
       const entries = await parseScriptPack(file);
-      const names = entries.map(s => `  ${s.type === 'library' ? '[L]' : '[T]'} ${s.name}`).join('\n');
+      const typeMark = (t: string): string =>
+        t === 'library' ? '[L]' : '[T]';
+      const names = entries.map(s => `  ${typeMark(s.type)} ${s.name}`).join('\n');
       const confirmed = window.confirm(
         `Import ${entries.length} script${entries.length > 1 ? 's' : ''}?\n\n${names}\n\nImported scripts will be disabled. Review and enable them manually.`,
       );
@@ -162,7 +167,9 @@ export const ScriptList: FC<ScriptListProps> = ({
         {filtered.length === 0 ? (
           <div className="ls-list-empty">
             <FileCode2 size={28} style={{ color: 'var(--lumiverse-border)', margin: '0 auto 8px' }} />
-            <p>No {activeType === 'library' ? 'libraries' : 'scripts'} yet</p>
+            <p>
+              No {activeType === 'library' ? 'libraries' : 'scripts'} yet
+            </p>
             <p style={{ marginTop: 4, color: 'var(--lumiverse-text-muted)' }}>
               Click + to create one
             </p>

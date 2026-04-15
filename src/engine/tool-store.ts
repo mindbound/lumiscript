@@ -72,6 +72,19 @@ export function removeTool(name: string, scriptId: string): boolean {
 }
 
 /**
+ * Admin-override removal: drop the tool entry by name, ignoring scriptId
+ * ownership. Used by the Status-tab "Remove" action, which lets the user
+ * strip a single stale registration without disabling the whole script.
+ * Returns `true` if an entry was present and removed.
+ *
+ * Re-running the owning script will re-register the tool if the code
+ * still calls `api.tools.register()`.
+ */
+export function removeByName(name: string): boolean {
+  return store.delete(name);
+}
+
+/**
  * Remove all tools registered by the given script.
  * Returns the names of the removed tools so the caller can call
  * `spindle.unregisterTool(name)` for each.
@@ -85,6 +98,20 @@ export function clearByScriptId(scriptId: string): string[] {
     }
   }
   return cleared;
+}
+
+/**
+ * Return the names of all tools owned by the given script.
+ * Used for the pre-execution snapshot in the auto-cleanup diff:
+ * callers compare this set against tools registered during the run to
+ * detect stale registrations that the new code no longer creates.
+ */
+export function listNamesByScriptId(scriptId: string): string[] {
+  const names: string[] = [];
+  for (const [name, entry] of store) {
+    if (entry.scriptId === scriptId) names.push(name);
+  }
+  return names;
 }
 
 /** Remove all tools regardless of script. */
@@ -102,4 +129,39 @@ export function getTool(name: string): ToolEntry | undefined {
 /** Return a snapshot array of all current entries. */
 export function listAll(): ToolEntry[] {
   return [...store.values()];
+}
+
+// ─── Post-execution auto-cleanup ────────────────────────────────────────────
+
+/**
+ * Diff a pre-execution tool-name snapshot against the set of tools that were
+ * actively registered during the run. Any tool that existed before the run
+ * but was NOT re-registered is stale (the new code no longer creates it)
+ * and gets removed from the store.
+ *
+ * Returns the names of removed tools so the caller can call
+ * `spindle.unregisterTool(name)` for each.
+ *
+ * This is the engine behind automatic stale-tool cleanup on re-run: if a
+ * user renames a tool in code from `roll_dice` to `roll_d20`, the old
+ * `roll_dice` registration is detected and removed here — no manual trash
+ * button click needed.
+ */
+export function diffAndCleanStaleTools(
+  scriptId: string,
+  preRunNames: readonly string[],
+  registeredThisRun: ReadonlySet<string>,
+): string[] {
+  const stale: string[] = [];
+  for (const name of preRunNames) {
+    if (registeredThisRun.has(name)) continue;
+    // Only remove if still owned by this script (another script could have
+    // claimed the name during the run — unlikely but defensive).
+    const entry = store.get(name);
+    if (entry && entry.scriptId === scriptId) {
+      store.delete(name);
+      stale.push(name);
+    }
+  }
+  return stale;
 }
