@@ -49,6 +49,23 @@ export interface TriggerDeps {
 
 // ─── TriggerRegistry class ────────────────────────────────────────────────────
 
+// ─── Synthetic event constants ────────────────────────────────────────────────
+
+/**
+ * `ls:startup` is a synthetic trigger event. It is NOT dispatched through
+ * Spindle's event bus (Spindle silently no-ops unknown event subscriptions).
+ * Instead, the TriggerRegistry fires it directly via `executeScript()` during
+ * the `register()` call.
+ *
+ * Semantics:
+ *   - Fires once per session for each enabled script that declares it.
+ *   - Does NOT re-fire on `reloadAll()` (startupFired set is preserved).
+ *   - Re-fires after a full teardown (master toggle off → on clears the set).
+ *   - Scripts whose bindings are unsatisfied at boot are deferred into
+ *     `startupPending` and retried on context change (chat open).
+ */
+const LS_STARTUP = 'ls:startup';
+
 export class TriggerRegistry {
   /** scriptId → { unsubs, events } — tracks live spindle.on() subscriptions */
   private cleanups = new Map<string, { unsubs: Array<() => void>; events: string[] }>();
@@ -78,6 +95,11 @@ export class TriggerRegistry {
   private batchMaxDuration = new Map<string, number>();
   private batchFirstError  = new Map<string, { message: string; runId: string }>();
 
+  /** Scripts whose `ls:startup` has already fired this session. */
+  private startupFired   = new Set<string>();
+  /** Scripts whose `ls:startup` was deferred because bindings weren't satisfied. */
+  private startupPending = new Set<string>();
+
   constructor(
     private readonly getDeps: () => TriggerDeps,
     private readonly sendToFrontend: (msg: BackendToFrontend) => void,
@@ -98,12 +120,17 @@ export class TriggerRegistry {
     const events = script.triggers ?? [];
     if (events.length === 0) return;
 
+    const hasStartup = events.includes(LS_STARTUP);
+    // Filter ls:startup out of the Spindle subscriptions — it's synthetic and
+    // Spindle would silently no-op it. We dispatch it directly below.
+    const spindleEvents = hasStartup ? events.filter(e => e !== LS_STARTUP) : events;
+
     // Capture the script ID only. The full script is fetched from storage at
     // invocation time so code changes take effect without re-registration.
     const scriptId = script.id;
     const unsubs: Array<() => void> = [];
 
-    for (const event of events) {
+    for (const event of spindleEvents) {
       const unsub = spindle.on(event, async (payload: unknown) => {
         // ── Fetch current script from storage ──────────────────────────────
         const { grantedPermissions, userId, scriptStorage, onToolsChanged, scriptTimeoutMs } = this.getDeps();
@@ -258,6 +285,20 @@ export class TriggerRegistry {
     spindle.log.info(
       `[LumiScript] Subscribed "${script.name}" to: ${events.join(', ')}`,
     );
+
+    // ── Synthetic ls:startup dispatch ───────────────────────────────────
+    if (hasStartup && !this.startupFired.has(scriptId)) {
+      if (isAnyBindingSatisfied(script.bindings)) {
+        this.startupFired.add(scriptId);
+        this.startupPending.delete(scriptId);
+        // Fire-and-forget — don't block registration of remaining scripts.
+        void this.fireStartup(script);
+      } else {
+        // Bindings not satisfied (e.g. no chat open yet). Defer until
+        // retryPendingStartups() is called on context change.
+        this.startupPending.add(scriptId);
+      }
+    }
   }
 
   /** Remove all spindle.on() subscriptions for a specific script. */
@@ -272,25 +313,147 @@ export class TriggerRegistry {
     clearCommandHandlerByScriptId(scriptId);
   }
 
-  /** Remove all registered subscriptions (all scripts). */
+  /**
+   * Remove all registered subscriptions (all scripts).
+   * Clears startup tracking — a subsequent `reloadAll()` will re-fire
+   * `ls:startup` for all eligible scripts. This gives "full teardown"
+   * semantics: master toggle off → on restarts everything.
+   */
   unregisterAll(): void {
     for (const [id] of [...this.cleanups]) {
       this.unregister(id);
     }
+    this.startupFired.clear();
+    this.startupPending.clear();
   }
 
   /**
    * Full reload: unregister everything, then re-subscribe all enabled triggers.
    * Called on startup, on enabled/triggers changes, and on settings changes.
+   *
+   * Preserves `startupFired` across the unregister/re-register cycle so that
+   * `syncTriggers()` calls (from script mutations, code edits, etc.) do NOT
+   * re-fire startup scripts that already ran this session. The
+   * `unregisterAll()` call inside would normally clear the set; we save and
+   * restore it here. A standalone `unregisterAll()` call (master toggle off)
+   * DOES clear the set — giving fresh-start semantics.
    */
   async reloadAll(scripts: Script[]): Promise<void> {
+    const savedFired   = new Set(this.startupFired);
+    const savedPending = new Set(this.startupPending);
     this.unregisterAll();
+    this.startupFired   = savedFired;
+    this.startupPending = savedPending;
+
     for (const script of scripts) {
       if (script.type === 'trigger' && script.enabled) {
         await this.register(script);
       }
     }
   }
+
+  // ─── ls:startup dispatch ──────────────────────────────────────────────────
+
+  /**
+   * Retry deferred `ls:startup` scripts whose bindings were previously
+   * unsatisfied. Called by backend.ts when the active context changes
+   * (chat open, character switch) so that character-bound startup scripts
+   * get a second chance.
+   */
+  async retryPendingStartups(): Promise<void> {
+    if (this.startupPending.size === 0) return;
+    const { scriptStorage } = this.getDeps();
+    for (const scriptId of [...this.startupPending]) {
+      const script = scriptStorage.getScript(scriptId);
+      if (!script || !script.enabled || script.type !== 'trigger') {
+        this.startupPending.delete(scriptId);
+        continue;
+      }
+      if (!isAnyBindingSatisfied(script.bindings)) continue; // still not satisfied
+      this.startupPending.delete(scriptId);
+      this.startupFired.add(scriptId);
+      await this.fireStartup(script);
+    }
+  }
+
+  /**
+   * Execute a script's body for `ls:startup`. Mirrors the event-handler
+   * execution path (watchdog, auto-cleanup, frontend notifications, toast on
+   * error) but without batch-aggregation — startup fires once, not
+   * concurrently.
+   */
+  private async fireStartup(script: Script): Promise<void> {
+    const { grantedPermissions, userId, scriptStorage, onToolsChanged, scriptTimeoutMs } = this.getDeps();
+    const ctx = getActiveContext();
+    const runId = generateUUID();
+
+    executionStatusStore.markRunning(script.id);
+    this.sendToFrontend({
+      type: 'execution_started',
+      scriptId: script.id,
+      scriptName: script.name,
+      runId,
+    });
+
+    clearBroadcastByScriptId(script.id);
+    clearCommandHandlerByScriptId(script.id);
+
+    const preRunToolNames = toolNamesByScript(script.id);
+    const toolsRegisteredThisRun = new Set<string>();
+
+    const opts: ExecutorOptions = {
+      grantedPermissions,
+      userId,
+      scriptStorage,
+      activeContext: ctx,
+      eventData: { __event: LS_STARTUP },
+      onConsole: (entry) =>
+        this.sendToFrontend({ type: 'console_entry', scriptId: script.id, runId, entry }),
+      onToolsChanged,
+      timeoutMs: scriptTimeoutMs,
+      toolsRegisteredThisRun,
+    };
+
+    const syncWatchdogMs = (scriptTimeoutMs ?? HARD_LIMIT_MS) + 5_000;
+    const syncWatchdog = setTimeout(() => {
+      spindle.log.error(
+        `[LumiScript] Startup script "${script.name}" blocked the worker — terminating`,
+      );
+      process.exit(1);
+    }, syncWatchdogMs);
+
+    const result = await executeScript(script, opts);
+    clearTimeout(syncWatchdog);
+
+    const staleTools = diffAndCleanStaleTools(script.id, preRunToolNames, toolsRegisteredThisRun);
+    for (const name of staleTools) {
+      try { spindle.unregisterTool(name); } catch { /* swallow */ }
+    }
+
+    if (result.success) {
+      executionStatusStore.markSuccess(script.id, result.duration);
+    } else {
+      executionStatusStore.markError(script.id, result.duration, result.error?.message ?? 'Unknown error');
+    }
+
+    this.sendToFrontend({
+      type: 'execution_ended',
+      scriptId: script.id,
+      runId: result.runId,
+      success: result.success,
+      duration: result.duration,
+      error: result.error?.message,
+    });
+
+    if (!result.success) {
+      spindle.toast.error(result.error?.message ?? 'Unknown error', {
+        title: `LumiScript — ${script.name}`,
+        duration: 10_000,
+      });
+    }
+  }
+
+  // ─── Diagnostics ──────────────────────────────────────────────────────────
 
   /**
    * Returns the currently subscribed event names per script.

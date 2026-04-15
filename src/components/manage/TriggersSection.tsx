@@ -11,6 +11,12 @@ interface EventGroup {
 
 export const TRIGGER_EVENT_GROUPS: EventGroup[] = [
   {
+    label: 'LumiScript',
+    events: [
+      { name: 'ls:startup', description: 'Fires once at LumiScript boot. Use for tool registration, cache pre-warming, and other one-time init.' },
+    ],
+  },
+  {
     label: 'Chat',
     events: [
       { name: 'MESSAGE_SENT',               description: 'A message was appended to the chat' },

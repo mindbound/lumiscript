@@ -643,6 +643,10 @@ spindle.on('SETTINGS_UPDATED', (payload: unknown) => {
       setActiveContext({ chatId: newChatId });
       const ctx = getActiveContext();
       send({ type: 'active_context', characterId: ctx.characterId, characterName: ctx.characterName, chatId: ctx.chatId });
+      // Retry any ls:startup scripts whose bindings were previously unsatisfied
+      // (e.g. character-bound scripts that couldn't fire at boot because no chat
+      // was open). Now that a chat is active, their bindings may be satisfied.
+      void triggerRegistry.retryPendingStartups();
     }
     // Closing (null): leave context unchanged so scripts bound to the chat or
     // character being closed can still fire their handlers. CHAT_CHANGED will
