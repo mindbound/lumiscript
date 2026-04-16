@@ -72,41 +72,41 @@ function toUpdateDTO(
 // ─── API builder ──────────────────────────────────────────────────────────────
 
 export function buildCharactersAPI(deps: APIBuildDeps): LumiScriptAPI['characters'] {
-  const { hasPerm, userId } = deps;
+  const { script, hasPerm, userId } = deps;
   const uid = userId ?? undefined;
 
   return {
     list: async (options) => {
-      assertPerm('characters', hasPerm);
+      assertPerm('characters', hasPerm, script.name);
       const result = await spindle.characters.list({ ...options, userId: uid });
       return { data: result.data.map(mapCharacter), total: result.total };
     },
 
     get: async (id) => {
-      assertPerm('characters', hasPerm);
+      assertPerm('characters', hasPerm, script.name);
       const dto = await spindle.characters.get(id, uid);
       return dto ? mapCharacter(dto) : null;
     },
 
     create: async (input) => {
-      assertPerm('characters', hasPerm);
+      assertPerm('characters', hasPerm, script.name);
       const dto = await spindle.characters.create(toCreateDTO(input), uid);
       return mapCharacter(dto);
     },
 
     update: async (id, input) => {
-      assertPerm('characters', hasPerm);
+      assertPerm('characters', hasPerm, script.name);
       const dto = await spindle.characters.update(id, toUpdateDTO(input), uid);
       return mapCharacter(dto);
     },
 
     delete: async (id) => {
-      assertPerm('characters', hasPerm);
+      assertPerm('characters', hasPerm, script.name);
       return spindle.characters.delete(id, uid);
     },
 
     getByName: async (name: string) => {
-      assertPerm('characters', hasPerm);
+      assertPerm('characters', hasPerm, script.name);
       // Scan all pages until a match is found or the list is exhausted.
       // Character names are not guaranteed unique in Lumiverse; the first
       // matching character is returned. Using a page size of 100 to minimise

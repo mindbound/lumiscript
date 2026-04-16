@@ -51,7 +51,7 @@ export function buildChatAPI(deps: APIBuildDeps): LumiScriptAPI['chat'] {
     getChatId: () => activeContext.chatId,
 
     getMessages: (opts) => {
-      assertPerm('chat_mutation', hasPerm);
+      assertPerm('chat_mutation', hasPerm, script.name);
       const id = requireChatId(activeContext);
       return shielded(
         spindle.chat.getMessages(id).then(msgs => {
@@ -71,7 +71,7 @@ export function buildChatAPI(deps: APIBuildDeps): LumiScriptAPI['chat'] {
     },
 
     sendMessage: (content, opts) => {
-      assertPerm('chat_mutation', hasPerm);
+      assertPerm('chat_mutation', hasPerm, script.name);
       const id = requireChatId(activeContext);
       return shielded(
         spindle.chat.appendMessage(id, {
@@ -83,19 +83,19 @@ export function buildChatAPI(deps: APIBuildDeps): LumiScriptAPI['chat'] {
     },
 
     editMessage: (msgId, content) => {
-      assertPerm('chat_mutation', hasPerm);
+      assertPerm('chat_mutation', hasPerm, script.name);
       const id = requireChatId(activeContext);
       return shielded(spindle.chat.updateMessage(id, msgId, { content }));
     },
 
     deleteMessage: (msgId) => {
-      assertPerm('chat_mutation', hasPerm);
+      assertPerm('chat_mutation', hasPerm, script.name);
       const id = requireChatId(activeContext);
       return shielded(spindle.chat.deleteMessage(id, msgId));
     },
 
     getMetadata: (key: string) => {
-      assertPerm('chats', hasPerm);
+      assertPerm('chats', hasPerm, script.name);
       const id = requireChatId(activeContext);
       return shielded(
         spindle.chats.get(id, uid).then(dto => {
@@ -106,7 +106,7 @@ export function buildChatAPI(deps: APIBuildDeps): LumiScriptAPI['chat'] {
     },
 
     setMetadata: (key: string, value: unknown) => {
-      assertPerm('chats', hasPerm);
+      assertPerm('chats', hasPerm, script.name);
       const id = requireChatId(activeContext);
       // Serialise via the per-chat queue so concurrent setMetadata calls for
       // the same chat cannot interleave at the two awaits and lose each other's
@@ -128,7 +128,7 @@ export function buildChatAPI(deps: APIBuildDeps): LumiScriptAPI['chat'] {
     // ── Prompt injection ────────────────────────────────────────────────────
 
     inject(id, content, options) {
-      assertPerm('interceptor', hasPerm);
+      assertPerm('interceptor', hasPerm, script.name);
       addInjection({
         id,
         content,
@@ -157,12 +157,12 @@ export function buildChatAPI(deps: APIBuildDeps): LumiScriptAPI['chat'] {
     },
 
     clearInjections() {
-      assertPerm('interceptor', hasPerm);
+      assertPerm('interceptor', hasPerm, script.name);
       clearByScriptId(script.id);
     },
 
     clearAllInjections() {
-      assertPerm('interceptor', hasPerm);
+      assertPerm('interceptor', hasPerm, script.name);
       assertDangerous(script);
       clearAll();
     },
@@ -170,19 +170,19 @@ export function buildChatAPI(deps: APIBuildDeps): LumiScriptAPI['chat'] {
     // ── Message hiding ─────────────────────────────────────────────────────
 
     setMessageHidden: (msgId: string, hidden: boolean) => {
-      assertPerm('chat_mutation', hasPerm);
+      assertPerm('chat_mutation', hasPerm, script.name);
       const id = requireChatId(activeContext);
       return shielded(spindle.chat.setMessageHidden(id, msgId, hidden));
     },
 
     setMessagesHidden: (msgIds: string[], hidden: boolean) => {
-      assertPerm('chat_mutation', hasPerm);
+      assertPerm('chat_mutation', hasPerm, script.name);
       const id = requireChatId(activeContext);
       return shielded(spindle.chat.setMessagesHidden(id, msgIds, hidden));
     },
 
     isMessageHidden: (msgId: string) => {
-      assertPerm('chat_mutation', hasPerm);
+      assertPerm('chat_mutation', hasPerm, script.name);
       const id = requireChatId(activeContext);
       return shielded(spindle.chat.isMessageHidden(id, msgId));
     },

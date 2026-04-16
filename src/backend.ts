@@ -14,14 +14,13 @@ import { generateUUID } from './utils/uuid.js';
 import { readFile } from 'fs/promises';
 import { listByMode, listAll, clearEphemeral, clearByScriptId } from './engine/injection-store.js';
 import {
-  getTool,
   clearByScriptId as clearToolsByScriptId,
   listAll as listAllTools,
   removeByName as removeToolByName,
   listNamesByScriptId as toolNamesByScript,
   diffAndCleanStaleTools,
 } from './engine/tool-store.js';
-import { emit as broadcastEmit } from './engine/broadcast-bus.js';
+import { dispatchToolInvocation } from './engine/tool-invocation.js';
 import { dispatchEvent as dispatchDOMEvent, cleanupScript as cleanupDOMScript } from './engine/dom-registry.js';
 
 // ─── Active user + permission tracking ───────────────────────────────────────
@@ -226,45 +225,21 @@ spindle.registerInterceptor(async (messages, context) => {
 
 // ─── Tool invocation dispatch ─────────────────────────────────────────────────
 //
-// Registered once at startup. Receives TOOL_INVOCATION messages for ALL tools
-// registered by LumiScript scripts — both Council (inline mode) and native LLM
-// function-calling paths.
+// Registered once at startup. Routes TOOL_INVOCATION messages for ALL tools
+// registered by LumiScript scripts — both the Council path (inline mode) and
+// the native LLM function-calling path use the same handler.
 //
-// The handler dispatches to the script's stored handler function. The handler
-// was already wrapped in buildToolsAPI to inject the `api` reference lazily,
-// so we only need to forward `args` here.
+// The dispatch logic lives in `./engine/tool-invocation.ts` so it can be tested
+// directly (without mocking Spindle's event bus). The return value is awaited
+// by the worker-runtime and posted back as `tool_invocation_result` with the
+// matching requestId — this is the only path through which Council tools'
+// results reach the deliberation block, so it is covered by a dedicated test
+// suite.
 //
 // IMPORTANT: The 'TOOL_INVOCATION' key must be UPPERCASE — the worker-runtime
 // case "tool_invocation" dispatches to eventHandlers.get("TOOL_INVOCATION")
 // (uppercase), and spindle.on() stores keys as-is without normalisation.
-spindle.on('TOOL_INVOCATION', async (event: unknown) => {
-  const { toolName, args } = event as { toolName: string; args: Record<string, unknown> };
-
-  // Council routes qualified names like "lumiscript:roll_dice" while direct
-  // LLM tool calls use bare names. Normalize by stripping any "extensionId:"
-  // prefix so a single handler dispatch works for both paths. Mirrors the
-  // same normalization Spotify Controls does at its TOOL_INVOCATION site.
-  const bareName = toolName.includes(':') ? toolName.split(':').pop()! : toolName;
-
-  // (1) Imperative path — tools registered at runtime via api.tools.register().
-  const entry = getTool(bareName);
-  if (entry) {
-    const start = Date.now();
-    const result = await Promise.resolve(entry.handler(args));
-    broadcastEmit('ls:tool:invoked', {
-      name:     bareName,
-      args,
-      result,
-      scriptId: entry.scriptId,
-      callMs:   Date.now() - start,
-    });
-    return result;
-  }
-
-  // No handler matched.
-  spindle.log.warn(`[LumiScript] TOOL_INVOCATION: no handler for tool '${bareName}'`);
-  return '';
-});
+spindle.on('TOOL_INVOCATION', dispatchToolInvocation);
 
 // ─── Trigger registry ─────────────────────────────────────────────────────────
 
@@ -787,6 +762,30 @@ spindle.permissions.onDenied(({ permission, operation }) => {
   // Trigger handlers are initialized lazily on the first frontend message once
   // storage and userId are both available (see triggersInitialized guard above).
   // userId is not available at startup so getActive/storage cannot be called here.
+
+  // Probe Lumiverse version info (spindle.version.* is available from
+  // spindle-types 0.4.21 / Lumiverse staging onward). Stashed on globalThis so
+  // future feature-gating checks don't have to re-query Spindle. Falls back to
+  // null on older hosts that don't implement the namespace yet — callers must
+  // treat these as "unknown" rather than a specific version.
+  void (async () => {
+    try {
+      const [backend, frontend] = await Promise.all([
+        spindle.version.getBackend().catch(() => null),
+        spindle.version.getFrontend().catch(() => null),
+      ]);
+      (globalThis as Record<string, unknown>).__lsLumiverseBackendVersion  = backend;
+      (globalThis as Record<string, unknown>).__lsLumiverseFrontendVersion = frontend;
+      if (backend || frontend) {
+        spindle.log.info(`[LumiScript] Host Lumiverse versions — backend: ${backend ?? 'unknown'}, frontend: ${frontend ?? 'unknown'}`);
+      }
+    } catch {
+      // spindle.version namespace missing entirely — pre-0.4.21 host. Leave
+      // the globals unset; feature-gating code should treat `undefined` as
+      // "namespace unavailable" and skip capability-dependent paths.
+    }
+  })();
+
   spindle.log.info('LumiScript backend ready');
 })();
 

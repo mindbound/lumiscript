@@ -200,11 +200,11 @@ function strictifySchema(schema: Record<string, unknown>): Record<string, unknow
 // ─── API builder ──────────────────────────────────────────────────────────────
 
 export function buildLLMAPI(deps: APIBuildDeps): LumiScriptAPI['llm'] {
-  const { hasPerm, userId, activeContext } = deps;
+  const { script, hasPerm, userId, activeContext } = deps;
 
   return {
     generate: (messages, opts) => {
-      assertPerm('generation', hasPerm);
+      assertPerm('generation', hasPerm, script.name);
       if (opts?.provider) assertProvider(opts.provider);
       return shielded(
         resolveConnection(opts, userId).then(conn => {
@@ -237,7 +237,7 @@ export function buildLLMAPI(deps: APIBuildDeps): LumiScriptAPI['llm'] {
       schema: ZodLike<T> | Record<string, unknown>,
       opts?: LLMOptions,
     ): Promise<T> => {
-      assertPerm('generation', hasPerm);
+      assertPerm('generation', hasPerm, script.name);
       if (opts?.provider) assertProvider(opts.provider);
       // Detect and convert schema before the async chain so errors surface synchronously.
       const zodSchema = isZodLike(schema) ? (schema as z.ZodType<T>) : null;
@@ -322,7 +322,7 @@ export function buildLLMAPI(deps: APIBuildDeps): LumiScriptAPI['llm'] {
       opts?: LLMOptions,
       schema?: ZodLike<T> | Record<string, unknown>,
     ) => {
-      assertPerm('generation', hasPerm);
+      assertPerm('generation', hasPerm, script.name);
       if (opts?.provider) assertProvider(opts.provider);
       return shielded(
         resolveConnection(opts, userId).then(conn => {
@@ -403,7 +403,7 @@ export function buildLLMAPI(deps: APIBuildDeps): LumiScriptAPI['llm'] {
     }) as any,
 
     dryRun: (options?: DryRunOptions) => {
-      assertPerm('generation', hasPerm);
+      assertPerm('generation', hasPerm, script.name);
 
       const chatId = options?.chatId ?? activeContext.chatId;
       if (!chatId) {

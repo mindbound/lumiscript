@@ -1166,6 +1166,12 @@ export interface Persona {
   /** Organisational folder label. */
   folder: string;
   isDefault: boolean;
+  /** Subjective pronoun (e.g. "he", "she", "they"). Optional. */
+  subjectivePronoun?: string;
+  /** Objective pronoun (e.g. "him", "her", "them"). Optional. */
+  objectivePronoun?: string;
+  /** Possessive pronoun (e.g. "his", "her", "their"). Optional. */
+  possessivePronoun?: string;
   metadata: Record<string, unknown>;
   createdAt: number;
   updatedAt: number;
@@ -1180,6 +1186,12 @@ export interface PersonaCreateInput {
   isDefault?: boolean;
   /** Attach a world book by ID. */
   attachedWorldBookId?: string;
+  /** Subjective pronoun (e.g. "he", "she", "they"). */
+  subjectivePronoun?: string;
+  /** Objective pronoun (e.g. "him", "her", "them"). */
+  objectivePronoun?: string;
+  /** Possessive pronoun (e.g. "his", "her", "their"). */
+  possessivePronoun?: string;
   metadata?: Record<string, unknown>;
 }
 
@@ -1191,6 +1203,9 @@ export interface PersonaUpdateInput {
   folder?: string;
   isDefault?: boolean;
   attachedWorldBookId?: string;
+  subjectivePronoun?: string;
+  objectivePronoun?: string;
+  possessivePronoun?: string;
   metadata?: Record<string, unknown>;
 }
 

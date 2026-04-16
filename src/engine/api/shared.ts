@@ -5,6 +5,8 @@
  * Shared dependency type and utility functions used across all API modules.
  */
 
+declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
+
 import type { Script } from '../../types/script.js';
 
 // ─── Shared dependency object ─────────────────────────────────────────────────
@@ -50,14 +52,48 @@ export function shielded<T>(p: Promise<T>): Promise<T> {
   return p;
 }
 
-export function assertPerm(permission: string, hasPerm: (p: string) => boolean): void {
+/**
+ * Assert that the extension has been granted the named Spindle permission.
+ *
+ * When the check fails we log a warning to the server console BEFORE throwing.
+ * The warning survives any downstream try/catch that might swallow the throw
+ * (e.g. a best-effort debug helper), so there's always an audit trail for
+ * permission-denied events. Otherwise the denial is completely invisible —
+ * Spindle's `permissions.onDenied` handler never fires because we short-circuit
+ * before touching Spindle.
+ *
+ * @param scriptName Optional — when supplied, the log line identifies the
+ *   calling script. Every API builder has `deps.script.name` available; pass
+ *   it through whenever you can.
+ */
+export function assertPerm(
+  permission: string,
+  hasPerm: (p: string) => boolean,
+  scriptName?: string,
+): void {
   if (!hasPerm(permission)) {
+    const who = scriptName ? `script "${scriptName}"` : 'an unidentified script';
+    spindle.log.warn(
+      `[LumiScript] Permission "${permission}" not granted (required by ${who})`,
+    );
     throw new Error(`PERMISSION_DENIED:${permission} — grant this permission to use this API`);
   }
 }
 
+/**
+ * Assert that the calling script has `allowDangerous` enabled.
+ *
+ * Like `assertPerm`, logs a warning BEFORE throwing so the denial is visible
+ * in the server log even if the script wraps the gated call in a try/catch
+ * that swallows the error. `allowDangerous` is a LumiScript-internal flag
+ * (not a Spindle permission), so without this log there's no audit trail
+ * when a script tries to use a dangerous API without the flag.
+ */
 export function assertDangerous(script: Script): void {
   if (!script.allowDangerous) {
+    spindle.log.warn(
+      `[LumiScript] allowDangerous required but disabled on script "${script.name}"`,
+    );
     throw new Error(`"${script.name}" must have "Allow Dangerous" enabled to use this API`);
   }
 }

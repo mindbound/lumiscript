@@ -85,8 +85,9 @@ describe('executeScript', () => {
   });
 
   test('captures the script body\'s return value on success', async () => {
-    // Tool-script dispatch relies on this: the last-expression return is
-    // picked up by the TOOL_INVOCATION handler as the tool's result string.
+    // The executor surfaces the last-expression return value on
+    // `ScriptExecutionResult.returnValue`. Callers can use this for any
+    // script whose body computes a result (manual runs, library scripts, etc.).
     const script = makeScript({ code: 'return "the answer: " + (40 + 2);' });
     const result = await executeScript(script, makeOptions());
     expect(result.success).toBe(true);

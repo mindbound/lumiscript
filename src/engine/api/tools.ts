@@ -40,7 +40,7 @@ export function buildToolsAPI(
 
   return {
     register(name: string, def: ToolDefinition, handler: ToolHandler): void {
-      assertPerm('tools', hasPerm);
+      assertPerm('tools', hasPerm, script.name);
 
       // Wrap the user's handler so that api is injected at invocation time,
       // not at registration time. This breaks the circular dependency and

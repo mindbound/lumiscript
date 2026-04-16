@@ -133,7 +133,7 @@ export function buildUIAPI(deps: APIBuildDeps): Omit<LumiScriptAPI['ui'], 'dom'>
       body: string,
       options: { tag?: string; url?: string; icon?: string; rawTitle?: boolean; image?: string } = {},
     ): Promise<{ sent: number }> {
-      assertPerm('push_notification', deps.hasPerm);
+      assertPerm('push_notification', deps.hasPerm, deps.script.name);
       return shielded(
         spindle.push.send({
           title,
@@ -148,7 +148,7 @@ export function buildUIAPI(deps: APIBuildDeps): Omit<LumiScriptAPI['ui'], 'dom'>
     },
 
     getPushStatus(): Promise<{ available: boolean; subscriptionCount: number }> {
-      assertPerm('push_notification', deps.hasPerm);
+      assertPerm('push_notification', deps.hasPerm, deps.script.name);
       return shielded(spindle.push.getStatus(deps.userId ?? undefined));
     },
   };

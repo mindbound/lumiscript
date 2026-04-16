@@ -49,7 +49,7 @@ export function buildDOMAPI(deps: APIBuildDeps): LumiScriptAPI['ui']['dom'] {
   const scriptId = deps.script.id;
 
   function gate(): void {
-    assertPerm('app_manipulation', deps.hasPerm);
+    assertPerm('app_manipulation', deps.hasPerm, deps.script.name);
   }
 
   function createHandle(elementId: string): DOMHandle {

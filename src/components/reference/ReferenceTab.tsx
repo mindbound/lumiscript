@@ -635,7 +635,7 @@ const KEY_TYPES: TypeDoc[] = [
   // ─── Utils ────────────────────────────────────────────────────────────────────
   {
     name: 'HttpRequestOptions',
-    note: 'Passed to api.utils.http.get / post / put / delete / request. Requires allowDangerous + cors_proxy permission.',
+    note: 'Passed to api.utils.http.get / post / put / delete / request. Requires allowDangerous + cors_proxy permission. Responses are capped at 25 MB by the Lumiverse cors_proxy; larger bodies are rejected upstream.',
     fields: [
       { field: 'method?',  type: "'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH'", optional: true, desc: 'HTTP method. Default depends on the helper used.' },
       { field: 'headers?', type: 'Record<string, string>',                       optional: true, desc: 'Request headers.' },
@@ -645,7 +645,7 @@ const KEY_TYPES: TypeDoc[] = [
   },
   {
     name: 'HttpResponse',
-    note: 'Returned by api.utils.http.* methods.',
+    note: 'Returned by api.utils.http.* methods. Response body is capped at 25 MB by the Lumiverse cors_proxy — requests for larger payloads reject with an upstream error.',
     fields: [
       { field: 'status',     type: 'number',                  optional: false, desc: 'HTTP status code (e.g. 200, 404).' },
       { field: 'statusText', type: 'string',                  optional: false, desc: 'HTTP status text (e.g. "OK", "Not Found").' },
@@ -867,6 +867,9 @@ const KEY_TYPES: TypeDoc[] = [
       { field: 'attachedWorldBookId',  type: 'string | null',           optional: false, desc: 'World book attached to this persona. Null if none.' },
       { field: 'folder',               type: 'string',                  optional: false, desc: 'Organisational folder label.' },
       { field: 'isDefault',            type: 'boolean',                 optional: false, desc: 'Whether this is the default persona.' },
+      { field: 'subjectivePronoun?',   type: 'string',                  optional: true,  desc: 'Subjective pronoun (e.g. "he", "she", "they").' },
+      { field: 'objectivePronoun?',    type: 'string',                  optional: true,  desc: 'Objective pronoun (e.g. "him", "her", "them").' },
+      { field: 'possessivePronoun?',   type: 'string',                  optional: true,  desc: 'Possessive pronoun (e.g. "his", "her", "their").' },
       { field: 'metadata',             type: 'Record<string, unknown>', optional: false, desc: 'Arbitrary metadata.' },
       { field: 'createdAt',            type: 'number',                  optional: false, desc: 'Creation timestamp (Unix ms).' },
       { field: 'updatedAt',            type: 'number',                  optional: false, desc: 'Last update timestamp (Unix ms).' },
@@ -882,6 +885,9 @@ const KEY_TYPES: TypeDoc[] = [
       { field: 'folder?',               type: 'string',                  optional: true,  desc: 'Organisational folder label.' },
       { field: 'isDefault?',            type: 'boolean',                 optional: true,  desc: 'Set as default persona (clears previous default).' },
       { field: 'attachedWorldBookId?',  type: 'string',                  optional: true,  desc: 'World book UUID to attach.' },
+      { field: 'subjectivePronoun?',    type: 'string',                  optional: true,  desc: 'Subjective pronoun (e.g. "he", "she", "they").' },
+      { field: 'objectivePronoun?',     type: 'string',                  optional: true,  desc: 'Objective pronoun (e.g. "him", "her", "them").' },
+      { field: 'possessivePronoun?',    type: 'string',                  optional: true,  desc: 'Possessive pronoun (e.g. "his", "her", "their").' },
       { field: 'metadata?',             type: 'Record<string, unknown>', optional: true,  desc: 'Arbitrary metadata.' },
     ],
   },

@@ -38,41 +38,41 @@ function mapChatSession(dto: import('lumiverse-spindle-types').ChatDTO): ChatSes
 // ─── API builder ──────────────────────────────────────────────────────────────
 
 export function buildChatsAPI(deps: APIBuildDeps): LumiScriptAPI['chats'] {
-  const { hasPerm, userId, activeContext } = deps;
+  const { script, hasPerm, userId, activeContext } = deps;
   const uid = userId ?? undefined;
 
   return {
     list: async (options) => {
-      assertPerm('chats', hasPerm);
+      assertPerm('chats', hasPerm, script.name);
       const result = await spindle.chats.list({ ...options, userId: uid });
       return { data: result.data.map(mapChatSession), total: result.total };
     },
 
     get: async (id) => {
-      assertPerm('chats', hasPerm);
+      assertPerm('chats', hasPerm, script.name);
       const dto = await spindle.chats.get(id, uid);
       return dto ? mapChatSession(dto) : null;
     },
 
     getActive: async () => {
-      assertPerm('chats', hasPerm);
+      assertPerm('chats', hasPerm, script.name);
       const dto = await spindle.chats.getActive(uid);
       return dto ? mapChatSession(dto) : null;
     },
 
     update: async (id, input: ChatSessionUpdateInput) => {
-      assertPerm('chats', hasPerm);
+      assertPerm('chats', hasPerm, script.name);
       const dto = await spindle.chats.update(id, input, uid);
       return mapChatSession(dto);
     },
 
     delete: async (id) => {
-      assertPerm('chats', hasPerm);
+      assertPerm('chats', hasPerm, script.name);
       return spindle.chats.delete(id, uid);
     },
 
     getMemories: async (chatId, options) => {
-      assertPerm('chats', hasPerm);
+      assertPerm('chats', hasPerm, script.name);
       const id = chatId ?? requireChatId(activeContext);
       // ChatMemoryResultDTO is already camelCase — pass through as-is.
       return spindle.chats.getMemories(id, {

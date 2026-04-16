@@ -145,7 +145,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // ─── API builder ──────────────────────────────────────────────────────────────
 
 export function buildWorldInfoAPI(deps: APIBuildDeps): LumiScriptAPI['worldInfo'] {
-  const { hasPerm, userId, activeContext } = deps;
+  const { script, hasPerm, userId, activeContext } = deps;
   const uid = userId ?? undefined;
 
   // Per-execution name→id cache to avoid redundant list() calls when the same
@@ -179,7 +179,7 @@ export function buildWorldInfoAPI(deps: APIBuildDeps): LumiScriptAPI['worldInfo'
     // ── World book CRUD ───────────────────────────────────────────────────────
 
     async list(options) {
-      assertPerm('world_books', hasPerm);
+      assertPerm('world_books', hasPerm, script.name);
       const result = await spindle.world_books.list({ ...options, userId: uid });
       // Populate name cache as a side-effect so subsequent name lookups are free.
       for (const book of result.data) nameCache.set(book.name, book.id);
@@ -187,7 +187,7 @@ export function buildWorldInfoAPI(deps: APIBuildDeps): LumiScriptAPI['worldInfo'
     },
 
     async get(ref) {
-      assertPerm('world_books', hasPerm);
+      assertPerm('world_books', hasPerm, script.name);
       const id = await resolveBookId(ref);
       const dto = await spindle.world_books.get(id, uid);
       if (dto) nameCache.set(dto.name, dto.id); // keep cache warm
@@ -195,14 +195,14 @@ export function buildWorldInfoAPI(deps: APIBuildDeps): LumiScriptAPI['worldInfo'
     },
 
     async create(input: WorldInfoCreateInput) {
-      assertPerm('world_books', hasPerm);
+      assertPerm('world_books', hasPerm, script.name);
       const dto = await spindle.world_books.create(input, uid);
       nameCache.set(dto.name, dto.id);
       return mapWorldBook(dto);
     },
 
     async update(ref, input: WorldInfoUpdateInput) {
-      assertPerm('world_books', hasPerm);
+      assertPerm('world_books', hasPerm, script.name);
       const id = await resolveBookId(ref);
       const dto = await spindle.world_books.update(id, input, uid);
       nameCache.set(dto.name, dto.id); // name may have changed
@@ -210,7 +210,7 @@ export function buildWorldInfoAPI(deps: APIBuildDeps): LumiScriptAPI['worldInfo'
     },
 
     async delete(ref) {
-      assertPerm('world_books', hasPerm);
+      assertPerm('world_books', hasPerm, script.name);
       const id = await resolveBookId(ref);
       return spindle.world_books.delete(id, uid);
     },
@@ -219,7 +219,7 @@ export function buildWorldInfoAPI(deps: APIBuildDeps): LumiScriptAPI['worldInfo'
 
     entries: {
       async list(ref, options) {
-        assertPerm('world_books', hasPerm);
+        assertPerm('world_books', hasPerm, script.name);
         const id = await resolveBookId(ref);
         const result = await spindle.world_books.entries.list(id, {
           ...options,
@@ -229,13 +229,13 @@ export function buildWorldInfoAPI(deps: APIBuildDeps): LumiScriptAPI['worldInfo'
       },
 
       async get(entryId) {
-        assertPerm('world_books', hasPerm);
+        assertPerm('world_books', hasPerm, script.name);
         const dto = await spindle.world_books.entries.get(entryId, uid);
         return dto ? mapEntry(dto) : null;
       },
 
       async create(ref, input: WorldInfoEntryInput) {
-        assertPerm('world_books', hasPerm);
+        assertPerm('world_books', hasPerm, script.name);
         const id = await resolveBookId(ref);
         const dto = await spindle.world_books.entries.create(
           id,
@@ -246,7 +246,7 @@ export function buildWorldInfoAPI(deps: APIBuildDeps): LumiScriptAPI['worldInfo'
       },
 
       async update(entryId, input: WorldInfoEntryInput) {
-        assertPerm('world_books', hasPerm);
+        assertPerm('world_books', hasPerm, script.name);
         const dto = await spindle.world_books.entries.update(
           entryId,
           mapEntryInput(input),
@@ -256,7 +256,7 @@ export function buildWorldInfoAPI(deps: APIBuildDeps): LumiScriptAPI['worldInfo'
       },
 
       async delete(entryId) {
-        assertPerm('world_books', hasPerm);
+        assertPerm('world_books', hasPerm, script.name);
         return spindle.world_books.entries.delete(entryId, uid);
       },
     },
@@ -264,7 +264,7 @@ export function buildWorldInfoAPI(deps: APIBuildDeps): LumiScriptAPI['worldInfo'
     // ── Activation scan ───────────────────────────────────────────────────────
 
     async getCapturedActive(chatId?: string): Promise<ActivatedWorldInfoEntry[]> {
-      assertPerm('world_books', hasPerm);
+      assertPerm('world_books', hasPerm, script.name);
 
       const id = chatId ?? activeContext.chatId;
       if (!id) throw new Error('api.worldInfo.getCapturedActive: no active chat — open a chat first');

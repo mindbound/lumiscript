@@ -21,7 +21,7 @@ export function buildFilesAPI(deps: APIBuildDeps): LumiScriptAPI['files'] {
   const danger = () => assertDangerous(script);
   const dangerTemp = () => {
     assertDangerous(script);
-    assertPerm('ephemeral_storage', hasPerm);
+    assertPerm('ephemeral_storage', hasPerm, script.name);
   };
 
   return {
