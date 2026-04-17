@@ -34,16 +34,37 @@ import {
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
 /**
+ * HTML-escape `&`, `<`, `>` in the supplied value, but only OUTSIDE of
+ * backticked inline-code spans. Inside backticks, content renders as
+ * inline code (no HTML parsing), so escapes would show up as literal
+ * `&lt;` to the reader. Used wherever user-supplied text is inlined into
+ * Markdown at places a strict parser might otherwise interpret as HTML
+ * (headings, italic notes, and — via `escapeCell` — table cells).
+ *
+ * Why we need this: names like `LLMRawResultStructured<T>` and phrases
+ * like "Add a <style> element" contain valid-looking HTML tokens.
+ * GitHub's sanitizer strips them; other parsers may consume content up
+ * to a closing tag that never arrives.
+ */
+function escapeHtmlOutsideBackticks(value: string): string {
+  const parts = value.split('`');
+  return parts.map((part, i) => {
+    if (i % 2 === 1) return part;
+    return part
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }).join('`');
+}
+
+/**
  * Escape a cell value so GitHub-flavoured Markdown tables render it literally.
  *
- * Handles three concerns:
+ * Handles three concerns on top of the shared HTML-escape logic:
  *
- *  1. Raw angle brackets outside backticks — strict GFM renderers (GitHub,
- *     Obsidian) try to parse them as HTML. `<string,` usually falls through
- *     as text because the comma isn't a valid tag char, but tokens like
- *     `<style>` are valid HTML tags and get stripped by sanitizers. We
- *     HTML-escape them outside inline-code spans so the literal text
- *     always renders.
+ *  1. Raw angle brackets outside backticks — delegated to
+ *     `escapeHtmlOutsideBackticks` (inline, to avoid an extra pass that
+ *     would re-escape the `<br>` we insert below).
  *
  *  2. Pipes outside backticks — must be `\|` to avoid splitting the cell.
  *     Inside backticks, GFM treats the pipe as literal code content, so
@@ -53,9 +74,6 @@ import {
  *     literal HTML, inserted AFTER the HTML-escape step so it isn't mangled.
  */
 function escapeCell(value: string): string {
-  // Split on backticks. Odd-indexed parts are inside inline code spans
-  // and should be passed through verbatim; even-indexed parts get the
-  // HTML / pipe escapes applied.
   const parts = value.split('`');
   const transformed = parts.map((part, i) => {
     if (i % 2 === 1) return part;
@@ -152,7 +170,11 @@ function renderKeyTypes(): string {
 }
 
 function renderTypeDoc(type: TypeDoc, headingLevel: '###' | '####' = '###'): string {
-  const note = type.note ? `*${type.note}*\n\n` : '';
+  // Escape angle brackets in the heading (e.g. `LLMRawResultStructured<T>`)
+  // and defensively in the italic note, so strict GFM sanitizers don't
+  // strip what they read as unclosed HTML tags.
+  const safeName = escapeHtmlOutsideBackticks(type.name);
+  const note = type.note ? `*${escapeHtmlOutsideBackticks(type.note)}*\n\n` : '';
   const body = table(
     ['Field', 'Type', 'Description'],
     // Type column wrapped in backticks so generics like `Record<string, unknown>`
@@ -162,7 +184,7 @@ function renderTypeDoc(type: TypeDoc, headingLevel: '###' | '####' = '###'): str
     // inside inline code).
     type.fields.map(f => [`\`${fieldLabel(f)}\``, `\`${f.type}\``, f.desc]),
   );
-  return `${headingLevel} ${type.name}\n\n${note}${body}`;
+  return `${headingLevel} ${safeName}\n\n${note}${body}`;
 }
 
 function renderApiFunctions(): string {
