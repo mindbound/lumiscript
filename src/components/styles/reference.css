@@ -7,6 +7,35 @@
   display: block;
 }
 
+/* ── Toolbar ─────────────────────────────────────────────────────────────── */
+.ls-ref-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
+}
+.ls-ref-export-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-family: inherit;
+  color: var(--lumiverse-text);
+  background: var(--lumiverse-fill-subtle);
+  border: 1px solid var(--lumiverse-border);
+  border-radius: var(--lumiverse-radius);
+  cursor: pointer;
+  transition: background var(--lumiverse-transition-fast), border-color var(--lumiverse-transition-fast);
+}
+.ls-ref-export-btn:hover {
+  background: color-mix(in srgb, var(--lumiverse-fill-subtle) 80%, var(--lumiverse-accent) 20%);
+  border-color: var(--lumiverse-accent);
+}
+.ls-ref-export-btn:focus-visible {
+  outline: 1px solid var(--lumiverse-accent);
+  outline-offset: 1px;
+}
+
 /* ── Section accordion ───────────────────────────────────────────────────── */
 .ls-ref-section {
   border: 1px solid var(--lumiverse-border);

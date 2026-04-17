@@ -1,5 +1,6 @@
 import { FC, useState } from 'react';
-import { Zap, Lock, Radio, List, Braces, Hash, Package, Blocks, Wrench, ChevronDown, ChevronRight } from 'lucide-react';
+import { Zap, Lock, Radio, List, Braces, Hash, Package, Blocks, Download, ChevronDown, ChevronRight } from 'lucide-react';
+import { downloadReferenceMarkdown } from './markdown-export.js';
 
 // ─── Section accordion ────────────────────────────────────────────────────────
 
@@ -53,7 +54,9 @@ const GroupHeader: FC<{ label: string; cols: number }> = ({ label, cols }) => (
 
 // ─── Events table ─────────────────────────────────────────────────────────────
 
-const EVENTS: Array<{ name: string; group: string; payload: string }> = [
+export interface EventRow { name: string; group: string; payload: string; }
+
+export const EVENTS: EventRow[] = [
   { group: 'Chat',       name: 'MESSAGE_SENT',               payload: '{ chatId, message }' },
   { group: 'Chat',       name: 'MESSAGE_EDITED',             payload: '{ chatId, message }' },
   { group: 'Chat',       name: 'MESSAGE_DELETED',            payload: '{ chatId, messageId }' },
@@ -106,18 +109,18 @@ const EventsTable: FC = () => {
 
 // ─── Permission matrix ────────────────────────────────────────────────────────
 
-interface PermRow {
+export interface PermRow {
   method: string;
   perms: string[];
   note?: string;
 }
 
-interface PermGroup {
+export interface PermGroup {
   group: string;
   rows: PermRow[];
 }
 
-const PERM_GROUPS: PermGroup[] = [
+export const PERM_GROUPS: PermGroup[] = [
   {
     group: 'Chat',
     rows: [
@@ -231,6 +234,30 @@ const PermsTable: FC = () => (
 
 // ─── Broadcast built-in events ────────────────────────────────────────────────
 
+export interface BroadcastEventRow {
+  name: string;
+  payload: string;
+  emittedBy: string;
+}
+
+export const BROADCAST_EVENTS: BroadcastEventRow[] = [
+  {
+    name:      'ls:tool:registered',
+    payload:   '{ name, scriptId }',
+    emittedBy: 'api.tools.register()',
+  },
+  {
+    name:      'ls:tool:unregistered',
+    payload:   '{ name, scriptId }',
+    emittedBy: 'api.tools.unregister() / auto-cleanup',
+  },
+  {
+    name:      'ls:tool:invoked',
+    payload:   '{ name, args, result, scriptId, callMs }',
+    emittedBy: 'api.tools.invoke() + TOOL_INVOCATION handler',
+  },
+];
+
 const BroadcastTable: FC = () => (
   <table className="ls-ref-table">
     <thead>
@@ -241,42 +268,34 @@ const BroadcastTable: FC = () => (
       </tr>
     </thead>
     <tbody>
-      <tr>
-        <td><Code>ls:tool:registered</Code></td>
-        <td><span className="ls-ref-muted">{'{ name, scriptId }'}</span></td>
-        <td><span className="ls-ref-muted">api.tools.register()</span></td>
-      </tr>
-      <tr>
-        <td><Code>ls:tool:unregistered</Code></td>
-        <td><span className="ls-ref-muted">{'{ name, scriptId }'}</span></td>
-        <td><span className="ls-ref-muted">api.tools.unregister() / auto-cleanup</span></td>
-      </tr>
-      <tr>
-        <td><Code>ls:tool:invoked</Code></td>
-        <td><span className="ls-ref-muted">{'{ name, args, result, scriptId, callMs }'}</span></td>
-        <td><span className="ls-ref-muted">api.tools.invoke() + TOOL_INVOCATION handler</span></td>
-      </tr>
+      {BROADCAST_EVENTS.map(row => (
+        <tr key={row.name}>
+          <td><Code>{row.name}</Code></td>
+          <td><span className="ls-ref-muted">{row.payload}</span></td>
+          <td><span className="ls-ref-muted">{row.emittedBy}</span></td>
+        </tr>
+      ))}
     </tbody>
   </table>
 );
 
 // ─── LumiScript macros ────────────────────────────────────────────────────────
 
-type MacroReturns = 'boolean' | 'string' | 'silent';
+export type MacroReturns = 'boolean' | 'string' | 'silent';
 
-interface LsMacroRow {
+export interface LsMacroRow {
   macro: string;
   aliases: string;
   returns: MacroReturns;
   desc: string;
 }
 
-interface LsMacroGroup {
+export interface LsMacroGroup {
   group: string;
   rows: LsMacroRow[];
 }
 
-const LS_MACRO_GROUPS: LsMacroGroup[] = [
+export const LS_MACRO_GROUPS: LsMacroGroup[] = [
   {
     group: 'Presence',
     rows: [
@@ -377,10 +396,10 @@ const LumiScriptMacrosTable: FC = () => (
 
 // ─── Key types ────────────────────────────────────────────────────────────────
 
-interface TypeField { field: string; type: string; optional: boolean; desc: string; }
-interface TypeDoc   { name: string; note?: string; fields: TypeField[]; }
+export interface TypeField { field: string; type: string; optional: boolean; desc: string; }
+export interface TypeDoc   { name: string; note?: string; fields: TypeField[]; }
 
-const KEY_TYPES: TypeDoc[] = [
+export const KEY_TYPES: TypeDoc[] = [
   // ─── Chat ────────────────────────────────────────────────────────────────────
   {
     name: 'ChatMessage',
@@ -1005,10 +1024,10 @@ const KeyTypesTable: FC = () => (
 
 // ─── API functions ────────────────────────────────────────────────────────────
 
-interface FnRow { name: string; args: string; desc: string; }
-interface FnGroup { group: string; rows: FnRow[]; }
+export interface FnRow { name: string; args: string; desc: string; }
+export interface FnGroup { group: string; rows: FnRow[]; }
 
-const API_GROUPS: FnGroup[] = [
+export const API_GROUPS: FnGroup[] = [
   {
     group: 'api.chat',
     rows: [
@@ -1270,7 +1289,7 @@ const ApiFunctionsTable: FC = () => (
 
 // ─── Built-in libraries ──────────────────────────────────────────────────────
 
-const BUILTIN_COMPONENTS: FnRow[] = [
+export const BUILTIN_COMPONENTS: FnRow[] = [
   { name: 'messageFooter',  args: 'messageId, html, options?',  desc: 'Attach a styled footer below a message bubble. Returns DOMHandle, or CollapsibleDOMHandle when options.collapsible is true. Options: { id?, className?, collapsible?, title?, defaultCollapsed? }.' },
   { name: 'messageHeader',  args: 'messageId, html, options?',  desc: 'Attach a styled header above message content. Returns DOMHandle, or CollapsibleDOMHandle when options.collapsible is true. Options: { id?, className?, collapsible?, title?, defaultCollapsed? }.' },
   { name: 'progressBar',    args: 'target, options?',           desc: 'Inject a progress bar with live setValue(). Returns ProgressBarHandle. Options: { value?, label?, color?, showPercent?, height?, id?, className? }.' },
@@ -1280,7 +1299,7 @@ const BUILTIN_COMPONENTS: FnRow[] = [
   { name: 'keyValueHtml',   args: 'label, value, options?',     desc: 'Returns label-value pair HTML string. Options: { muted?, className? }.' },
 ];
 
-const BUILTIN_TYPES: TypeDoc[] = [
+export const BUILTIN_TYPES: TypeDoc[] = [
   {
     name: 'MessageFooterOptions / MessageHeaderOptions',
     note: 'Options for messageFooter() and messageHeader().',
@@ -1415,6 +1434,18 @@ const BuiltinLibrariesSection: FC = () => (
 
 export const ReferenceTab: FC = () => (
   <div className="ls-ref">
+    <div className="ls-ref-toolbar">
+      <button
+        type="button"
+        className="ls-ref-export-btn"
+        onClick={() => downloadReferenceMarkdown()}
+        title="Download the current reference as a Markdown file"
+      >
+        <Download size={11} />
+        Export Markdown
+      </button>
+    </div>
+
     <Section icon={<Zap size={11} />} title="Lumiverse Events" defaultOpen>
       <EventsTable />
     </Section>
@@ -1450,45 +1481,6 @@ export const ReferenceTab: FC = () => (
 
     <Section icon={<Blocks size={11} />} title="Built-in Libraries">
       <BuiltinLibrariesSection />
-    </Section>
-
-    <Section icon={<Wrench size={11} />} title="Tool Scripts">
-      <p className="ls-ref-muted" style={{ marginBottom: 6 }}>
-        A <strong>tool script</strong> declares a Council-eligible tool that LumiScript
-        registers with Spindle at boot. The tool appears in the Council panel
-        from the moment Lumiverse launches — no trigger event required. When
-        the tool is invoked (by a Council member or by direct LLM function
-        calling), LumiScript runs the script body as the handler.
-      </p>
-      <p className="ls-ref-muted" style={{ marginBottom: 6 }}>
-        <strong>Metadata</strong> (set in the editor sidebar's Tool section, not
-        frontmatter): <Code>Display name</Code>, <Code>Description</Code>,
-        <Code> Parameters</Code> (JSON Schema), <Code>Council eligible</Code>.
-        The script's <Code>name</Code> is the tool's registration name passed
-        to <Code>spindle.registerTool()</Code>.
-      </p>
-      <p className="ls-ref-muted" style={{ marginBottom: 6 }}>
-        <strong>Body contract</strong> — invocation args arrive in <Code>data</Code>:
-      </p>
-      <ul className="ls-ref-muted" style={{ marginBottom: 6, marginLeft: 14, listStyle: 'disc' }}>
-        <li><Code>data.&lt;param&gt;</Code> — parameters declared in the tool's schema</li>
-        <li><Code>data.context</Code> — formatted chat context (Council invocations only)</li>
-        <li><Code>data.__userId</Code>, <Code>data.__deadlineMs</Code> — host-injected metadata</li>
-      </ul>
-      <p className="ls-ref-muted" style={{ marginBottom: 6 }}>
-        The script's <strong>last-expression return value</strong> becomes the tool's
-        result string (non-string values are coerced via <Code>String()</Code>;
-        <Code> undefined</Code> becomes <Code>""</Code>). Throwing an error marks
-        the invocation as failed and dispatches the standard LumiScript failure
-        toast + sticky red dot.
-      </p>
-      <p className="ls-ref-muted">
-        <strong>Contrast with <Code>api.tools.register()</Code></strong> — imperative
-        registration from inside any script still works unchanged. That path
-        is runtime (the tool exists only while/after the owning script has
-        run since Lumiverse boot). Tool scripts are the declarative,
-        startup-persistent alternative.
-      </p>
     </Section>
 
     <Section icon={<Package size={11} />} title="Script Packs">
