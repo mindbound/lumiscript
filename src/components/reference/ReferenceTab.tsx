@@ -45,8 +45,11 @@ const Silent: FC = () => (
   <span className="ls-ref-muted" style={{ fontStyle: 'italic' }}>silent</span>
 );
 
-/** Full-width group header row spanning all table columns */
-const GroupHeader: FC<{ label: string; cols: number }> = ({ label, cols }) => (
+/** Full-width group header row spanning all table columns. Accepts ReactNode
+ *  so callers can compose a label with inline description (e.g. the
+ *  LumiScriptMacrosTable's "Character Variables" group has an explanatory
+ *  subline rendered alongside the short label). */
+const GroupHeader: FC<{ label: React.ReactNode; cols: number }> = ({ label, cols }) => (
   <tr>
     <td colSpan={cols} className="ls-ref-group-header">{label}</td>
   </tr>
@@ -291,13 +294,18 @@ export interface LsMacroRow {
 }
 
 export interface LsMacroGroup {
-  group: string;
+  /** Short category label shown in the table's group header. */
+  label: string;
+  /** Optional prose describing the group — rendered as a subline in the UI
+   *  and as an italic paragraph under the heading in the Markdown export.
+   *  Kept separate from `label` so the Markdown heading stays short. */
+  description?: string;
   rows: LsMacroRow[];
 }
 
 export const LS_MACRO_GROUPS: LsMacroGroup[] = [
   {
-    group: 'Presence',
+    label: 'Presence',
     rows: [
       {
         macro:   '{{lumiScriptActive}}',
@@ -308,7 +316,8 @@ export const LS_MACRO_GROUPS: LsMacroGroup[] = [
     ],
   },
   {
-    group: 'Character Variables — reads/writes the active character\'s variable store. Write operations are silent.',
+    label:       'Character Variables',
+    description: "reads/writes the active character's variable store. Write operations are silent.",
     rows: [
       {
         macro:   '{{getcvar::key}}',
@@ -375,7 +384,15 @@ const LumiScriptMacrosTable: FC = () => (
     <tbody>
       {LS_MACRO_GROUPS.map(group => (
         <>
-          <GroupHeader key={`hdr-${group.group}`} label={group.group} cols={4} />
+          <GroupHeader
+            key={`hdr-${group.label}`}
+            label={
+              group.description
+                ? <>{group.label} — <span className="ls-ref-muted" style={{ fontWeight: 'normal' }}>{group.description}</span></>
+                : group.label
+            }
+            cols={4}
+          />
           {group.rows.map(row => (
             <tr key={row.macro}>
               <td><Code>{row.macro}</Code></td>
@@ -912,9 +929,18 @@ export const KEY_TYPES: TypeDoc[] = [
   },
   {
     name: 'PersonaUpdateInput',
-    note: 'Passed to api.personas.update(personaId, input). Same fields as PersonaCreateInput, all optional.',
+    note: 'Passed to api.personas.update(personaId, input). All fields optional — only the fields provided are updated; omitted fields are left unchanged.',
     fields: [
-      { field: '(same fields as PersonaCreateInput)', type: '— all optional', optional: true, desc: 'Only the fields provided are updated. Omitted fields are left unchanged.' },
+      { field: 'name?',                 type: 'string',                  optional: true, desc: 'New persona name.' },
+      { field: 'title?',                type: 'string',                  optional: true, desc: 'Short tagline.' },
+      { field: 'description?',          type: 'string',                  optional: true, desc: 'Persona description.' },
+      { field: 'folder?',               type: 'string',                  optional: true, desc: 'Organisational folder label.' },
+      { field: 'isDefault?',            type: 'boolean',                 optional: true, desc: 'Set as default persona (clears previous default).' },
+      { field: 'attachedWorldBookId?',  type: 'string',                  optional: true, desc: 'World book UUID to attach.' },
+      { field: 'subjectivePronoun?',    type: 'string',                  optional: true, desc: 'Subjective pronoun (e.g. "he", "she", "they").' },
+      { field: 'objectivePronoun?',     type: 'string',                  optional: true, desc: 'Objective pronoun (e.g. "him", "her", "them").' },
+      { field: 'possessivePronoun?',    type: 'string',                  optional: true, desc: 'Possessive pronoun (e.g. "his", "her", "their").' },
+      { field: 'metadata?',             type: 'Record<string, unknown>', optional: true, desc: 'Arbitrary metadata (replaces entire object).' },
     ],
   },
   // ─── Tools ────────────────────────────────────────────────────────────────────

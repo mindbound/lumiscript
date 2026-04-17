@@ -35,14 +35,37 @@ import {
 
 /**
  * Escape a cell value so GitHub-flavoured Markdown tables render it literally.
- * Pipes must be escaped; newlines inside cells become HTML line breaks so the
- * row doesn't split. Backticks are preserved — they're part of our convention
- * for inline code in descriptions.
+ *
+ * Handles three concerns:
+ *
+ *  1. Raw angle brackets outside backticks — strict GFM renderers (GitHub,
+ *     Obsidian) try to parse them as HTML. `<string,` usually falls through
+ *     as text because the comma isn't a valid tag char, but tokens like
+ *     `<style>` are valid HTML tags and get stripped by sanitizers. We
+ *     HTML-escape them outside inline-code spans so the literal text
+ *     always renders.
+ *
+ *  2. Pipes outside backticks — must be `\|` to avoid splitting the cell.
+ *     Inside backticks, GFM treats the pipe as literal code content, so
+ *     we leave those alone.
+ *
+ *  3. Newlines — become `<br>` so the row doesn't split. This is deliberate
+ *     literal HTML, inserted AFTER the HTML-escape step so it isn't mangled.
  */
 function escapeCell(value: string): string {
-  return value
-    .replace(/\|/g, '\\|')
-    .replace(/\r?\n/g, '<br>');
+  // Split on backticks. Odd-indexed parts are inside inline code spans
+  // and should be passed through verbatim; even-indexed parts get the
+  // HTML / pipe escapes applied.
+  const parts = value.split('`');
+  const transformed = parts.map((part, i) => {
+    if (i % 2 === 1) return part;
+    return part
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/\|/g, '\\|');
+  }).join('`');
+  return transformed.replace(/\r?\n/g, '<br>');
 }
 
 function table(headers: readonly string[], rows: ReadonlyArray<readonly string[]>): string {
@@ -115,7 +138,10 @@ function renderLumiScriptMacros(): string {
         row.desc,
       ]),
     );
-    return `### ${group.group}\n\n${body}`;
+    const parts = [`### ${group.label}`];
+    if (group.description) parts.push(`*${group.description}*`);
+    parts.push(body);
+    return parts.join('\n\n');
   });
   const footer = 'Character variable macros read from and write to the active character\'s store at `variables/characters/<id>.json` in user storage. They resolve to `""` when no character is active.';
   return `## LumiScript Macros\n\n${sections.join('\n\n')}\n\n*${footer}*`;
@@ -129,7 +155,12 @@ function renderTypeDoc(type: TypeDoc, headingLevel: '###' | '####' = '###'): str
   const note = type.note ? `*${type.note}*\n\n` : '';
   const body = table(
     ['Field', 'Type', 'Description'],
-    type.fields.map(f => [`\`${fieldLabel(f)}\``, f.type, f.desc]),
+    // Type column wrapped in backticks so generics like `Record<string, unknown>`
+    // and `Promise<ModalResult>` render consistently across GFM parsers — inline
+    // code content isn't HTML-parsed. Also harmonises enum-union types like
+    // `'user' | 'assistant' | 'system'` (pipes don't need backslash-escape
+    // inside inline code).
+    type.fields.map(f => [`\`${fieldLabel(f)}\``, `\`${f.type}\``, f.desc]),
   );
   return `${headingLevel} ${type.name}\n\n${note}${body}`;
 }
