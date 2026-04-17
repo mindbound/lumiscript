@@ -12,4 +12,3 @@ More docs will land here as the feature surface grows.
 
 - **In-app reference** — LumiScript's Script Manager has a **Reference** tab that documents the runtime surface (events, permissions, macros, key types, `api.*` functions, built-in libraries, script-pack import/export). The tab's toolbar has an `Export Markdown` button that produces an exportable copy.
 - **Source comments** — the `src/` tree is JSDoc-rich; header comment blocks on engine modules, API builders, and shared utilities describe intent and edge cases that aren't repeated elsewhere.
-- **Working notes** — `notes/` (gitignored) carries design journals, investigation logs, and deferred-work memoranda. Not part of the public documentation surface.
