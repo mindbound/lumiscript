@@ -198,6 +198,7 @@ export const PERM_GROUPS: PermGroup[] = [
     group: 'Tools & Broadcast',
     rows: [
       { method: 'api.tools.*', perms: ['tools'] },
+      { method: 'api.macros.*', perms: [] },
       { method: 'api.broadcast.*', perms: [] },
       { method: 'api.commands.*', perms: [] },
       { method: 'api.events.*', perms: ['event_tracking'] },
@@ -258,6 +259,16 @@ export const BROADCAST_EVENTS: BroadcastEventRow[] = [
     name:      'ls:tool:invoked',
     payload:   '{ name, args, result, scriptId, callMs }',
     emittedBy: 'api.tools.invoke() + TOOL_INVOCATION handler',
+  },
+  {
+    name:      'ls:macro:registered',
+    payload:   `{ name, scriptId, mode: 'push' | 'pull' }`,
+    emittedBy: 'api.macros.register()',
+  },
+  {
+    name:      'ls:macro:unregistered',
+    payload:   '{ name, scriptId }',
+    emittedBy: 'api.macros.unregister() / auto-cleanup',
   },
 ];
 
@@ -977,6 +988,43 @@ export const KEY_TYPES: TypeDoc[] = [
       { field: 'scriptName',       type: 'string',  optional: false, desc: 'Name of the script that registered this tool.' },
     ],
   },
+  // ─── Macros ──────────────────────────────────────────────────────────────────
+  {
+    name: 'MacroDefinition',
+    note: 'Passed to api.macros.register(name, def, handler?).',
+    fields: [
+      { field: 'description', type: 'string',                                         optional: false, desc: 'Human-readable description shown in preset editors and macro browsers.' },
+      { field: 'category?',   type: 'string',                                         optional: true,  desc: "Category label. Default: 'extension:lumiscript:user'." },
+      { field: 'returnType?', type: "'string'|'integer'|'number'|'boolean'",          optional: true,  desc: 'Hint for value-type coercion on resolution. Default string.' },
+      { field: 'args?',       type: 'Array<{ name, description?, required? }>',      optional: true,  desc: 'Argument schema shown to preset authors.' },
+    ],
+  },
+  {
+    name: 'MacroContext',
+    note: 'Parameter passed to a pull-mode macro handler at resolution time. Mirrors Lumiverse\'s MacroExecContext. Per convention, `args` is on ctx — not a top-level variable.',
+    fields: [
+      { field: 'name',       type: 'string',                                optional: false, desc: 'The bare macro name (no `{{}}`, no arguments).' },
+      { field: 'args',       type: 'string[]',                              optional: false, desc: 'Argument tokens parsed from the macro invocation.' },
+      { field: 'env?',       type: '{ character?, chat?, names?, variables?, … }', optional: true, desc: 'Environment context populated by the macro engine (character UUID is NOT in here; use globalThis.__lsActiveCharId if you need it).' },
+      { field: 'isScoped?',  type: 'boolean',                               optional: true,  desc: 'True when the macro is resolved inside a scoped block (e.g. {{if::…}}…{{/if}}).' },
+      { field: 'body?',      type: 'string',                                optional: true,  desc: 'Body text for scoped macros.' },
+    ],
+  },
+  {
+    name: 'RegisteredMacroInfo',
+    note: 'Returned by api.macros.list(). Visible across scripts — any script can see push-values set by any other script (matches the already-world-readable nature of macros).',
+    fields: [
+      { field: 'name',        type: 'string',                                optional: false, desc: 'Macro identifier.' },
+      { field: 'description', type: 'string',                                optional: false, desc: 'Description as supplied at registration.' },
+      { field: 'category',    type: 'string',                                optional: false, desc: 'Category label. User-registered macros default to `extension:lumiscript:user`.' },
+      { field: 'returnType?', type: "'string'|'integer'|'number'|'boolean'", optional: true,  desc: 'Return-type hint.' },
+      { field: 'args?',       type: 'Array<{ name, description?, required? }>', optional: true, desc: 'Argument schema.' },
+      { field: 'mode',        type: "'push' | 'pull'",                       optional: false, desc: '`push` when registered without a handler; `pull` when handler-backed.' },
+      { field: 'lastValue?',  type: 'string',                                optional: true,  desc: 'Most recent value pushed via updateValue. Only meaningful in push mode.' },
+      { field: 'scriptId',    type: 'string',                                optional: false, desc: 'ID of the owning script.' },
+      { field: 'scriptName',  type: 'string',                                optional: false, desc: 'Name of the owning script.' },
+    ],
+  },
   // ─── Events ──────────────────────────────────────────────────────────────────
   {
     name: 'EventTrackOptions',
@@ -1243,6 +1291,15 @@ export const API_GROUPS: FnGroup[] = [
       { name: 'unregister', args: 'name',                desc: "Unregister a tool registered by this script. No-op if not found." },
       { name: 'list',       args: '—',                   desc: 'List all currently registered tools across all scripts.' },
       { name: 'invoke',     args: 'name, args?',         desc: 'Invoke a registered tool handler directly (for use inside an agentic loop).' },
+    ],
+  },
+  {
+    group: 'api.macros',
+    rows: [
+      { name: 'register',    args: 'name, def, handler?', desc: 'Register a Lumiverse macro. Omit handler for push-mode (value set via updateValue); provide handler for pull-mode (computed at resolution).' },
+      { name: 'updateValue', args: 'name, value',         desc: 'Push a new value for a push-mode macro. Throws if the macro was registered with a handler.' },
+      { name: 'unregister',  args: 'name',                desc: 'Unregister a macro owned by this script. No-op if not found or not owned.' },
+      { name: 'list',        args: '—',                   desc: 'List all currently registered macros across all scripts.' },
     ],
   },
   {

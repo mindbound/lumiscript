@@ -31,6 +31,8 @@ import type { ScriptStorage } from '../storage/script-storage.js';
 import { clearByScriptId as clearBroadcastByScriptId } from './broadcast-bus.js';
 import { clearCommandHandlerByScriptId } from './api/commands.js';
 import { listNamesByScriptId as toolNamesByScript, diffAndCleanStaleTools } from './tool-store.js';
+import { listNamesByScriptId as macroNamesByScript, diffAndCleanStaleMacros } from './macro-store.js';
+import { logCleanup } from './cleanup-log.js';
 
 // ─── Dependency factory ───────────────────────────────────────────────────────
 
@@ -185,9 +187,11 @@ export class TriggerRegistry {
         clearCommandHandlerByScriptId(scriptId);
 
         // ── Execute the current script body ────────────────────────────────
-        // Snapshot tool names before execution for the auto-cleanup diff.
-        const preRunToolNames = toolNamesByScript(scriptId);
-        const toolsRegisteredThisRun = new Set<string>();
+        // Snapshot tool + macro names before execution for the auto-cleanup diff.
+        const preRunToolNames  = toolNamesByScript(scriptId);
+        const preRunMacroNames = macroNamesByScript(scriptId);
+        const toolsRegisteredThisRun  = new Set<string>();
+        const macrosRegisteredThisRun = new Set<string>();
 
         const opts: ExecutorOptions = {
           grantedPermissions,
@@ -200,6 +204,7 @@ export class TriggerRegistry {
           onToolsChanged,
           timeoutMs: scriptTimeoutMs,
           toolsRegisteredThisRun,
+          macrosRegisteredThisRun,
         };
 
         // Sync-loop watchdog: process.exit(1) is the only escape when the
@@ -215,11 +220,17 @@ export class TriggerRegistry {
         const result = await executeScript(currentScript, opts);
         clearTimeout(syncWatchdog);
 
-        // ── Auto-cleanup stale tools ──────────────────────────────────────
+        // ── Auto-cleanup stale tools + macros ─────────────────────────────
         const staleTools = diffAndCleanStaleTools(scriptId, preRunToolNames, toolsRegisteredThisRun);
         for (const name of staleTools) {
           try { spindle.unregisterTool(name); } catch { /* swallow */ }
         }
+        const staleMacros = diffAndCleanStaleMacros(scriptId, preRunMacroNames, macrosRegisteredThisRun);
+        for (const name of staleMacros) {
+          try { spindle.unregisterMacro(name); } catch { /* swallow */ }
+        }
+        logCleanup('tool',  'stale after re-run', currentScript.name, staleTools);
+        logCleanup('macro', 'stale after re-run', currentScript.name, staleMacros);
 
         // ── Fold this invocation's result into the batch aggregates ───────
         const prevMax = this.batchMaxDuration.get(currentScript.id) ?? 0;
@@ -398,8 +409,10 @@ export class TriggerRegistry {
     clearBroadcastByScriptId(script.id);
     clearCommandHandlerByScriptId(script.id);
 
-    const preRunToolNames = toolNamesByScript(script.id);
-    const toolsRegisteredThisRun = new Set<string>();
+    const preRunToolNames  = toolNamesByScript(script.id);
+    const preRunMacroNames = macroNamesByScript(script.id);
+    const toolsRegisteredThisRun  = new Set<string>();
+    const macrosRegisteredThisRun = new Set<string>();
 
     const opts: ExecutorOptions = {
       grantedPermissions,
@@ -412,6 +425,7 @@ export class TriggerRegistry {
       onToolsChanged,
       timeoutMs: scriptTimeoutMs,
       toolsRegisteredThisRun,
+      macrosRegisteredThisRun,
     };
 
     const syncWatchdogMs = (scriptTimeoutMs ?? HARD_LIMIT_MS) + 5_000;
@@ -429,6 +443,12 @@ export class TriggerRegistry {
     for (const name of staleTools) {
       try { spindle.unregisterTool(name); } catch { /* swallow */ }
     }
+    const staleMacros = diffAndCleanStaleMacros(script.id, preRunMacroNames, macrosRegisteredThisRun);
+    for (const name of staleMacros) {
+      try { spindle.unregisterMacro(name); } catch { /* swallow */ }
+    }
+    logCleanup('tool',  'stale after re-run', script.name, staleTools);
+    logCleanup('macro', 'stale after re-run', script.name, staleMacros);
 
     if (result.success) {
       executionStatusStore.markSuccess(script.id, result.duration);

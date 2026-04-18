@@ -61,6 +61,7 @@ import { buildEnclaveAPI   } from './api/enclave.js';
 import { buildCommandsAPI  } from './api/commands.js';
 import { buildEventsAPI   } from './api/events.js';
 import { buildDOMAPI      } from './api/dom.js';
+import { buildMacrosAPI   } from './api/macros.js';
 import { resolveBuiltin, isBuiltinName } from './builtin-library-registry.js';
 
 // ─── Executor options ─────────────────────────────────────────────────────────
@@ -102,6 +103,12 @@ export interface ExecutorOptions {
    * detect and unregister stale tools that the updated code no longer creates.
    */
   toolsRegisteredThisRun?: Set<string>;
+  /**
+   * Parallel tracker for `api.macros.register(name, ...)` calls. Consumed by
+   * `diffAndCleanStaleMacros` post-execution to auto-unregister macros the
+   * updated script body no longer creates. See `toolsRegisteredThisRun`.
+   */
+  macrosRegisteredThisRun?: Set<string>;
 }
 
 // ─── Cross-script console context ────────────────────────────────────────────
@@ -241,10 +248,28 @@ export async function executeScript(
 // ─── API assembler (exported for use by TriggerRegistry) ──────────────────────
 
 export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiScriptAPI {
-  const { grantedPermissions, activeContext, userId, onToolsChanged, toolsRegisteredThisRun } = options;
+  const {
+    grantedPermissions,
+    activeContext,
+    userId,
+    onToolsChanged,
+    toolsRegisteredThisRun,
+    macrosRegisteredThisRun,
+  } = options;
   const hasPerm = (p: string) => grantedPermissions.has(p);
 
-  const deps: APIBuildDeps = { script, hasPerm, userId, activeContext, onToolsChanged, toolsRegisteredThisRun };
+  const deps: APIBuildDeps = {
+    script,
+    hasPerm,
+    userId,
+    activeContext,
+    onToolsChanged,
+    toolsRegisteredThisRun,
+    // `onMacrosChanged` is intentionally omitted for v1 — no Status-tab
+    // "Active Macros" list yet. The seam exists on APIBuildDeps so the UI
+    // can be wired in later without touching this file or api/macros.ts.
+    macrosRegisteredThisRun,
+  };
 
   // api is captured in a variable so that buildToolsAPI can receive a lazy
   // getter (() => api) that resolves to the fully-constructed object at
@@ -263,6 +288,7 @@ export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiSc
     worldInfo:  buildWorldInfoAPI(deps),
     personas:   buildPersonasAPI(deps),
     tools:      buildToolsAPI(deps, () => api),
+    macros:     buildMacrosAPI(deps),
     broadcast:  buildBroadcastAPI(deps),
     commands:   buildCommandsAPI(deps),
     events:     buildEventsAPI(deps),

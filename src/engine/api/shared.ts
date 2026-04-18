@@ -37,6 +37,19 @@ export interface APIBuildDeps {
    * When present, `buildToolsAPI` adds every tool name to this set on register.
    */
   toolsRegisteredThisRun?: Set<string>;
+  /**
+   * Parallel to `onToolsChanged` for macros. No caller wires this in v1 (no
+   * Status-tab "Active Macros" list yet) — the seam is here so the UI can
+   * light up later without changes to the API builder.
+   */
+  onMacrosChanged?: () => void;
+  /**
+   * Per-execution macro-registration tracker. When present, `buildMacrosAPI`
+   * adds every macro name to this set on register. Consumed by
+   * `diffAndCleanStaleMacros` at post-execution to auto-unregister macros
+   * the updated script body no longer creates. Mirrors `toolsRegisteredThisRun`.
+   */
+  macrosRegisteredThisRun?: Set<string>;
 }
 
 // ─── Shared utility functions ─────────────────────────────────────────────────

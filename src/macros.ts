@@ -18,7 +18,25 @@
 
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
 
+import { RESERVED_MACRO_NAMES } from './engine/reserved-macro-names.js';
+
 const CATEGORY = 'extension:lumiscript';
+
+/**
+ * Boot-time sanity check: every macro name this module registers must appear
+ * in `RESERVED_MACRO_NAMES`. If someone adds a new internal macro without
+ * also updating the reserved set, the mismatch would leave `macro-store`
+ * unaware of the name and a user script could steal it. Fail loudly at boot
+ * rather than let that happen silently.
+ */
+function ensureReserved(name: string): void {
+  if (!RESERVED_MACRO_NAMES.has(name)) {
+    throw new Error(
+      `[LumiScript] Internal macro "${name}" is not listed in RESERVED_MACRO_NAMES. ` +
+      `Update src/engine/reserved-macro-names.ts in the same commit.`,
+    );
+  }
+}
 
 // ─── Typed context interface (subset of MacroExecContext sent via IPC) ────────
 
@@ -79,8 +97,12 @@ async function writeCharVars(characterId: string, data: Record<string, unknown>)
   );
 }
 
-/** Register a macro and zero or more aliases sharing the same definition. */
+/** Register a macro and zero or more aliases sharing the same definition.
+ *  Asserts every name is present in `RESERVED_MACRO_NAMES` so user-script
+ *  registrations can safely assume LumiScript-internal names are protected. */
 function reg(def: Record<string, unknown>, ...aliases: string[]): void {
+  ensureReserved(def.name as string);
+  for (const alias of aliases) ensureReserved(alias);
   spindle.registerMacro(def as any);
   for (const alias of aliases) {
     spindle.registerMacro({ ...def, name: alias } as any);
@@ -97,6 +119,7 @@ export function registerLumiScriptMacros(isEnabled: () => boolean): void {
 
   // ── {{lumiScriptActive}} — push model ─────────────────────────────────────
 
+  ensureReserved('lumiScriptActive');
   spindle.registerMacro({
     name: 'lumiScriptActive',
     category: CATEGORY,

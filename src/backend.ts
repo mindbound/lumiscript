@@ -20,6 +20,12 @@ import {
   listNamesByScriptId as toolNamesByScript,
   diffAndCleanStaleTools,
 } from './engine/tool-store.js';
+import {
+  clearByScriptId as clearMacrosByScriptId,
+  listNamesByScriptId as macroNamesByScript,
+  diffAndCleanStaleMacros,
+} from './engine/macro-store.js';
+import { logCleanup } from './engine/cleanup-log.js';
 import { dispatchToolInvocation } from './engine/tool-invocation.js';
 import { dispatchEvent as dispatchDOMEvent, cleanupScript as cleanupDOMScript } from './engine/dom-registry.js';
 
@@ -393,13 +399,21 @@ spindle.onFrontendMessage(async (raw, userId) => {
         ) {
           pushTools();
         }
-        // Clear injections, tools, and DOM when a script is disabled so stale entries don't linger.
+        // Clear injections, tools, macros, and DOM when a script is disabled so stale entries don't linger.
         if ('enabled' in msg.patch && !msg.patch.enabled) {
+          const disabledScript  = scriptStorage.getScript(msg.id);
+          const disabledName    = disabledScript?.name ?? msg.id;
           clearByScriptId(msg.id);
           pushInjections();
           const clearedTools = clearToolsByScriptId(msg.id);
           for (const name of clearedTools) spindle.unregisterTool(name);
           pushTools();
+          const clearedMacros = clearMacrosByScriptId(msg.id);
+          for (const name of clearedMacros) {
+            try { spindle.unregisterMacro(name); } catch { /* swallow */ }
+          }
+          logCleanup('tool',  'disabled', disabledName, clearedTools);
+          logCleanup('macro', 'disabled', disabledName, clearedMacros);
           cleanupDOMScript(msg.id);
           send({ type: 'dom_cleanup_script', scriptId: msg.id });
         }
@@ -407,12 +421,22 @@ spindle.onFrontendMessage(async (raw, userId) => {
       }
 
       case 'delete_script': {
-        // Clear injections, tools, and DOM this script registered before removing it.
+        // Clear injections, tools, macros, and DOM this script registered before removing it.
+        // Capture the name BEFORE deleteScript() removes it from storage so
+        // the cleanup log has a readable identifier.
+        const deletedScript = scriptStorage.getScript(msg.id);
+        const deletedName   = deletedScript?.name ?? msg.id;
         clearByScriptId(msg.id);
         pushInjections();
         const clearedTools = clearToolsByScriptId(msg.id);
         for (const name of clearedTools) spindle.unregisterTool(name);
         pushTools();
+        const clearedMacros = clearMacrosByScriptId(msg.id);
+        for (const name of clearedMacros) {
+          try { spindle.unregisterMacro(name); } catch { /* swallow */ }
+        }
+        logCleanup('tool',  'deleted', deletedName, clearedTools);
+        logCleanup('macro', 'deleted', deletedName, clearedMacros);
         cleanupDOMScript(msg.id);
         send({ type: 'dom_cleanup_script', scriptId: msg.id });
         await scriptStorage.deleteScript(msg.id);
@@ -513,11 +537,14 @@ spindle.onFrontendMessage(async (raw, userId) => {
           process.exit(1);
         }, timeoutMs + 5_000);
 
-        // Snapshot tool names owned by this script BEFORE execution so we
-        // can diff afterwards and auto-unregister anything the new code no
-        // longer creates (e.g. user renamed `roll_dice` → `roll_d20`).
-        const preRunToolNames = toolNamesByScript(script.id);
-        const toolsRegisteredThisRun = new Set<string>();
+        // Snapshot tool + macro names owned by this script BEFORE execution
+        // so we can diff afterwards and auto-unregister anything the new
+        // code no longer creates (e.g. user renamed `roll_dice` → `roll_d20`,
+        // or removed an `api.macros.register(...)` call).
+        const preRunToolNames  = toolNamesByScript(script.id);
+        const preRunMacroNames = macroNamesByScript(script.id);
+        const toolsRegisteredThisRun  = new Set<string>();
+        const macrosRegisteredThisRun = new Set<string>();
 
         const result = await executeScript(script, {
           grantedPermissions,
@@ -529,16 +556,23 @@ spindle.onFrontendMessage(async (raw, userId) => {
           scriptStorage,
           timeoutMs,
           toolsRegisteredThisRun,
+          macrosRegisteredThisRun,
         });
         clearTimeout(syncWatchdog);
 
-        // ── Auto-cleanup stale tools ──────────────────────────────────────
+        // ── Auto-cleanup stale tools + macros ─────────────────────────────
         // Anything the script owned before this run but did NOT re-register
         // during this execution is stale. Remove from the store + Spindle.
         const staleTools = diffAndCleanStaleTools(script.id, preRunToolNames, toolsRegisteredThisRun);
         for (const name of staleTools) {
           try { spindle.unregisterTool(name); } catch { /* swallow */ }
         }
+        const staleMacros = diffAndCleanStaleMacros(script.id, preRunMacroNames, macrosRegisteredThisRun);
+        for (const name of staleMacros) {
+          try { spindle.unregisterMacro(name); } catch { /* swallow */ }
+        }
+        logCleanup('tool',  'stale after re-run', script.name, staleTools);
+        logCleanup('macro', 'stale after re-run', script.name, staleMacros);
 
         if (result.success) {
           executionStatusStore.markSuccess(script.id, result.duration);

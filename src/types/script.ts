@@ -219,6 +219,8 @@ export interface LumiScriptAPI {
   enclave: EnclaveAPI;
   /** Register LLM tools invocable by Lumiverse Council and inline LLM function-calling. Requires tools permission. */
   tools: ToolsAPI;
+  /** Register Lumiverse macros from scripts. Both push-model (register + updateValue) and pull-model (register with handler) are supported. No permission required. */
+  macros: MacrosAPI;
   /** Real-time script-to-script pub/sub broadcast bus. No permission required. */
   broadcast: BroadcastAPI;
   /** Command palette registration. No permission required. */
@@ -1875,6 +1877,149 @@ export interface ToolsAPI {
   invoke(name: string, args?: Record<string, unknown>): Promise<string>;
 }
 
+// ─── Macros API ──────────────────────────────────────────────────────────────
+
+/**
+ * Context passed to a pull-model macro handler at resolution time.
+ *
+ * Mirrors Lumiverse's internal `MacroExecContext`. Handlers receive a single
+ * parameter named `ctx` — per Lumiverse convention, `args` is a property on
+ * ctx (`ctx.args[0]`), NOT a top-level variable.
+ *
+ * Async data must be pre-loaded into `globalThis` before macro resolution if
+ * the handler is a SYNC string-compiled handler. Function-reference handlers
+ * (the path used by `api.macros.register()` with a function argument) can
+ * be async directly.
+ */
+export interface MacroContext {
+  /** The bare macro name (no `{{}}`, no arguments). */
+  name: string;
+  /** Argument tokens parsed from the macro invocation. */
+  args: string[];
+  /** Environment context populated by the macro engine at resolution time. */
+  env?: {
+    character?: { id?: string; name?: string; [k: string]: unknown };
+    chat?:      { id?: string; [k: string]: unknown };
+    names?:     { char?: string; user?: string; [k: string]: unknown };
+    variables?: { local?: Record<string, string>; global?: Record<string, string> };
+    [k: string]: unknown;
+  };
+  /** True when the macro is resolved inside a scoped block (e.g. `{{if::...}}…{{/if}}`). */
+  isScoped?: boolean;
+  /** Body text for scoped macros. */
+  body?: string;
+}
+
+/** Pull-model handler signature. May be sync or async. */
+export type MacroHandler = (ctx: MacroContext) => string | Promise<string>;
+
+/** Passed to `api.macros.register(name, def, handler?)`. */
+export interface MacroDefinition {
+  /** Human-readable description shown in preset editors and macro browsers. */
+  description: string;
+  /**
+   * Category label used to group the macro in Lumiverse's macro browser.
+   * Defaults to `extension:lumiscript:user` so script-registered macros stay
+   * separate from LumiScript's internal `extension:lumiscript` family.
+   */
+  category?: string;
+  /** Hint for value-type coercion on resolution. Defaults to `string`. */
+  returnType?: 'string' | 'integer' | 'number' | 'boolean';
+  /** Argument schema shown to preset authors. */
+  args?: { name: string; description?: string; required?: boolean }[];
+}
+
+/**
+ * Serialisable snapshot of a registered macro. Returned from `api.macros.list()`.
+ *
+ * `lastValue` is visible across scripts — any script calling `list()` can see
+ * push-values set by any other script. This matches the already-world-readable
+ * nature of macros (any preset can reference any macro by name).
+ */
+export interface RegisteredMacroInfo {
+  name: string;
+  description: string;
+  category: string;
+  returnType?: 'string' | 'integer' | 'number' | 'boolean';
+  args?: { name: string; description?: string; required?: boolean }[];
+  /** `'push'` if registered without a handler; `'pull'` if registered with one. */
+  mode: 'push' | 'pull';
+  /** Most recent value pushed via `updateValue`. Only meaningful for push-mode macros. */
+  lastValue?: string;
+  scriptId: string;
+  scriptName: string;
+}
+
+/**
+ * `api.macros` — register Lumiverse macros from scripts.
+ *
+ * Two registration modes share one surface:
+ *
+ * - **Push-mode** (no handler): register the macro, then push values via
+ *   `updateValue`. The Lumiverse macro engine resolves each occurrence to
+ *   whatever value was last pushed. Best for state that changes on
+ *   script-internal events (e.g. "current scene", "active quest"). No
+ *   resolution-time latency.
+ *
+ * - **Pull-mode** (handler provided): the handler runs every time the macro
+ *   is resolved during prompt assembly. Handlers may be sync or async. Best
+ *   for values that depend on live context (current character, chat ID,
+ *   argument tokens) or need computation at resolution time.
+ *
+ * LumiScript reserves macro names used by its own internal macros
+ * (`lumiScriptActive`, the character-variable family). Attempting to
+ * register one throws.
+ *
+ * No Lumiverse permission required — macro registration is a naming
+ * operation. Side effects inside a pull-mode handler are still gated by
+ * the permissions its inner API calls require.
+ */
+export interface MacrosAPI {
+  /**
+   * Register a macro. Omit `handler` for push-mode; provide it for pull-mode.
+   *
+   * @throws  if `name` matches a reserved LumiScript-internal macro name.
+   * @throws  if `name` is already registered by a different script.
+   *
+   * @example  push-mode
+   * api.macros.register('currentScene', { description: 'Active scene name.', returnType: 'string' });
+   * api.macros.updateValue('currentScene', 'Market square');
+   *
+   * @example  pull-mode
+   * api.macros.register(
+   *   'unread_count',
+   *   { description: 'Count of unread messages.', returnType: 'integer' },
+   *   async (ctx) => {
+   *     const msgs = await api.chat.getMessages();
+   *     return String(msgs.filter(m => !m.metadata?.read).length);
+   *   },
+   * );
+   */
+  register(name: string, def: MacroDefinition, handler?: MacroHandler): void;
+
+  /**
+   * Push a new value for a push-mode macro. Only valid against macros
+   * registered by the calling script.
+   *
+   * @throws  if the named macro was registered with a handler (pull-mode).
+   *          Pull-mode macros compute their value from the handler and
+   *          ignore pushed values; failing fast here surfaces the mistake.
+   */
+  updateValue(name: string, value: string): void;
+
+  /**
+   * Unregister a macro by name. Only removes macros owned by the calling
+   * script. Silent no-op if not found or not owned.
+   */
+  unregister(name: string): void;
+
+  /**
+   * List all currently registered macros across all scripts. Use for
+   * diagnostics, dashboards, or debugging.
+   */
+  list(): RegisteredMacroInfo[];
+}
+
 // ─── Broadcast API ───────────────────────────────────────────────────────────
 
 /**
@@ -1890,6 +2035,8 @@ export interface ToolsAPI {
  * | `ls:tool:invoked`       | `{ name, args, result, scriptId, callMs }`           |
  * | `ls:tool:registered`    | `{ name, scriptId }`                                 |
  * | `ls:tool:unregistered`  | `{ name, scriptId }`                                 |
+ * | `ls:macro:registered`   | `{ name, scriptId, mode }` where mode is 'push'|'pull' |
+ * | `ls:macro:unregistered` | `{ name, scriptId }`                                 |
  *
  * Use any other name for your own custom events.
  */
