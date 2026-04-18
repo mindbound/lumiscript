@@ -3,7 +3,7 @@ import { Code2, BookMarked, Plus, Upload, Download, FileCode2, FolderOpen, Chevr
 import type { Script, ScriptType } from '../../types/script.js';
 import type { FrontendToBackend } from '../../types/messages.js';
 import { ScriptListItem, type ExecutionDot } from './ScriptListItem.js';
-import { exportScriptPack } from '../../utils/pack-export.js';
+import { exportScriptPack, buildScriptPackBytes } from '../../utils/pack-export.js';
 import { parseScriptPack } from '../../utils/pack-import.js';
 
 interface ScriptExecInfo {
@@ -18,6 +18,20 @@ interface ScriptListProps {
   onSelect: (id: string) => void;
   onEdit: (id: string) => void;
   sendToBackend: (msg: FrontendToBackend) => void;
+}
+
+/**
+ * Base64-encode a byte array for transport across the frontend→backend
+ * message channel. Uses chunked String.fromCharCode to avoid blowing the
+ * call stack on packs larger than the per-call argument limit (~65k).
+ */
+function bytesToBase64(bytes: Uint8Array): string {
+  const CHUNK = 0x8000;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
 }
 
 /** Group scripts by folder. Scripts without a folder go into the '' group. */
@@ -70,8 +84,19 @@ export const ScriptList: FC<ScriptListProps> = ({
     sendToBackend({ type: 'create_script', name: name.trim(), scriptType: activeType });
   };
 
-  const handleExport = () => {
+  const handleExport = (e: React.MouseEvent<HTMLButtonElement>) => {
     if (filtered.length === 0) return;
+    // Shift+click → save to extension storage instead of browser download.
+    // Used by external dev tooling that polls a fixed path on disk.
+    if (e.shiftKey) {
+      const bytes = buildScriptPackBytes(filtered);
+      sendToBackend({
+        type: 'save_pack_to_disk',
+        bytesB64: bytesToBase64(bytes),
+        scriptType: activeType,
+      });
+      return;
+    }
     const packName = window.prompt('Pack name:', 'my-scripts');
     if (!packName?.trim()) return;
     exportScriptPack(filtered, packName.trim());
@@ -144,7 +169,7 @@ export const ScriptList: FC<ScriptListProps> = ({
           <button
             className="ls-icon-btn"
             onClick={handleExport}
-            title="Export current scripts as pack"
+            title="Export current scripts as pack (Shift+click: save to extension storage)"
             disabled={filtered.length === 0}
           >
             <Download size={15} />

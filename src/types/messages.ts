@@ -71,6 +71,29 @@ export type FrontendToBackend =
     }
   | {
       /**
+       * Shift+click on the Script Manager Export button. Instead of triggering
+       * a browser download, write the zipped pack to the extension's scoped
+       * storage at `exports/<scriptType>.lumiscript.zip`.
+       *
+       * Intended for external developer tooling (e.g. a CLI pipeline that
+       * polls a fixed path, unpacks via pack2js, edits, re-packs via js2pack,
+       * and imports back). Since `spindle.storage` is path-sandboxed to the
+       * extension's own storage directory, external tools need to know
+       * Lumiverse's data-dir convention for their OS to reach the file —
+       * the backend logs the resolved path on each write.
+       *
+       * `bytesB64` is the zip payload, base64-encoded so it survives the
+       * frontend→backend message channel regardless of transport.
+       * `scriptType` is the active Script Manager tab ('trigger' | 'library')
+       * and becomes the filename stem, keeping the two tabs in separate
+       * output files instead of last-write-wins.
+       */
+      type: 'save_pack_to_disk';
+      bytesB64: string;
+      scriptType: ScriptType;
+    }
+  | {
+      /**
        * Admin-override removal of a single tool registration. Dispatched from
        * the Status-tab "Remove" action on an Active Tools row. Drops the entry
        * from `tool-store`, forgets the name in `tool-script-registry` if it

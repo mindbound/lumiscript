@@ -10,12 +10,17 @@ import { zipSync, strToU8 } from 'fflate';
 import type { Script, ScriptPackEntry } from '../types/script.js';
 
 /**
- * Export the given scripts as a `.lumiscript.zip` download.
+ * Build the raw zipped pack bytes for the given scripts.
+ *
+ * Shared between the browser-download path (`exportScriptPack`) and the
+ * save-to-extension-storage path (Shift+click on the Export button, handled
+ * by the backend's `save_pack_to_disk` message). Returns a `Uint8Array`
+ * containing a `.lumiscript.zip` payload (one `pack.json` entry inside).
  *
  * Only shareable fields are included — id, enabled, allowDangerous, and
  * timestamps are omitted (regenerated on import with safe defaults).
  */
-export function exportScriptPack(scripts: Script[], packName: string): void {
+export function buildScriptPackBytes(scripts: Script[]): Uint8Array {
   const entries: ScriptPackEntry[] = scripts.map(s => ({
     name: s.name,
     code: s.code,
@@ -32,7 +37,17 @@ export function exportScriptPack(scripts: Script[], packName: string): void {
     scripts: entries,
   };
 
-  const zipped = zipSync({ 'pack.json': strToU8(JSON.stringify(pack, null, 2)) });
+  return zipSync({ 'pack.json': strToU8(JSON.stringify(pack, null, 2)) });
+}
+
+/**
+ * Export the given scripts as a `.lumiscript.zip` download.
+ *
+ * Only shareable fields are included — id, enabled, allowDangerous, and
+ * timestamps are omitted (regenerated on import with safe defaults).
+ */
+export function exportScriptPack(scripts: Script[], packName: string): void {
+  const zipped = buildScriptPackBytes(scripts);
   const blob = new Blob([zipped.buffer as ArrayBuffer], { type: 'application/zip' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');

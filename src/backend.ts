@@ -462,6 +462,40 @@ spindle.onFrontendMessage(async (raw, userId) => {
         break;
       }
 
+      case 'save_pack_to_disk': {
+        // Shift+click on Export: decode the base64 payload the frontend
+        // built via buildScriptPackBytes() and drop it into extension storage
+        // at a predictable, per-tab path. External dev tooling polls this
+        // file as an alternative to the browser-download path.
+        //
+        // spindle.storage is path-sandboxed to
+        //   {DATA_DIR}/users/{userId}/extensions/lumiscript/storage/
+        // so the caller can't redirect the write elsewhere. We log the
+        // relative path on success; testers resolve the absolute location
+        // against their Lumiverse data dir once, then hard-code it in
+        // whatever tool consumes the file.
+        try {
+          const bin = atob(msg.bytesB64);
+          const bytes = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+          const relPath = `exports/${msg.scriptType}.lumiscript.zip`;
+          await spindle.storage.writeBinary(relPath, bytes);
+          spindle.log.info(
+            `[LumiScript] Exported ${msg.scriptType} pack to extension storage: ` +
+            `${relPath} (${bytes.byteLength} bytes)`,
+          );
+          spindle.toast.success(
+            `Pack saved to extension storage: ${relPath}`,
+            { title: 'Export' },
+          );
+        } catch (err) {
+          const text = err instanceof Error ? err.message : String(err);
+          spindle.log.error(`[LumiScript] save_pack_to_disk failed: ${text}`);
+          spindle.toast.error(`Export to disk failed: ${text}`, { title: 'Export' });
+        }
+        break;
+      }
+
       // ── Tools ────────────────────────────────────────────────────────────
       case 'unregister_tool': {
         // Admin-override removal from the Status-tab "Remove" action.
