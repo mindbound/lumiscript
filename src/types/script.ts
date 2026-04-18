@@ -415,6 +415,32 @@ export interface LLMOptions {
    * Only meaningful when calling `generateWithTools()`.
    */
   parallelToolCalls?: boolean;
+  /**
+   * Optional `AbortSignal` to cancel an in-flight generation. When aborted,
+   * the upstream LLM request is torn down and the returned promise rejects
+   * with an `AbortError` (`err.name === 'AbortError'`). Composes naturally
+   * with `AbortSignal.timeout()` and `AbortSignal.any([...])`.
+   *
+   * Note: the worker host automatically aborts any in-flight generation
+   * when the extension is torn down, so scripts don't need to thread a
+   * signal just to avoid leaking requests on disable/reload. Use this
+   * when you want *script-level* cancellation — e.g. user-cancellable
+   * actions, per-request timeouts, or racing multiple calls.
+   *
+   * @example
+   * ```ts
+   * const ctrl = new AbortController();
+   * setTimeout(() => ctrl.abort(), 10_000);
+   * try {
+   *   const text = await api.llm.generate(messages, { signal: ctrl.signal });
+   * } catch (err) {
+   *   if (err instanceof Error && err.name === 'AbortError') {
+   *     // timed out — not an error condition
+   *   }
+   * }
+   * ```
+   */
+  signal?: AbortSignal;
 }
 
 /**

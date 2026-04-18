@@ -212,8 +212,9 @@ export function buildLLMAPI(deps: APIBuildDeps): LumiScriptAPI['llm'] {
           // When using a connection profile without explicit overrides, the profile's
           // model and provider are forwarded so strict providers (e.g. NanoGPT) don't
           // reject the request for a missing model field.
-          // provider and model are passed at runtime but absent from GenerationRequestDTO
-          // in the current lumiverse-spindle-types version; spread via Record cast.
+          // NOTE: `provider` and `model` are accepted at runtime by the host but not
+          // declared on GenerationRequestDTO (verified against spindle-types 0.4.24).
+          // Spread via Record<string, string> cast so the object literal still typechecks.
           const effectiveProvider = opts?.provider ?? conn?.provider;
           const effectiveModel    = opts?.model    ?? conn?.model;
           const providerFields = {
@@ -227,6 +228,7 @@ export function buildLLMAPI(deps: APIBuildDeps): LumiScriptAPI['llm'] {
             ...(conn?.id ? { connection_id: conn.id } : {}),
             parameters: buildLLMParams(opts),
             userId: userId ?? undefined,
+            ...(opts?.signal ? { signal: opts.signal } : {}),
           }).then(result => (result as { content: string }).content);
         }),
       );
@@ -292,6 +294,7 @@ export function buildLLMAPI(deps: APIBuildDeps): LumiScriptAPI['llm'] {
             ...(conn?.id ? { connection_id: conn.id } : {}),
             parameters: { ...buildLLMParams(opts), ...extraParams },
             userId: userId ?? undefined,
+            ...(opts?.signal ? { signal: opts.signal } : {}),
           }).then(result => {
             const content = (result as { content: string }).content;
             let parsed: T;
@@ -376,6 +379,7 @@ export function buildLLMAPI(deps: APIBuildDeps): LumiScriptAPI['llm'] {
             ...(conn?.id ? { connection_id: conn.id } : {}),
             parameters: { ...buildLLMParams(opts), ...extraParams },
             userId: userId ?? undefined,
+            ...(opts?.signal ? { signal: opts.signal } : {}),
           } as any) as Promise<{ content?: string; tool_calls?: Array<{ name: string; args: Record<string, unknown>; call_id: string }> }>).then(raw => {
             // Structured output path: parse/validate on the final step (no tool_calls returned)
             if (schema && !raw.tool_calls?.length) {

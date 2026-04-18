@@ -577,6 +577,8 @@ export const KEY_TYPES: TypeDoc[] = [
       { field: 'model?',          type: 'string',      optional: true, desc: 'Model identifier. Used with provider for direct calls.' },
       { field: 'temperature?',    type: 'number',      optional: true, desc: 'Override temperature (0–2).' },
       { field: 'maxTokens?',      type: 'number',      optional: true, desc: 'Override max tokens.' },
+      { field: 'parallelToolCalls?', type: 'boolean',  optional: true, desc: 'When false, forces one tool call per turn. Only meaningful for generateWithTools(). Needed for Mistral and other providers that require serialised tool use.' },
+      { field: 'signal?',         type: 'AbortSignal', optional: true, desc: 'Cancel an in-flight generation. On abort the promise rejects with an AbortError. The worker auto-aborts on extension teardown — use this for script-level cancellation (timeouts, user cancel, races).' },
     ],
   },
   {
