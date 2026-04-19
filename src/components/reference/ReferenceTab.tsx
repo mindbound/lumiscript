@@ -979,10 +979,11 @@ export const KEY_TYPES: TypeDoc[] = [
   },
   {
     name: 'ToolInvocationContext',
-    note: 'Optional third parameter passed to tool handlers. Populated when invoked via Lumiverse TOOL_INVOCATION; undefined when invoked via api.tools.invoke() (script-to-script). Requires Lumiverse host commit 8d310f8 or later for councilMember/requestId population — older hosts leave both fields undefined.',
+    note: 'Optional third parameter passed to tool handlers. Populated when invoked via Lumiverse TOOL_INVOCATION; undefined when invoked via api.tools.invoke() (script-to-script). Field-level host requirements: requestId/councilMember require Lumiverse 8d310f8+ (spindle-types 0.4.25+); contextMessages require Lumiverse 993544c8+ (spindle-types 0.4.26+). Older hosts leave the corresponding fields undefined and the helper gracefully falls back.',
     fields: [
-      { field: 'requestId?',     type: 'string',                optional: true, desc: 'Host-side correlation id for this invocation. Useful for matching handler-side logs against Lumiverse server logs.' },
-      { field: 'councilMember?', type: 'CouncilMemberContext',  optional: true, desc: 'Personality snapshot of the Council member that triggered the invocation. Populated only when the tool ran as part of a Council execution cycle; undefined for inline function-calling, api.tools.invoke(), and older hosts.' },
+      { field: 'requestId?',       type: 'string',                optional: true, desc: 'Host-side correlation id for this invocation. Useful for matching handler-side logs against Lumiverse server logs.' },
+      { field: 'councilMember?',   type: 'CouncilMemberContext',  optional: true, desc: 'Personality snapshot of the Council member that triggered the invocation. Populated only when the tool ran as part of a Council execution cycle; undefined for inline function-calling, api.tools.invoke(), and older hosts.' },
+      { field: 'contextMessages?', type: 'LLMMessage[]',          optional: true, desc: "Structured chat context for Council invocations — same content as args.context but with role boundaries preserved. Prefer this over args.context when available — the ls:council-prompt helper's buildCouncilMessages uses it automatically when passed via the contextMessages option. Multi-part (text+image) content is flattened to its text portion before delivery. Undefined for non-Council paths / older hosts." },
     ],
   },
   {
@@ -1507,9 +1508,10 @@ export const BUILTIN_TYPES: TypeDoc[] = [
   },
   {
     name: 'CouncilMessagesOptions',
-    note: 'Extends CouncilSystemPromptOptions. Passed to buildCouncilMessages() — adds the `args` object so the helper can pull args.context into the output message array.',
+    note: 'Extends CouncilSystemPromptOptions. Passed to buildCouncilMessages() — adds context-source fields so the helper can include chat history in the output message array. When both contextMessages and args.context are present, contextMessages takes priority (preserves role boundaries); args.context is the fallback path for older Lumiverse hosts.',
     fields: [
-      { field: 'args',              type: 'ToolInvocationArgs',                      optional: false, desc: 'The args object from the tool handler. Only args.context is read — if absent or empty, no context message is included.' },
+      { field: 'args',              type: 'ToolInvocationArgs',                      optional: false, desc: 'The args object from the tool handler. args.context (flattened chat context) is used as a fallback when contextMessages is absent or empty.' },
+      { field: 'contextMessages?',  type: 'LLMMessage[]',                            optional: true,  desc: "Structured chat context from ToolInvocationContext.contextMessages. When provided and non-empty, takes priority over args.context — preserves role boundaries for better LLM voice continuity. Pass through as `contextMessages: ctx.contextMessages` from your handler. Requires Lumiverse 993544c8+." },
     ],
   },
 ];

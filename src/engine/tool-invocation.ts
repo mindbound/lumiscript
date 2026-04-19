@@ -46,11 +46,13 @@ import { generateUUID } from '../utils/uuid.js';
  */
 export async function dispatchToolInvocation(event: unknown): Promise<string> {
   // Cast to the upstream DTO shape. `requestId` and `councilMember` landed in
-  // spindle-types 0.4.25 (Lumiverse commit 8d310f8+); older hosts still send
-  // `{ toolName, args }` only, which destructures safely to `undefined` for
-  // the new fields. The runtime cast is safe for either shape.
+  // spindle-types 0.4.25 (Lumiverse commit 8d310f8+); `contextMessages` landed
+  // in spindle-types 0.4.26 (Lumiverse commit 993544c8+). Older hosts still
+  // send `{ toolName, args }` only (or the 0.4.25 shape without
+  // contextMessages), which destructures safely to `undefined` for whichever
+  // fields aren't populated. The runtime cast is safe across all shapes.
   const payload = event as ToolInvocationPayloadDTO;
-  const { toolName, args, councilMember, requestId } = payload;
+  const { toolName, args, councilMember, requestId, contextMessages } = payload;
   const bareName = toolName.includes(':') ? toolName.split(':').pop()! : toolName;
 
   const entry = getTool(bareName);
@@ -60,9 +62,13 @@ export async function dispatchToolInvocation(event: unknown): Promise<string> {
   }
 
   // Build the invocation context object that the user's ToolHandler receives
-  // as its third argument. Both fields optional — pre-8d310f8 hosts and
-  // non-Council invocation paths leave either or both undefined.
-  const ctx: ToolInvocationContext = { requestId, councilMember };
+  // as its third argument. All three fields optional — pre-8d310f8 hosts and
+  // non-Council invocation paths leave some or all undefined. `contextMessages`
+  // is passed through directly; its `LlmMessageDTO[]` shape (role/content
+  // required, optional `name`) is structurally compatible with our
+  // `LLMMessage[]` (role/content only) — extra optional fields flow through
+  // harmlessly.
+  const ctx: ToolInvocationContext = { requestId, councilMember, contextMessages };
 
   const start = Date.now();
   let result: string;

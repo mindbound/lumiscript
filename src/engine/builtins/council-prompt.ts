@@ -158,26 +158,47 @@ ${toolPrompt}${dynamic}${brevity}${userControl}`;
 /**
  * Assemble the full `LLMMessage[]` array ready to feed into `api.llm.generate`.
  *
- * Output shape:
- *   [ system: identity + tool spec + directives,
- *     system: flattened chat context (only when args.context is non-empty),
- *     user:   closing "Review the story context..." directive ]
+ * Output shape depends on whether structured context is available:
  *
- * Extension tools receive `args.context` as a pre-flattened string rather
- * than structured chat messages — this is a host-side delivery-path choice
- * that can't be undone here. The context is attached as a system message
- * (not user) because its role semantically is "background context", and
+ *   With `opts.contextMessages` (preferred, Lumiverse 993544c8+):
+ *     [ system: identity + tool spec + directives,
+ *       ...contextMessages,          // real system/user/assistant turns
+ *       user:   closing directive ]
+ *
+ *   Fallback (older hosts or script didn't pass contextMessages):
+ *     [ system: identity + tool spec + directives,
+ *       system: flattened chat context from args.context (when non-empty),
+ *       user:   closing directive ]
+ *
+ * The structured path preserves role boundaries from the host's chat
+ * history, which gives the analyst LLM real turn-taking and voice precedent
+ * from prior assistant messages — closes most of the behavioural gap
+ * between extension tools and sidecar tools.
+ *
+ * The fallback path attaches the flattened context as a system message
+ * (not user) because its role semantically is "background context," and
  * providers that specialize on system-vs-user (e.g. Anthropic) handle it
- * better that way.
+ * better that way. Both paths emit the same closing user directive.
+ *
+ * Precedence rule when both are present: structured wins, flattened
+ * ignored. Empty structured array (`contextMessages: []`) is treated as
+ * "structured not available" — we fall back to the flattened string.
  */
 function buildCouncilMessages(opts: CouncilMessagesOptions): LLMMessage[] {
   // buildCouncilSystemPrompt already asserts councilMember — don't duplicate.
   const messages: LLMMessage[] = [];
   messages.push({ role: 'system', content: buildCouncilSystemPrompt(opts) });
 
-  const context = typeof opts.args?.context === 'string' ? opts.args.context.trim() : '';
-  if (context.length > 0) {
-    messages.push({ role: 'system', content: context });
+  // Prefer structured contextMessages when available. Empty array is
+  // treated as "not available" — an empty flattened string wouldn't emit
+  // anything either, so falling back doesn't lose anything.
+  if (opts.contextMessages && opts.contextMessages.length > 0) {
+    messages.push(...opts.contextMessages);
+  } else {
+    const context = typeof opts.args?.context === 'string' ? opts.args.context.trim() : '';
+    if (context.length > 0) {
+      messages.push({ role: 'system', content: context });
+    }
   }
 
   messages.push({

@@ -1845,6 +1845,23 @@ export interface ToolInvocationContext {
    * inline function-calling, `api.tools.invoke()`, older hosts.
    */
   councilMember?: import('lumiverse-spindle-types').CouncilMemberContext;
+  /**
+   * Structured chat context for Council invocations — the same content the
+   * host flattens into `args.context`, but as a typed `LLMMessage[]` with
+   * role boundaries preserved. Populated by Lumiverse hosts at commit
+   * `993544c8` or later (spindle-types 0.4.26+); `undefined` for
+   * non-Council paths and older hosts. Multi-part (text+image) message
+   * content is flattened to its text portion before delivery.
+   *
+   * Prefer this over `args.context` when available — the structured form
+   * gives the analyst LLM real turn-taking boundaries and voice precedent
+   * from prior assistant messages, closing most of the behavioural gap
+   * between extension tools and the built-in sidecar tools. The
+   * `ls:council-prompt` helper's `buildCouncilMessages` will use these
+   * automatically when you pass them through via the `contextMessages`
+   * option.
+   */
+  contextMessages?: LLMMessage[];
 }
 
 /**
@@ -2428,9 +2445,23 @@ export interface CouncilSystemPromptOptions {
  */
 export interface CouncilMessagesOptions extends CouncilSystemPromptOptions {
   /**
-   * Tool invocation args. Uses `args.context` — the flattened chat-context
-   * string the host builds for extension tools. When absent or empty, no
-   * context message is included in the output array.
+   * Tool invocation args. Used as a fallback source of chat context via
+   * `args.context` — the flattened string the host builds for extension
+   * tools on older Lumiverse hosts (pre-993544c8). When absent or empty
+   * AND `contextMessages` is also absent, no context message is included
+   * in the output array.
    */
   args: ToolInvocationArgs;
+  /**
+   * Structured chat context from `ToolInvocationContext.contextMessages`.
+   * When provided and non-empty, takes priority over the flattened
+   * `args.context` string — preserves role boundaries from the host's chat
+   * history for better LLM voice continuity and turn-taking awareness.
+   *
+   * Pass through as `contextMessages: ctx.contextMessages` from your handler.
+   * Requires Lumiverse host commit `993544c8` or later (spindle-types
+   * 0.4.26+). Older hosts don't populate the field; the helper gracefully
+   * falls back to the flattened-string path.
+   */
+  contextMessages?: LLMMessage[];
 }

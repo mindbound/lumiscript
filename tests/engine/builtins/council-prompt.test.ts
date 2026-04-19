@@ -22,6 +22,7 @@ interface SystemPromptOpts {
 
 interface MessagesOpts extends SystemPromptOpts {
   args: ToolInvocationArgs;
+  contextMessages?: LLMMessage[];
 }
 
 interface Lib {
@@ -306,6 +307,92 @@ describe('buildCouncilMessages', () => {
       args:          {},
       tool:          { display_name: 'T', description: 'D' },
     })).toThrow(/requires councilMember/);
+  });
+});
+
+// ─── buildCouncilMessages — structured contextMessages (Lumiverse 993544c8+)
+
+describe('buildCouncilMessages — structured contextMessages', () => {
+  test('uses structured context when contextMessages is present and non-empty', () => {
+    const { buildCouncilMessages } = getLib();
+    const contextMessages: LLMMessage[] = [
+      { role: 'system',    content: '## Character Information\nName: Miyo' },
+      { role: 'system',    content: '## User Persona\nName: Bernard' },
+      { role: 'assistant', content: 'first greeting message' },
+      { role: 'user',      content: 'first user reply' },
+    ];
+    const messages = buildCouncilMessages({
+      councilMember:   makeMember(),
+      args:            { context: 'SHOULD_BE_IGNORED' },  // flattened fallback present but ignored
+      contextMessages,
+      tool:            { display_name: 'T', description: 'D' },
+    });
+
+    // [system(prompt), ...contextMessages, user(closing)] — 6 messages total.
+    expect(messages).toHaveLength(1 + contextMessages.length + 1);
+    expect(messages[0]!.role).toBe('system');
+    expect(messages[0]!.content).toContain('## Tool: T');
+
+    // Structured messages preserved in order with their original roles.
+    expect(messages[1]!.role).toBe('system');
+    expect(messages[1]!.content).toContain('Name: Miyo');
+    expect(messages[2]!.role).toBe('system');
+    expect(messages[2]!.content).toContain('Name: Bernard');
+    expect(messages[3]!.role).toBe('assistant');
+    expect(messages[3]!.content).toBe('first greeting message');
+    expect(messages[4]!.role).toBe('user');
+    expect(messages[4]!.content).toBe('first user reply');
+
+    // Flattened fallback string must NOT appear anywhere — structured wins.
+    const joined = messages.map(m => m.content).join('\n');
+    expect(joined).not.toContain('SHOULD_BE_IGNORED');
+
+    // Closing user directive still emitted with member-name substitution.
+    expect(messages[5]!.role).toBe('user');
+    expect(messages[5]!.content).toContain('your unique perspective as Lyra');
+  });
+
+  test('falls back to flattened args.context when contextMessages is absent', () => {
+    const { buildCouncilMessages } = getLib();
+    const messages = buildCouncilMessages({
+      councilMember: makeMember(),
+      args:          { context: 'Flattened context string.' },
+      tool:          { display_name: 'T', description: 'D' },
+    });
+    // No contextMessages → old three-message shape: [system, system(flat), user]
+    expect(messages).toHaveLength(3);
+    expect(messages[0]!.role).toBe('system');
+    expect(messages[1]!.role).toBe('system');
+    expect(messages[1]!.content).toBe('Flattened context string.');
+    expect(messages[2]!.role).toBe('user');
+  });
+
+  test('falls back to flattened args.context when contextMessages is an empty array', () => {
+    // Defensive: empty structured array shouldn't cause us to emit nothing
+    // and drop on the floor — fall through to the flattened path so the
+    // model still sees the context the host did produce.
+    const { buildCouncilMessages } = getLib();
+    const messages = buildCouncilMessages({
+      councilMember:   makeMember(),
+      args:            { context: 'Flattened context string.' },
+      contextMessages: [],
+      tool:            { display_name: 'T', description: 'D' },
+    });
+    expect(messages).toHaveLength(3);
+    expect(messages[1]!.content).toBe('Flattened context string.');
+  });
+
+  test('emits two messages when both contextMessages and args.context are absent', () => {
+    // No context at all — minimal output, just system prompt + closing.
+    const { buildCouncilMessages } = getLib();
+    const messages = buildCouncilMessages({
+      councilMember: makeMember(),
+      args:          {},
+      tool:          { display_name: 'T', description: 'D' },
+    });
+    expect(messages).toHaveLength(2);
+    expect(messages[0]!.role).toBe('system');
+    expect(messages[1]!.role).toBe('user');
   });
 });
 

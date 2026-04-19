@@ -123,10 +123,11 @@ describe('dispatchToolInvocation — invocation context', () => {
     expect(receivedCtx.councilMember).toEqual(councilMember);
   });
 
-  test('builds ctx with undefined fields when the payload omits councilMember and requestId', async () => {
-    // Backward compatibility with pre-8d310f8 Lumiverse hosts that only send
-    // { toolName, args }. Handler must still get a ctx object — just with
-    // both fields undefined, not a missing second argument.
+  test('builds ctx with undefined fields when the payload omits the new top-level fields', async () => {
+    // Backward compatibility with pre-8d310f8 Lumiverse hosts (no requestId /
+    // councilMember) and pre-993544c8 hosts (no contextMessages) that only
+    // send { toolName, args }. Handler must still get a ctx object — just
+    // with all optional fields undefined, not a missing second argument.
     const handler = mock((_args: Record<string, unknown>): string => 'ok');
     seedTool({ handler });
 
@@ -139,6 +140,33 @@ describe('dispatchToolInvocation — invocation context', () => {
     expect(receivedCtx).toBeDefined();
     expect(receivedCtx.requestId).toBeUndefined();
     expect(receivedCtx.councilMember).toBeUndefined();
+    expect(receivedCtx.contextMessages).toBeUndefined();
+  });
+
+  test('forwards contextMessages to the handler when the payload carries them', async () => {
+    // Lumiverse 993544c8+ / spindle-types 0.4.26+ — structured chat context
+    // alongside (or preferred over) the flattened args.context string.
+    const handler = mock((_args: Record<string, unknown>): string => 'ok');
+    seedTool({ handler });
+
+    const contextMessages = [
+      { role: 'system',    content: '## Character Information\nName: Miyo' },
+      { role: 'assistant', content: 'first greeting message' },
+      { role: 'user',      content: 'first user reply' },
+    ];
+
+    await dispatchToolInvocation({
+      toolName: 'roll_dice',
+      args:     { context: 'flattened fallback' },
+      requestId: 'req-ctxmsgs',
+      contextMessages,
+    });
+
+    const receivedCtx = handler.mock.calls[0]![1] as Record<string, unknown>;
+    expect(receivedCtx).toBeDefined();
+    expect(receivedCtx.contextMessages).toEqual(contextMessages);
+    // Other ctx fields still forwarded correctly alongside.
+    expect(receivedCtx.requestId).toBe('req-ctxmsgs');
   });
 
   test('includes councilMember on the ls:tool:invoked broadcast payload', async () => {
