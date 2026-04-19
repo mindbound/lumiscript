@@ -12,26 +12,32 @@ import type { CouncilMemberContext, ToolInvocationArgs, LLMMessage } from '../..
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+interface SystemPromptOpts {
+  councilMember: CouncilMemberContext;
+  tool: { display_name: string; description: string; prompt?: string };
+  maxWordsPerTool?: number;
+  allowUserControl?: boolean;
+  dynamicSuffix?: string;
+}
+
+interface MessagesOpts extends SystemPromptOpts {
+  args: ToolInvocationArgs;
+}
+
 interface Lib {
   buildCouncilIdentity:     (cm: CouncilMemberContext) => string;
   roleNote:                 (role: string) => string;
   brevityNote:              (maxWords: number) => string;
   userControlNote:          (allow: boolean) => string;
-  buildCouncilSystemPrompt: (opts: {
-    councilMember: CouncilMemberContext;
-    tool: { display_name: string; description: string; prompt?: string };
-    maxWordsPerTool?: number;
-    allowUserControl?: boolean;
-    dynamicSuffix?: string;
-  }) => string;
-  buildCouncilMessages: (opts: {
-    councilMember: CouncilMemberContext;
-    args: ToolInvocationArgs;
-    tool: { display_name: string; description: string; prompt?: string };
-    maxWordsPerTool?: number;
-    allowUserControl?: boolean;
-    dynamicSuffix?: string;
-  }) => LLMMessage[];
+  buildCouncilSystemPrompt: (opts: SystemPromptOpts) => string;
+  buildCouncilMessages:     (opts: MessagesOpts) => LLMMessage[];
+  debug: {
+    formatMember:       (cm: CouncilMemberContext) => string;
+    formatIdentity:     (cm: CouncilMemberContext) => string;
+    formatSystemPrompt: (opts: SystemPromptOpts) => string;
+    formatMessages:     (opts: MessagesOpts) => string;
+    formatReport:       (opts: MessagesOpts) => string;
+  };
 }
 
 /** Factory ignores its api argument — pass `null` cast as any. */
@@ -300,5 +306,159 @@ describe('buildCouncilMessages', () => {
       args:          {},
       tool:          { display_name: 'T', description: 'D' },
     })).toThrow(/requires councilMember/);
+  });
+});
+
+// ─── debug namespace ─────────────────────────────────────────────────────────
+
+describe('debug.formatMember', () => {
+  test('includes all CouncilMemberContext fields in the snapshot', () => {
+    const { debug } = getLib();
+    const out = debug.formatMember(makeMember());
+    // Identifiers + identity fields all present.
+    expect(out).toContain('name:           Lyra');
+    expect(out).toContain('role:           Plot Enforcer');
+    expect(out).toContain('memberId:       cm-1');
+    expect(out).toContain('itemId:         item-1');
+    expect(out).toContain('packId:         pack-1');
+    expect(out).toContain('packName:       Test Pack');
+    expect(out).toContain('chance:         75');
+    expect(out).toContain('genderIdentity: 1 (feminine)');
+    expect(out).toContain('avatarUrl:      (null)');
+    // Personality fields present (not truncated — makeMember strings < 60 chars).
+    expect(out).toContain('A sharp-eyed narrator with a precise memory.');
+    expect(out).toContain('Decisive. Skeptical of vague motivations.');
+    expect(out).toContain('Calls out inconsistencies immediately.');
+  });
+
+  test('renders empty strings as "(empty)" and null avatar as "(null)"', () => {
+    const { debug } = getLib();
+    const out = debug.formatMember(makeMember({ role: '', personality: '', avatarUrl: null }));
+    expect(out).toContain('role:           (empty)');
+    expect(out).toContain('personality:    (empty)');
+    expect(out).toContain('avatarUrl:      (null)');
+  });
+
+  test('truncates long personality strings with [N chars] prefix', () => {
+    const { debug } = getLib();
+    const longDefinition = 'x'.repeat(200);
+    const out = debug.formatMember(makeMember({ definition: longDefinition }));
+    expect(out).toContain('definition:     [200 chars]');
+    expect(out).toContain('...');
+    expect(out).not.toContain(longDefinition); // full string is NOT in the output
+  });
+
+  test('labels gender identity correctly for each variant', () => {
+    const { debug } = getLib();
+    expect(debug.formatMember(makeMember({ genderIdentity: 0 }))).toContain('0 (unspecified)');
+    expect(debug.formatMember(makeMember({ genderIdentity: 1 }))).toContain('1 (feminine)');
+    expect(debug.formatMember(makeMember({ genderIdentity: 2 }))).toContain('2 (masculine)');
+  });
+
+  test('wraps the snapshot in a titled frame', () => {
+    const { debug } = getLib();
+    const out = debug.formatMember(makeMember());
+    expect(out).toContain('COUNCIL MEMBER SNAPSHOT');
+    // Frame uses === rule lines (60 chars each).
+    expect(out).toContain('='.repeat(60));
+  });
+});
+
+describe('debug.formatIdentity', () => {
+  test('includes the member name in the header', () => {
+    const { debug } = getLib();
+    const out = debug.formatIdentity(makeMember());
+    expect(out).toContain('COUNCIL IDENTITY BLOCK — Lyra');
+  });
+
+  test('body is byte-equivalent to buildCouncilIdentity output', () => {
+    const { debug, buildCouncilIdentity } = getLib();
+    const framed = debug.formatIdentity(makeMember());
+    const raw    = buildCouncilIdentity(makeMember());
+    // The raw identity block must appear verbatim inside the framed output.
+    expect(framed).toContain(raw);
+  });
+});
+
+describe('debug.formatSystemPrompt', () => {
+  test('includes the char count in the header', () => {
+    const { debug, buildCouncilSystemPrompt } = getLib();
+    const opts = {
+      councilMember: makeMember(),
+      tool: { display_name: 'T', description: 'D' },
+    };
+    const raw    = buildCouncilSystemPrompt(opts);
+    const framed = debug.formatSystemPrompt(opts);
+    expect(framed).toContain(`COUNCIL SYSTEM PROMPT — ${raw.length} chars`);
+    expect(framed).toContain(raw);
+  });
+});
+
+describe('debug.formatMessages', () => {
+  test('header reports message count and total chars', () => {
+    const { debug, buildCouncilMessages } = getLib();
+    const opts = {
+      councilMember: makeMember(),
+      args:          { context: 'Context string.' },
+      tool:          { display_name: 'T', description: 'D' },
+    };
+    const msgs  = buildCouncilMessages(opts);
+    const total = msgs.reduce((n, m) => n + m.content.length, 0);
+    const out   = debug.formatMessages(opts);
+    expect(out).toContain(`COUNCIL MESSAGES — ${msgs.length} messages, ${total} chars total`);
+  });
+
+  test('each message gets an indexed header with role and char count', () => {
+    const { debug } = getLib();
+    const out = debug.formatMessages({
+      councilMember: makeMember(),
+      args:          { context: 'Context string.' },
+      tool:          { display_name: 'T', description: 'D' },
+    });
+    expect(out).toMatch(/\[1\] system — \d+ chars/);
+    expect(out).toMatch(/\[2\] system — \d+ chars/);
+    expect(out).toMatch(/\[3\] user — \d+ chars/);
+  });
+
+  test('separates messages with --- subrule lines', () => {
+    const { debug } = getLib();
+    const out = debug.formatMessages({
+      councilMember: makeMember(),
+      args:          {},
+      tool:          { display_name: 'T', description: 'D' },
+    });
+    expect(out).toContain('-'.repeat(60));
+  });
+});
+
+describe('debug.formatReport', () => {
+  test('includes all four sub-report headers', () => {
+    const { debug } = getLib();
+    const out = debug.formatReport({
+      councilMember: makeMember(),
+      args:          { context: 'Scene context.' },
+      tool:          { display_name: 'T', description: 'D' },
+    });
+    expect(out).toContain('COUNCIL MEMBER SNAPSHOT');
+    expect(out).toContain('COUNCIL IDENTITY BLOCK — Lyra');
+    expect(out).toContain('COUNCIL SYSTEM PROMPT —');
+    expect(out).toContain('COUNCIL MESSAGES —');
+  });
+
+  test('stitches sub-reports in member → identity → system → messages order', () => {
+    const { debug } = getLib();
+    const out = debug.formatReport({
+      councilMember: makeMember(),
+      args:          {},
+      tool:          { display_name: 'T', description: 'D' },
+    });
+    const memberIdx   = out.indexOf('COUNCIL MEMBER SNAPSHOT');
+    const identityIdx = out.indexOf('COUNCIL IDENTITY BLOCK');
+    const promptIdx   = out.indexOf('COUNCIL SYSTEM PROMPT');
+    const messagesIdx = out.indexOf('COUNCIL MESSAGES');
+    expect(memberIdx).toBeGreaterThanOrEqual(0);
+    expect(identityIdx).toBeGreaterThan(memberIdx);
+    expect(promptIdx).toBeGreaterThan(identityIdx);
+    expect(messagesIdx).toBeGreaterThan(promptIdx);
   });
 });

@@ -1417,6 +1417,11 @@ export const BUILTIN_COUNCIL_PROMPT: FnRow[] = [
   { name: 'roleNote',                 args: 'role',                        desc: 'Role-aware directive block. Returns "" when role is empty; otherwise prepends "\\n".' },
   { name: 'brevityNote',              args: 'maxWords',                    desc: 'Word-budget directive. Returns "" when maxWords ≤ 0; otherwise prepends "\\n\\n" to attach as a paragraph.' },
   { name: 'userControlNote',          args: 'allow',                       desc: 'User-character guidance block. Permissive variant when allow=true, restrictive variant when false. Always non-empty (prepended with "\\n\\n").' },
+  { name: 'debug.formatMember',       args: 'councilMember',               desc: 'Pretty-printed snapshot of all CouncilMemberContext fields — identifiers, identity strings, chance, gender label, avatar URL, personality strings (truncated for long values). Returns a framed string ready to console.log.' },
+  { name: 'debug.formatIdentity',     args: 'councilMember',               desc: 'Framed wrapper around buildCouncilIdentity output with the member name in the header. For "what does the identity prefix look like for this member" inspection.' },
+  { name: 'debug.formatSystemPrompt', args: 'options',                     desc: 'Framed wrapper around buildCouncilSystemPrompt output with character count in the header. Shows exactly what goes to the LLM as the system message.' },
+  { name: 'debug.formatMessages',     args: 'options',                     desc: 'Framed rendering of the full LLMMessage[] array with per-message headers (index, role, char count). Reveals the context system message that isn\'t visible from the system-prompt view alone.' },
+  { name: 'debug.formatReport',       args: 'options',                     desc: 'Comprehensive one-call dump: member snapshot + identity + system prompt + all messages, stitched together. What you reach for when you want the whole picture in one console.log.' },
 ];
 
 export const BUILTIN_TYPES: TypeDoc[] = [

@@ -188,6 +188,135 @@ function buildCouncilMessages(opts: CouncilMessagesOptions): LLMMessage[] {
   return messages;
 }
 
+// ─── Debug namespace ────────────────────────────────────────────────────────
+//
+// Presentation-friendly inspection helpers for Council-tool development.
+// All five functions return pre-formatted strings — scripts decide whether
+// to console.log, spindle.log.info, toast, or persist. Useful during chats
+// where the editor is closed: entries queue up in the frontend panel's
+// consoleHistory state (always-mounted, per-script-capped) and surface
+// when the user opens the editor later.
+//
+// Style conventions: ASCII rule lines, ALL-CAPS section headers, no ANSI
+// colors (LS console doesn't render them), no emoji. Rule width fixed at
+// 60 to fit typical dock-panel widths without wrapping.
+
+const RULE    = '='.repeat(60);
+const SUBRULE = '-'.repeat(60);
+
+/**
+ * Wrap content in a titled frame: rule / title / rule / content / rule.
+ * Used by every public debug function for visual consistency.
+ */
+function frame(title: string, content: string): string {
+  return `${RULE}\n${title}\n${RULE}\n${content}\n${RULE}`;
+}
+
+/**
+ * Preview a string field for the member snapshot. Null renders as
+ * `(null)`, empty as `(empty)`, short strings pass through verbatim, and
+ * long strings (> 60 chars) truncate to a `[N chars] <preview>...` form
+ * so a single snapshot doesn't blow up the console.
+ */
+function previewString(s: string | null, maxLen: number = 60): string {
+  if (s === null) return '(null)';
+  if (s === '') return '(empty)';
+  if (s.length <= maxLen) return s;
+  return `[${s.length} chars] ${s.slice(0, maxLen - 3)}...`;
+}
+
+/** Unframed snapshot body — shared between `formatMember` and `formatReport`. */
+function memberSnapshotContent(cm: CouncilMemberContext): string {
+  const genderLabel = cm.genderIdentity === 1 ? ' (feminine)'
+                    : cm.genderIdentity === 2 ? ' (masculine)'
+                    : ' (unspecified)';
+  return [
+    `name:           ${cm.name}`,
+    `role:           ${cm.role || '(empty)'}`,
+    `memberId:       ${cm.memberId}`,
+    `itemId:         ${cm.itemId}`,
+    `packId:         ${cm.packId}`,
+    `packName:       ${cm.packName}`,
+    `chance:         ${cm.chance}`,
+    `genderIdentity: ${cm.genderIdentity}${genderLabel}`,
+    `avatarUrl:      ${cm.avatarUrl ?? '(null)'}`,
+    `definition:     ${previewString(cm.definition)}`,
+    `personality:    ${previewString(cm.personality)}`,
+    `behavior:       ${previewString(cm.behavior)}`,
+  ].join('\n');
+}
+
+/** Unframed messages body — each message gets a header + subrule + content. */
+function messagesContent(messages: LLMMessage[]): string {
+  return messages.map((m, i) => {
+    const header = `[${i + 1}] ${m.role} — ${m.content.length} chars`;
+    return `${header}\n${SUBRULE}\n${m.content}`;
+  }).join('\n\n');
+}
+
+/**
+ * Pretty-printed snapshot of all `CouncilMemberContext` fields. Shows
+ * identifiers (memberId/itemId/packId/packName), identity strings
+ * (name/role), personality fields (with truncation for long values),
+ * chance, gender-identity label, and avatar URL.
+ *
+ * Useful for "which member is this invocation tagged to?" debugging
+ * and for confirming that upstream sent a well-formed snapshot.
+ */
+function debugFormatMember(cm: CouncilMemberContext): string {
+  return frame('COUNCIL MEMBER SNAPSHOT', memberSnapshotContent(cm));
+}
+
+/**
+ * Framed wrapper around `buildCouncilIdentity` — the identity block
+ * with the member's name in the header. Shows what the LLM sees as the
+ * "you are X" framing prefix in the system prompt.
+ */
+function debugFormatIdentity(cm: CouncilMemberContext): string {
+  return frame(`COUNCIL IDENTITY BLOCK — ${cm.name}`, buildCouncilIdentity(cm));
+}
+
+/**
+ * Framed wrapper around `buildCouncilSystemPrompt` — the complete
+ * system prompt that will go to the LLM as `messages[0]`, with
+ * character count in the header for size comparison across runs.
+ */
+function debugFormatSystemPrompt(opts: CouncilSystemPromptOptions): string {
+  const content = buildCouncilSystemPrompt(opts);
+  return frame(`COUNCIL SYSTEM PROMPT — ${content.length} chars`, content);
+}
+
+/**
+ * Framed rendering of the full `LLMMessage[]` array produced by
+ * `buildCouncilMessages`. Each message gets a sub-header (index, role,
+ * char count) followed by its content separated by a subrule. Shows
+ * the context system message that's often the largest piece going to
+ * the LLM and isn't visible from the system-prompt view alone.
+ */
+function debugFormatMessages(opts: CouncilMessagesOptions): string {
+  const msgs  = buildCouncilMessages(opts);
+  const total = msgs.reduce((n, m) => n + m.content.length, 0);
+  return frame(
+    `COUNCIL MESSAGES — ${msgs.length} messages, ${total} chars total`,
+    messagesContent(msgs),
+  );
+}
+
+/**
+ * Comprehensive one-call report: member snapshot + identity + system
+ * prompt + full messages, stitched together with `\n\n` between
+ * sections. What you reach for when you want the whole picture in one
+ * `console.log` dump for inspection or bug reporting.
+ */
+function debugFormatReport(opts: CouncilMessagesOptions): string {
+  return [
+    debugFormatMember(opts.councilMember),
+    debugFormatIdentity(opts.councilMember),
+    debugFormatSystemPrompt(opts),
+    debugFormatMessages(opts),
+  ].join('\n\n');
+}
+
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
 /**
@@ -196,6 +325,11 @@ function buildCouncilMessages(opts: CouncilMessagesOptions): LLMMessage[] {
  * or chat operations), so the factory ignores its argument. The returned
  * exports are shared — safe to memoize across callers, but the registry's
  * per-require cache already handles that.
+ *
+ * The `debug` namespace hosts presentation-friendly inspection helpers
+ * that wrap the core builders. Split into a sub-object rather than flat
+ * top-level exports so tab-complete in the script editor stays focused
+ * on the builders by default; debug surfaces explicitly via `.debug.*`.
  */
 export const createCouncilPromptLibrary: BuiltinLibraryFactory = () => ({
   buildCouncilIdentity,
@@ -204,4 +338,11 @@ export const createCouncilPromptLibrary: BuiltinLibraryFactory = () => ({
   userControlNote,
   buildCouncilSystemPrompt,
   buildCouncilMessages,
+  debug: {
+    formatMember:       debugFormatMember,
+    formatIdentity:     debugFormatIdentity,
+    formatSystemPrompt: debugFormatSystemPrompt,
+    formatMessages:     debugFormatMessages,
+    formatReport:       debugFormatReport,
+  },
 });
