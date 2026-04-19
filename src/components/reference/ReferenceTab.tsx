@@ -257,7 +257,7 @@ export const BROADCAST_EVENTS: BroadcastEventRow[] = [
   },
   {
     name:      'ls:tool:invoked',
-    payload:   '{ name, args, result, scriptId, callMs }',
+    payload:   '{ name, args, result, scriptId, callMs, councilMember? }',
     emittedBy: 'api.tools.invoke() + TOOL_INVOCATION handler',
   },
   {
@@ -978,6 +978,32 @@ export const KEY_TYPES: TypeDoc[] = [
     ],
   },
   {
+    name: 'ToolInvocationContext',
+    note: 'Optional third parameter passed to tool handlers. Populated when invoked via Lumiverse TOOL_INVOCATION; undefined when invoked via api.tools.invoke() (script-to-script). Requires Lumiverse host commit 8d310f8 or later for councilMember/requestId population — older hosts leave both fields undefined.',
+    fields: [
+      { field: 'requestId?',     type: 'string',                optional: true, desc: 'Host-side correlation id for this invocation. Useful for matching handler-side logs against Lumiverse server logs.' },
+      { field: 'councilMember?', type: 'CouncilMemberContext',  optional: true, desc: 'Personality snapshot of the Council member that triggered the invocation. Populated only when the tool ran as part of a Council execution cycle; undefined for inline function-calling, api.tools.invoke(), and older hosts.' },
+    ],
+  },
+  {
+    name: 'CouncilMemberContext',
+    note: 'Re-exported from lumiverse-spindle-types. Personality snapshot of the Council member that triggered a tool invocation — identity, role, avatar, and Lumia personality fields. Delivered on ToolInvocationContext.councilMember.',
+    fields: [
+      { field: 'memberId',       type: 'string',  optional: false, desc: 'Unique Council member id (Council settings row id).' },
+      { field: 'itemId',         type: 'string',  optional: false, desc: 'Source Lumia item id this member is backed by.' },
+      { field: 'packId',         type: 'string',  optional: false, desc: 'Pack id the Lumia item lives in.' },
+      { field: 'packName',       type: 'string',  optional: false, desc: 'Pack name the Lumia item lives in.' },
+      { field: 'name',           type: 'string',  optional: false, desc: 'Display name of the Lumia item (also used as the member name).' },
+      { field: 'role',           type: 'string',  optional: false, desc: 'Freeform role description assigned by the user (e.g. "Plot Enforcer", "Comic Relief").' },
+      { field: 'chance',         type: 'number',  optional: false, desc: 'Probability (0–100) that this member participates in each generation.' },
+      { field: 'avatarUrl',      type: 'string | null', optional: false, desc: 'Relative URL to the member\'s avatar (e.g. "/api/v1/images/{id}"), or null.' },
+      { field: 'definition',     type: 'string',  optional: false, desc: 'Lumia "definition" field — physical/identity description.' },
+      { field: 'personality',    type: 'string',  optional: false, desc: 'Lumia "personality" field.' },
+      { field: 'behavior',       type: 'string',  optional: false, desc: 'Lumia "behavior" field — behavioural patterns.' },
+      { field: 'genderIdentity', type: '0 | 1 | 2', optional: false, desc: 'Gender identity marker (0=unspecified, 1=feminine, 2=masculine).' },
+    ],
+  },
+  {
     name: 'RegisteredToolInfo',
     note: 'Returned by api.tools.list(). A serialisable snapshot of a registered tool.',
     fields: [
@@ -1289,7 +1315,7 @@ export const API_GROUPS: FnGroup[] = [
   {
     group: 'api.tools',
     rows: [
-      { name: 'register',   args: 'name, def, handler',  desc: 'Register an LLM tool. Handler receives (args, api) and must return a string.' },
+      { name: 'register',   args: 'name, def, handler',  desc: 'Register an LLM tool. Handler receives (args, api, ctx?) and must return a string. ctx is populated when invoked via Lumiverse TOOL_INVOCATION — read ctx.councilMember to personalise output per Council member, ctx.requestId to correlate with host-side logging.' },
       { name: 'unregister', args: 'name',                desc: "Unregister a tool registered by this script. No-op if not found." },
       { name: 'list',       args: '—',                   desc: 'List all currently registered tools across all scripts.' },
       { name: 'invoke',     args: 'name, args?',         desc: 'Invoke a registered tool handler directly (for use inside an agentic loop).' },
@@ -1384,6 +1410,15 @@ export const BUILTIN_COMPONENTS: FnRow[] = [
   { name: 'keyValueHtml',   args: 'label, value, options?',     desc: 'Returns label-value pair HTML string. Options: { muted?, className? }.' },
 ];
 
+export const BUILTIN_COUNCIL_PROMPT: FnRow[] = [
+  { name: 'buildCouncilMessages',     args: 'options',                     desc: 'Build the full LLMMessage[] array for a Council-voice tool invocation — identity + role + tool spec + flattened context + closing directive. Returns [system, system?, user]. Throws if options.councilMember is missing.' },
+  { name: 'buildCouncilSystemPrompt', args: 'options',                     desc: 'Build just the system-prompt string used by buildCouncilMessages. Useful when composing your own message structure.' },
+  { name: 'buildCouncilIdentity',     args: 'councilMember',               desc: 'Member-identity block: "You are a council member named ..." plus WHO YOU ARE / INSTRUCTION sections when personality fields are present.' },
+  { name: 'roleNote',                 args: 'role',                        desc: 'Role-aware directive block. Returns "" when role is empty; otherwise prepends "\\n".' },
+  { name: 'brevityNote',              args: 'maxWords',                    desc: 'Word-budget directive. Returns "" when maxWords ≤ 0; otherwise prepends "\\n\\n" to attach as a paragraph.' },
+  { name: 'userControlNote',          args: 'allow',                       desc: 'User-character guidance block. Permissive variant when allow=true, restrictive variant when false. Always non-empty (prepended with "\\n\\n").' },
+];
+
 export const BUILTIN_TYPES: TypeDoc[] = [
   {
     name: 'MessageFooterOptions / MessageHeaderOptions',
@@ -1454,14 +1489,35 @@ export const BUILTIN_TYPES: TypeDoc[] = [
       { field: 'className?', type: 'string',                           optional: true, desc: 'Additional CSS class.' },
     ],
   },
+  {
+    name: 'CouncilSystemPromptOptions',
+    note: 'Options for buildCouncilSystemPrompt() from ls:council-prompt. Three Council settings the host doesn\'t forward to extension tools (tool.prompt, maxWordsPerTool, allowUserControl) are supplied here — published tools probably want deterministic behavior regardless of local user preferences.',
+    fields: [
+      { field: 'councilMember',     type: 'CouncilMemberContext',                    optional: false, desc: 'Member snapshot from ToolInvocationContext.councilMember. Required — this helper only makes sense for Council-originated invocations.' },
+      { field: 'tool',              type: '{ display_name, description, prompt? }', optional: false, desc: "Tool identification + optional per-tool directive. `prompt` is appended after the tool description." },
+      { field: 'maxWordsPerTool?',  type: 'number',                                  optional: true,  desc: 'Per-tool word budget. 0 or omitted → no brevity note.' },
+      { field: 'allowUserControl?', type: 'boolean',                                 optional: true,  desc: 'Whether the tool may direct the user-character. Default false (restrictive).' },
+      { field: 'dynamicSuffix?',    type: 'string',                                  optional: true,  desc: 'Extra text appended after tool.prompt, before the brevity note. Use for tool-specific dynamic enrichment.' },
+    ],
+  },
+  {
+    name: 'CouncilMessagesOptions',
+    note: 'Extends CouncilSystemPromptOptions. Passed to buildCouncilMessages() — adds the `args` object so the helper can pull args.context into the output message array.',
+    fields: [
+      { field: 'args',              type: 'ToolInvocationArgs',                      optional: false, desc: 'The args object from the tool handler. Only args.context is read — if absent or empty, no context message is included.' },
+    ],
+  },
 ];
 
 const BuiltinLibrariesSection: FC = () => (
   <>
     <p className="ls-ref-muted" style={{ marginBottom: 8 }}>
-      Built-in libraries are loaded via <Code>{"script.require('ls:components')"}</Code>.
-      All DOM operations are attributed to the calling script. Injection components
-      require <Code>app_manipulation</Code>; HTML builders return strings and need no permission.
+      Built-in libraries are loaded via <Code>{"script.require('ls:<name>')"}</Code>.
+      Two are currently shipped: <Code>ls:components</Code> (DOM widget factories — all operations
+      attributed to the calling script; injection components require <Code>app_manipulation</Code>,
+      HTML builders are free) and <Code>ls:council-prompt</Code> (pure string helpers for
+      replicating Lumiverse's built-in Council sidecar prompt in extension tools; no permissions
+      required; only meaningful when the tool was invoked as part of a Council cycle).
     </p>
 
     <table className="ls-ref-table">
@@ -1475,6 +1531,14 @@ const BuiltinLibrariesSection: FC = () => (
       <tbody>
         <GroupHeader label="ls:components" cols={3} />
         {BUILTIN_COMPONENTS.map(row => (
+          <tr key={row.name}>
+            <td><Code>{row.name}</Code></td>
+            <td><span className="ls-ref-muted">{row.args}</span></td>
+            <td><span className="ls-ref-muted">{row.desc}</span></td>
+          </tr>
+        ))}
+        <GroupHeader label="ls:council-prompt" cols={3} />
+        {BUILTIN_COUNCIL_PROMPT.map(row => (
           <tr key={row.name}>
             <td><Code>{row.name}</Code></td>
             <td><span className="ls-ref-muted">{row.args}</span></td>

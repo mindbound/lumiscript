@@ -26,7 +26,7 @@
 
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
 
-import type { LumiScriptAPI, ToolDefinition, ToolHandler, RegisteredToolInfo } from '../../types/script.js';
+import type { LumiScriptAPI, ToolDefinition, ToolHandler, ToolInvocationContext, RegisteredToolInfo } from '../../types/script.js';
 import type { APIBuildDeps } from './shared.js';
 import { assertPerm } from './shared.js';
 import { addTool, removeTool, getTool, listAll } from '../tool-store.js';
@@ -45,8 +45,14 @@ export function buildToolsAPI(
       // Wrap the user's handler so that api is injected at invocation time,
       // not at registration time. This breaks the circular dependency and
       // ensures the handler always receives the fully-constructed api object.
-      const wrappedHandler = (args: Record<string, unknown>): string | Promise<string> =>
-        handler(args, getApi());
+      // The optional `ctx` (invocation context — councilMember + requestId)
+      // is forwarded through: populated when dispatched from TOOL_INVOCATION,
+      // undefined when called via api.tools.invoke().
+      const wrappedHandler = (
+        args: Record<string, unknown>,
+        ctx?: ToolInvocationContext,
+      ): string | Promise<string> =>
+        handler(args, getApi(), ctx);
 
       addTool({
         name,
@@ -101,13 +107,17 @@ export function buildToolsAPI(
         return Promise.reject(new Error(`api.tools.invoke: no handler registered for tool '${name}'`));
       }
       const start = Date.now();
+      // Script-to-script invocation — no Council context applies. We emit
+      // `councilMember: undefined` for payload-shape parity with the
+      // dispatchToolInvocation emit, so listeners get a consistent key set.
       return Promise.resolve(entry.handler(args)).then(result => {
         busEmit('ls:tool:invoked', {
           name,
           args,
           result,
-          scriptId: entry.scriptId,
-          callMs:   Date.now() - start,
+          scriptId:      entry.scriptId,
+          callMs:        Date.now() - start,
+          councilMember: undefined,
         });
         return result;
       });

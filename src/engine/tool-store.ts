@@ -16,6 +16,8 @@
  *  - Script delete / disable → clearByScriptId() + spindle.unregisterTool() × N
  */
 
+import type { ToolInvocationContext } from '../types/script.js';
+
 /** Internal record stored in the singleton map. */
 export interface ToolEntry {
   name: string;
@@ -25,11 +27,16 @@ export interface ToolEntry {
   parameters?: Record<string, unknown>;
   councilEligible: boolean;
   /**
-   * Wrapped handler: (args) → string. The user's ToolHandler has already been
-   * partially applied with the api reference via buildToolsAPI's getApi() lazy
-   * getter, so backend.ts calls this with just the raw args object.
+   * Wrapped handler: (args, ctx?) → string. The user's ToolHandler has already
+   * been partially applied with the api reference via buildToolsAPI's getApi()
+   * lazy getter, so callers supply only the raw args plus the optional
+   * invocation context (populated when dispatched from TOOL_INVOCATION,
+   * undefined when called via api.tools.invoke()).
    */
-  handler: (args: Record<string, unknown>) => string | Promise<string>;
+  handler: (
+    args: Record<string, unknown>,
+    ctx?: ToolInvocationContext,
+  ) => string | Promise<string>;
   scriptId: string;
   scriptName: string;
 }

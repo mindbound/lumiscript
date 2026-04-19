@@ -77,7 +77,100 @@ describe('dispatchToolInvocation — return value', () => {
       toolName: 'roll_dice',
       args:     { notation: '3d6+2', reason: 'damage' },
     });
-    expect(handler).toHaveBeenCalledWith({ notation: '3d6+2', reason: 'damage' });
+    // Check the first positional arg directly rather than using
+    // toHaveBeenCalledWith — the handler is now called with (args, ctx),
+    // and ctx is the responsibility of the dedicated "invocation context"
+    // block below.
+    expect(handler.mock.calls[0]![0]).toEqual({
+      notation: '3d6+2',
+      reason:   'damage',
+    });
+  });
+});
+
+// ─── Invocation context (councilMember + requestId) ──────────────────────────
+
+describe('dispatchToolInvocation — invocation context', () => {
+  test('forwards councilMember + requestId to the handler when the payload carries them', async () => {
+    const handler = mock((_args: Record<string, unknown>): string => 'ok');
+    seedTool({ handler });
+
+    const councilMember = {
+      memberId:       'cm-1',
+      itemId:         'item-1',
+      packId:         'pack-1',
+      packName:       'Test Pack',
+      name:           'Lyra',
+      role:           'Plot Enforcer',
+      chance:         75,
+      avatarUrl:      null,
+      definition:     'A sharp-eyed narrator.',
+      personality:    'Precise, decisive.',
+      behavior:       'Calls out inconsistencies.',
+      genderIdentity: 1 as const,
+    };
+
+    await dispatchToolInvocation({
+      toolName:  'roll_dice',
+      args:      { notation: '2d6' },
+      requestId: 'req-abc-123',
+      councilMember,
+    });
+
+    const receivedCtx = handler.mock.calls[0]![1] as Record<string, unknown>;
+    expect(receivedCtx).toBeDefined();
+    expect(receivedCtx.requestId).toBe('req-abc-123');
+    expect(receivedCtx.councilMember).toEqual(councilMember);
+  });
+
+  test('builds ctx with undefined fields when the payload omits councilMember and requestId', async () => {
+    // Backward compatibility with pre-8d310f8 Lumiverse hosts that only send
+    // { toolName, args }. Handler must still get a ctx object — just with
+    // both fields undefined, not a missing second argument.
+    const handler = mock((_args: Record<string, unknown>): string => 'ok');
+    seedTool({ handler });
+
+    await dispatchToolInvocation({
+      toolName: 'roll_dice',
+      args:     {},
+    });
+
+    const receivedCtx = handler.mock.calls[0]![1] as Record<string, unknown>;
+    expect(receivedCtx).toBeDefined();
+    expect(receivedCtx.requestId).toBeUndefined();
+    expect(receivedCtx.councilMember).toBeUndefined();
+  });
+
+  test('includes councilMember on the ls:tool:invoked broadcast payload', async () => {
+    seedTool({ scriptId: 'script-1', handler: () => 'ok' });
+    const received: Array<unknown> = [];
+    busOn('ls:tool:invoked', (payload) => { received.push(payload); }, 'listener-script');
+
+    const councilMember = {
+      memberId:       'cm-2',
+      itemId:         'item-2',
+      packId:         'pack-2',
+      packName:       'Test Pack',
+      name:           'Kai',
+      role:           'Comic Relief',
+      chance:         40,
+      avatarUrl:      null,
+      definition:     'A wry observer.',
+      personality:    'Deflects with humour.',
+      behavior:       'Cracks jokes at tense moments.',
+      genderIdentity: 2 as const,
+    };
+
+    await dispatchToolInvocation({
+      toolName:  'roll_dice',
+      args:      { notation: 'd20' },
+      requestId: 'req-xyz',
+      councilMember,
+    });
+
+    expect(received).toHaveLength(1);
+    const payload = received[0] as Record<string, unknown>;
+    expect(payload.councilMember).toEqual(councilMember);
   });
 });
 

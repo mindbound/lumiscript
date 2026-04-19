@@ -22,7 +22,9 @@
 
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
 
+import type { ToolInvocationPayloadDTO } from 'lumiverse-spindle-types';
 import type { BackendToFrontend } from '../types/messages.js';
+import type { ToolInvocationContext } from '../types/script.js';
 import { getTool } from './tool-store.js';
 import { emit as broadcastEmit } from './broadcast-bus.js';
 import { executionStatusStore } from './execution-status.js';
@@ -43,7 +45,12 @@ import { generateUUID } from '../utils/uuid.js';
  * panel, invisible to the LumiScript UI.
  */
 export async function dispatchToolInvocation(event: unknown): Promise<string> {
-  const { toolName, args } = event as { toolName: string; args: Record<string, unknown> };
+  // Cast to the upstream DTO shape. `requestId` and `councilMember` landed in
+  // spindle-types 0.4.25 (Lumiverse commit 8d310f8+); older hosts still send
+  // `{ toolName, args }` only, which destructures safely to `undefined` for
+  // the new fields. The runtime cast is safe for either shape.
+  const payload = event as ToolInvocationPayloadDTO;
+  const { toolName, args, councilMember, requestId } = payload;
   const bareName = toolName.includes(':') ? toolName.split(':').pop()! : toolName;
 
   const entry = getTool(bareName);
@@ -52,10 +59,15 @@ export async function dispatchToolInvocation(event: unknown): Promise<string> {
     return '';
   }
 
+  // Build the invocation context object that the user's ToolHandler receives
+  // as its third argument. Both fields optional — pre-8d310f8 hosts and
+  // non-Council invocation paths leave either or both undefined.
+  const ctx: ToolInvocationContext = { requestId, councilMember };
+
   const start = Date.now();
   let result: string;
   try {
-    result = await Promise.resolve(entry.handler(args));
+    result = await Promise.resolve(entry.handler(args, ctx));
   } catch (err) {
     const duration = Date.now() - start;
     const msg = err instanceof Error ? err.message : String(err);
@@ -104,11 +116,15 @@ export async function dispatchToolInvocation(event: unknown): Promise<string> {
   }
 
   broadcastEmit('ls:tool:invoked', {
-    name:     bareName,
+    name:          bareName,
     args,
     result,
-    scriptId: entry.scriptId,
-    callMs:   Date.now() - start,
+    scriptId:      entry.scriptId,
+    callMs:        Date.now() - start,
+    // `councilMember` is undefined for non-Council invocations. Included
+    // explicitly so listeners can check for presence without guarding against
+    // a missing key.
+    councilMember,
   });
   return result;
 }

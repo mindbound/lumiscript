@@ -22,6 +22,7 @@ import {
   KEY_TYPES,
   API_GROUPS,
   BUILTIN_COMPONENTS,
+  BUILTIN_COUNCIL_PROMPT,
   BUILTIN_TYPES,
   type PermRow,
   type LsMacroRow,
@@ -199,10 +200,14 @@ function renderApiFunctions(): string {
 }
 
 function renderBuiltinLibraries(): string {
-  const preamble = 'Built-in libraries are loaded via `script.require(\'ls:components\')`. All DOM operations are attributed to the calling script. Injection components require `app_manipulation`; HTML builders return strings and need no permission.';
+  const preamble = 'Built-in libraries are loaded via `script.require(\'ls:<name>\')`. Two are currently shipped: `ls:components` (DOM widget factories — all operations attributed to the calling script; injection components require `app_manipulation`, HTML builders are free) and `ls:council-prompt` (pure string helpers for replicating Lumiverse\'s built-in Council sidecar prompt in extension tools; no permissions required; only meaningful when the tool was invoked as part of a Council cycle).';
   const componentsTable = table(
     ['Method', 'Arguments', 'Description'],
     BUILTIN_COMPONENTS.map((row: FnRow) => [`\`${row.name}\``, row.args, row.desc]),
+  );
+  const councilPromptTable = table(
+    ['Method', 'Arguments', 'Description'],
+    BUILTIN_COUNCIL_PROMPT.map((row: FnRow) => [`\`${row.name}\``, row.args, row.desc]),
   );
   const typesBlock = BUILTIN_TYPES.map(t => renderTypeDoc(t, '####')).join('\n\n');
   return [
@@ -213,6 +218,10 @@ function renderBuiltinLibraries(): string {
     '### ls:components',
     '',
     componentsTable,
+    '',
+    '### ls:council-prompt',
+    '',
+    councilPromptTable,
     '',
     '### Built-in types',
     '',

@@ -1808,6 +1808,46 @@ export interface ToolDefinition {
 }
 
 /**
+ * Re-exported from `lumiverse-spindle-types`. Personality snapshot of the
+ * Council member that triggered a tool invocation — identity, role, Lumia
+ * personality fields, avatar URL, etc. Populated on `ToolInvocationContext`
+ * only when the tool was invoked as part of a Council execution cycle.
+ *
+ * We re-export rather than mirror because this type is tightly coupled to
+ * upstream's Council implementation: if upstream adds/changes fields, scripts
+ * should see those changes automatically rather than drift silently against
+ * a local copy.
+ *
+ * Requires Lumiverse host commit `8d310f8` or later for the `councilMember`
+ * field to be populated; older hosts omit it and scripts see `undefined`.
+ */
+export type { CouncilMemberContext } from 'lumiverse-spindle-types';
+
+/**
+ * Optional context object passed to `ToolHandler` as the third parameter.
+ *
+ * Always defined when the handler is invoked via Lumiverse's `TOOL_INVOCATION`
+ * event; `undefined` when invoked via `api.tools.invoke()` (script-to-script).
+ *
+ * Modeled as an object (rather than a flat positional `councilMember?`)
+ * so upstream can add future correlation fields without another arg.
+ */
+export interface ToolInvocationContext {
+  /**
+   * Host-side correlation id for this invocation. Populated by Lumiverse
+   * hosts at commit `8d310f8` or later; `undefined` on older hosts.
+   */
+  requestId?: string;
+  /**
+   * Personality snapshot of the Council member that triggered the invocation.
+   * Populated only when the tool was invoked as part of a Council execution
+   * cycle (and the host supports it). `undefined` for all other paths —
+   * inline function-calling, `api.tools.invoke()`, older hosts.
+   */
+  councilMember?: import('lumiverse-spindle-types').CouncilMemberContext;
+}
+
+/**
  * Tool handler callback. Invoked by Lumiverse when the tool is called.
  *
  * @param args  Tool invocation arguments. `args.context` contains formatted
@@ -1816,12 +1856,18 @@ export interface ToolDefinition {
  * @param api   Full LumiScript API. Use `api.llm.generate()` (or other api.*
  *              methods) to build the tool's response with the script-configured
  *              connection and parameters.
+ * @param ctx   Invocation context — populated when called via Lumiverse's
+ *              `TOOL_INVOCATION` event, `undefined` when called via
+ *              `api.tools.invoke()`. Read `ctx.councilMember` to personalise
+ *              output for the invoking Council member, or `ctx.requestId` to
+ *              correlate with host-side logging.
  * @returns     A string that Lumiverse uses as the tool's result in the Council
  *              deliberation block or inline function-call response.
  */
 export type ToolHandler = (
   args: ToolInvocationArgs,
   api: LumiScriptAPI,
+  ctx?: ToolInvocationContext,
 ) => string | Promise<string>;
 
 /** Serialisable snapshot of a registered tool, used in the Status tab. */
@@ -2323,4 +2369,68 @@ export interface LSComponentsExports {
 
   /** Return a label–value pair HTML string. Composable inside other components. */
   keyValueHtml(label: string, value: string, options?: KeyValueHtmlOptions): string;
+}
+
+// ─── Built-in library: ls:council-prompt ──────────────────────────────────────
+
+/**
+ * Options for `buildCouncilSystemPrompt` from `ls:council-prompt`.
+ *
+ * The helper mirrors Lumiverse's built-in sidecar Council tool prompt —
+ * identity block, optional role note, tool spec, optional per-tool prompt
+ * directive, optional brevity budget, and user-control guidance.
+ *
+ * Three settings the host keeps for itself (per-tool `prompt`,
+ * `maxWordsPerTool`, `allowUserControl`) are supplied by the tool author
+ * here. Extension tools don't receive the user's live Council settings,
+ * and published tools probably want deterministic behavior regardless
+ * of whatever local preferences the invoking user has configured.
+ */
+export interface CouncilSystemPromptOptions {
+  /**
+   * Council member snapshot for the invocation. Unwrap from
+   * `ToolInvocationContext.councilMember` — this helper is only meaningful
+   * when the tool was invoked via a Council execution cycle.
+   */
+  councilMember: import('lumiverse-spindle-types').CouncilMemberContext;
+  /** Tool display-name + description + optional per-tool prompt directive. */
+  tool: {
+    display_name: string;
+    description: string;
+    /** Tool-specific directive appended after the description. */
+    prompt?: string;
+  };
+  /** Per-tool word budget. Pass 0 or omit to skip the brevity note. */
+  maxWordsPerTool?: number;
+  /**
+   * Whether the tool is permitted to direct the user-character's actions.
+   * Default `false`.
+   */
+  allowUserControl?: boolean;
+  /**
+   * Additional text appended after `tool.prompt`, before the brevity note.
+   * Useful for tool-specific dynamic enrichment (e.g. available expression
+   * labels, world-state summaries, etc.).
+   *
+   * Include your own leading `\n\n` if you want the suffix to appear as a
+   * separate paragraph — the helper doesn't add spacing, matching the host's
+   * convention where `dynamicSuffix` is rendered as-authored (see
+   * `council-execution.service.ts` — the built-in `detect_expression`
+   * enrichment uses `\n\n## Available Expression Labels\n...`).
+   */
+  dynamicSuffix?: string;
+}
+
+/**
+ * Options for `buildCouncilMessages` from `ls:council-prompt`. Extends
+ * `CouncilSystemPromptOptions` with the `args` object delivered to the tool
+ * handler, so the helper can pull `args.context` into the message array.
+ */
+export interface CouncilMessagesOptions extends CouncilSystemPromptOptions {
+  /**
+   * Tool invocation args. Uses `args.context` — the flattened chat-context
+   * string the host builds for extension tools. When absent or empty, no
+   * context message is included in the output array.
+   */
+  args: ToolInvocationArgs;
 }
