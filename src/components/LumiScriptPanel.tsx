@@ -375,7 +375,17 @@ const StatusTab: FC<StatusTabProps> = ({ scripts, execInfo, invocationCounts, in
 
   return (
     <div className="ls-status-list">
-      {enabled.map(script => {
+      {/* ── Scripts section ─────────────────────────────────────────────────── */}
+      <div className="ls-status-section">
+        <div className="ls-inject-header">
+          <Code2 size={10} />
+          Scripts
+          {enabled.length > 0 && <span className="ls-inject-count">{enabled.length}</span>}
+        </div>
+        <div className="ls-status-section-body">
+          {enabled.length === 0 ? (
+            <div className="ls-section-empty">No enabled trigger scripts</div>
+          ) : enabled.map(script => {
         const info = execInfo[script.id];
         const dot = info?.dot ?? 'idle';
         const dotClass = {
@@ -437,61 +447,66 @@ const StatusTab: FC<StatusTabProps> = ({ scripts, execInfo, invocationCounts, in
           </div>
         );
       })}
+        </div>
+      </div>
 
-      {/* ── Active Tools section — always visible ───────────────────────────── */}
-      <div className="ls-inject-section">
+      {/* ── Active Tools section ────────────────────────────────────────────── */}
+      <div className="ls-status-section">
         <div className="ls-inject-header">
           <Wrench size={10} />
           Active Tools
           {tools.length > 0 && <span className="ls-inject-count">{tools.length}</span>}
         </div>
-        {tools.length === 0 ? (
-          <div className="ls-section-empty">No tools registered</div>
-        ) : (
-          tools.map(tool => (
-            <div key={tool.name} className="ls-tool-row">
-              <div className="ls-tool-name" title={tool.description}>{tool.name}</div>
-              <div className="ls-tool-meta">
-                {tool.council_eligible && (
-                  <span className="ls-tool-badge ls-tool-council" title="Available in Council">
-                    council
+        <div className="ls-status-section-body">
+          {tools.length === 0 ? (
+            <div className="ls-section-empty">No tools registered</div>
+          ) : (
+            tools.map(tool => (
+              <div key={tool.name} className="ls-tool-row">
+                <div className="ls-tool-name" title={tool.description}>{tool.name}</div>
+                <div className="ls-tool-meta">
+                  {tool.council_eligible && (
+                    <span className="ls-tool-badge ls-tool-council" title="Available in Council">
+                      council
+                    </span>
+                  )}
+                  <span className="ls-inject-script" title={tool.scriptId}>
+                    {tool.scriptName}
                   </span>
-                )}
-                <span className="ls-inject-script" title={tool.scriptId}>
-                  {tool.scriptName}
-                </span>
-                <button
-                  type="button"
-                  className="ls-tool-remove"
-                  aria-label={`Unregister tool ${tool.name}`}
-                  title={
-                    `Unregister "${tool.name}" from Lumiverse.\n` +
-                    `The owning script is not disabled — the next script edit/enable ` +
-                    `will re-register declaratively-defined tools.`
-                  }
-                  onClick={() => sendToBackend({ type: 'unregister_tool', name: tool.name })}
-                >
-                  <Trash2 size={11} />
-                </button>
+                  <button
+                    type="button"
+                    className="ls-tool-remove"
+                    aria-label={`Unregister tool ${tool.name}`}
+                    title={
+                      `Unregister "${tool.name}" from Lumiverse.\n` +
+                      `The owning script is not disabled — the next script edit/enable ` +
+                      `will re-register declaratively-defined tools.`
+                    }
+                    onClick={() => sendToBackend({ type: 'unregister_tool', name: tool.name })}
+                  >
+                    <Trash2 size={11} />
+                  </button>
+                </div>
               </div>
-            </div>
-          ))
-        )}
+            ))
+          )}
+        </div>
       </div>
 
       {/* ── Variables Inspector section ──────────────────────────────────── */}
       <VariablesSection variables={variables} sendToBackend={sendToBackend} />
 
-      {/* ── Active Injections section — always visible ──────────────────────── */}
-      <div className="ls-inject-section">
+      {/* ── Active Injections section ───────────────────────────────────────── */}
+      <div className="ls-status-section">
         <div className="ls-inject-header">
           <Syringe size={10} />
           Active Injections
           {injections.length > 0 && <span className="ls-inject-count">{injections.length}</span>}
         </div>
-        {injections.length === 0 ? (
-          <div className="ls-section-empty">No injections active</div>
-        ) : injections.map(inj => {
+        <div className="ls-status-section-body">
+          {injections.length === 0 ? (
+            <div className="ls-section-empty">No injections active</div>
+          ) : injections.map(inj => {
             const isExpanded = expandedInjections.has(inj.id);
             return (
               <div key={inj.id} className="ls-inject-row ls-inject-row-clickable" onClick={() => toggleInjection(inj.id)}>
@@ -542,6 +557,7 @@ const StatusTab: FC<StatusTabProps> = ({ scripts, execInfo, invocationCounts, in
             );
           })}
         </div>
+      </div>
     </div>
   );
 };
@@ -585,7 +601,7 @@ const VariablesSection: FC<{
     : 0;
 
   return (
-    <div className="ls-inject-section">
+    <div className="ls-status-section">
       <div className="ls-inject-header">
         <Database size={10} />
         Variables
@@ -598,41 +614,42 @@ const VariablesSection: FC<{
           <RefreshCw size={10} />
         </button>
       </div>
-
-      {!variables ? (
-        <div className="ls-section-empty">Click refresh to load variables</div>
-      ) : totalKeys === 0 ? (
-        <div className="ls-section-empty">No variables in active context</div>
-      ) : (
-        SCOPE_LABELS.map(({ key, label, hint }) => {
-          const scope = variables[key];
-          const keys = Object.keys(scope);
-          const isExpanded = expandedScopes.has(key);
-          if (keys.length === 0) return null;
-          return (
-            <div key={key} className="ls-vars-scope">
-              <button className="ls-vars-scope-header" onClick={() => toggleScope(key)}>
-                {isExpanded ? <ChevronDown size={10} /> : <ChevronUp size={10} />}
-                <span className="ls-vars-scope-name">{label}</span>
-                {hint && <span className="ls-vars-scope-hint">{hint}</span>}
-                <span className="ls-vars-scope-count">{keys.length}</span>
-              </button>
-              {isExpanded && (
-                <div className="ls-vars-scope-body">
-                  {keys.sort().map(k => (
-                    <div key={k} className="ls-vars-entry">
-                      <span className="ls-vars-key">{k}</span>
-                      <span className="ls-vars-value" title={String(scope[k])}>
-                        {formatValue(scope[k])}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          );
-        })
-      )}
+      <div className="ls-status-section-body">
+        {!variables ? (
+          <div className="ls-section-empty">Click refresh to load variables</div>
+        ) : totalKeys === 0 ? (
+          <div className="ls-section-empty">No variables in active context</div>
+        ) : (
+          SCOPE_LABELS.map(({ key, label, hint }) => {
+            const scope = variables[key];
+            const keys = Object.keys(scope);
+            const isExpanded = expandedScopes.has(key);
+            if (keys.length === 0) return null;
+            return (
+              <div key={key} className="ls-vars-scope">
+                <button className="ls-vars-scope-header" onClick={() => toggleScope(key)}>
+                  {isExpanded ? <ChevronDown size={10} /> : <ChevronUp size={10} />}
+                  <span className="ls-vars-scope-name">{label}</span>
+                  {hint && <span className="ls-vars-scope-hint">{hint}</span>}
+                  <span className="ls-vars-scope-count">{keys.length}</span>
+                </button>
+                {isExpanded && (
+                  <div className="ls-vars-scope-body">
+                    {keys.sort().map(k => (
+                      <div key={k} className="ls-vars-entry">
+                        <span className="ls-vars-key">{k}</span>
+                        <span className="ls-vars-value" title={String(scope[k])}>
+                          {formatValue(scope[k])}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })
+        )}
+      </div>
     </div>
   );
 };

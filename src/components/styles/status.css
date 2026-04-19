@@ -1,9 +1,74 @@
 /* ── Status tab ─────────────────────────────────────────────────────────── */
+/*
+ * The Status tab is a four-slot vertical grid: Scripts / Active Tools /
+ * Variables / Active Injections. Each slot scrolls independently when its
+ * content exceeds its share of the panel height, so a long script list no
+ * longer pushes the lower sections off-screen. Fractional-unit shares
+ * (3:2:2:2) give the scripts section the most space (typically densest)
+ * while keeping the three smaller sections equal to each other.
+ *
+ * Pure fr units (no `minmax` floor) — the grid always fills exactly its
+ * container, with each section's body scrolling when content exceeds its
+ * share. This guarantees the whole Status tab fits the panel height and
+ * the sidebar itself never scrolls. Trade-off: at very short panel
+ * heights individual sections can get cramped, but their headers stay
+ * pinned and bodies scroll, so nothing is hidden — just tighter.
+ */
 .ls-status-list {
   flex: 1;
-  overflow-y: auto;
   min-height: 0;
   padding: 4px;
+  display: grid;
+  /*
+   * `minmax(0, Xfr)` is load-bearing here. Grid items have an implicit
+   * `min-height: auto` (= min-content) by default, so a row with
+   * content taller than its fr share will *expand* the row past its
+   * proportional allocation to honor that min-content. With all four
+   * rows potentially doing that, the grid grows past its container and
+   * the panel starts scrolling. Forcing `minmax(0, Xfr)` sets the row
+   * minimum to 0, overriding min-content; the section's own
+   * `overflow: hidden` then clips content to the fr share, and the
+   * `.ls-status-section-body` scrolls internally. This is what makes
+   * "each section scrolls independently, sidebar itself doesn't" work.
+   */
+  grid-template-rows:
+    minmax(0, 3fr)
+    minmax(0, 2fr)
+    minmax(0, 2fr)
+    minmax(0, 2fr);
+  row-gap: 4px;
+  overflow: hidden;
+}
+
+/*
+ * Section wrapper — one per grid row. Clips its body scroll via
+ * `overflow: hidden` so the pinned header never scrolls with the content.
+ * Retains the subtle border-top from the old `.ls-inject-section` as a
+ * visual separator between slots.
+ */
+.ls-status-section {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  padding: 8px;
+  border-top: 1px solid var(--lumiverse-border);
+}
+/* First section has no top border (row-gap handles separation from the
+   tab-header above). */
+.ls-status-section:first-child {
+  border-top: none;
+}
+
+/*
+ * Scrollable body — the only element in each section that actually
+ * scrolls. `flex: 1 1 auto` + `min-height: 0` is the standard "let me
+ * shrink to my parent's height and scroll the overflow" flex idiom.
+ */
+.ls-status-section-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  min-height: 0;
 }
 .ls-status-row {
   display: flex;
@@ -61,12 +126,10 @@
 }
 .ls-placeholder p { margin: 0; font-size: 12px; }
 
-/* ── Active Injections section ───────────────────────────────────────────── */
-.ls-inject-section {
-  margin-top: 4px;
-  padding: 8px;
-  border-top: 1px solid var(--lumiverse-border);
-}
+/* ── Section headers + injection/tool/var row styles ─────────────────────── */
+/* (Section wrapper styling now lives under `.ls-status-section` above; the
+ * header rule below is shared by Scripts / Active Tools / Variables /
+ * Active Injections for visual consistency.) */
 .ls-inject-header {
   display: flex;
   align-items: center;
@@ -77,6 +140,10 @@
   text-transform: uppercase;
   color: var(--lumiverse-text-muted);
   margin-bottom: 6px;
+  /* Headers must never compress when the section body is content-heavy —
+     otherwise a full body could squeeze the pinned header below its intended
+     visible height inside the flex column. */
+  flex-shrink: 0;
 }
 .ls-inject-count {
   background: color-mix(in srgb, var(--lumiverse-accent) 20%, transparent);

@@ -2,7 +2,25 @@
 .ls-panel {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  /*
+   * Pin panel height directly to Lumiverse's viewport variable (declared
+   * at :root in the core styles). `height: 100%` alone fails here because
+   * the Spindle dock-panel root uses positioning rather than an explicit
+   * height to define its bounds, so `100%` of an auto-sized parent
+   * resolves to content height — and the panel grows unbounded with its
+   * contents. That breaks any flex chain below that depends on a bounded
+   * parent (notably the Status tab's fr-unit grid — the rows degenerate
+   * to content sizes when the grid container itself has no definite
+   * height). Binding to `--app-viewport-height` (fallback 100dvh) gives
+   * the panel a real height and lets `flex: 1` and `fr` units inside
+   * work correctly.
+   *
+   * Assumes the LumiScript dock panel spans the full viewport height
+   * (dock-top/dock-bottom both 0, which is the current setup). If we
+   * ever support partial-height docking, switch to
+   *   calc(var(--app-viewport-height) - var(--spindle-dock-top) - var(--spindle-dock-bottom))
+   */
+  height: var(--app-viewport-height, 100dvh);
   min-height: 0;
   color: var(--lumiverse-text);
   font-size: 13px;
