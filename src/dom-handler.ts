@@ -39,6 +39,39 @@ function isDOMMessage(msg: unknown): msg is DOMMessage {
 /** elementId → injected DOM Element */
 const elementMap = new Map<string, Element>();
 
+// ─── External bindings (exposed for modal-handler) ───────────────────────────
+
+/**
+ * Bind a pre-existing DOM element to an `elementId` so subsequent `dom_update`
+ * / `dom_listen` / `dom_remove` messages targeting that ID flow through the
+ * existing pipeline.
+ *
+ * Used by `modal-handler.ts` to bind the advanced-modal body (which is created
+ * by the host's `ctx.ui.showModal(...)`, not by `ctx.dom.inject(...)`). The
+ * element is NOT registered in `elementScripts`, so a `dom_cleanup_script`
+ * sweep will not remove it — modal lifetime is driven by `ls_modal_dismiss`,
+ * not by DOM cleanup.
+ */
+export function bindExternalElement(elementId: string, el: Element): void {
+  elementMap.set(elementId, el);
+}
+
+/**
+ * Remove an external binding. Detaches any active listeners on this element.
+ * Called by `modal-handler.ts` when the modal is dismissed so the elementId
+ * is free for garbage collection.
+ */
+export function unbindExternalElement(elementId: string): void {
+  const el = elementMap.get(elementId);
+  for (const [lid, entry] of listenerMap) {
+    if (entry.elementId === elementId) {
+      if (el) el.removeEventListener(entry.event, entry.handler);
+      listenerMap.delete(lid);
+    }
+  }
+  elementMap.delete(elementId);
+}
+
 /** elementId → scriptId (for cleanup-by-script) */
 const elementScripts = new Map<string, string>();
 

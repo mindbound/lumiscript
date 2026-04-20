@@ -27,6 +27,7 @@ import type {
   DOMHandle,
   MessageFooterOptions,
   MessageHeaderOptions,
+  MultiSelectOptions,
   ProgressBarHandle,
 } from '../../types/script.js';
 import type { BuiltinLibraryFactory } from '../builtin-library-registry.js';
@@ -464,6 +465,111 @@ const FLOATING_BUTTON_CSS = `
 }
 `;
 
+const MULTI_SELECT_CSS = `
+.ls-comp-ms {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 0;
+  /* The advanced-modal body has its own padding; keep content flush. */
+}
+.ls-comp-ms__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 360px;
+  overflow-y: auto;
+  border-radius: var(--lumiverse-radius, 6px);
+  border: 1px solid var(--lumiverse-border, rgba(255,255,255,0.08));
+  background: var(--lumiverse-fill, rgba(0,0,0,0.15));
+  padding: 4px;
+}
+.ls-comp-ms__item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--lumiverse-radius, 4px);
+  cursor: pointer;
+  transition: background var(--lumiverse-transition-fast, 0.15s);
+}
+.ls-comp-ms__item:hover {
+  background: var(--lumiverse-fill-subtle, rgba(255,255,255,0.05));
+}
+.ls-comp-ms__item--disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.ls-comp-ms__item--disabled:hover {
+  background: transparent;
+}
+.ls-comp-ms__cb {
+  margin: 3px 0 0 0;
+  cursor: pointer;
+  accent-color: var(--lumiverse-accent, #6366f1);
+  flex-shrink: 0;
+}
+.ls-comp-ms__item--disabled .ls-comp-ms__cb {
+  cursor: not-allowed;
+}
+.ls-comp-ms__item-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+.ls-comp-ms__item-label {
+  font-size: 0.9rem;
+  color: var(--lumiverse-text, inherit);
+  line-height: 1.35;
+}
+.ls-comp-ms__item-desc {
+  font-size: 0.75rem;
+  color: var(--lumiverse-text-muted, rgba(255,255,255,0.6));
+  line-height: 1.4;
+}
+.ls-comp-ms__status {
+  font-size: 0.75rem;
+  color: var(--lumiverse-text-muted, rgba(255,255,255,0.6));
+  text-align: right;
+  padding: 0 2px;
+}
+.ls-comp-ms__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--lumiverse-border, rgba(255,255,255,0.06));
+}
+.ls-comp-ms__btn {
+  padding: 6px 16px;
+  font: inherit;
+  font-size: 0.85rem;
+  border-radius: var(--lumiverse-radius, 6px);
+  border: 1px solid var(--lumiverse-border, rgba(255,255,255,0.1));
+  background: transparent;
+  color: var(--lumiverse-text, inherit);
+  cursor: pointer;
+  transition: background var(--lumiverse-transition-fast, 0.15s),
+              border-color var(--lumiverse-transition-fast, 0.15s),
+              filter var(--lumiverse-transition-fast, 0.15s);
+}
+.ls-comp-ms__btn:hover {
+  background: var(--lumiverse-fill-subtle, rgba(255,255,255,0.05));
+  border-color: var(--lumiverse-accent, #6366f1);
+}
+.ls-comp-ms__btn--confirm {
+  background: var(--lumiverse-accent, #6366f1);
+  border-color: var(--lumiverse-accent, #6366f1);
+  color: var(--lumiverse-accent-fg, #fff);
+}
+.ls-comp-ms__btn--confirm:hover {
+  background: var(--lumiverse-accent, #6366f1);
+  filter: brightness(1.1);
+}
+`;
+
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
 export const createComponentsLibrary: BuiltinLibraryFactory = (api) => {
@@ -482,6 +588,7 @@ export const createComponentsLibrary: BuiltinLibraryFactory = (api) => {
   const kvFlag      = { v: false };
   const progressFlag = { v: false };
   const fabFlag     = { v: false };
+  const multiSelectFlag = { v: false };
 
   // Sync the initial footerStyleInjected → footerFlag for backward compat
   // (not needed since we're rewriting, but kept for clarity)
@@ -815,6 +922,139 @@ export const createComponentsLibrary: BuiltinLibraryFactory = (api) => {
     return handle;
   }
 
+  // ── multiSelect ───────────────────────────────────────────────────────
+
+  function multiSelect(options: MultiSelectOptions): Promise<string[] | null> {
+    ensureStyles(MULTI_SELECT_CSS, multiSelectFlag);
+
+    // Snapshot initial selection from the input items. Subsequent changes
+    // are tracked in this Set; the input array is never mutated.
+    const selected = new Set<string>();
+    for (const it of options.items) {
+      if (it.checked && !it.disabled) selected.add(it.key);
+    }
+
+    const confirmLabel = options.confirmLabel ?? 'Confirm';
+    const cancelLabel  = options.cancelLabel  ?? 'Cancel';
+    const minSelect    = options.minSelect ?? 0;
+    const maxSelect    = options.maxSelect ?? Infinity;
+
+    // Build the full body once. Checkbox state is managed by the browser
+    // after the initial render — the backend just tracks `selected` from
+    // change events. No re-renders on interaction, so focus never jumps.
+    const renderBody = (): string => {
+      const rows = options.items.map((it) => {
+        const isChecked = selected.has(it.key);
+        const itemClass = 'ls-comp-ms__item' + (it.disabled ? ' ls-comp-ms__item--disabled' : '');
+        const descHtml  = it.description
+          ? `<span class="ls-comp-ms__item-desc">${escapeHtml(it.description)}</span>`
+          : '';
+        return (
+          `<label class="${itemClass}">` +
+            `<input type="checkbox" class="ls-comp-ms__cb" ` +
+              `data-ls-ms-key="${escapeHtml(it.key)}"` +
+              `${isChecked ? ' checked' : ''}${it.disabled ? ' disabled' : ''}>` +
+            `<span class="ls-comp-ms__item-body">` +
+              `<span class="ls-comp-ms__item-label">${escapeHtml(it.label)}</span>` +
+              descHtml +
+            `</span>` +
+          `</label>`
+        );
+      }).join('');
+
+      const rangeHint = (() => {
+        if (minSelect > 0 && Number.isFinite(maxSelect)) {
+          return `Select ${minSelect}–${maxSelect}.`;
+        }
+        if (minSelect > 0) return `Select at least ${minSelect}.`;
+        if (Number.isFinite(maxSelect)) return `Select up to ${maxSelect}.`;
+        return '';
+      })();
+
+      const statusHtml = rangeHint
+        ? `<div class="ls-comp-ms__status">${escapeHtml(rangeHint)}</div>`
+        : '';
+
+      return (
+        `<div class="ls-comp-ms">` +
+          `<div class="ls-comp-ms__list">${rows}</div>` +
+          statusHtml +
+          `<div class="ls-comp-ms__actions">` +
+            `<button type="button" class="ls-comp-ms__btn" ` +
+              `data-ls-ms-action="cancel">${escapeHtml(cancelLabel)}</button>` +
+            `<button type="button" class="ls-comp-ms__btn ls-comp-ms__btn--confirm" ` +
+              `data-ls-ms-action="confirm">${escapeHtml(confirmLabel)}</button>` +
+          `</div>` +
+        `</div>`
+      );
+    };
+
+    return new Promise<string[] | null>((resolve) => {
+      const modal = api.ui.showAdvancedModal({
+        title:     options.title,
+        width:     options.width ?? 480,
+        maxHeight: options.maxHeight,
+      });
+
+      modal.root.update(renderBody());
+
+      let resolved = false;
+      const finish = (result: string[] | null): void => {
+        if (resolved) return;
+        resolved = true;
+        resolve(result);
+        modal.dismiss();
+      };
+
+      // Checkbox state → selected set.
+      modal.root.on('change', (data) => {
+        const key = data.dataset?.lsMsKey;
+        if (typeof key !== 'string') return;
+        if (data.targetChecked) selected.add(key);
+        else selected.delete(key);
+      });
+
+      // Button clicks → Confirm/Cancel. Event delegation via data-ls-ms-action.
+      modal.root.on('click', (data) => {
+        const action = data.dataset?.lsMsAction;
+        if (action === 'cancel') {
+          finish(null);
+          return;
+        }
+        if (action === 'confirm') {
+          if (selected.size < minSelect) {
+            const plural = minSelect === 1 ? 'item' : 'items';
+            api.ui.toast(`Please select at least ${minSelect} ${plural}.`, 'warning');
+            return;
+          }
+          if (selected.size > maxSelect) {
+            const plural = maxSelect === 1 ? 'item' : 'items';
+            api.ui.toast(`Please select at most ${maxSelect} ${plural}.`, 'warning');
+            return;
+          }
+          // Return keys in the input item order, not the insertion order of
+          // the Set (which reflects check-click order) — more predictable.
+          const keys = options.items
+            .filter((it) => selected.has(it.key))
+            .map((it) => it.key);
+          finish(keys);
+        }
+      });
+
+      // Dismissal from the ✕ button, backdrop, Escape, or script teardown.
+      // If the user clicked Cancel/Confirm we've already resolved; this
+      // fires after `modal.dismiss()` but short-circuits on the `resolved`
+      // guard. For user/teardown dismissal without an explicit choice,
+      // resolve with `null`.
+      modal.onDismiss(() => {
+        if (!resolved) {
+          resolved = true;
+          resolve(null);
+        }
+      });
+    });
+  }
+
   // ── Exports ────────────────────────────────────────────────────────────
 
   return {
@@ -825,5 +1065,6 @@ export const createComponentsLibrary: BuiltinLibraryFactory = (api) => {
     keyValueHtml,
     progressBar,
     floatingButton,
+    multiSelect,
   };
 };

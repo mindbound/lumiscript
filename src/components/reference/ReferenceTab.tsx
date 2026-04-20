@@ -174,6 +174,7 @@ export const PERM_GROUPS: PermGroup[] = [
       { method: 'api.ui.prompt', perms: [] },
       { method: 'api.ui.confirm', perms: [] },
       { method: 'api.ui.showModal', perms: [] },
+      { method: 'api.ui.showAdvancedModal', perms: ['app_manipulation'] },
       { method: 'api.ui.editText', perms: [] },
       { method: 'api.ui.pushNotification', perms: ['push_notification'] },
       { method: 'api.ui.getPushStatus', perms: ['push_notification'] },
@@ -533,6 +534,37 @@ export const KEY_TYPES: TypeDoc[] = [
       { field: 'openRequestId', type: 'string',               optional: false, desc: 'UUID identifying this modal instance. Immediately available on the returned handle.' },
       { field: 'result',        type: 'Promise<ModalResult>',  optional: false, desc: 'Resolves with dismissal reason when the modal closes.' },
       { field: 'close()',       type: 'Promise<void>',         optional: false, desc: 'Programmatically dismiss the modal.' },
+    ],
+  },
+  {
+    name: 'AdvancedModalOptions',
+    note: 'Options for api.ui.showAdvancedModal(options). Extension-owned body DOM.',
+    fields: [
+      { field: 'title',       type: 'string',  optional: false, desc: 'Modal header title. Required.' },
+      { field: 'width?',      type: 'number',  optional: true,  desc: 'Width in pixels. Default: 420 (host). Clamped to viewport.' },
+      { field: 'maxHeight?',  type: 'number',  optional: true,  desc: 'Max height in pixels. Default: 520 (host). Clamped to viewport.' },
+      { field: 'persistent?', type: 'boolean', optional: true,  desc: 'When true, backdrop click no longer dismisses. Close button and programmatic dismiss() still work.' },
+    ],
+  },
+  {
+    name: 'AdvancedModalDismissReason',
+    note: "Reason a modal was dismissed. Passed to onDismiss handlers.",
+    fields: [
+      { field: "'user'",     type: 'literal', optional: false, desc: 'Close button, backdrop click, or Escape key.' },
+      { field: "'script'",   type: 'literal', optional: false, desc: 'The script called handle.dismiss().' },
+      { field: "'teardown'", type: 'literal', optional: false, desc: 'Script was disabled or deleted while the modal was open.' },
+    ],
+  },
+  {
+    name: 'AdvancedModalHandle',
+    note: 'Returned by api.ui.showAdvancedModal(). Body DOM is fully script-owned via the root DOMHandle. The modal element carries data-ls-script and data-ls-modal attributes, so api.ui.dom.addStyle() @scope rules match content inside the modal just like any other injected DOM.',
+    fields: [
+      { field: 'modalId',           type: 'string',                                              optional: false, desc: 'UUID identifying this modal instance. Available synchronously.' },
+      { field: 'root',              type: 'DOMHandle',                                           optional: false, desc: "DOMHandle bound to the modal's content container. Use root.update(html), root.on(event, handler), etc. Calls are buffered until the frontend has mounted the modal." },
+      { field: 'dismissed',         type: 'boolean',                                             optional: false, desc: 'True once the modal has been dismissed by any path (user/script/teardown). Useful for bailing out of long-running async work if the user closed the modal mid-task.' },
+      { field: 'setTitle(title)',   type: '(string) => void',                                    optional: false, desc: 'Update the modal header title.' },
+      { field: 'dismiss()',         type: '() => void',                                          optional: false, desc: 'Close the modal programmatically. Safe to call after dismissal (no-op).' },
+      { field: 'onDismiss(handler)', type: '(fn: (reason) => void) => () => void',              optional: false, desc: "Fire once when the modal is dismissed, with the reason. Returns unsubscribe. If already dismissed when registered, fires on next microtask with the recorded reason." },
     ],
   },
   // ─── DOM Injection ───────────────────────────────────────────────────────────
@@ -1230,6 +1262,7 @@ export const API_GROUPS: FnGroup[] = [
       { name: 'prompt',    args: 'message, defaultValue?, options?', desc: 'Show a themed text input dialog. Returns entered string (trimmed) or null if cancelled. Options: placeholder, submitLabel, cancelLabel, multiline.' },
       { name: 'confirm',   args: 'message, title?, options?',        desc: 'Show a themed confirmation dialog. Returns true if confirmed. Options: variant (info/warning/danger/success), confirmLabel, cancelLabel.' },
       { name: 'showModal', args: 'items, options',                   desc: 'Display structured read-only content in a themed modal. Returns ModalHandle { result, openRequestId, close() }. Await handle.result for dismissal. Options: title (required), width, maxHeight, persistent.' },
+      { name: 'showAdvancedModal', args: 'options',                  desc: 'Open a modal whose body is fully script-owned via a DOMHandle (handle.root). Use api.ui.dom.* on root.update/on/... to render and wire interactive UIs. Up to 2 concurrent modals per script (pre-checked backend-side). Returns AdvancedModalHandle { modalId, root, dismissed, setTitle, dismiss, onDismiss }. Requires app_manipulation.' },
       { name: 'editText',  args: 'title?, value?, options?',         desc: 'Open the native Lumiverse expanded text editor with macro syntax highlighting. Blocks until close. Returns edited text or null if cancelled. Options: placeholder.' },
       { name: 'pushNotification', args: 'title, body, options?',   desc: 'Send an OS push notification. Only delivered when app is unfocused. Returns { sent }. Options: tag (dedup), url, icon, rawTitle, image. Requires push_notification.' },
       { name: 'getPushStatus', args: '—',                          desc: 'Check if push notifications are available. Returns { available, subscriptionCount }. Requires push_notification.' },
@@ -1430,6 +1463,7 @@ export const BUILTIN_COMPONENTS: FnRow[] = [
   { name: 'badgeHtml',      args: 'text, options?',             desc: 'Returns badge/pill HTML string for composing inside other injections.' },
   { name: 'statBarHtml',    args: 'label, value, options?',     desc: 'Returns labeled stat bar HTML string. Options: { max?, color?, showValue?, height?, className? }.' },
   { name: 'keyValueHtml',   args: 'label, value, options?',     desc: 'Returns label-value pair HTML string. Options: { muted?, className? }.' },
+  { name: 'multiSelect',    args: 'options',                    desc: 'Open an advanced modal with a checkbox list + Confirm / Cancel. Resolves Promise<string[] | null> — selected keys on confirm, null on cancel / dismiss / teardown. Options: { title, items, confirmLabel?, cancelLabel?, minSelect?, maxSelect?, width?, maxHeight? }. Keys returned in input item order. Requires app_manipulation (transitively via showAdvancedModal).' },
 ];
 
 export const BUILTIN_COUNCIL_PROMPT: FnRow[] = [
@@ -1501,6 +1535,31 @@ export const BUILTIN_TYPES: TypeDoc[] = [
       { field: 'height?',      type: 'number',  optional: true, desc: 'Bar height in px. Default: 8.' },
       { field: 'id?',          type: 'string',  optional: true, desc: 'Stable ID for idempotent injection.' },
       { field: 'className?',   type: 'string',  optional: true, desc: 'Additional CSS class.' },
+    ],
+  },
+  {
+    name: 'MultiSelectItem',
+    note: 'A single selectable row in a multiSelect() items array.',
+    fields: [
+      { field: 'key',          type: 'string',  optional: false, desc: 'Stable identifier returned in the resolved array when this item is selected.' },
+      { field: 'label',        type: 'string',  optional: false, desc: 'Primary label shown next to the checkbox.' },
+      { field: 'description?', type: 'string',  optional: true,  desc: 'Secondary line shown below the label in dim text.' },
+      { field: 'checked?',     type: 'boolean', optional: true,  desc: 'Initial checked state. Default: false.' },
+      { field: 'disabled?',    type: 'boolean', optional: true,  desc: 'When true, the row is unclickable and visually dimmed.' },
+    ],
+  },
+  {
+    name: 'MultiSelectOptions',
+    note: 'Options for multiSelect(). Built on api.ui.showAdvancedModal — inherits the 2-per-script stack limit.',
+    fields: [
+      { field: 'title',         type: 'string',             optional: false, desc: 'Modal title. Required.' },
+      { field: 'items',         type: 'MultiSelectItem[]',  optional: false, desc: 'List of selectable items.' },
+      { field: 'confirmLabel?', type: 'string',             optional: true,  desc: "Label for the confirm button. Default: 'Confirm'." },
+      { field: 'cancelLabel?',  type: 'string',             optional: true,  desc: "Label for the cancel button. Default: 'Cancel'." },
+      { field: 'minSelect?',    type: 'number',             optional: true,  desc: 'Minimum selections to confirm. Below this, Confirm shows a warning toast and the modal stays open. Default: 0.' },
+      { field: 'maxSelect?',    type: 'number',             optional: true,  desc: 'Maximum selections allowed. Over-limit on Confirm shows a warning toast and the modal stays open. Default: unlimited.' },
+      { field: 'width?',        type: 'number',             optional: true,  desc: 'Modal width in pixels. Default: 480.' },
+      { field: 'maxHeight?',    type: 'number',             optional: true,  desc: 'Modal max-height in pixels. Clamped to viewport.' },
     ],
   },
   {

@@ -21,9 +21,21 @@
 
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
 
-import type { LumiScriptAPI, UINotificationType, ModalItem, ShowModalOptions, ModalResult, ModalHandle } from '../../types/script.js';
+import type { LumiScriptAPI, UINotificationType, ModalItem, ShowModalOptions, ModalResult, ModalHandle, AdvancedModalOptions, AdvancedModalHandle, AdvancedModalDismissReason } from '../../types/script.js';
 import type { APIBuildDeps } from './shared.js';
 import { shielded, assertPerm } from './shared.js';
+import { createDOMHandle, nextDOMId } from './dom.js';
+import { registerElement } from '../dom-registry.js';
+import {
+  registerModal,
+  countLiveModalsByScript,
+  markPendingDismissal,
+  addDismissHandler,
+  getModal,
+} from '../advanced-modal-registry.js';
+
+/** Maximum concurrent advanced modals per extension (host-enforced). */
+const ADVANCED_MODAL_STACK_LIMIT = 2;
 
 // ─── API builder ──────────────────────────────────────────────────────────────
 
@@ -126,6 +138,92 @@ export function buildUIAPI(deps: APIBuildDeps): Omit<LumiScriptAPI['ui'], 'dom'>
       };
     },
 
+    showAdvancedModal(options: AdvancedModalOptions): AdvancedModalHandle {
+      assertPerm('app_manipulation', deps.hasPerm, deps.script.name);
+
+      const scriptId = deps.script.id;
+
+      // ── Pre-check stack limit ──────────────────────────────────────────
+      // Host enforces ≤ 2 modals per extension; catching the overflow here
+      // surfaces it as a synchronous throw (with a clear message) instead
+      // of as a silent no-op on the frontend.
+      const live = countLiveModalsByScript(scriptId);
+      if (live >= ADVANCED_MODAL_STACK_LIMIT) {
+        throw new Error(
+          `api.ui.showAdvancedModal: stack limit reached (${ADVANCED_MODAL_STACK_LIMIT} modals open for this script).` +
+          ` Dismiss an existing modal before opening another.`,
+        );
+      }
+
+      // ── Allocate IDs ───────────────────────────────────────────────────
+      // `modalId` identifies the modal lifecycle on both sides;
+      // `rootElementId` is what the frontend binds to the modal body so
+      // the existing `dom_*` pipeline can manipulate content via the
+      // DOMHandle returned as `.root`.
+      const modalId       = crypto.randomUUID();
+      const rootElementId = nextDOMId('mr');
+
+      // Register in both registries BEFORE sending the open message so
+      // any follow-up DOM op that the script fires synchronously after
+      // this call has its elementId already resolved.
+      //
+      // NOTE: `registerElement` is passed NO stable ID — we never want
+      // idempotent lookup to collide with a modal body.
+      registerElement(rootElementId, scriptId);
+      registerModal(modalId, rootElementId, scriptId);
+
+      // ── Construct the handle ───────────────────────────────────────────
+      const root = createDOMHandle(rootElementId, deps);
+
+      const handle: AdvancedModalHandle = {
+        modalId,
+        root,
+        get dismissed(): boolean {
+          return getModal(modalId)?.dismissed ?? true;
+        },
+        setTitle(title: string): void {
+          if (getModal(modalId)?.dismissed) return;
+          spindle.sendToFrontend({ type: 'ls_modal_set_title', modalId, title });
+        },
+        dismiss(): void {
+          const entry = getModal(modalId);
+          if (!entry || entry.dismissed) return;
+          markPendingDismissal(modalId, 'script');
+          spindle.sendToFrontend({ type: 'ls_modal_dismiss', modalId });
+        },
+        onDismiss(fn: (reason: AdvancedModalDismissReason) => void): () => void {
+          const entry = getModal(modalId);
+          if (!entry) return () => {};
+          // If the modal is already dismissed, fire on next microtask with
+          // the recorded reason so callers don't have to special-case it.
+          if (entry.dismissed && entry.dismissedReason) {
+            const reason = entry.dismissedReason;
+            queueMicrotask(() => {
+              try { fn(reason); } catch { /* swallow user callback errors */ }
+            });
+            return () => {};
+          }
+          return addDismissHandler(modalId, fn);
+        },
+      };
+
+      // ── Fire the open message ─────────────────────────────────────────
+      spindle.sendToFrontend({
+        type: 'ls_modal_open',
+        scriptId,
+        modalId,
+        rootElementId,
+        options: {
+          title:      options.title,
+          width:      options.width,
+          maxHeight:  options.maxHeight,
+          persistent: options.persistent,
+        },
+      });
+
+      return handle;
+    },
+
     // ── Push notifications ─────────────────────────────────────────────────
 
     pushNotification(
@@ -155,4 +253,4 @@ export function buildUIAPI(deps: APIBuildDeps): Omit<LumiScriptAPI['ui'], 'dom'>
 }
 
 // Suppress unused-import warning — these types are re-exported for external consumers.
-export type { ModalItem, ShowModalOptions, ModalResult, ModalHandle };
+export type { ModalItem, ShowModalOptions, ModalResult, ModalHandle, AdvancedModalOptions, AdvancedModalHandle, AdvancedModalDismissReason };

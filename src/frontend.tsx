@@ -6,6 +6,7 @@ import { LumiScriptPanel } from './components/LumiScriptPanel.js';
 import { SettingsPanel } from './components/settings/SettingsPanel.js';
 import type { FrontendToBackend } from './types/messages.js';
 import { installDOMHandler } from './dom-handler.js';
+import { installModalHandler } from './modal-handler.js';
 
 // ─── LumiScript Frontend ──────────────────────────────────────────────────
 // Runs in the browser via dynamic import.
@@ -65,6 +66,14 @@ export function setup(ctx: SpindleFrontendContext) {
   // ─── DOM injection handler ──────────────────────────────────────────────
   const cleanupDOM = installDOMHandler(ctx, virtualOnBackendMessage, sendToBackend);
   cleanups.push(cleanupDOM);
+
+  // ─── Advanced modal handler ─────────────────────────────────────────────
+  // Translates backend `ls_modal_*` commands into `ctx.ui.showModal(...)`
+  // calls and echoes dismissal back to the backend. Shares the DOM element
+  // map with installDOMHandler — the modal body is bound under the
+  // `rootElementId` so `api.ui.dom.*` messages targeting it "just work".
+  const cleanupModal = installModalHandler(ctx, virtualOnBackendMessage, sendToBackend);
+  cleanups.push(cleanupModal);
 
   // ─── Dock Panel ─────────────────────────────────────────────────────────
   const panel = ctx.ui.requestDockPanel({

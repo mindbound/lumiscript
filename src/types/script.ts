@@ -1488,6 +1488,81 @@ export interface ModalHandle {
   close(): Promise<void>;
 }
 
+// ─── Advanced modal (DOM-owned) ──────────────────────────────────────────────
+
+/**
+ * Options for `api.ui.showAdvancedModal()`.
+ *
+ * Unlike `showModal()`, which renders a structured item list, advanced modals
+ * give the extension full control over the body via a `DOMHandle` on the
+ * returned handle's `.root` field.
+ */
+export interface AdvancedModalOptions {
+  /** Modal header title. Required. */
+  title: string;
+  /** Width in pixels. Default: 420 (host). Clamped to viewport by the host. */
+  width?: number;
+  /** Maximum height in pixels. Default: 520 (host). Clamped to viewport by the host. */
+  maxHeight?: number;
+  /**
+   * When `true`, clicking the backdrop no longer dismisses the modal — the
+   * user must use the close button, or the script must call `dismiss()`.
+   */
+  persistent?: boolean;
+}
+
+/**
+ * Why an advanced modal was dismissed.
+ *
+ * - `'user'` — user clicked the close button, the backdrop, or pressed Escape.
+ * - `'script'` — the script called `handle.dismiss()`.
+ * - `'teardown'` — the script was disabled or deleted while the modal was open,
+ *    and cleanup forced dismissal.
+ */
+export type AdvancedModalDismissReason = 'user' | 'script' | 'teardown';
+
+/**
+ * Handle returned by `api.ui.showAdvancedModal()`.
+ *
+ * Scripts own the modal body via `root` (a `DOMHandle` bound to the modal's
+ * content container). Use the existing `api.ui.dom.*` pattern: call
+ * `root.update(html)` to set content, `root.on('click', ...)` to wire events,
+ * or delegate to higher-level libraries like `ls:components`.
+ *
+ * Calling `root.remove()` is discouraged — it removes the content container but
+ * leaves the surrounding modal chrome intact. Use `dismiss()` to close the modal.
+ */
+export interface AdvancedModalHandle {
+  /** UUID identifying this modal instance. Available synchronously. */
+  readonly modalId: string;
+  /**
+   * `DOMHandle` bound to the modal's content container.
+   *
+   * The handle is live the moment `showAdvancedModal` returns — calls are
+   * buffered and applied in order once the frontend has mounted the modal.
+   */
+  readonly root: DOMHandle;
+  /**
+   * Has the modal been dismissed? Flips to `true` on any dismissal path
+   * (user, script, or teardown) — handy inside long-running async work to
+   * bail out if the user closed the modal mid-task.
+   */
+  readonly dismissed: boolean;
+  /** Update the modal header title. */
+  setTitle(title: string): void;
+  /** Close the modal programmatically. Safe to call after dismissal (no-op). */
+  dismiss(): void;
+  /**
+   * Register a handler that fires once when the modal is dismissed.
+   * Receives the dismissal reason (`'user' | 'script' | 'teardown'`).
+   * Returns an unsubscribe function.
+   *
+   * If the modal was already dismissed when `onDismiss` is called, the handler
+   * fires on the next microtask with the recorded reason.
+   */
+  onDismiss(handler: (reason: AdvancedModalDismissReason) => void): () => void;
+}
+
 // ─── UI API ───────────────────────────────────────────────────────────────────
 
 export interface UIAPI {
@@ -1560,6 +1635,32 @@ export interface UIAPI {
    * const result = await handle.result;
    */
   showModal(items: ModalItem[], options: ShowModalOptions): ModalHandle;
+
+  /**
+   * Open an **advanced** modal — the extension owns the body DOM via a
+   * `DOMHandle` exposed on `handle.root`.
+   *
+   * Unlike `showModal()` (which renders a structured `ModalItem[]`), the
+   * advanced modal provides a blank content container and returns a handle
+   * for full-fidelity DOM manipulation using the existing `api.ui.dom.*`
+   * pattern. Ideal for complex interactive UIs: configuration editors,
+   * tabbed panels, live-updating status boards, etc.
+   *
+   * Requires the `app_manipulation` permission (same as `api.ui.dom.*`).
+   *
+   * Up to **two** advanced modals may be open concurrently per extension
+   * (host-enforced); the backend pre-checks this limit and throws
+   * synchronously if exceeded.
+   *
+   * @example
+   * const modal = api.ui.showAdvancedModal({ title: 'Settings', width: 480 });
+   * modal.root.update('<div class="panel"><button id="save">Save</button></div>');
+   * modal.root.on('click', (e) => {
+   *   if (e.targetId === 'save') modal.dismiss();
+   * });
+   * modal.onDismiss((reason) => api.chat.console(`modal closed: ${reason}`));
+   */
+  showAdvancedModal(options: AdvancedModalOptions): AdvancedModalHandle;
 
   /**
    * Open the native Lumiverse expanded text editor with macro syntax highlighting.
@@ -2428,6 +2529,49 @@ export interface FloatingButtonOptions {
   className?: string;
 }
 
+// ── multiSelect ──────────────────────────────────────────────────────────
+
+/** A single selectable item in `multiSelect()`. */
+export interface MultiSelectItem {
+  /** Stable key returned in the resolved array when this item is selected. */
+  key: string;
+  /** Primary label shown next to the checkbox. */
+  label: string;
+  /** Optional secondary line shown below the label in dim text. */
+  description?: string;
+  /** Initial checked state. Default: `false`. */
+  checked?: boolean;
+  /** When `true`, the row is unclickable and visually dimmed. Default: `false`. */
+  disabled?: boolean;
+}
+
+/** Options for `multiSelect()` from `ls:components`. */
+export interface MultiSelectOptions {
+  /** Modal title. Required. */
+  title: string;
+  /** List of selectable items. */
+  items: MultiSelectItem[];
+  /** Label for the confirm button. Default: `'Confirm'`. */
+  confirmLabel?: string;
+  /** Label for the cancel button. Default: `'Cancel'`. */
+  cancelLabel?: string;
+  /**
+   * Minimum number of selections required to confirm. If the user clicks
+   * Confirm with fewer selections, a warning toast is shown and the modal
+   * stays open. Default: `0`.
+   */
+  minSelect?: number;
+  /**
+   * Maximum number of selections allowed. Evaluated on Confirm; over-limit
+   * shows a warning toast and keeps the modal open. Default: unlimited.
+   */
+  maxSelect?: number;
+  /** Modal width in pixels. Default: `480`. */
+  width?: number;
+  /** Modal max-height in pixels. Clamped to viewport. */
+  maxHeight?: number;
+}
+
 // ── Library exports ──────────────────────────────────────────────────────
 
 /** Exports of the `ls:components` built-in library. */
@@ -2486,6 +2630,31 @@ export interface LSComponentsExports {
 
   /** Return a label–value pair HTML string. Composable inside other components. */
   keyValueHtml(label: string, value: string, options?: KeyValueHtmlOptions): string;
+
+  // ── Modal-based components (require `app_manipulation` via api.ui.showAdvancedModal) ─
+
+  /**
+   * Open an advanced modal with a checkbox list and Confirm / Cancel buttons.
+   * Resolves with an array of selected `key`s when the user confirms, or
+   * `null` if they cancel, dismiss, or the script is torn down.
+   *
+   * Demonstrates the `api.ui.showAdvancedModal` API — an extension-owned
+   * modal body driven by the existing `DOMHandle` pipeline.
+   *
+   * @example
+   * const picked = await multiSelect({
+   *   title: 'Pick companions',
+   *   items: [
+   *     { key: 'alice', label: 'Alice', description: 'Alchemist' },
+   *     { key: 'bob',   label: 'Bob',   description: 'Bard' },
+   *     { key: 'cara',  label: 'Cara',  description: 'Cleric', checked: true },
+   *   ],
+   *   minSelect: 1,
+   *   maxSelect: 2,
+   * });
+   * if (picked) api.ui.toast(`Chose: ${picked.join(', ')}`);
+   */
+  multiSelect(options: MultiSelectOptions): Promise<string[] | null>;
 }
 
 // ─── Built-in library: ls:council-prompt ──────────────────────────────────────

@@ -28,6 +28,12 @@ import {
 import { logCleanup } from './engine/cleanup-log.js';
 import { dispatchToolInvocation } from './engine/tool-invocation.js';
 import { dispatchEvent as dispatchDOMEvent, cleanupScript as cleanupDOMScript } from './engine/dom-registry.js';
+import {
+  liveModalsByScript as advancedModalsByScript,
+  markPendingDismissal as markModalPendingDismissal,
+  markDismissed as markModalDismissed,
+  dropEntry as dropAdvancedModalEntry,
+} from './engine/advanced-modal-registry.js';
 import { checkMinimumHostVersion } from './utils/host-version.js';
 
 // ─── Active user + permission tracking ───────────────────────────────────────
@@ -431,6 +437,15 @@ spindle.onFrontendMessage(async (raw, userId) => {
           }
           logCleanup('tool',  'disabled', disabledName, clearedTools);
           logCleanup('macro', 'disabled', disabledName, clearedMacros);
+          // Dismiss any advanced modals this script still has open. Marking
+          // a pending reason of 'teardown' means the frontend's dismissal
+          // echo (ls_modal_dismissed) will fire the script's onDismiss
+          // handlers with `reason: 'teardown'` — even though the handlers
+          // themselves may have already been collected by ls:teardown.
+          for (const modalId of advancedModalsByScript(msg.id)) {
+            markModalPendingDismissal(modalId, 'teardown');
+            send({ type: 'ls_modal_dismiss', modalId });
+          }
           cleanupDOMScript(msg.id);
           send({ type: 'dom_cleanup_script', scriptId: msg.id });
         }
@@ -461,6 +476,12 @@ spindle.onFrontendMessage(async (raw, userId) => {
         }
         logCleanup('tool',  'deleted', deletedName, clearedTools);
         logCleanup('macro', 'deleted', deletedName, clearedMacros);
+        // Dismiss any advanced modals this script still has open. See the
+        // matching block in `update_script` for the teardown-reason story.
+        for (const modalId of advancedModalsByScript(msg.id)) {
+          markModalPendingDismissal(modalId, 'teardown');
+          send({ type: 'ls_modal_dismiss', modalId });
+        }
         cleanupDOMScript(msg.id);
         send({ type: 'dom_cleanup_script', scriptId: msg.id });
         await scriptStorage.deleteScript(msg.id);
@@ -544,6 +565,27 @@ spindle.onFrontendMessage(async (raw, userId) => {
       // ── DOM events (from frontend) ──────────────────────────────────────
       case 'dom_event': {
         dispatchDOMEvent(msg.listenerId, msg.data);
+        break;
+      }
+
+      // ── Advanced modal dismissal echo ─────────────────────────────────
+      // Frontend sends this after any modal dismissal (user-initiated or
+      // in response to a backend `ls_modal_dismiss`). The registry tracks
+      // whether the backend initiated the dismissal (via markPendingDismissal)
+      // and reports the correct reason to subscribed handlers.
+      case 'ls_modal_dismissed': {
+        const result = markModalDismissed(msg.modalId);
+        if (result) {
+          for (const fn of result.handlers) {
+            try { fn(result.reason); } catch (err) {
+              spindle.log.warn(
+                `[LumiScript] onDismiss handler threw: ` +
+                (err instanceof Error ? err.message : String(err)),
+              );
+            }
+          }
+          dropAdvancedModalEntry(msg.modalId);
+        }
         break;
       }
 

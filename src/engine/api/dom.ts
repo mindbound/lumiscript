@@ -35,12 +35,65 @@ import {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 let _idCounter = 0;
-function nextId(prefix: string): string {
+export function nextDOMId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${(++_idCounter).toString(36)}`;
 }
 
+// Local alias retained for the rest of this module.
+const nextId = nextDOMId;
+
 function send(msg: BackendToFrontend): void {
   spindle.sendToFrontend(msg);
+}
+
+/**
+ * Build a `DOMHandle` for the given `elementId` using the provided API build
+ * dependencies. Exposed at module scope (rather than closed over inside
+ * `buildDOMAPI`) so other API builders — e.g. `showAdvancedModal` in `ui.ts`
+ * — can wrap elements they allocate via the existing DOM message pipeline
+ * without duplicating the handle shape.
+ *
+ * The handle's permission gate and `deps.script.name` are resolved from `deps`
+ * at call time, matching the behaviour of handles created inside `buildDOMAPI`.
+ */
+export function createDOMHandle(elementId: string, deps: APIBuildDeps): DOMHandle {
+  function gate(): void {
+    assertPerm('app_manipulation', deps.hasPerm, deps.script.name);
+  }
+
+  return {
+    get id() { return elementId; },
+
+    update(html: string): void {
+      gate();
+      send({ type: 'dom_update', elementId, html });
+    },
+
+    remove(): void {
+      gate();
+      // Clear listeners in registry (frontend will also detach on remove)
+      clearListeners(elementId);
+      unregisterElement(elementId);
+      send({ type: 'dom_remove', elementId });
+    },
+
+    on(event: string, handler: (data: DOMEventData) => void): () => void {
+      gate();
+      const listenerId = nextId('dl');
+      addListener(elementId, listenerId, event, handler);
+      send({ type: 'dom_listen', elementId, listenerId, event });
+
+      return () => {
+        removeListener(elementId, listenerId);
+        send({ type: 'dom_unlisten', elementId, listenerId, event });
+      };
+    },
+
+    makeDraggable(handleSelector?: string): void {
+      gate();
+      send({ type: 'dom_make_draggable', elementId, handleSelector });
+    },
+  };
 }
 
 // ─── API builder ─────────────────────────────────────────────────────────────
@@ -52,41 +105,7 @@ export function buildDOMAPI(deps: APIBuildDeps): LumiScriptAPI['ui']['dom'] {
     assertPerm('app_manipulation', deps.hasPerm, deps.script.name);
   }
 
-  function createHandle(elementId: string): DOMHandle {
-    return {
-      get id() { return elementId; },
-
-      update(html: string): void {
-        gate();
-        send({ type: 'dom_update', elementId, html });
-      },
-
-      remove(): void {
-        gate();
-        // Clear listeners in registry (frontend will also detach on remove)
-        clearListeners(elementId);
-        unregisterElement(elementId);
-        send({ type: 'dom_remove', elementId });
-      },
-
-      on(event: string, handler: (data: DOMEventData) => void): () => void {
-        gate();
-        const listenerId = nextId('dl');
-        addListener(elementId, listenerId, event, handler);
-        send({ type: 'dom_listen', elementId, listenerId, event });
-
-        return () => {
-          removeListener(elementId, listenerId);
-          send({ type: 'dom_unlisten', elementId, listenerId, event });
-        };
-      },
-
-      makeDraggable(handleSelector?: string): void {
-        gate();
-        send({ type: 'dom_make_draggable', elementId, handleSelector });
-      },
-    };
-  }
+  const createHandle = (elementId: string): DOMHandle => createDOMHandle(elementId, deps);
 
   return {
     inject(

@@ -116,6 +116,20 @@ export type FrontendToBackend =
       event: string;
       data: DOMEventData;
     }
+  // ─── Advanced modal lifecycle (frontend → backend) ─────────────────
+  | {
+      /**
+       * Fired by the frontend when an advanced modal has been dismissed —
+       * either by user action (close button, backdrop click, Escape) or in
+       * response to a backend-initiated `ls_modal_dismiss` message.
+       *
+       * The backend distinguishes `'user'` from `'script'`/`'teardown'` by
+       * tracking whether it initiated the dismissal itself; this message
+       * always reports a plain completion.
+       */
+      type: 'ls_modal_dismissed';
+      modalId: string;
+    }
 ;
 
 // ─── Backend → Frontend ───────────────────────────────────────────────────────
@@ -199,4 +213,39 @@ export type BackendToFrontend =
   | { type: 'dom_unlisten';        elementId: string; listenerId: string; event: string }
   | { type: 'dom_cleanup_script';  scriptId: string }
   | { type: 'dom_make_draggable';  elementId: string; handleSelector?: string }
+  // ─── Advanced modal commands (backend → frontend) ──────────────────
+  | {
+      /**
+       * Open an advanced modal. The frontend calls `ctx.ui.showModal(options)`
+       * and binds the resulting body element to `rootElementId` in its DOM
+       * element map, so subsequent `dom_update` / `dom_listen` / etc. messages
+       * targeting `rootElementId` manipulate the modal body via the existing
+       * DOM pipeline.
+       */
+      type: 'ls_modal_open';
+      scriptId: string;
+      modalId: string;
+      rootElementId: string;
+      options: {
+        title: string;
+        width?: number;
+        maxHeight?: number;
+        persistent?: boolean;
+      };
+    }
+  | {
+      /** Update an open modal's header title. */
+      type: 'ls_modal_set_title';
+      modalId: string;
+      title: string;
+    }
+  | {
+      /**
+       * Request dismissal of an open modal. The frontend calls
+       * `handle.dismiss()` on the underlying Spindle modal handle, which
+       * produces an `ls_modal_dismissed` echo back to the backend.
+       */
+      type: 'ls_modal_dismiss';
+      modalId: string;
+    }
 ;
