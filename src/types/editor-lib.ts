@@ -938,6 +938,14 @@ interface WorldInfoAPI {
     create(ref: WorldInfoRef, input: WorldInfoEntryInput): Promise<WorldInfoEntry>;
     update(entryId: string, input: WorldInfoEntryInput): Promise<WorldInfoEntry>;
     delete(entryId: string): Promise<boolean>;
+    /**
+     * Find all entries across ALL world books whose automationId starts
+     * with the given prefix. Useful for enumerating / cleaning up entries
+     * a script owns (e.g. 'lumiscript:<scriptId>:' for managed entries).
+     * O(books × entries-per-book) — not recommended for hot paths.
+     * Requires world_books permission.
+     */
+    listByAutomationIdPrefix(prefix: string): Promise<WorldInfoEntry[]>;
   };
   /**
    * Get all world info entries that would activate for the current (or specified) chat.
@@ -1223,6 +1231,12 @@ interface LumiScriptAPI {
 }
 
 interface ScriptNamespace {
+  /** This script's stable UUID. Use as owner key for external state. */
+  id: string;
+  /** This script's current human-readable name (tracks Script Manager). */
+  name: string;
+  /** This script's type — 'trigger' or 'library'. */
+  type: 'trigger' | 'library';
   /**
    * Load a library script by name or ID (lazy, cached per execution).
    * Built-in libraries use the ls: prefix (e.g. 'ls:components').

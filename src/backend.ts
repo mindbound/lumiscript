@@ -410,6 +410,16 @@ spindle.onFrontendMessage(async (raw, userId) => {
         if ('enabled' in msg.patch && !msg.patch.enabled) {
           const disabledScript  = scriptStorage.getScript(msg.id);
           const disabledName    = disabledScript?.name ?? msg.id;
+          // Fire ls:teardown BEFORE any state cleanup so the handler can
+          // still access tools/macros/world-info it registered. No-op for
+          // scripts that don't declare the trigger. Handler errors + timeouts
+          // are logged and do NOT block the cleanup that follows.
+          if (disabledScript) {
+            // The stored record still has enabled=true at this point (we're
+            // about to update it) — fireTeardown's guard expects the current
+            // enabled state, so use the stored record rather than the patch.
+            await triggerRegistry.fireTeardown(disabledScript, 'disabled');
+          }
           clearByScriptId(msg.id);
           pushInjections();
           const clearedTools = clearToolsByScriptId(msg.id);
@@ -433,6 +443,13 @@ spindle.onFrontendMessage(async (raw, userId) => {
         // the cleanup log has a readable identifier.
         const deletedScript = scriptStorage.getScript(msg.id);
         const deletedName   = deletedScript?.name ?? msg.id;
+        // Fire ls:teardown with reason='deleted' before any state cleanup.
+        // fireTeardown internally skips already-disabled scripts (they were
+        // torn down on the earlier disable event), so deleting an
+        // already-disabled script is a no-op here.
+        if (deletedScript) {
+          await triggerRegistry.fireTeardown(deletedScript, 'deleted');
+        }
         clearByScriptId(msg.id);
         pushInjections();
         const clearedTools = clearToolsByScriptId(msg.id);

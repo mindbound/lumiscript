@@ -193,3 +193,135 @@ describe('TriggerRegistry — batch aggregation', () => {
     expect(ends[0].duration).toBeGreaterThanOrEqual(35);
   });
 });
+
+// ─── ls:teardown dispatch ────────────────────────────────────────────────────
+
+/**
+ * Teardown path sets up the same way as event-handler path but invokes
+ * `fireTeardown(script, reason)` directly instead of routing through a
+ * captured spindle.on handler. Teardown isn't dispatched via Spindle's
+ * event bus — it's a synthetic LS event fired by backend.ts before
+ * disable/delete cleanup.
+ */
+async function setupForTeardown(
+  scriptCode: string,
+  overrides?: Partial<Script>,
+) {
+  const adapter = new InMemoryStorageAdapter();
+  const storage = new ScriptStorage(adapter, () => 'test-user');
+  await storage.load();
+
+  const seeded = makeScript(scriptCode, {
+    triggers: ['ls:teardown'],
+    ...overrides,
+  });
+  await storage.store.create(seeded);
+
+  const deps: TriggerDeps = {
+    grantedPermissions: new Set(),
+    userId: 'test-user',
+    scriptStorage: storage,
+    scriptTimeoutMs: 5_000,
+  };
+
+  const sendToFrontend = mock((_msg: BackendToFrontend) => {});
+  const registry = new TriggerRegistry(() => deps, sendToFrontend);
+
+  setActiveContext({ chatId: 'test-chat', characterId: 'test-char' });
+
+  // Registering subscribes to Spindle events — synthetic ls:teardown is
+  // filtered out (as intended), so no spindle.on call is made. We then
+  // invoke fireTeardown directly in the tests below.
+  await registry.register(seeded);
+
+  return { registry, storage, seeded, sendToFrontend };
+}
+
+describe('fireTeardown', () => {
+  test('runs the handler body when the script declares ls:teardown', async () => {
+    const { registry, seeded, sendToFrontend } = await setupForTeardown(`
+      console.log(\`teardown: \${data.reason}\`);
+    `);
+
+    await registry.fireTeardown(seeded, 'disabled');
+
+    const ends = executionEnds(sendToFrontend);
+    expect(ends).toHaveLength(1);
+    expect(ends[0].success).toBe(true);
+  });
+
+  test("passes reason discriminant into the handler's data payload", async () => {
+    const { registry, seeded, sendToFrontend } = await setupForTeardown(`
+      if (data.reason !== 'deleted') throw new Error('wrong reason: ' + data.reason);
+    `);
+
+    await registry.fireTeardown(seeded, 'deleted');
+
+    const ends = executionEnds(sendToFrontend);
+    expect(ends).toHaveLength(1);
+    expect(ends[0].success).toBe(true);
+  });
+
+  test('no-ops when the script does not declare ls:teardown', async () => {
+    const { registry, seeded, sendToFrontend } = await setupForTeardown(`
+      throw new Error('should not run');
+    `, { triggers: ['MESSAGE_SENT'] });  // declares a different trigger
+
+    await registry.fireTeardown(seeded, 'disabled');
+
+    // No execution_ended message — handler was never dispatched.
+    const ends = executionEnds(sendToFrontend);
+    expect(ends).toHaveLength(0);
+  });
+
+  test('skips teardown when a disabled script is being deleted', async () => {
+    // Disabled scripts were already torn down on the earlier disable event.
+    // Deleting one should not re-fire teardown — the script's cleanup has
+    // already happened, and re-running user code after disable is wrong.
+    const { registry, seeded, sendToFrontend } = await setupForTeardown(`
+      throw new Error('should not re-fire on delete');
+    `, { enabled: false });
+
+    await registry.fireTeardown(seeded, 'deleted');
+
+    const ends = executionEnds(sendToFrontend);
+    expect(ends).toHaveLength(0);
+  });
+
+  test('handler errors are logged but do not propagate (cleanup must proceed)', async () => {
+    const { registry, seeded, sendToFrontend } = await setupForTeardown(`
+      throw new Error('boom from teardown');
+    `);
+
+    // No throw here — fireTeardown swallows handler errors so backend.ts
+    // can proceed with tool/macro/state cleanup regardless.
+    await registry.fireTeardown(seeded, 'disabled');
+
+    const ends = executionEnds(sendToFrontend);
+    expect(ends).toHaveLength(1);
+    expect(ends[0].success).toBe(false);
+    expect(ends[0].error).toContain('boom from teardown');
+
+    // Warning surfaces in server log (mock).
+    const warnMock = (globalThis as any).spindle.log.warn as any;
+    const warnCalls = (warnMock.mock.calls as unknown[][])
+      .map(c => String(c[0]));
+    expect(warnCalls.some(c => c.includes('ls:teardown handler'))).toBe(true);
+  });
+
+  test('teardown on an already-disabled script with disabled reason still runs', async () => {
+    // Sanity: the "skip on delete-after-disable" guard is SPECIFIC to the
+    // deleted reason. A disabled-reason teardown on an already-disabled
+    // script is unusual but shouldn't be silently skipped — protects against
+    // future lifecycle paths that might re-fire a disable event.
+    const { registry, seeded, sendToFrontend } = await setupForTeardown(`
+      /* empty handler */
+    `, { enabled: false });
+
+    await registry.fireTeardown(seeded, 'disabled');
+
+    const ends = executionEnds(sendToFrontend);
+    expect(ends).toHaveLength(1);
+    expect(ends[0].success).toBe(true);
+  });
+});

@@ -60,6 +60,8 @@ const GroupHeader: FC<{ label: React.ReactNode; cols: number }> = ({ label, cols
 export interface EventRow { name: string; group: string; payload: string; }
 
 export const EVENTS: EventRow[] = [
+  { group: 'LumiScript', name: 'ls:startup',                 payload: '{ __event: "ls:startup" }' },
+  { group: 'LumiScript', name: 'ls:teardown',                payload: "{ reason: 'disabled' | 'deleted', scriptId, scriptName }" },
   { group: 'Chat',       name: 'MESSAGE_SENT',               payload: '{ chatId, message }' },
   { group: 'Chat',       name: 'MESSAGE_EDITED',             payload: '{ chatId, message }' },
   { group: 'Chat',       name: 'MESSAGE_DELETED',            payload: '{ chatId, messageId }' },
@@ -1311,6 +1313,7 @@ export const API_GROUPS: FnGroup[] = [
       { name: 'entries.create',      args: 'ref, input',        desc: 'Create a new entry in a world book.' },
       { name: 'entries.update',      args: 'entryId, input',    desc: 'Update an entry by ID.' },
       { name: 'entries.delete',      args: 'entryId',           desc: 'Delete an entry by ID.' },
+      { name: 'entries.listByAutomationIdPrefix', args: 'prefix', desc: 'Find all entries across all world books whose automationId starts with the given prefix. Useful for enumerating / cleaning up entries a script owns (e.g. "lumiscript:<scriptId>:" convention). Returns WorldInfoEntry[]; O(books × entries-per-book).' },
       { name: 'getCapturedActive',   args: 'chatId?',           desc: 'Get all entries that would activate for the current chat (full pipeline).' },
     ],
   },
@@ -1383,6 +1386,9 @@ export const API_GROUPS: FnGroup[] = [
   {
     group: 'script',
     rows: [
+      { name: 'id',      args: '(property)', desc: "This script's stable UUID. Immutable across enables, edits, renames. Use as owner key for any external state the script creates (world-book entries via automation_id, persistent storage paths, etc.)." },
+      { name: 'name',    args: '(property)', desc: "This script's current human-readable name. Tracks the Script Manager — can change when the user renames. Useful for log lines; NOT stable for ownership (use script.id for that)." },
+      { name: 'type',    args: '(property)', desc: "Script type: 'trigger' or 'library'." },
       { name: 'require', args: 'nameOrId', desc: "Load a library by name/ID, or a built-in library by ls: prefix (e.g. 'ls:components')." },
     ],
   },

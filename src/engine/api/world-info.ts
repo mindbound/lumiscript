@@ -259,6 +259,60 @@ export function buildWorldInfoAPI(deps: APIBuildDeps): LumiScriptAPI['worldInfo'
         assertPerm('world_books', hasPerm, script.name);
         return spindle.world_books.entries.delete(entryId, uid);
       },
+
+      async listByAutomationIdPrefix(prefix: string): Promise<WorldInfoEntry[]> {
+        assertPerm('world_books', hasPerm, script.name);
+
+        // Page through ALL world books. `list()` defaults to limit 50, max 200;
+        // we use 200 to minimise round-trips. Books are small in practice (users
+        // rarely have more than a few dozen), so this is usually one page.
+        const matches: WorldInfoEntry[] = [];
+        let bookOffset = 0;
+        const BOOK_PAGE = 200;
+        // Single pass — most users have well under 200 books. Additional
+        // pages are handled by the while-loop below if the count exceeds.
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          const books = await spindle.world_books.list({
+            userId: uid,
+            limit:  BOOK_PAGE,
+            offset: bookOffset,
+          });
+          if (books.data.length === 0) break;
+
+          // For each book, page through its entries and filter by prefix.
+          // Running in parallel per book to minimise wall-clock time; each
+          // book's entry paging is sequential since page N depends on N-1.
+          const perBookResults = await Promise.all(
+            books.data.map(async (book) => {
+              const bookMatches: WorldInfoEntry[] = [];
+              let entryOffset = 0;
+              const ENTRY_PAGE = 200;
+              while (true) {
+                const page = await spindle.world_books.entries.list(book.id, {
+                  userId: uid,
+                  limit:  ENTRY_PAGE,
+                  offset: entryOffset,
+                });
+                for (const dto of page.data) {
+                  if (dto.automation_id && dto.automation_id.startsWith(prefix)) {
+                    bookMatches.push(mapEntry(dto));
+                  }
+                }
+                if (page.data.length < ENTRY_PAGE) break;
+                entryOffset += page.data.length;
+              }
+              return bookMatches;
+            }),
+          );
+          for (const subset of perBookResults) matches.push(...subset);
+
+          if (books.data.length < BOOK_PAGE) break;
+          bookOffset += books.data.length;
+        }
+
+        return matches;
+      },
     },
 
     // ── Activation scan ───────────────────────────────────────────────────────

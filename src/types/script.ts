@@ -1391,6 +1391,20 @@ export interface WorldInfoAPI {
     update(entryId: string, input: WorldInfoEntryInput): Promise<WorldInfoEntry>;
     /** Delete an entry by its entry ID. Returns true if deleted. Requires world_books permission. */
     delete(entryId: string): Promise<boolean>;
+    /**
+     * Find all entries across ALL world books whose `automationId` starts
+     * with the given prefix. Useful for scripts that create entries under
+     * their own convention (e.g. `'lumiscript:<scriptId>:'` for managed
+     * dynamic entries) and need to enumerate, update, or clean them up.
+     *
+     * Implementation is O(books × entries-per-book) — each book is listed
+     * and each entry is scanned. Acceptable for typical world-book sizes;
+     * not recommended for hot-path use. Requires world_books permission.
+     *
+     * Returns a flat `WorldInfoEntry[]` (not paginated). The `worldBookId`
+     * field on each entry identifies which book it belongs to.
+     */
+    listByAutomationIdPrefix(prefix: string): Promise<WorldInfoEntry[]>;
   };
   /**
    * Get all world info entries that would activate for the current (or specified) chat.
@@ -2221,6 +2235,25 @@ export interface BroadcastAPI {
 // ─── Script namespace ─────────────────────────────────────────────────────────
 
 export interface ScriptNamespace {
+  /**
+   * This script's stable identifier. UUID; never changes across enables,
+   * edits, or rename. Use as the owner key for any external state the
+   * script creates (world-book entries via `automation_id`, persistent
+   * storage paths, broadcast channel prefixes, etc.).
+   */
+  id: string;
+  /**
+   * This script's current human-readable name. Tracks the name field in
+   * the Script Manager — can change when the user renames. Useful for
+   * log lines and user-visible messages; NOT suitable as a stable owner
+   * key (use `script.id` for that).
+   */
+  name: string;
+  /**
+   * This script's type — trigger or library. Library scripts are loaded
+   * on demand via `script.require()` and don't receive trigger events.
+   */
+  type: ScriptType;
   /**
    * Load a library script by name or ID (lazy, cached per execution).
    * Built-in libraries use the `ls:` prefix (e.g. `'ls:components'`).

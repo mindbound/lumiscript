@@ -14,6 +14,7 @@ export const TRIGGER_EVENT_GROUPS: EventGroup[] = [
     label: 'LumiScript',
     events: [
       { name: 'ls:startup', description: 'Fires once at LumiScript boot. Use for tool registration, cache pre-warming, and other one-time init.' },
+      { name: 'ls:teardown', description: "Fires before the script is disabled or deleted. Use for cleanup of external state (dynamic world-book entries, registered tools outside api.tools lifecycle, persistent storage). Handler has full api access and a 10s budget — errors are logged, not toasted. data.reason is 'disabled' | 'deleted'." },
     ],
   },
   {

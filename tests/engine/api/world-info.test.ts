@@ -219,3 +219,108 @@ describe('entries.update', () => {
     expect(mockSpindle.world_books.entries.update).toHaveBeenCalledTimes(1);
   });
 });
+
+// ─── Entry listByAutomationIdPrefix ──────────────────────────────────────────
+
+describe('entries.listByAutomationIdPrefix', () => {
+  /**
+   * Convenience factory — builds an entry DTO with a custom automation_id.
+   * All other fields fall back to the top-level `entryDTO` constant.
+   */
+  function entryWithAutomationId(id: string, automationId: string) {
+    return { ...entryDTO, id, automation_id: automationId };
+  }
+
+  test('returns only entries whose automation_id starts with the prefix', async () => {
+    // Single book with three entries — two match the prefix, one does not.
+    mockSpindle.world_books.list.mockReturnValueOnce(
+      Promise.resolve({ data: [bookDTO], total: 1 }),
+    );
+    mockSpindle.world_books.entries.list.mockReturnValueOnce(Promise.resolve({
+      data: [
+        entryWithAutomationId('e1', 'lumiscript:script-a:handler-x'),
+        entryWithAutomationId('e2', 'lumiscript:script-a:handler-y'),
+        entryWithAutomationId('e3', 'lumiscript:script-b:handler-z'),
+      ],
+      total: 3,
+    }));
+    const api = buildApi();
+    const result = await api.entries.listByAutomationIdPrefix('lumiscript:script-a:');
+    expect(result).toHaveLength(2);
+    expect(result.map(e => e.id).sort()).toEqual(['e1', 'e2']);
+  });
+
+  test('skips entries with empty or null automation_id', async () => {
+    mockSpindle.world_books.list.mockReturnValueOnce(
+      Promise.resolve({ data: [bookDTO], total: 1 }),
+    );
+    mockSpindle.world_books.entries.list.mockReturnValueOnce(Promise.resolve({
+      data: [
+        entryWithAutomationId('e1', 'lumiscript:script-a:h'),
+        { ...entryDTO, id: 'e2', automation_id: '' },
+        { ...entryDTO, id: 'e3', automation_id: null as unknown as string },
+      ],
+      total: 3,
+    }));
+    const api = buildApi();
+    const result = await api.entries.listByAutomationIdPrefix('lumiscript:');
+    expect(result).toHaveLength(1);
+    expect(result[0]!.id).toBe('e1');
+  });
+
+  test('scans across multiple world books', async () => {
+    const book2 = { ...bookDTO, id: 'wb-2', name: 'Other Lorebook' };
+    mockSpindle.world_books.list.mockReturnValueOnce(
+      Promise.resolve({ data: [bookDTO, book2], total: 2 }),
+    );
+    // First book: one match. Second book: one match.
+    mockSpindle.world_books.entries.list
+      .mockReturnValueOnce(Promise.resolve({
+        data: [entryWithAutomationId('e1', 'lumiscript:script-a:h')],
+        total: 1,
+      }))
+      .mockReturnValueOnce(Promise.resolve({
+        data: [
+          { ...entryDTO, id: 'e2', world_book_id: 'wb-2',
+            automation_id: 'lumiscript:script-a:h' },
+        ],
+        total: 1,
+      }));
+    const api = buildApi();
+    const result = await api.entries.listByAutomationIdPrefix('lumiscript:script-a:');
+    expect(result).toHaveLength(2);
+    // worldBookId on each entry identifies which book it belongs to.
+    expect(result.map(e => e.worldBookId).sort()).toEqual(['wb-1', 'wb-2']);
+  });
+
+  test('returns empty array when no entries match', async () => {
+    mockSpindle.world_books.list.mockReturnValueOnce(
+      Promise.resolve({ data: [bookDTO], total: 1 }),
+    );
+    mockSpindle.world_books.entries.list.mockReturnValueOnce(Promise.resolve({
+      data: [entryWithAutomationId('e1', 'something-else')],
+      total: 1,
+    }));
+    const api = buildApi();
+    const result = await api.entries.listByAutomationIdPrefix('lumiscript:');
+    expect(result).toEqual([]);
+  });
+
+  test('returns empty array when the user has no world books', async () => {
+    mockSpindle.world_books.list.mockReturnValueOnce(
+      Promise.resolve({ data: [], total: 0 }),
+    );
+    const api = buildApi();
+    const result = await api.entries.listByAutomationIdPrefix('lumiscript:');
+    expect(result).toEqual([]);
+    // entries.list shouldn't be called when there are no books to scan.
+    expect(mockSpindle.world_books.entries.list).not.toHaveBeenCalled();
+  });
+
+  test('throws when world_books permission denied', async () => {
+    const api = buildApi({ hasPerm: () => false });
+    await expect(
+      api.entries.listByAutomationIdPrefix('lumiscript:'),
+    ).rejects.toThrow('PERMISSION_DENIED');
+  });
+});

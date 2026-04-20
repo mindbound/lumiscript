@@ -68,6 +68,29 @@ export interface TriggerDeps {
  */
 const LS_STARTUP = 'ls:startup';
 
+/**
+ * `ls:teardown` is a synthetic trigger event mirroring `ls:startup`. Fires
+ * when a trigger script is about to be disabled or deleted — before any
+ * state cleanup runs, so the handler can still use the full api (tools,
+ * macros, world info, chat, etc.) for whatever final-housekeeping work
+ * it needs (e.g. deleting dynamic world-book entries it created).
+ *
+ * Semantics:
+ *   - Fires once per disable/delete for each script that declares it.
+ *   - `data.reason` discriminates: `'disabled'` | `'deleted'`.
+ *   - Hard 10-second timeout. Handler exceeding it is abandoned; teardown
+ *     continues regardless. Handler errors are logged but don't block.
+ *   - The handler CANNOT veto the teardown — user-initiated disable/delete
+ *     always proceeds to completion.
+ *   - Not dispatched through Spindle's event bus (synthetic, LS-internal).
+ */
+const LS_TEARDOWN = 'ls:teardown';
+
+/** Hard ceiling on teardown handler runtime. Beyond this, LS abandons the
+ *  handler and proceeds with cleanup — buggy or blocking teardown code
+ *  must not stall disable/delete. */
+const LS_TEARDOWN_TIMEOUT_MS = 10_000;
+
 export class TriggerRegistry {
   /** scriptId → { unsubs, events } — tracks live spindle.on() subscriptions */
   private cleanups = new Map<string, { unsubs: Array<() => void>; events: string[] }>();
@@ -123,9 +146,13 @@ export class TriggerRegistry {
     if (events.length === 0) return;
 
     const hasStartup = events.includes(LS_STARTUP);
-    // Filter ls:startup out of the Spindle subscriptions — it's synthetic and
-    // Spindle would silently no-op it. We dispatch it directly below.
-    const spindleEvents = hasStartup ? events.filter(e => e !== LS_STARTUP) : events;
+    // Filter synthetic LS events out of the Spindle subscriptions — neither
+    // is dispatched via Spindle's event bus. `ls:startup` fires from
+    // `register()` below; `ls:teardown` fires from `fireTeardown()` which
+    // is invoked by backend.ts before disable/delete cleanup.
+    const spindleEvents = events.filter(
+      e => e !== LS_STARTUP && e !== LS_TEARDOWN,
+    );
 
     // Capture the script ID only. The full script is fetched from storage at
     // invocation time so code changes take effect without re-registration.
@@ -471,6 +498,127 @@ export class TriggerRegistry {
         duration: 10_000,
       });
     }
+  }
+
+  // ─── ls:teardown dispatch ────────────────────────────────────────────────
+
+  /**
+   * Fire `ls:teardown` for a script that's about to be disabled or deleted.
+   * Called by backend.ts BEFORE any cleanup pass — at this point the
+   * script's tools / macros / broadcast subscriptions / WI entries it
+   * created etc. are all still live, so the handler has full api access
+   * to do final housekeeping.
+   *
+   * Contract:
+   *   - Runs synchronously (awaited by the caller) so cleanup can proceed
+   *     after the handler completes or times out.
+   *   - Hard `LS_TEARDOWN_TIMEOUT_MS` budget. Exceeding it logs a warning
+   *     and returns; the handler keeps running orphaned but LS proceeds.
+   *   - Handler errors are caught + logged. They do NOT surface as toasts
+   *     (teardown shouldn't spam the user) and do NOT block cleanup.
+   *   - Scripts that don't declare `ls:teardown` in their triggers list
+   *     are skipped — no-op return.
+   *
+   * `reason` discriminates between disable and delete so handlers that
+   * care about the distinction (e.g. freeze state on disable, nuke it
+   * on delete) can branch on it.
+   */
+  async fireTeardown(
+    script: Script,
+    reason: 'disabled' | 'deleted',
+  ): Promise<void> {
+    // Skip scripts that don't opt in. Cheap guard, avoids any executor spin-up
+    // for the common case of scripts that don't need teardown hooks.
+    if (!(script.triggers ?? []).includes(LS_TEARDOWN)) return;
+    // Skip disabled scripts on 'deleted' path — they were already torn down
+    // on the earlier disable event, nothing to clean up a second time.
+    if (!script.enabled && reason === 'deleted') return;
+
+    const { grantedPermissions, userId, scriptStorage, onToolsChanged, scriptTimeoutMs } = this.getDeps();
+    const ctx = getActiveContext();
+    const runId = generateUUID();
+
+    executionStatusStore.markRunning(script.id);
+    this.sendToFrontend({
+      type: 'execution_started',
+      scriptId: script.id,
+      scriptName: script.name,
+      runId,
+    });
+
+    const opts: ExecutorOptions = {
+      grantedPermissions,
+      userId,
+      scriptStorage,
+      activeContext: ctx,
+      eventData: { __event: LS_TEARDOWN, reason, scriptId: script.id, scriptName: script.name },
+      onConsole: (entry) =>
+        this.sendToFrontend({ type: 'console_entry', scriptId: script.id, runId, entry }),
+      onToolsChanged,
+      timeoutMs: scriptTimeoutMs,
+      // Intentionally no toolsRegisteredThisRun / macrosRegisteredThisRun —
+      // stale-diff cleanup after a teardown run makes no sense; the whole
+      // script is about to be unregistered anyway.
+    };
+
+    // Race the executor against the hard timeout. If the handler exceeds
+    // the budget, we abandon waiting and log a warning — the handler
+    // itself keeps running in the background until the script sandbox
+    // is torn down by the subsequent cleanup path.
+    let timedOut = false;
+    const timeoutPromise = new Promise<null>((resolve) => {
+      setTimeout(() => {
+        timedOut = true;
+        resolve(null);
+      }, LS_TEARDOWN_TIMEOUT_MS);
+    });
+
+    const execPromise = executeScript(script, opts);
+    const result = await Promise.race([execPromise, timeoutPromise]);
+
+    if (timedOut || result === null) {
+      spindle.log.warn(
+        `[LumiScript] ls:teardown handler for "${script.name}" exceeded ` +
+        `${LS_TEARDOWN_TIMEOUT_MS / 1000}s budget — proceeding with cleanup ` +
+        `(handler may still be running).`,
+      );
+      executionStatusStore.markError(
+        script.id,
+        LS_TEARDOWN_TIMEOUT_MS,
+        'ls:teardown handler timeout',
+      );
+      this.sendToFrontend({
+        type: 'execution_ended',
+        scriptId: script.id,
+        runId,
+        success: false,
+        duration: LS_TEARDOWN_TIMEOUT_MS,
+        error: 'ls:teardown handler exceeded timeout budget',
+      });
+      return;
+    }
+
+    if (result.success) {
+      executionStatusStore.markSuccess(script.id, result.duration);
+    } else {
+      // Log handler errors but DO NOT toast — teardown shouldn't spam the
+      // user on script disable/delete. Errors still surface in the editor
+      // console via the execution_ended message below.
+      spindle.log.warn(
+        `[LumiScript] ls:teardown handler for "${script.name}" failed: ` +
+        `${result.error?.message ?? 'Unknown error'}`,
+      );
+      executionStatusStore.markError(script.id, result.duration, result.error?.message ?? 'Unknown error');
+    }
+
+    this.sendToFrontend({
+      type: 'execution_ended',
+      scriptId: script.id,
+      runId: result.runId,
+      success: result.success,
+      duration: result.duration,
+      error: result.error?.message,
+    });
   }
 
   // ─── Diagnostics ──────────────────────────────────────────────────────────

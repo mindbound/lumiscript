@@ -314,6 +314,13 @@ export function buildScriptNamespace(
   const inProgress = sharedInProgress ?? new Set<string>();
 
   return {
+    // Script identity — read at namespace-build time. Name can become stale
+    // if the user renames the script mid-execution (rare), but id and type
+    // are immutable for the lifetime of the script record.
+    id:   _script.id,
+    name: _script.name,
+    type: _script.type,
+
     async require(nameOrId: string): Promise<unknown> {
       // ── Built-in libraries (ls:*) — resolved before user storage ─────
       if (isBuiltinName(nameOrId)) {
