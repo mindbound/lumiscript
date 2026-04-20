@@ -28,6 +28,7 @@ import {
 import { logCleanup } from './engine/cleanup-log.js';
 import { dispatchToolInvocation } from './engine/tool-invocation.js';
 import { dispatchEvent as dispatchDOMEvent, cleanupScript as cleanupDOMScript } from './engine/dom-registry.js';
+import { checkMinimumHostVersion } from './utils/host-version.js';
 
 // ─── Active user + permission tracking ───────────────────────────────────────
 
@@ -312,6 +313,12 @@ spindle.onFrontendMessage(async (raw, userId) => {
     void syncTriggers();
     await contextPromise;
     publishActiveCharId();
+    // Verify the host meets our minimum Lumiverse version (declared in
+    // spindle.json). Fire-and-forget: warns via toast + log if the host
+    // is too old, silent otherwise. Hooked here rather than module scope
+    // so the toast reaches a live frontend (we know it is — this block
+    // only runs on first frontend message).
+    void checkMinimumHostVersion();
   }
 
   const msg = raw as FrontendToBackend;
