@@ -240,6 +240,63 @@ export interface ChatMessage {
   swipeId: number;
   /** All swipe variants for this message. `swipes[swipeId]` equals `content`. */
   swipes: string[];
+  /**
+   * Per-swipe creation timestamps (unix epoch seconds), aligned index-wise
+   * with `swipes`. Populated by Lumiverse hosts at the commit that shipped
+   * spindle-types 0.4.27; older hosts deliver an empty array.
+   */
+  swipeDates: number[];
+  /**
+   * Free-form host-maintained metadata bag. Carries reasoning text + duration
+   * (for assistant messages with chain-of-thought), attachments, a `hidden`
+   * flag, plus any other fields the host or other extensions attach. The
+   * exact keys depend on the host build and are not part of LumiScript's
+   * contract — treat as opaque `unknown` at read time.
+   */
+  extra: Record<string, unknown>;
+}
+
+/**
+ * Patch shape accepted by `api.chat.editMessage(id, patch)`. Mirrors the
+ * upstream `spindle.chat.updateMessage` signature in spindle-types 0.4.27
+ * with camelCase field names matching the rest of the `ChatMessage` surface
+ * (`swipeId` → `swipe_id`, `swipeDates` → `swipe_dates` are mapped at the
+ * chat API boundary).
+ *
+ * Only the fields you provide get updated. Writing `swipes`, `swipeId`,
+ * or `swipeDates` fires Lumiverse's `SWIPE_EDITED` event in addition to
+ * `MESSAGE_EDITED`; a plain `content` edit fires only `MESSAGE_EDITED`.
+ */
+export interface MessagePatch {
+  /** Replace the active swipe's content. */
+  content?: string;
+  /** Replace the host-maintained metadata bag. Merges at the host level. */
+  metadata?: Record<string, unknown>;
+  /**
+   * Replace the full swipes array. Length changes (adding/removing variants)
+   * are expressible here — the host emits `SWIPE_EDITED` with the whole new
+   * message state.
+   */
+  swipes?: string[];
+  /**
+   * Navigate to a different swipe index. Usually paired with `swipes` when
+   * rewriting both, but can be used alone to cycle without content changes.
+   */
+  swipeId?: number;
+  /**
+   * Replace per-swipe timestamps. Length should match `swipes` after the
+   * patch is applied; otherwise the host may reject the patch.
+   */
+  swipeDates?: number[];
+  /**
+   * Set the chain-of-thought reasoning text + duration shown in Lumiverse's
+   * reasoning panel. Pass `{ text: null }` to clear, or just `text` to set
+   * without a duration.
+   */
+  reasoning?: {
+    text?: string | null;
+    duration?: number | null;
+  };
 }
 
 export interface GetMessagesOptions {
@@ -301,8 +358,18 @@ export interface ChatAPI {
   getMessages(options?: GetMessagesOptions): Promise<ChatMessage[]>;
   /** Append a new message. Requires chat_mutation permission. */
   sendMessage(content: string, options?: SendMessageOptions): Promise<{ id: string }>;
-  /** Edit a message. Requires chat_mutation permission. */
-  editMessage(id: string, content: string): Promise<void>;
+  /**
+   * Edit a message. Requires chat_mutation permission.
+   *
+   * Two call shapes:
+   *   - `editMessage(id, 'new content')` — replace the active swipe's content.
+   *     Fires Lumiverse's `MESSAGE_EDITED` event.
+   *   - `editMessage(id, patch)` — apply a richer patch (content, metadata,
+   *     swipes, swipe navigation, reasoning text). Fires `SWIPE_EDITED`
+   *     alongside (or instead of) `MESSAGE_EDITED` when the patch touches
+   *     any swipe-shaped field. See `MessagePatch` for the full shape.
+   */
+  editMessage(id: string, contentOrPatch: string | MessagePatch): Promise<void>;
   /** Delete a message. Requires chat_mutation permission. */
   deleteMessage(id: string): Promise<void>;
   /** Get the current chat ID from the active context. */

@@ -109,6 +109,23 @@ interface ChatMessage {
   swipeId: number;
   /** All swipe variants for this message. swipes[swipeId] equals content. */
   swipes: string[];
+  /** Per-swipe timestamps (unix epoch seconds), aligned with swipes. */
+  swipeDates: number[];
+  /** Host-maintained bag: reasoning text/duration, attachments, hidden flag, etc. */
+  extra: Record<string, unknown>;
+}
+
+/** Patch shape accepted by api.chat.editMessage(id, patch). */
+interface MessagePatch {
+  content?: string;
+  metadata?: Record<string, unknown>;
+  swipes?: string[];
+  swipeId?: number;
+  swipeDates?: number[];
+  reasoning?: {
+    text?: string | null;
+    duration?: number | null;
+  };
 }
 
 interface GetMessagesOptions {
@@ -158,8 +175,13 @@ interface ChatAPI {
   getMessages(options?: GetMessagesOptions): Promise<ChatMessage[]>;
   /** Append a new message to the current chat. Requires chat_mutation permission. */
   sendMessage(content: string, options?: SendMessageOptions): Promise<{ id: string }>;
-  /** Edit a message by ID. Requires chat_mutation permission. */
-  editMessage(id: string, content: string): Promise<void>;
+  /**
+   * Edit a message by ID. Requires chat_mutation permission.
+   * Pass a string to replace the active swipe's content, or a MessagePatch
+   * to update swipes, swipe navigation, reasoning, or metadata. Patches
+   * that touch swipe-shaped fields fire SWIPE_EDITED alongside MESSAGE_EDITED.
+   */
+  editMessage(id: string, contentOrPatch: string | MessagePatch): Promise<void>;
   /** Delete a message by ID. Requires chat_mutation permission. */
   deleteMessage(id: string): Promise<void>;
   /** Get the current chat ID. Returns null if no chat is active. */

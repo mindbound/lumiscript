@@ -64,6 +64,7 @@ export const EVENTS: EventRow[] = [
   { group: 'Chat',       name: 'MESSAGE_EDITED',             payload: '{ chatId, message }' },
   { group: 'Chat',       name: 'MESSAGE_DELETED',            payload: '{ chatId, messageId }' },
   { group: 'Chat',       name: 'MESSAGE_SWIPED',             payload: '{ chatId, message, action, swipeId, previousSwipeId? }' },
+  { group: 'Chat',       name: 'SWIPE_EDITED',               payload: '{ chatId, message, previousSwipeId }' },
   { group: 'Chat',       name: 'CHARACTER_MESSAGE_RENDERED', payload: '{ chatId, messageId }' },
   { group: 'Chat',       name: 'USER_MESSAGE_RENDERED',      payload: '{ chatId, messageId }' },
   { group: 'Generation', name: 'GENERATION_STARTED',         payload: '{ generationId, chatId, model }' },
@@ -433,12 +434,14 @@ export const KEY_TYPES: TypeDoc[] = [
     name: 'ChatMessage',
     note: 'Returned by api.chat.getMessages().',
     fields: [
-      { field: 'id',        type: 'string',                          optional: false, desc: 'Message identifier.' },
-      { field: 'content',   type: 'string',                          optional: false, desc: 'Plain-text message content.' },
-      { field: 'role',      type: "'user' | 'assistant' | 'system'", optional: false, desc: 'Sender role.' },
-      { field: 'metadata?', type: 'Record<string, unknown>',         optional: true,  desc: 'Arbitrary metadata attached to the message.' },
-      { field: 'swipeId',   type: 'number',                          optional: false, desc: 'Index of the active swipe variant. 0 when the message has no alternates.' },
-      { field: 'swipes',    type: 'string[]',                        optional: false, desc: 'All swipe variants. swipes[swipeId] equals content.' },
+      { field: 'id',         type: 'string',                          optional: false, desc: 'Message identifier.' },
+      { field: 'content',    type: 'string',                          optional: false, desc: 'Plain-text message content.' },
+      { field: 'role',       type: "'user' | 'assistant' | 'system'", optional: false, desc: 'Sender role.' },
+      { field: 'metadata?',  type: 'Record<string, unknown>',         optional: true,  desc: 'Arbitrary metadata attached to the message.' },
+      { field: 'swipeId',    type: 'number',                          optional: false, desc: 'Index of the active swipe variant. 0 when the message has no alternates.' },
+      { field: 'swipes',     type: 'string[]',                        optional: false, desc: 'All swipe variants. swipes[swipeId] equals content.' },
+      { field: 'swipeDates', type: 'number[]',                        optional: false, desc: 'Per-swipe creation timestamps (unix epoch seconds), aligned with swipes. Empty array on older hosts (pre-spindle-types 0.4.27).' },
+      { field: 'extra',      type: 'Record<string, unknown>',         optional: false, desc: 'Host-maintained bag: reasoning text/duration, attachments, hidden flag, etc. Keys depend on host build — treat as opaque. Empty object on older hosts.' },
     ],
   },
   {
@@ -455,6 +458,18 @@ export const KEY_TYPES: TypeDoc[] = [
     fields: [
       { field: 'role?',     type: "'user' | 'assistant' | 'system'", optional: true, desc: "Sender role. Default 'user'." },
       { field: 'metadata?', type: 'Record<string, unknown>',         optional: true, desc: 'Arbitrary metadata to attach.' },
+    ],
+  },
+  {
+    name: 'MessagePatch',
+    note: 'Passed to api.chat.editMessage(id, patch) when using the richer object form. Only fields you provide are updated. Patches touching swipes / swipeId / swipeDates fire SWIPE_EDITED alongside MESSAGE_EDITED; plain content patches fire only MESSAGE_EDITED.',
+    fields: [
+      { field: 'content?',    type: 'string',                         optional: true, desc: "Replace the active swipe's content." },
+      { field: 'metadata?',   type: 'Record<string, unknown>',        optional: true, desc: 'Replace the host-maintained metadata bag. Host-side merge semantics apply.' },
+      { field: 'swipes?',     type: 'string[]',                       optional: true, desc: 'Replace the full swipes array. Length changes are expressible here.' },
+      { field: 'swipeId?',    type: 'number',                         optional: true, desc: 'Navigate to a different swipe index. Can be used alone to cycle without rewriting content.' },
+      { field: 'swipeDates?', type: 'number[]',                       optional: true, desc: 'Replace per-swipe timestamps. Length should match swipes after the patch applies.' },
+      { field: 'reasoning?',  type: '{ text?, duration? }',           optional: true, desc: 'Set chain-of-thought reasoning text + duration (assistant messages). text: string | null; duration: number | null.' },
     ],
   },
   {
@@ -1136,7 +1151,7 @@ export const API_GROUPS: FnGroup[] = [
     rows: [
       { name: 'getMessages',       args: 'options?',              desc: 'Get messages in the current chat. Pass { last: N } for the N most recent.' },
       { name: 'sendMessage',       args: 'content, options?',     desc: 'Append a new message. Options: role, metadata.' },
-      { name: 'editMessage',       args: 'id, content',           desc: 'Edit a message by ID.' },
+      { name: 'editMessage',       args: 'id, contentOrPatch',    desc: 'Edit a message by ID. Pass a string to replace the active swipe\'s content, or a MessagePatch to update swipes / swipeId / swipeDates / reasoning / metadata. Patches touching swipe-shaped fields fire SWIPE_EDITED alongside MESSAGE_EDITED.' },
       { name: 'deleteMessage',     args: 'id',                    desc: 'Delete a message by ID.' },
       { name: 'getChatId',         args: '—',                     desc: 'Return the active chat ID, or null.' },
       { name: 'getMetadata',       args: 'key',                   desc: 'Get a metadata value from the current chat.' },

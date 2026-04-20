@@ -20,7 +20,7 @@
 
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
 
-import type { LumiScriptAPI, InjectionInfo } from '../../types/script.js';
+import type { LumiScriptAPI, InjectionInfo, MessagePatch } from '../../types/script.js';
 import { type APIBuildDeps, assertPerm, assertDangerous, requireChatId, shielded } from './shared.js';
 import {
   addInjection,
@@ -43,6 +43,29 @@ import {
  */
 const metadataQueues = new Map<string, Promise<void>>();
 
+/**
+ * Translate LumiScript's camelCase `MessagePatch` to the snake_case shape
+ * `spindle.chat.updateMessage` expects. Undefined fields are omitted so
+ * the host only updates what the script explicitly provided.
+ */
+function toUpstreamPatch(patch: MessagePatch): {
+  content?: string;
+  metadata?: Record<string, unknown>;
+  swipes?: string[];
+  swipe_id?: number;
+  swipe_dates?: number[];
+  reasoning?: { text?: string | null; duration?: number | null };
+} {
+  const out: Record<string, unknown> = {};
+  if (patch.content    !== undefined) out.content     = patch.content;
+  if (patch.metadata   !== undefined) out.metadata    = patch.metadata;
+  if (patch.swipes     !== undefined) out.swipes      = patch.swipes;
+  if (patch.swipeId    !== undefined) out.swipe_id    = patch.swipeId;
+  if (patch.swipeDates !== undefined) out.swipe_dates = patch.swipeDates;
+  if (patch.reasoning  !== undefined) out.reasoning   = patch.reasoning;
+  return out;
+}
+
 export function buildChatAPI(deps: APIBuildDeps): LumiScriptAPI['chat'] {
   const { script, hasPerm, activeContext, userId } = deps;
   const uid = userId ?? undefined;
@@ -55,13 +78,19 @@ export function buildChatAPI(deps: APIBuildDeps): LumiScriptAPI['chat'] {
       const id = requireChatId(activeContext);
       return shielded(
         spindle.chat.getMessages(id).then(msgs => {
+          // Map upstream snake_case DTO → LumiScript's camelCase ChatMessage.
+          // `swipeDates` and `extra` landed in spindle-types 0.4.27; older
+          // hosts return undefined for either field, which we normalize to
+          // an empty array / empty object so scripts don't have to guard.
           let mapped = msgs.map(m => ({
-            id:       m.id,
-            content:  m.content,
-            role:     m.role,
-            metadata: m.metadata,
-            swipeId:  m.swipe_id,
-            swipes:   m.swipes,
+            id:         m.id,
+            content:    m.content,
+            role:       m.role,
+            metadata:   m.metadata,
+            swipeId:    m.swipe_id,
+            swipes:     m.swipes,
+            swipeDates: (m as { swipe_dates?: number[] }).swipe_dates ?? [],
+            extra:      (m as { extra?: Record<string, unknown> }).extra ?? {},
           }));
           if (opts?.last  !== undefined) mapped = mapped.slice(-opts.last);
           if (opts?.first !== undefined) mapped = mapped.slice(0, opts.first);
@@ -82,10 +111,23 @@ export function buildChatAPI(deps: APIBuildDeps): LumiScriptAPI['chat'] {
       );
     },
 
-    editMessage: (msgId, content) => {
+    editMessage: (msgId, contentOrPatch) => {
       assertPerm('chat_mutation', hasPerm, script.name);
       const id = requireChatId(activeContext);
-      return shielded(spindle.chat.updateMessage(id, msgId, { content }));
+      // Two call shapes:
+      //   string → shorthand for a content-only patch (backward-compatible
+      //     with the pre-0.14 signature).
+      //   MessagePatch → rich patch covering content + metadata + swipes +
+      //     swipe navigation + reasoning. Host-side `spindle.chat.updateMessage`
+      //     fires SWIPE_EDITED alongside MESSAGE_EDITED when the patch
+      //     touches any swipe-shaped field.
+      // camelCase → snake_case normalization for the upstream patch surface
+      // happens inline below — upstream accepts `swipe_id` / `swipe_dates`
+      // rather than camelCase.
+      const patch = typeof contentOrPatch === 'string'
+        ? { content: contentOrPatch }
+        : toUpstreamPatch(contentOrPatch);
+      return shielded(spindle.chat.updateMessage(id, msgId, patch));
     },
 
     deleteMessage: (msgId) => {
