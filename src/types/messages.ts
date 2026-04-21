@@ -130,6 +130,28 @@ export type FrontendToBackend =
       type: 'ls_modal_dismissed';
       modalId: string;
     }
+  // ─── Context menu result (frontend → backend) ─────────────────────
+  | {
+      /**
+       * Fired by the frontend after `ctx.ui.showContextMenu` resolves — either
+       * with the user's selected `key` or `null` if the menu was dismissed.
+       * The backend correlates this with the original request via `requestId`.
+       */
+      type: 'ls_context_menu_result';
+      requestId: string;
+      selectedKey: string | null;
+    }
+  // ─── Input bar action click (frontend → backend) ──────────────────
+  | {
+      /**
+       * Fired by the frontend when the user activates a registered input-bar
+       * action. Backend fans the event out to all click handlers registered
+       * on that action via `handle.onClick(fn)`.
+       */
+      type: 'ls_input_bar_action_click';
+      scriptId: string;
+      actionId: string;
+    }
 ;
 
 // ─── Backend → Frontend ───────────────────────────────────────────────────────
@@ -209,7 +231,7 @@ export type BackendToFrontend =
   | { type: 'dom_remove';          elementId: string }
   | { type: 'dom_add_style';       scriptId: string; styleId: string; css: string }
   | { type: 'dom_remove_style';    styleId: string }
-  | { type: 'dom_listen';          elementId: string; listenerId: string; event: string }
+  | { type: 'dom_listen';          elementId: string; listenerId: string; event: string; preventDefault?: boolean }
   | { type: 'dom_unlisten';        elementId: string; listenerId: string; event: string }
   | { type: 'dom_cleanup_script';  scriptId: string }
   | { type: 'dom_make_draggable';  elementId: string; handleSelector?: string }
@@ -247,5 +269,73 @@ export type BackendToFrontend =
        */
       type: 'ls_modal_dismiss';
       modalId: string;
+    }
+  // ─── Context menu commands (backend → frontend) ────────────────────
+  | {
+      /**
+       * Request the frontend to show a themed context menu at the given
+       * position. The frontend calls `ctx.ui.showContextMenu` and echoes the
+       * user's selection back via `ls_context_menu_result` using the same
+       * `requestId` so the backend can resolve the awaiting promise.
+       */
+      type: 'ls_context_menu_show';
+      requestId: string;
+      options: {
+        position: { x: number; y: number };
+        items: Array<{
+          key: string;
+          label: string;
+          type?: 'item' | 'divider';
+          disabled?: boolean;
+          danger?: boolean;
+          active?: boolean;
+        }>;
+      };
+    }
+  // ─── Input bar action lifecycle (backend → frontend) ───────────────
+  | {
+      /**
+       * Register an input-bar action. The frontend calls
+       * `ctx.ui.registerInputBarAction(options)` and stores the returned
+       * handle keyed by `(scriptId, actionId)` so subsequent set-label /
+       * set-enabled / destroy messages can find it. Click events are echoed
+       * back via `ls_input_bar_action_click`.
+       */
+      type: 'ls_input_bar_action_register';
+      scriptId: string;
+      actionId: string;
+      options: {
+        label: string;
+        iconSvg?: string;
+        iconUrl?: string;
+        enabled?: boolean;
+      };
+    }
+  | {
+      /** Update the label of a registered input-bar action. */
+      type: 'ls_input_bar_action_set_label';
+      scriptId: string;
+      actionId: string;
+      label: string;
+    }
+  | {
+      /**
+       * Show or hide a registered input-bar action. Disabled actions are
+       * hidden from the popover (host behaviour), not greyed out.
+       */
+      type: 'ls_input_bar_action_set_enabled';
+      scriptId: string;
+      actionId: string;
+      enabled: boolean;
+    }
+  | {
+      /**
+       * Destroy a registered input-bar action — removes it from the popover
+       * and detaches any click listeners. Idempotent on the frontend side;
+       * silently ignored if the action is already gone.
+       */
+      type: 'ls_input_bar_action_destroy';
+      scriptId: string;
+      actionId: string;
     }
 ;

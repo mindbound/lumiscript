@@ -567,6 +567,48 @@ export const KEY_TYPES: TypeDoc[] = [
       { field: 'onDismiss(handler)', type: '(fn: (reason) => void) => () => void',              optional: false, desc: "Fire once when the modal is dismissed, with the reason. Returns unsubscribe. If already dismissed when registered, fires on next microtask with the recorded reason." },
     ],
   },
+  {
+    name: 'ContextMenuItem',
+    note: 'A single entry in api.ui.showContextMenu()`s items array.',
+    fields: [
+      { field: 'key',       type: 'string',                 optional: false, desc: 'Stable key returned when this item is selected. Required.' },
+      { field: 'label',     type: 'string',                 optional: false, desc: "Display text. Ignored when type === 'divider'." },
+      { field: 'type?',     type: "'item' | 'divider'",     optional: true,  desc: "Entry type. Default: 'item'." },
+      { field: 'disabled?', type: 'boolean',                optional: true,  desc: 'Greyed out and not clickable.' },
+      { field: 'danger?',   type: 'boolean',                optional: true,  desc: 'Rendered in red / danger style.' },
+      { field: 'active?',   type: 'boolean',                optional: true,  desc: 'Highlighted to indicate current selection.' },
+    ],
+  },
+  {
+    name: 'ShowContextMenuOptions',
+    note: 'Options for api.ui.showContextMenu().',
+    fields: [
+      { field: 'position', type: '{ x: number; y: number }', optional: false, desc: 'Screen coordinates to anchor the menu. Typically taken from a pointer event (use data.clientX / data.clientY from a contextmenu handler).' },
+      { field: 'items',    type: 'ContextMenuItem[]',        optional: false, desc: 'Menu entries.' },
+    ],
+  },
+  {
+    name: 'InputBarActionOptions',
+    note: 'Options for api.ui.registerInputBarAction().',
+    fields: [
+      { field: 'id',        type: 'string',  optional: false, desc: 'Unique identifier within your script — used by the handle for subsequent setLabel / setEnabled / destroy calls. Required.' },
+      { field: 'label',     type: 'string',  optional: false, desc: 'Display label shown in the Extras popover row.' },
+      { field: 'iconSvg?',  type: 'string',  optional: true,  desc: 'Inline SVG string (sanitized upstream via DOMPurify). Rendered at 14×14.' },
+      { field: 'iconUrl?',  type: 'string',  optional: true,  desc: 'URL to an icon image. Takes precedence over iconSvg if both are set.' },
+      { field: 'enabled?',  type: 'boolean', optional: true,  desc: 'When false, the action is hidden from the popover. Default: true.' },
+    ],
+  },
+  {
+    name: 'InputBarActionHandle',
+    note: 'Returned by api.ui.registerInputBarAction(). Actions appear in the chat input-bar Extras popover under a teal-badged extension header. Limits: 4 per script, 12 global.',
+    fields: [
+      { field: 'actionId',                   type: 'string',                                  optional: false, desc: 'The action id (same as the id passed in options).' },
+      { field: 'setLabel(label)',            type: '(string) => void',                        optional: false, desc: 'Update the display label. Safe to call after destroy (no-op).' },
+      { field: 'setEnabled(enabled)',        type: '(boolean) => void',                       optional: false, desc: 'Show or hide the action in the popover. Disabled actions are hidden entirely rather than greyed out. Safe to call after destroy.' },
+      { field: 'onClick(handler)',           type: '(fn: () => void) => () => void',          optional: false, desc: 'Register a click handler. Multiple handlers supported — all fire on each click. Returns unsubscribe. The Extras popover closes automatically after a click (host behaviour).' },
+      { field: 'destroy()',                  type: '() => void',                              optional: false, desc: 'Remove the action from the popover and clear all click handlers. Idempotent.' },
+    ],
+  },
   // ─── DOM Injection ───────────────────────────────────────────────────────────
   {
     name: 'DOMInjectOptions',
@@ -591,7 +633,7 @@ export const KEY_TYPES: TypeDoc[] = [
       { field: 'id',          type: 'string',                                   optional: false, desc: 'Unique element ID (generated or from stable ID).' },
       { field: 'update(html)', type: 'void',                                    optional: false, desc: 'Replace the inner HTML of the injected element.' },
       { field: 'remove()',    type: 'void',                                     optional: false, desc: 'Remove the element from the DOM and detach all listeners.' },
-      { field: 'on(event, handler)', type: '() => void',                        optional: false, desc: 'Attach a DOM event listener. Handler receives DOMEventData. Returns an unsubscribe function.' },
+      { field: 'on(event, handler, options?)', type: '() => void',              optional: false, desc: 'Attach a DOM event listener. Handler receives DOMEventData. Pass { preventDefault: true } to suppress the browser default synchronously (e.g. to block the native context menu on right-click). Returns an unsubscribe function.' },
       { field: 'makeDraggable(handleSelector?)', type: 'void',               optional: false, desc: 'Enable frontend-only drag. Optional CSS selector picks a drag handle child; the root element moves. Without a selector, the whole element is draggable.' },
     ],
   },
@@ -605,6 +647,15 @@ export const KEY_TYPES: TypeDoc[] = [
       { field: 'targetChecked?', type: 'boolean',                   optional: true,  desc: 'The checked property (for checkbox/radio elements).' },
       { field: 'dataset?',       type: 'Record<string, string>',    optional: true,  desc: 'All data-* attributes on the event target.' },
       { field: 'detail?',        type: 'unknown',                   optional: true,  desc: 'CustomEvent.detail (must be JSON-serializable).' },
+      { field: 'clientX?',       type: 'number',                    optional: true,  desc: 'Viewport X coordinate. Populated for MouseEvent / PointerEvent / contextmenu and from the first touch of a TouchEvent. Useful for positioning api.ui.showContextMenu at the cursor.' },
+      { field: 'clientY?',       type: 'number',                    optional: true,  desc: 'Viewport Y coordinate. Same event families as clientX.' },
+    ],
+  },
+  {
+    name: 'DOMListenOptions',
+    note: 'Options bag for DOMHandle.on(event, handler, options?).',
+    fields: [
+      { field: 'preventDefault?', type: 'boolean', optional: true, desc: "When true, the frontend listener calls event.preventDefault() synchronously before dispatching to the script handler. Must be set at registration time — the async worker-boundary dispatch returns too late to preventDefault from inside the handler body. Default: false." },
     ],
   },
   // ─── LLM ─────────────────────────────────────────────────────────────────────
@@ -1263,6 +1314,8 @@ export const API_GROUPS: FnGroup[] = [
       { name: 'confirm',   args: 'message, title?, options?',        desc: 'Show a themed confirmation dialog. Returns true if confirmed. Options: variant (info/warning/danger/success), confirmLabel, cancelLabel.' },
       { name: 'showModal', args: 'items, options',                   desc: 'Display structured read-only content in a themed modal. Returns ModalHandle { result, openRequestId, close() }. Await handle.result for dismissal. Options: title (required), width, maxHeight, persistent.' },
       { name: 'showAdvancedModal', args: 'options',                  desc: 'Open a modal whose body is fully script-owned via a DOMHandle (handle.root). Use api.ui.dom.* on root.update/on/... to render and wire interactive UIs. Up to 2 concurrent modals per script (pre-checked backend-side). Returns AdvancedModalHandle { modalId, root, dismissed, setTitle, dismiss, onDismiss }. Requires app_manipulation.' },
+      { name: 'showContextMenu', args: 'options',                    desc: "Show a themed context menu at a screen position and await the user's selection. Resolves with the chosen item's key, or null if dismissed. Options: { position: { x, y }, items: [{ key, label, type?, disabled?, danger?, active? }] }. Pair with a contextmenu event listener using { preventDefault: true } to suppress the native browser menu. Free-tier." },
+      { name: 'registerInputBarAction', args: 'options',             desc: 'Register an action inside the chat input-bar Extras popover. Extension actions are visually grouped under a teal-badged extension header. Limits: 4 per script (pre-checked backend-side), 12 global. Returns InputBarActionHandle { actionId, setLabel, setEnabled, onClick, destroy }. Free-tier.' },
       { name: 'editText',  args: 'title?, value?, options?',         desc: 'Open the native Lumiverse expanded text editor with macro syntax highlighting. Blocks until close. Returns edited text or null if cancelled. Options: placeholder.' },
       { name: 'pushNotification', args: 'title, body, options?',   desc: 'Send an OS push notification. Only delivered when app is unfocused. Returns { sent }. Options: tag (dedup), url, icon, rawTitle, image. Requires push_notification.' },
       { name: 'getPushStatus', args: '—',                          desc: 'Check if push notifications are available. Returns { available, subscriptionCount }. Requires push_notification.' },

@@ -7,6 +7,8 @@ import { SettingsPanel } from './components/settings/SettingsPanel.js';
 import type { FrontendToBackend } from './types/messages.js';
 import { installDOMHandler } from './dom-handler.js';
 import { installModalHandler } from './modal-handler.js';
+import { installContextMenuHandler } from './context-menu-handler.js';
+import { installInputBarActionHandler } from './input-bar-action-handler.js';
 
 // ─── LumiScript Frontend ──────────────────────────────────────────────────
 // Runs in the browser via dynamic import.
@@ -74,6 +76,21 @@ export function setup(ctx: SpindleFrontendContext) {
   // `rootElementId` so `api.ui.dom.*` messages targeting it "just work".
   const cleanupModal = installModalHandler(ctx, virtualOnBackendMessage, sendToBackend);
   cleanups.push(cleanupModal);
+
+  // ─── Context-menu handler ───────────────────────────────────────────────
+  // Stateless request-response proxy for `api.ui.showContextMenu` — receives
+  // `ls_context_menu_show`, calls `ctx.ui.showContextMenu`, echoes the
+  // selected key (or null) back via `ls_context_menu_result`.
+  const cleanupContextMenu = installContextMenuHandler(ctx, virtualOnBackendMessage, sendToBackend);
+  cleanups.push(cleanupContextMenu);
+
+  // ─── Input-bar action handler ───────────────────────────────────────────
+  // Lifecycle proxy for `api.ui.registerInputBarAction`. Maintains a local
+  // map of Spindle handles so set-label / set-enabled / destroy messages
+  // can route to the right one. Click events are echoed back via
+  // `ls_input_bar_action_click` for the backend registry to fan out.
+  const cleanupInputBarActions = installInputBarActionHandler(ctx, virtualOnBackendMessage, sendToBackend);
+  cleanups.push(cleanupInputBarActions);
 
   // ─── Dock Panel ─────────────────────────────────────────────────────────
   const panel = ctx.ui.requestDockPanel({

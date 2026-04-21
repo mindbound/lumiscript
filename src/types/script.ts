@@ -1563,6 +1563,85 @@ export interface AdvancedModalHandle {
   onDismiss(handler: (reason: AdvancedModalDismissReason) => void): () => void;
 }
 
+// ─── Context menu (request-response) ─────────────────────────────────────────
+
+/** A single entry in `api.ui.showContextMenu(options)`'s items array. */
+export interface ContextMenuItem {
+  /** Stable key returned when this item is selected. Required. */
+  key: string;
+  /** Display text. Ignored when `type === 'divider'`. */
+  label: string;
+  /** Entry type. Default: `'item'`. */
+  type?: 'item' | 'divider';
+  /** Greyed out and not clickable. Default: `false`. */
+  disabled?: boolean;
+  /** Rendered in red / danger style. Default: `false`. */
+  danger?: boolean;
+  /** Highlighted to indicate current selection. Default: `false`. */
+  active?: boolean;
+}
+
+/** Options for `api.ui.showContextMenu()`. */
+export interface ShowContextMenuOptions {
+  /** Screen coordinates to anchor the menu. Typically taken from a pointer event. */
+  position: { x: number; y: number };
+  /** Menu entries. */
+  items: ContextMenuItem[];
+}
+
+// ─── Input bar actions (lifecycle) ───────────────────────────────────────────
+
+/** Options for `api.ui.registerInputBarAction()`. */
+export interface InputBarActionOptions {
+  /**
+   * Unique identifier within your script. Used by the handle for subsequent
+   * `setLabel` / `setEnabled` / `destroy` calls — pick something stable.
+   */
+  id: string;
+  /** Display label shown in the Extras popover row. */
+  label: string;
+  /** Inline SVG string (sanitized upstream via DOMPurify). Rendered at 14×14. */
+  iconSvg?: string;
+  /** URL to an icon image. Takes precedence over `iconSvg` if both are set. */
+  iconUrl?: string;
+  /** When `false`, the action is hidden from the popover. Default: `true`. */
+  enabled?: boolean;
+}
+
+/**
+ * Handle returned by `api.ui.registerInputBarAction()`.
+ *
+ * Input bar actions appear inside the **Extras** popover on the chat input
+ * bar, visually grouped under a teal-badged header with the extension name.
+ * Host-enforced limits: 4 actions per extension, 12 global.
+ */
+export interface InputBarActionHandle {
+  /**
+   * The action's identifier — the same `id` passed in `InputBarActionOptions`.
+   * Kept on the handle for convenience when dispatching click events or
+   * looking up actions from external state.
+   */
+  readonly actionId: string;
+  /** Update the display label. Safe to call after dismissal (no-op). */
+  setLabel(label: string): void;
+  /**
+   * Show or hide the action in the popover. Disabled actions are hidden
+   * entirely rather than greyed out. Safe to call after `destroy()` (no-op).
+   */
+  setEnabled(enabled: boolean): void;
+  /**
+   * Register a click handler. Multiple handlers are supported — all fire on
+   * each click. Returns an unsubscribe function. The Extras popover is
+   * automatically closed after a click (host behaviour).
+   */
+  onClick(handler: () => void): () => void;
+  /**
+   * Remove the action from the popover and clear all registered click
+   * handlers. Idempotent — subsequent calls are no-ops.
+   */
+  destroy(): void;
+}
+
 // ─── UI API ───────────────────────────────────────────────────────────────────
 
 export interface UIAPI {
@@ -1663,6 +1742,55 @@ export interface UIAPI {
   showAdvancedModal(options: AdvancedModalOptions): AdvancedModalHandle;
 
   /**
+   * Show a themed context menu at a screen position and await the user's
+   * selection. Resolves with the selected item's `key`, or `null` if the
+   * user dismissed the menu without selecting.
+   *
+   * The menu is rendered by Lumiverse using the system theme — it
+   * automatically matches the user's accent color, glass mode, and
+   * dark/light preference. Viewport-clamped so it never renders off-screen.
+   *
+   * Free-tier (no permission required).
+   *
+   * @example
+   * const key = await api.ui.showContextMenu({
+   *   position: { x: event.clientX, y: event.clientY },
+   *   items: [
+   *     { key: 'edit',   label: 'Edit'                             },
+   *     { key: 'div',    label: '',              type: 'divider'   },
+   *     { key: 'delete', label: 'Delete',        danger: true      },
+   *   ],
+   * });
+   * if (key === 'delete') { ... }
+   */
+  showContextMenu(options: ShowContextMenuOptions): Promise<string | null>;
+
+  /**
+   * Register an action inside the **Extras** popover on the chat input bar.
+   * Extension actions are visually grouped under a teal-badged header with
+   * the extension name.
+   *
+   * Host-enforced limits: 4 actions per script (LumiScript pre-checks this
+   * limit synchronously and throws with a clear message on overflow), 12
+   * global across all extensions.
+   *
+   * Free-tier (no permission required).
+   *
+   * @example
+   * const action = api.ui.registerInputBarAction({
+   *   id:    'translate-last',
+   *   label: 'Translate last reply',
+   * });
+   * action.onClick(async () => {
+   *   const msgs = await api.chat.getMessages();
+   *   const last = msgs[msgs.length - 1];
+   *   // ...do work...
+   * });
+   * // On script teardown, action.destroy() is invoked automatically.
+   */
+  registerInputBarAction(options: InputBarActionOptions): InputBarActionHandle;
+
+  /**
    * Open the native Lumiverse expanded text editor with macro syntax highlighting.
    * Blocks until the user closes the editor.
    * Returns the edited text, or null if the user cancelled.
@@ -1756,6 +1884,30 @@ export interface DOMEventData {
   dataset?: Record<string, string>;
   /** `event.detail` for CustomEvents (must be JSON-serializable). */
   detail?: unknown;
+  /**
+   * Viewport X coordinate. Populated for `MouseEvent` / `PointerEvent`, and
+   * from the first touch of a `TouchEvent`. Useful for positioning
+   * `api.ui.showContextMenu(...)` at the cursor or tap location.
+   */
+  clientX?: number;
+  /** Viewport Y coordinate. Populated for the same event families as `clientX`. */
+  clientY?: number;
+}
+
+/** Options for `DOMHandle.on(event, handler, options?)`. */
+export interface DOMListenOptions {
+  /**
+   * When `true`, the frontend listener calls `event.preventDefault()` on the
+   * native DOM event *before* dispatching to the script handler. Needed to
+   * suppress the browser's native right-click menu when handling
+   * `contextmenu` events, or to suppress form-submit defaults, link
+   * navigation, etc.
+   *
+   * Because the handler dispatches asynchronously across the worker boundary,
+   * `preventDefault` must be decided at listener-registration time rather
+   * than inside the handler body. Default: `false`.
+   */
+  preventDefault?: boolean;
 }
 
 /**
@@ -1773,8 +1925,18 @@ export interface DOMHandle {
    * Attach a DOM event listener on the injected element.
    * The handler receives a serialized `DOMEventData` subset (not the raw Event).
    * Returns an unsubscribe function that detaches the listener.
+   *
+   * Pass `{ preventDefault: true }` to suppress the browser's default action
+   * for the event (e.g. to stop the native right-click menu when handling
+   * `contextmenu`). Because the handler runs asynchronously across the worker
+   * boundary, this must be set at listener-registration time — a handler
+   * can't decide mid-dispatch.
    */
-  on(event: string, handler: (data: DOMEventData) => void): () => void;
+  on(
+    event: string,
+    handler: (data: DOMEventData) => void,
+    options?: DOMListenOptions,
+  ): () => void;
   /**
    * Enable frontend-only drag on this element.
    * @param handleSelector  Optional CSS selector for the drag handle within the element.

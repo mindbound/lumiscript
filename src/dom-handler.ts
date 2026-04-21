@@ -113,6 +113,22 @@ function extractEventData(event: Event): DOMEventData {
     }
   }
 
+  // Viewport coordinates — populated for pointer-ish events so scripts can
+  // position follow-up UI (e.g. `api.ui.showContextMenu`) at the cursor or
+  // first-touch location. MouseEvent covers click / contextmenu / pointer*
+  // (PointerEvent extends MouseEvent) via the shared `clientX` / `clientY`
+  // surface; TouchEvent carries coordinates on `touches[0]` instead.
+  if (event instanceof MouseEvent) {
+    data.clientX = event.clientX;
+    data.clientY = event.clientY;
+  } else if (typeof TouchEvent !== 'undefined' && event instanceof TouchEvent) {
+    const first = event.touches[0] ?? event.changedTouches[0];
+    if (first) {
+      data.clientX = first.clientX;
+      data.clientY = first.clientY;
+    }
+  }
+
   if (event instanceof CustomEvent && event.detail !== undefined) {
     try {
       // Ensure detail is JSON-serializable
@@ -338,11 +354,15 @@ export function installDOMHandler(
 
       // ── Listen ─────────────────────────────────────────────────────
       case 'dom_listen': {
-        const { elementId, listenerId, event } = msg;
+        const { elementId, listenerId, event, preventDefault } = msg;
         const el = elementMap.get(elementId);
         if (!el) break;
 
         const handler: EventListener = (evt: Event) => {
+          // Suppress the browser's default action synchronously — the
+          // backend dispatch is async across the worker boundary and
+          // returns too late to preventDefault on its own.
+          if (preventDefault) evt.preventDefault();
           const data = extractEventData(evt);
           sendToBackend({ type: 'dom_event', elementId, listenerId, event, data });
         };

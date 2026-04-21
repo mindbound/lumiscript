@@ -21,7 +21,21 @@
 
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
 
-import type { LumiScriptAPI, UINotificationType, ModalItem, ShowModalOptions, ModalResult, ModalHandle, AdvancedModalOptions, AdvancedModalHandle, AdvancedModalDismissReason } from '../../types/script.js';
+import type {
+  LumiScriptAPI,
+  UINotificationType,
+  ModalItem,
+  ShowModalOptions,
+  ModalResult,
+  ModalHandle,
+  AdvancedModalOptions,
+  AdvancedModalHandle,
+  AdvancedModalDismissReason,
+  ShowContextMenuOptions,
+  ContextMenuItem,
+  InputBarActionOptions,
+  InputBarActionHandle,
+} from '../../types/script.js';
 import type { APIBuildDeps } from './shared.js';
 import { shielded, assertPerm } from './shared.js';
 import { createDOMHandle, nextDOMId } from './dom.js';
@@ -33,9 +47,43 @@ import {
   addDismissHandler,
   getModal,
 } from '../advanced-modal-registry.js';
+import {
+  registerAction,
+  countByScript as countActionsByScript,
+  updateLabel as updateActionLabel,
+  updateEnabled as updateActionEnabled,
+  addClickHandler as addActionClickHandler,
+  destroyAction,
+} from '../input-bar-action-registry.js';
 
 /** Maximum concurrent advanced modals per extension (host-enforced). */
 const ADVANCED_MODAL_STACK_LIMIT = 2;
+
+/** Maximum concurrent input-bar actions per extension (host-enforced: 4). */
+const INPUT_BAR_ACTION_STACK_LIMIT = 4;
+
+// ─── Context menu — request-response bridge ─────────────────────────────────
+
+/**
+ * Map of in-flight `api.ui.showContextMenu` calls keyed by requestId.
+ * The backend message handler in `backend.ts` calls `resolveContextMenu`
+ * when an `ls_context_menu_result` arrives from the frontend, which resolves
+ * the matching promise.
+ */
+const pendingContextMenus = new Map<string, (selectedKey: string | null) => void>();
+
+/**
+ * Resolve a pending `showContextMenu` call. Invoked by the backend's
+ * frontend-message handler when the user makes (or declines) a selection.
+ * No-op if the requestId is unknown (e.g. a stale result arriving after a
+ * script teardown cleared all pending calls).
+ */
+export function resolveContextMenu(requestId: string, selectedKey: string | null): void {
+  const resolve = pendingContextMenus.get(requestId);
+  if (!resolve) return;
+  pendingContextMenus.delete(requestId);
+  resolve(selectedKey);
+}
 
 // ─── API builder ──────────────────────────────────────────────────────────────
 
@@ -224,6 +272,125 @@ export function buildUIAPI(deps: APIBuildDeps): Omit<LumiScriptAPI['ui'], 'dom'>
       return handle;
     },
 
+    showContextMenu(options: ShowContextMenuOptions): Promise<string | null> {
+      const requestId = crypto.randomUUID();
+
+      // Normalise items to a plain-object shape for the wire. Avoids
+      // leaking any extra script-side properties through structured clone.
+      const items = options.items.map((it): ContextMenuItem => ({
+        key:      it.key,
+        label:    it.label,
+        type:     it.type,
+        disabled: it.disabled,
+        danger:   it.danger,
+        active:   it.active,
+      }));
+
+      return shielded(new Promise<string | null>((resolve) => {
+        pendingContextMenus.set(requestId, resolve);
+        spindle.sendToFrontend({
+          type: 'ls_context_menu_show',
+          requestId,
+          options: {
+            position: { x: options.position.x, y: options.position.y },
+            items,
+          },
+        });
+      }));
+    },
+
+    registerInputBarAction(options: InputBarActionOptions): InputBarActionHandle {
+      const scriptId = deps.script.id;
+
+      // ── Validate id ──────────────────────────────────────────────────
+      // The id is the primary identifier for every follow-up call
+      // (setLabel / setEnabled / destroy) and for dispatching click events
+      // back from the frontend. An empty or non-string id is a caller bug,
+      // surfaced synchronously rather than silently misrouting messages.
+      if (typeof options.id !== 'string' || options.id.length === 0) {
+        throw new Error('api.ui.registerInputBarAction: options.id must be a non-empty string.');
+      }
+
+      // ── Pre-check stack limit ────────────────────────────────────────
+      // Host enforces ≤ 4 per extension; we pre-check here so the overflow
+      // surfaces as a synchronous throw with a clear message instead of a
+      // silent no-op on the frontend.
+      const live = countActionsByScript(scriptId);
+      if (live >= INPUT_BAR_ACTION_STACK_LIMIT) {
+        throw new Error(
+          `api.ui.registerInputBarAction: stack limit reached (${INPUT_BAR_ACTION_STACK_LIMIT} actions open for this script).` +
+          ` Call destroy() on an existing action before registering another.`,
+        );
+      }
+
+      const actionId = options.id;
+      const label    = options.label;
+      const enabled  = options.enabled !== false;  // default: true
+
+      // Registers in the backend registry. Throws on duplicate (scriptId,
+      // actionId) — first-wins ownership policy mirroring tools / macros.
+      // Done BEFORE sending the frontend message so a rejected registration
+      // never leaks a live action to the host.
+      registerAction(scriptId, actionId, label, enabled);
+
+      spindle.sendToFrontend({
+        type: 'ls_input_bar_action_register',
+        scriptId,
+        actionId,
+        options: {
+          label,
+          iconSvg: options.iconSvg,
+          iconUrl: options.iconUrl,
+          enabled,
+        },
+      });
+
+      // `destroyed` is per-handle. Teardown-driven clears (disable/delete)
+      // drop the registry entry without touching this flag — in that case
+      // subsequent handle calls fall through the registry's
+      // "unknown-action" silent-no-op paths (updateLabel/updateEnabled
+      // return false; addClickHandler returns a no-op unsubscribe).
+      let destroyed = false;
+
+      const handle: InputBarActionHandle = {
+        actionId,
+        setLabel(nextLabel: string): void {
+          if (destroyed) return;
+          if (!updateActionLabel(scriptId, actionId, nextLabel)) return;
+          spindle.sendToFrontend({
+            type: 'ls_input_bar_action_set_label',
+            scriptId, actionId, label: nextLabel,
+          });
+        },
+        setEnabled(nextEnabled: boolean): void {
+          if (destroyed) return;
+          if (!updateActionEnabled(scriptId, actionId, nextEnabled)) return;
+          spindle.sendToFrontend({
+            type: 'ls_input_bar_action_set_enabled',
+            scriptId, actionId, enabled: nextEnabled,
+          });
+        },
+        onClick(fn: () => void): () => void {
+          if (destroyed) return () => {};
+          return addActionClickHandler(scriptId, actionId, fn);
+        },
+        destroy(): void {
+          if (destroyed) return;
+          destroyed = true;
+          // destroyAction returns false if the entry was already cleared
+          // by teardown; either way, send the destroy message so the
+          // frontend handler can release its own state.
+          destroyAction(scriptId, actionId);
+          spindle.sendToFrontend({
+            type: 'ls_input_bar_action_destroy',
+            scriptId, actionId,
+          });
+        },
+      };
+
+      return handle;
+    },
+
     // ── Push notifications ─────────────────────────────────────────────────
 
     pushNotification(
@@ -253,4 +420,16 @@ export function buildUIAPI(deps: APIBuildDeps): Omit<LumiScriptAPI['ui'], 'dom'>
 }
 
 // Suppress unused-import warning — these types are re-exported for external consumers.
-export type { ModalItem, ShowModalOptions, ModalResult, ModalHandle, AdvancedModalOptions, AdvancedModalHandle, AdvancedModalDismissReason };
+export type {
+  ModalItem,
+  ShowModalOptions,
+  ModalResult,
+  ModalHandle,
+  AdvancedModalOptions,
+  AdvancedModalHandle,
+  AdvancedModalDismissReason,
+  ShowContextMenuOptions,
+  ContextMenuItem,
+  InputBarActionOptions,
+  InputBarActionHandle,
+};

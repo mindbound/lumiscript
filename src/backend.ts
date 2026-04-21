@@ -34,6 +34,12 @@ import {
   markDismissed as markModalDismissed,
   dropEntry as dropAdvancedModalEntry,
 } from './engine/advanced-modal-registry.js';
+import {
+  listByScript as listActionsByScript,
+  clearByScript as clearActionsByScript,
+  dispatchClick as dispatchActionClick,
+} from './engine/input-bar-action-registry.js';
+import { resolveContextMenu } from './engine/api/ui.js';
 import { checkMinimumHostVersion } from './utils/host-version.js';
 
 // ─── Active user + permission tracking ───────────────────────────────────────
@@ -446,6 +452,15 @@ spindle.onFrontendMessage(async (raw, userId) => {
             markModalPendingDismissal(modalId, 'teardown');
             send({ type: 'ls_modal_dismiss', modalId });
           }
+          // Destroy any input-bar actions this script still has registered.
+          // Unlike modals, there's no dismissal-reason discriminant — input
+          // bar actions are fire-and-forget click surfaces. Emit destroy
+          // messages so the frontend tears down host state, then drop
+          // registry entries in one sweep.
+          for (const actionId of listActionsByScript(msg.id)) {
+            send({ type: 'ls_input_bar_action_destroy', scriptId: msg.id, actionId });
+          }
+          clearActionsByScript(msg.id);
           cleanupDOMScript(msg.id);
           send({ type: 'dom_cleanup_script', scriptId: msg.id });
         }
@@ -482,6 +497,12 @@ spindle.onFrontendMessage(async (raw, userId) => {
           markModalPendingDismissal(modalId, 'teardown');
           send({ type: 'ls_modal_dismiss', modalId });
         }
+        // Destroy any input-bar actions this script still has registered —
+        // see the matching block in `update_script` for the teardown story.
+        for (const actionId of listActionsByScript(msg.id)) {
+          send({ type: 'ls_input_bar_action_destroy', scriptId: msg.id, actionId });
+        }
+        clearActionsByScript(msg.id);
         cleanupDOMScript(msg.id);
         send({ type: 'dom_cleanup_script', scriptId: msg.id });
         await scriptStorage.deleteScript(msg.id);
@@ -586,6 +607,25 @@ spindle.onFrontendMessage(async (raw, userId) => {
           }
           dropAdvancedModalEntry(msg.modalId);
         }
+        break;
+      }
+
+      // ── Context menu selection result ──────────────────────────────────
+      // Frontend echoes this after `ctx.ui.showContextMenu` resolves (with
+      // the selected key, or null on user dismissal). `resolveContextMenu`
+      // no-ops on unknown requestId (stale result after script teardown).
+      case 'ls_context_menu_result': {
+        resolveContextMenu(msg.requestId, msg.selectedKey);
+        break;
+      }
+
+      // ── Input bar action click ─────────────────────────────────────────
+      // Frontend sends this when the user activates a registered action.
+      // Registry fans the click out to every handler registered via
+      // `handle.onClick(fn)`. Per-handler errors are swallowed inside
+      // dispatchClick — one bad handler can't stop the rest.
+      case 'ls_input_bar_action_click': {
+        dispatchActionClick(msg.scriptId, msg.actionId);
         break;
       }
 

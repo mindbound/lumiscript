@@ -16,7 +16,7 @@
 
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
 
-import type { LumiScriptAPI, DOMEventData, DOMHandle, DOMInjectOptions, DOMMessageInjectOptions } from '../../types/script.js';
+import type { LumiScriptAPI, DOMEventData, DOMHandle, DOMInjectOptions, DOMListenOptions, DOMMessageInjectOptions } from '../../types/script.js';
 import type { BackendToFrontend } from '../../types/messages.js';
 import type { APIBuildDeps } from './shared.js';
 import { assertPerm } from './shared.js';
@@ -77,11 +77,21 @@ export function createDOMHandle(elementId: string, deps: APIBuildDeps): DOMHandl
       send({ type: 'dom_remove', elementId });
     },
 
-    on(event: string, handler: (data: DOMEventData) => void): () => void {
+    on(
+      event: string,
+      handler: (data: DOMEventData) => void,
+      options?: DOMListenOptions,
+    ): () => void {
       gate();
       const listenerId = nextId('dl');
       addListener(elementId, listenerId, event, handler);
-      send({ type: 'dom_listen', elementId, listenerId, event });
+      send({
+        type: 'dom_listen',
+        elementId,
+        listenerId,
+        event,
+        preventDefault: options?.preventDefault,
+      });
 
       return () => {
         removeListener(elementId, listenerId);
