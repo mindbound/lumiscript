@@ -152,6 +152,30 @@ export type FrontendToBackend =
       scriptId: string;
       actionId: string;
     }
+  // ─── Float widget drag end (frontend → backend) ────────────────────
+  | {
+      /**
+       * Fired by the frontend when the user completes a drag gesture on a
+       * float widget. The backend updates its cached position + fans the
+       * event out to any `onDragEnd` handlers the script registered.
+       */
+      type: 'ls_float_widget_drag_end';
+      widgetId: string;
+      x: number;
+      y: number;
+    }
+  // ─── Drawer tab activation (frontend → backend) ────────────────────
+  | {
+      /**
+       * Fired by the frontend when the user switches to a registered
+       * drawer tab (via sidebar click, command palette, or programmatic
+       * `handle.activate()`). Backend fans the event out to all handlers
+       * registered via `handle.onActivate(fn)`.
+       */
+      type: 'ls_drawer_tab_activated';
+      scriptId: string;
+      tabId: string;
+    }
 ;
 
 // ─── Backend → Frontend ───────────────────────────────────────────────────────
@@ -337,5 +361,103 @@ export type BackendToFrontend =
       type: 'ls_input_bar_action_destroy';
       scriptId: string;
       actionId: string;
+    }
+  // ─── Float widget lifecycle (backend → frontend) ───────────────────
+  | {
+      /**
+       * Create a float widget. The frontend calls `ctx.ui.createFloatWidget`,
+       * binds the resulting widget's `.root` HTMLElement into the shared DOM
+       * element map under `rootElementId` so `dom_*` messages targeting it
+       * flow through the existing pipeline, and wires `onDragEnd` to echo
+       * position updates back via `ls_float_widget_drag_end`.
+       */
+      type: 'ls_float_widget_create';
+      scriptId: string;
+      widgetId: string;
+      rootElementId: string;
+      options: {
+        width: number;
+        height: number;
+        initialPosition?: { x: number; y: number };
+        snapToEdge?: boolean;
+        tooltip?: string;
+        chromeless?: boolean;
+      };
+    }
+  | {
+      /** Move a widget to new coordinates. */
+      type: 'ls_float_widget_move';
+      widgetId: string;
+      x: number;
+      y: number;
+    }
+  | {
+      /** Show or hide a widget. */
+      type: 'ls_float_widget_set_visible';
+      widgetId: string;
+      visible: boolean;
+    }
+  | {
+      /** Destroy a widget — removes it from the viewport. Idempotent frontend-side. */
+      type: 'ls_float_widget_destroy';
+      widgetId: string;
+    }
+  // ─── Drawer tab lifecycle (backend → frontend) ─────────────────────
+  | {
+      /**
+       * Register a drawer tab. The frontend calls
+       * `ctx.ui.registerDrawerTab(options)`, binds the returned tab's
+       * `.root` HTMLElement into the shared DOM element map under
+       * `rootElementId` so `dom_*` messages manipulate the tab body via
+       * the existing pipeline, and wires `onActivate` to echo via
+       * `ls_drawer_tab_activated`.
+       */
+      type: 'ls_drawer_tab_register';
+      scriptId: string;
+      tabId: string;
+      rootElementId: string;
+      options: {
+        id: string;
+        title: string;
+        shortName?: string;
+        description?: string;
+        keywords?: string[];
+        headerTitle?: string;
+        iconSvg?: string;
+        iconUrl?: string;
+      };
+    }
+  | {
+      /** Update a drawer tab's full title (command palette + panel header). */
+      type: 'ls_drawer_tab_set_title';
+      scriptId: string;
+      tabId: string;
+      title: string;
+    }
+  | {
+      /** Update a drawer tab's sidebar icon label. */
+      type: 'ls_drawer_tab_set_short_name';
+      scriptId: string;
+      tabId: string;
+      shortName: string;
+    }
+  | {
+      /** Show or clear a badge next to a drawer tab's icon. `null` clears. */
+      type: 'ls_drawer_tab_set_badge';
+      scriptId: string;
+      tabId: string;
+      badge: string | null;
+    }
+  | {
+      /** Programmatically activate a drawer tab. */
+      type: 'ls_drawer_tab_activate';
+      scriptId: string;
+      tabId: string;
+    }
+  | {
+      /** Destroy a drawer tab. Idempotent on the frontend side. */
+      type: 'ls_drawer_tab_destroy';
+      scriptId: string;
+      tabId: string;
     }
 ;

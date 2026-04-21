@@ -39,6 +39,17 @@ import {
   clearByScript as clearActionsByScript,
   dispatchClick as dispatchActionClick,
 } from './engine/input-bar-action-registry.js';
+import {
+  liveWidgetsByScript,
+  destroyWidget as destroyWidgetInRegistry,
+  dropEntry as dropWidgetEntry,
+  dispatchDragEnd as dispatchWidgetDragEnd,
+} from './engine/float-widget-registry.js';
+import {
+  listByScript as listTabsByScript,
+  clearByScript as clearTabsByScript,
+  dispatchActivation as dispatchTabActivation,
+} from './engine/drawer-tab-registry.js';
 import { resolveContextMenu } from './engine/api/ui.js';
 import { checkMinimumHostVersion } from './utils/host-version.js';
 
@@ -461,6 +472,23 @@ spindle.onFrontendMessage(async (raw, userId) => {
             send({ type: 'ls_input_bar_action_destroy', scriptId: msg.id, actionId });
           }
           clearActionsByScript(msg.id);
+          // Destroy any float widgets this script still has open. Same
+          // lifecycle shape as input-bar actions — fire-and-forget
+          // destroy messages, then drop registry entries via the
+          // destroyWidget + dropEntry pair (marking destroyed first so
+          // any in-flight drag-end echoes become harmless no-ops).
+          for (const widgetId of liveWidgetsByScript(msg.id)) {
+            destroyWidgetInRegistry(widgetId);
+            send({ type: 'ls_float_widget_destroy', widgetId });
+            dropWidgetEntry(widgetId);
+          }
+          // Destroy any drawer tabs this script has registered. Simple
+          // lifecycle like input-bar actions — emit destroy messages,
+          // then clear the registry entries.
+          for (const tabId of listTabsByScript(msg.id)) {
+            send({ type: 'ls_drawer_tab_destroy', scriptId: msg.id, tabId });
+          }
+          clearTabsByScript(msg.id);
           cleanupDOMScript(msg.id);
           send({ type: 'dom_cleanup_script', scriptId: msg.id });
         }
@@ -503,6 +531,17 @@ spindle.onFrontendMessage(async (raw, userId) => {
           send({ type: 'ls_input_bar_action_destroy', scriptId: msg.id, actionId });
         }
         clearActionsByScript(msg.id);
+        // Destroy float widgets — see the matching block in `update_script`.
+        for (const widgetId of liveWidgetsByScript(msg.id)) {
+          destroyWidgetInRegistry(widgetId);
+          send({ type: 'ls_float_widget_destroy', widgetId });
+          dropWidgetEntry(widgetId);
+        }
+        // Destroy drawer tabs — see the matching block in `update_script`.
+        for (const tabId of listTabsByScript(msg.id)) {
+          send({ type: 'ls_drawer_tab_destroy', scriptId: msg.id, tabId });
+        }
+        clearTabsByScript(msg.id);
         cleanupDOMScript(msg.id);
         send({ type: 'dom_cleanup_script', scriptId: msg.id });
         await scriptStorage.deleteScript(msg.id);
@@ -626,6 +665,24 @@ spindle.onFrontendMessage(async (raw, userId) => {
       // dispatchClick — one bad handler can't stop the rest.
       case 'ls_input_bar_action_click': {
         dispatchActionClick(msg.scriptId, msg.actionId);
+        break;
+      }
+
+      // ── Float widget drag end ──────────────────────────────────────────
+      // Authoritative position update from the frontend after the user
+      // completes a drag. Registry updates the position cache + fans out
+      // to any `onDragEnd` handlers the script registered.
+      case 'ls_float_widget_drag_end': {
+        dispatchWidgetDragEnd(msg.widgetId, msg.x, msg.y);
+        break;
+      }
+
+      // ── Drawer tab activation ──────────────────────────────────────────
+      // User switched to a registered drawer tab (via sidebar click,
+      // command palette, or programmatic `activate()`). Registry fans out
+      // to every `onActivate` handler the script registered.
+      case 'ls_drawer_tab_activated': {
+        dispatchTabActivation(msg.scriptId, msg.tabId);
         break;
       }
 

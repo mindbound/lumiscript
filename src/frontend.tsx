@@ -9,6 +9,8 @@ import { installDOMHandler } from './dom-handler.js';
 import { installModalHandler } from './modal-handler.js';
 import { installContextMenuHandler } from './context-menu-handler.js';
 import { installInputBarActionHandler } from './input-bar-action-handler.js';
+import { installFloatWidgetHandler } from './float-widget-handler.js';
+import { installDrawerTabHandler } from './drawer-tab-handler.js';
 
 // ─── LumiScript Frontend ──────────────────────────────────────────────────
 // Runs in the browser via dynamic import.
@@ -91,6 +93,23 @@ export function setup(ctx: SpindleFrontendContext) {
   // `ls_input_bar_action_click` for the backend registry to fan out.
   const cleanupInputBarActions = installInputBarActionHandler(ctx, virtualOnBackendMessage, sendToBackend);
   cleanups.push(cleanupInputBarActions);
+
+  // ─── Float widget handler ───────────────────────────────────────────────
+  // Lifecycle proxy for `api.ui.createFloatWidget`. Binds each widget's
+  // `.root` HTMLElement into the shared DOM element map so content ops
+  // pipe through the existing `dom_*` pipeline. Drag-end coordinates are
+  // echoed via `ls_float_widget_drag_end` so the backend's position cache
+  // stays authoritative and script `onDragEnd` handlers fire.
+  const cleanupFloatWidgets = installFloatWidgetHandler(ctx, virtualOnBackendMessage, sendToBackend);
+  cleanups.push(cleanupFloatWidgets);
+
+  // ─── Drawer tab handler ─────────────────────────────────────────────────
+  // Lifecycle proxy for `api.ui.registerDrawerTab`. Same root-element
+  // binding trick as modals/widgets — the tab body is bound under
+  // `rootElementId` so `dom_*` messages target it via the existing
+  // pipeline. Activation events are echoed via `ls_drawer_tab_activated`.
+  const cleanupDrawerTabs = installDrawerTabHandler(ctx, virtualOnBackendMessage, sendToBackend);
+  cleanups.push(cleanupDrawerTabs);
 
   // ─── Dock Panel ─────────────────────────────────────────────────────────
   const panel = ctx.ui.requestDockPanel({

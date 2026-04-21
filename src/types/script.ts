@@ -1642,6 +1642,158 @@ export interface InputBarActionHandle {
   destroy(): void;
 }
 
+// ─── Float widgets (lifecycle, DOM-owned) ────────────────────────────────────
+
+/** Options for `api.ui.createFloatWidget()`. */
+export interface FloatWidgetOptions {
+  /** Widget width in pixels. */
+  width: number;
+  /** Widget height in pixels. */
+  height: number;
+  /** Starting position in viewport coordinates. */
+  initialPosition?: { x: number; y: number };
+  /** Snap to the nearest screen edge after drag. Default: `false`. */
+  snapToEdge?: boolean;
+  /** Hover tooltip text. */
+  tooltip?: string;
+  /**
+   * Strip the default container chrome (border, background, shadow,
+   * border-radius). The script fully owns the visual presentation via
+   * `handle.root` content + `api.ui.dom.addStyle`. Default: `false`.
+   */
+  chromeless?: boolean;
+}
+
+/**
+ * Handle returned by `api.ui.createFloatWidget()`.
+ *
+ * Float widgets are small draggable overlays. The body DOM is fully
+ * script-owned via `handle.root` (a `DOMHandle` bound to the widget's content
+ * container), mirroring the `api.ui.showAdvancedModal` pattern. Host-enforced
+ * limit: 2 widgets per script, 8 global.
+ *
+ * `getPosition()` and `isVisible()` return backend-cached state updated via
+ * drag-end echoes from the frontend and explicit `moveTo`/`setVisible`
+ * commands. Values may briefly lag if the host clamps a `moveTo` to viewport
+ * bounds; the next drag-end corrects the cache.
+ */
+export interface FloatWidgetHandle {
+  /** UUID identifying this widget instance. Available synchronously. */
+  readonly widgetId: string;
+  /**
+   * `DOMHandle` bound to the widget's content container.
+   *
+   * Content is managed via the existing `api.ui.dom.*` pipeline. Calls are
+   * buffered and applied in order once the frontend has mounted the widget.
+   */
+  readonly root: DOMHandle;
+  /** Move the widget to new viewport coordinates. */
+  moveTo(x: number, y: number): void;
+  /** Current cached position. See interface docs for caching semantics. */
+  getPosition(): { x: number; y: number };
+  /** Show or hide the widget. */
+  setVisible(visible: boolean): void;
+  /** Current cached visibility state. */
+  isVisible(): boolean;
+  /**
+   * Register a handler fired after the user completes a drag gesture, with
+   * the final coordinates. Returns an unsubscribe function. Multiple
+   * handlers supported — all fire on each drag-end.
+   */
+  onDragEnd(handler: (pos: { x: number; y: number }) => void): () => void;
+  /**
+   * Remove the widget from the viewport. Idempotent — subsequent calls and
+   * method invocations on this handle are silent no-ops.
+   */
+  destroy(): void;
+}
+
+// ─── Drawer tabs (lifecycle, DOM-owned) ──────────────────────────────────────
+
+/** Options for `api.ui.registerDrawerTab()`. */
+export interface DrawerTabOptions {
+  /**
+   * Unique identifier within your script. Used by the handle for subsequent
+   * `setTitle` / `setShortName` / `setBadge` / `activate` / `destroy` calls
+   * and for routing `onActivate` events — pick something stable.
+   */
+  id: string;
+  /**
+   * Full display title. Shown in the panel header and the command palette
+   * listing (users can jump to your tab via `Ctrl+K` → type the title).
+   */
+  title: string;
+  /**
+   * Short label rendered beneath the sidebar icon. Keep to ~8 characters;
+   * longer values are truncated with an ellipsis. Defaults to a truncation
+   * of `title`.
+   */
+  shortName?: string;
+  /**
+   * One-line description shown below the title in the command palette.
+   * Defaults to `"Open {title} extension tab"`.
+   */
+  description?: string;
+  /**
+   * Extra terms for command-palette fuzzy search. The extension name is
+   * always included automatically; list topic-specific synonyms here
+   * (e.g. `['analytics', 'metrics', 'charts']`).
+   */
+  keywords?: string[];
+  /**
+   * Title shown in the panel header navbar. Useful when the full `title`
+   * is too long for the header. Defaults to `title`.
+   */
+  headerTitle?: string;
+  /** Inline SVG string for the sidebar icon. Rendered at 20×20, sanitized upstream. */
+  iconSvg?: string;
+  /** URL to an icon image. Mutually exclusive with `iconSvg`. */
+  iconUrl?: string;
+}
+
+/**
+ * Handle returned by `api.ui.registerDrawerTab()`.
+ *
+ * Drawer tabs live in the ViewportDrawer sidebar. Each tab registration
+ * automatically appears in the command palette (`Ctrl+K`) as well, searchable
+ * by title, shortName, description terms, keywords, and the extension name.
+ *
+ * Host-enforced limits: 4 tabs per extension, 8 global. Because LumiScript
+ * is a single Spindle extension, all user scripts share the 4-tab quota.
+ * LumiScript enforces **at most 1 drawer tab per script** synchronously at
+ * register time so a single script can't starve the shared quota.
+ */
+export interface DrawerTabHandle {
+  /** The tab's identifier — the same `id` passed in `DrawerTabOptions`. */
+  readonly tabId: string;
+  /**
+   * `DOMHandle` bound to the tab's content container.
+   *
+   * Render tab content via the existing `api.ui.dom.*` pipeline. Calls are
+   * buffered and applied once the frontend has mounted the tab.
+   */
+  readonly root: DOMHandle;
+  /** Update the full title (affects command palette + panel header). */
+  setTitle(title: string): void;
+  /** Update the sidebar icon label. */
+  setShortName(shortName: string): void;
+  /** Show a badge next to the tab icon. Pass `null` to clear. */
+  setBadge(text: string | null): void;
+  /** Programmatically switch the drawer to this tab. */
+  activate(): void;
+  /**
+   * Register a handler fired when the user switches to this tab. Returns an
+   * unsubscribe function. Multiple handlers supported — all fire on each
+   * activation.
+   */
+  onActivate(handler: () => void): () => void;
+  /**
+   * Remove the tab from the sidebar and detach all handlers. Idempotent —
+   * subsequent method calls on this handle are silent no-ops.
+   */
+  destroy(): void;
+}
+
 // ─── UI API ───────────────────────────────────────────────────────────────────
 
 export interface UIAPI {
@@ -1789,6 +1941,63 @@ export interface UIAPI {
    * // On script teardown, action.destroy() is invoked automatically.
    */
   registerInputBarAction(options: InputBarActionOptions): InputBarActionHandle;
+
+  /**
+   * Create a small draggable float widget overlaying the app. The body DOM
+   * is fully script-owned via `handle.root` (`DOMHandle`), mirroring
+   * `api.ui.showAdvancedModal`. Host-enforced limits: 2 widgets per script
+   * (pre-checked backend-side), 8 global across extensions.
+   *
+   * Unlike `api.ui.dom.floatingButton` (which is a free-tier styled button
+   * injection), `createFloatWidget` uses Lumiverse's native float-widget
+   * infrastructure — snap-to-edge after drag, chromeless mode, drag-end
+   * callbacks for position persistence.
+   *
+   * Requires the `ui_panels` permission.
+   *
+   * @example
+   * const widget = api.ui.createFloatWidget({
+   *   width: 200,
+   *   height: 120,
+   *   initialPosition: { x: 100, y: 100 },
+   *   snapToEdge: true,
+   *   tooltip: 'Stats',
+   * });
+   * widget.root.update('<div style="padding:10px">Hello</div>');
+   * widget.onDragEnd((pos) => api.variables.local.set('widget-pos', pos));
+   */
+  createFloatWidget(options: FloatWidgetOptions): FloatWidgetHandle;
+
+  /**
+   * Register a tab in the ViewportDrawer sidebar. The tab's body DOM is
+   * fully script-owned via `handle.root` (`DOMHandle`), mirroring the
+   * `api.ui.showAdvancedModal` / `createFloatWidget` pattern.
+   *
+   * Host-enforced limits: 4 tabs per Spindle extension, 8 global.
+   * LumiScript-enforced: **1 tab per script** (pre-checked synchronously).
+   * Because all user scripts share LumiScript's 4-tab host quota, the
+   * per-script cap ensures one script can't starve the others.
+   *
+   * Registered tabs automatically appear in the command palette (`Ctrl+K`)
+   * — users can jump to your tab by typing its title, shortName, any word
+   * from its description, any entry in its keywords, or the LumiScript
+   * extension name. No extra code needed.
+   *
+   * Free-tier (no permission required).
+   *
+   * @example
+   * const tab = api.ui.registerDrawerTab({
+   *   id:    'stats',
+   *   title: 'Character Stats',
+   *   shortName: 'Stats',
+   *   description: 'View character performance metrics',
+   *   keywords: ['analytics', 'metrics'],
+   *   iconSvg: '<svg>...</svg>',
+   * });
+   * tab.root.update('<div>...</div>');
+   * tab.onActivate(() => api.chat.console('user opened stats tab'));
+   */
+  registerDrawerTab(options: DrawerTabOptions): DrawerTabHandle;
 
   /**
    * Open the native Lumiverse expanded text editor with macro syntax highlighting.

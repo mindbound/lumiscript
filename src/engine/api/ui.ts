@@ -35,6 +35,10 @@ import type {
   ContextMenuItem,
   InputBarActionOptions,
   InputBarActionHandle,
+  FloatWidgetOptions,
+  FloatWidgetHandle,
+  DrawerTabOptions,
+  DrawerTabHandle,
 } from '../../types/script.js';
 import type { APIBuildDeps } from './shared.js';
 import { shielded, assertPerm } from './shared.js';
@@ -55,12 +59,40 @@ import {
   addClickHandler as addActionClickHandler,
   destroyAction,
 } from '../input-bar-action-registry.js';
+import {
+  registerWidget,
+  getWidget,
+  countLiveWidgetsByScript,
+  updatePosition as updateWidgetPosition,
+  updateVisibility as updateWidgetVisibility,
+  addDragEndHandler,
+  destroyWidget,
+} from '../float-widget-registry.js';
+import {
+  registerTab,
+  countByScript as countTabsByScript,
+  countTotal as countTotalTabs,
+  addActivateHandler,
+  destroyTab,
+} from '../drawer-tab-registry.js';
 
 /** Maximum concurrent advanced modals per extension (host-enforced). */
 const ADVANCED_MODAL_STACK_LIMIT = 2;
 
 /** Maximum concurrent input-bar actions per extension (host-enforced: 4). */
 const INPUT_BAR_ACTION_STACK_LIMIT = 4;
+
+/** Maximum concurrent float widgets per extension (host-enforced: 2). */
+const FLOAT_WIDGET_STACK_LIMIT = 2;
+
+/**
+ * LumiScript-enforced per-script drawer-tab cap. Prevents any single script
+ * from starving the shared per-extension quota (host enforces 4 total).
+ */
+const DRAWER_TAB_PER_SCRIPT_LIMIT = 1;
+
+/** Spindle's host cap on drawer tabs per extension. */
+const DRAWER_TAB_TOTAL_LIMIT = 4;
 
 // ─── Context menu — request-response bridge ─────────────────────────────────
 
@@ -391,6 +423,194 @@ export function buildUIAPI(deps: APIBuildDeps): Omit<LumiScriptAPI['ui'], 'dom'>
       return handle;
     },
 
+    createFloatWidget(options: FloatWidgetOptions): FloatWidgetHandle {
+      assertPerm('ui_panels', deps.hasPerm, deps.script.name);
+
+      const scriptId = deps.script.id;
+
+      // ── Pre-check stack limit ──────────────────────────────────────────
+      const live = countLiveWidgetsByScript(scriptId);
+      if (live >= FLOAT_WIDGET_STACK_LIMIT) {
+        throw new Error(
+          `api.ui.createFloatWidget: stack limit reached (${FLOAT_WIDGET_STACK_LIMIT} widgets open for this script).` +
+          ` Call destroy() on an existing widget before creating another.`,
+        );
+      }
+
+      // ── Allocate IDs ───────────────────────────────────────────────────
+      const widgetId      = crypto.randomUUID();
+      const rootElementId = nextDOMId('fw');
+
+      // Seed position cache with the requested initial position. The host
+      // may place elsewhere on first mount if `initialPosition` is omitted;
+      // the first drag-end echo will correct the cache when that happens.
+      const initialX = options.initialPosition?.x ?? 0;
+      const initialY = options.initialPosition?.y ?? 0;
+
+      // Register in both registries BEFORE sending the create message so
+      // any follow-up DOM op fired synchronously after this call resolves
+      // the elementId correctly.
+      registerElement(rootElementId, scriptId);
+      registerWidget(widgetId, rootElementId, scriptId, initialX, initialY);
+
+      // ── Construct the handle ───────────────────────────────────────────
+      const root = createDOMHandle(rootElementId, deps);
+
+      const handle: FloatWidgetHandle = {
+        widgetId,
+        root,
+        moveTo(x: number, y: number): void {
+          const entry = getWidget(widgetId);
+          if (!entry || entry.destroyed) return;
+          updateWidgetPosition(widgetId, x, y);
+          spindle.sendToFrontend({ type: 'ls_float_widget_move', widgetId, x, y });
+        },
+        getPosition(): { x: number; y: number } {
+          const entry = getWidget(widgetId);
+          if (!entry) return { x: 0, y: 0 };
+          return { x: entry.x, y: entry.y };
+        },
+        setVisible(visible: boolean): void {
+          const entry = getWidget(widgetId);
+          if (!entry || entry.destroyed) return;
+          updateWidgetVisibility(widgetId, visible);
+          spindle.sendToFrontend({ type: 'ls_float_widget_set_visible', widgetId, visible });
+        },
+        isVisible(): boolean {
+          const entry = getWidget(widgetId);
+          if (!entry) return false;
+          return entry.visible;
+        },
+        onDragEnd(fn: (pos: { x: number; y: number }) => void): () => void {
+          return addDragEndHandler(widgetId, fn);
+        },
+        destroy(): void {
+          if (!destroyWidget(widgetId)) return;
+          spindle.sendToFrontend({ type: 'ls_float_widget_destroy', widgetId });
+          // Drop the entry lazily via the backend's frontend-message handler
+          // after any pending drag-end echoes have settled. Not strictly
+          // necessary — `destroyed: true` already guards the handler
+          // fan-out — but keeps the map tidy.
+        },
+      };
+
+      // ── Fire the create message ───────────────────────────────────────
+      spindle.sendToFrontend({
+        type: 'ls_float_widget_create',
+        scriptId,
+        widgetId,
+        rootElementId,
+        options: {
+          width:            options.width,
+          height:           options.height,
+          initialPosition:  options.initialPosition,
+          snapToEdge:       options.snapToEdge,
+          tooltip:          options.tooltip,
+          chromeless:       options.chromeless,
+        },
+      });
+
+      return handle;
+    },
+
+    registerDrawerTab(options: DrawerTabOptions): DrawerTabHandle {
+      const scriptId = deps.script.id;
+
+      // ── Validate id ──────────────────────────────────────────────────
+      if (typeof options.id !== 'string' || options.id.length === 0) {
+        throw new Error('api.ui.registerDrawerTab: options.id must be a non-empty string.');
+      }
+      if (typeof options.title !== 'string' || options.title.length === 0) {
+        throw new Error('api.ui.registerDrawerTab: options.title must be a non-empty string.');
+      }
+
+      // ── Pre-check per-script cap ─────────────────────────────────────
+      const liveForScript = countTabsByScript(scriptId);
+      if (liveForScript >= DRAWER_TAB_PER_SCRIPT_LIMIT) {
+        throw new Error(
+          `api.ui.registerDrawerTab: per-script limit reached (${DRAWER_TAB_PER_SCRIPT_LIMIT} drawer tab per script).` +
+          ` Call destroy() on the existing tab before registering another.`,
+        );
+      }
+
+      // ── Pre-check LS-wide cap ────────────────────────────────────────
+      // LumiScript is one Spindle extension, so all user scripts share
+      // the 4-tab host quota. Fail fast with a message that names the
+      // global rather than per-script exhaustion — different remedy.
+      const liveTotal = countTotalTabs();
+      if (liveTotal >= DRAWER_TAB_TOTAL_LIMIT) {
+        throw new Error(
+          `api.ui.registerDrawerTab: LumiScript drawer-tab quota exhausted (${DRAWER_TAB_TOTAL_LIMIT} total across all scripts).` +
+          ` Another script must destroy its tab before this one can register.`,
+        );
+      }
+
+      // ── Allocate IDs ─────────────────────────────────────────────────
+      const tabId         = options.id;
+      const rootElementId = nextDOMId('dt');
+
+      // Register both entries BEFORE sending the create message so any
+      // synchronous follow-up DOM op on `.root` finds the elementId.
+      registerElement(rootElementId, scriptId);
+      registerTab(scriptId, tabId, rootElementId);   // throws on duplicate
+
+      // ── Construct the handle ─────────────────────────────────────────
+      const root = createDOMHandle(rootElementId, deps);
+
+      let destroyed = false;
+
+      const handle: DrawerTabHandle = {
+        tabId,
+        root,
+        setTitle(title: string): void {
+          if (destroyed) return;
+          spindle.sendToFrontend({ type: 'ls_drawer_tab_set_title', scriptId, tabId, title });
+        },
+        setShortName(shortName: string): void {
+          if (destroyed) return;
+          spindle.sendToFrontend({ type: 'ls_drawer_tab_set_short_name', scriptId, tabId, shortName });
+        },
+        setBadge(text: string | null): void {
+          if (destroyed) return;
+          spindle.sendToFrontend({ type: 'ls_drawer_tab_set_badge', scriptId, tabId, badge: text });
+        },
+        activate(): void {
+          if (destroyed) return;
+          spindle.sendToFrontend({ type: 'ls_drawer_tab_activate', scriptId, tabId });
+        },
+        onActivate(fn: () => void): () => void {
+          if (destroyed) return () => {};
+          return addActivateHandler(scriptId, tabId, fn);
+        },
+        destroy(): void {
+          if (destroyed) return;
+          destroyed = true;
+          destroyTab(scriptId, tabId);
+          spindle.sendToFrontend({ type: 'ls_drawer_tab_destroy', scriptId, tabId });
+        },
+      };
+
+      // ── Fire the register message ────────────────────────────────────
+      spindle.sendToFrontend({
+        type: 'ls_drawer_tab_register',
+        scriptId,
+        tabId,
+        rootElementId,
+        options: {
+          id:          options.id,
+          title:       options.title,
+          shortName:   options.shortName,
+          description: options.description,
+          keywords:    options.keywords,
+          headerTitle: options.headerTitle,
+          iconSvg:     options.iconSvg,
+          iconUrl:     options.iconUrl,
+        },
+      });
+
+      return handle;
+    },
+
     // ── Push notifications ─────────────────────────────────────────────────
 
     pushNotification(
@@ -432,4 +652,8 @@ export type {
   ContextMenuItem,
   InputBarActionOptions,
   InputBarActionHandle,
+  FloatWidgetOptions,
+  FloatWidgetHandle,
+  DrawerTabOptions,
+  DrawerTabHandle,
 };
