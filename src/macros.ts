@@ -52,6 +52,17 @@ interface MacroCtx {
   };
   isScoped?: boolean;
   body?: string;
+  /**
+   * False when the host is performing a dry / non-committing macro resolution
+   * (e.g. via `spindle.macros.resolve(template, { commit: false })`). Handlers
+   * with side effects (disk writes, event emissions, external calls) MUST skip
+   * those side effects when `commit === false`. Added upstream in
+   * `lumiverse-spindle-types` v0.4.32.
+   *
+   * Undefined means "commit" (old-host behaviour). Only an explicit `false`
+   * signals a dry resolve. Guard writes on `ctx.commit !== false`.
+   */
+  commit?: boolean;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -169,6 +180,9 @@ export function registerLumiScriptMacros(isEnabled: () => boolean): void {
       const k = key(ctx), cid = resolveCharId();
       if (!k || !cid) return '';
       const value = ctx.args[1] !== undefined ? String(ctx.args[1]) : '';
+      // Dry resolves must not write — the host calls us with commit: false
+      // to preview a template without triggering side effects.
+      if (ctx.commit === false) return '';
       const data = await readCharVars(cid);
       data[k] = value;
       await writeCharVars(cid, data);
@@ -187,6 +201,7 @@ export function registerLumiScriptMacros(isEnabled: () => boolean): void {
       if (!k || !cid) return '';
       const addVal = parseFloat(ctx.args[1] ?? '');
       if (isNaN(addVal)) return '';
+      if (ctx.commit === false) return '';
       const data = await readCharVars(cid);
       const current = parseFloat(String(data[k])) || 0;
       data[k] = String(current + addVal);
@@ -204,6 +219,7 @@ export function registerLumiScriptMacros(isEnabled: () => boolean): void {
     handler: async (ctx: MacroCtx) => {
       const k = key(ctx), cid = resolveCharId();
       if (!k || !cid) return '';
+      if (ctx.commit === false) return '';
       const data = await readCharVars(cid);
       const current = parseFloat(String(data[k])) || 0;
       data[k] = String(current + 1);
@@ -221,6 +237,7 @@ export function registerLumiScriptMacros(isEnabled: () => boolean): void {
     handler: async (ctx: MacroCtx) => {
       const k = key(ctx), cid = resolveCharId();
       if (!k || !cid) return '';
+      if (ctx.commit === false) return '';
       const data = await readCharVars(cid);
       const current = parseFloat(String(data[k])) || 0;
       data[k] = String(current - 1);
@@ -253,6 +270,7 @@ export function registerLumiScriptMacros(isEnabled: () => boolean): void {
     handler: async (ctx: MacroCtx) => {
       const k = key(ctx), cid = resolveCharId();
       if (!k || !cid) return '';
+      if (ctx.commit === false) return '';
       const data = await readCharVars(cid);
       delete data[k];
       await writeCharVars(cid, data);

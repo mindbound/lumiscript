@@ -62,6 +62,7 @@ import { buildCommandsAPI  } from './api/commands.js';
 import { buildEventsAPI   } from './api/events.js';
 import { buildDOMAPI      } from './api/dom.js';
 import { buildMacrosAPI   } from './api/macros.js';
+import { buildTokensAPI   } from './api/tokens.js';
 import { resolveBuiltin, isBuiltinName } from './builtin-library-registry.js';
 
 // ─── Executor options ─────────────────────────────────────────────────────────
@@ -292,6 +293,7 @@ export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiSc
     broadcast:  buildBroadcastAPI(deps),
     commands:   buildCommandsAPI(deps),
     events:     buildEventsAPI(deps),
+    tokens:     buildTokensAPI(deps),
   };
   return api;
 }

@@ -16,6 +16,7 @@ import type {
   Character,
   CharacterCreateInput,
   CharacterUpdateInput,
+  CharacterAvatarUpload,
 } from '../../types/script.js';
 import { type APIBuildDeps, assertPerm } from './shared.js';
 
@@ -97,6 +98,18 @@ export function buildCharactersAPI(deps: APIBuildDeps): LumiScriptAPI['character
     update: async (id, input) => {
       assertPerm('characters', hasPerm, script.name);
       const dto = await spindle.characters.update(id, toUpdateDTO(input), uid);
+      return mapCharacter(dto);
+    },
+
+    setAvatar: async (id: string, avatar: CharacterAvatarUpload) => {
+      assertPerm('characters', hasPerm, script.name);
+      // LumiScript uses camelCase `mimeType`; the upstream DTO field is
+      // `mime_type`. Re-map at the boundary so scripts keep a clean surface.
+      const dto = await spindle.characters.setAvatar(id, {
+        data:      avatar.data,
+        filename:  avatar.filename,
+        mime_type: avatar.mimeType,
+      }, uid);
       return mapCharacter(dto);
     },
 

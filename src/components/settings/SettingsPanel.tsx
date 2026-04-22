@@ -1,5 +1,5 @@
 import { FC, useState, useEffect } from 'react';
-import { Code2, BookMarked, Terminal, Timer, Type, FileCode2 } from 'lucide-react';
+import { Code2, BookMarked, Terminal, Timer, Type, FileCode2, PanelLeft } from 'lucide-react';
 import type { Script, LumiScriptSettings } from '../../types/script.js';
 import type { BackendToFrontend, FrontendToBackend } from '../../types/messages.js';
 import { DEFAULT_SETTINGS } from '../../types/script.js';
@@ -159,6 +159,31 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
               sendToBackend({ type: 'update_settings', patch: { autosaveDebounceMs: ms } });
             }}
           />
+        </div>
+      </div>
+
+      {/* Dock Panel position */}
+      <div className="ls-settings-section">
+        <div className="ls-settings-section-label">
+          <PanelLeft size={11} />
+          Panel Position
+        </div>
+
+        <div className="ls-settings-field">
+          <label className="ls-settings-field-label" title="Which screen edge the LumiScript dock panel attaches to. Applies live — the panel will be re-created on the selected edge.">
+            Sidebar edge
+          </label>
+          <select
+            className="ls-number-input"
+            value={settings.dockPanelEdge}
+            onChange={e => {
+              const edge = e.target.value === 'left' ? 'left' : 'right';
+              sendToBackend({ type: 'update_settings', patch: { dockPanelEdge: edge } });
+            }}
+          >
+            <option value="right">Right</option>
+            <option value="left">Left</option>
+          </select>
         </div>
       </div>
 

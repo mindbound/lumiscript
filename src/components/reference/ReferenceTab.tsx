@@ -164,6 +164,7 @@ export const PERM_GROUPS: PermGroup[] = [
       { method: 'api.utils.uuid / shortId / wait', perms: [] },
       { method: 'api.utils.random.*', perms: [] },
       { method: 'api.utils.template.*', perms: [] },
+      { method: 'api.utils.macros.resolve', perms: [] },
       { method: 'api.utils.http.*', perms: ['cors_proxy'], note: '+ allowDangerous' },
     ],
   },
@@ -207,6 +208,7 @@ export const PERM_GROUPS: PermGroup[] = [
       { method: 'api.broadcast.*', perms: [] },
       { method: 'api.commands.*', perms: [] },
       { method: 'api.events.*', perms: ['event_tracking'] },
+      { method: 'api.tokens.*', perms: [] },
     ],
   },
 ];
@@ -1243,6 +1245,55 @@ export const KEY_TYPES: TypeDoc[] = [
       { field: 'payload?',  type: 'Record<string, unknown>', optional: true, desc: 'Arbitrary event data.' },
     ],
   },
+  // ─── Macros ──────────────────────────────────────────────────────────────────
+  {
+    name: 'MacrosResolveOptions',
+    note: 'Options for api.utils.macros.resolve(template, options?).',
+    fields: [
+      { field: 'chatId?',      type: 'string',  optional: true, desc: 'Chat ID for context-sensitive macros. Defaults to the active chat.' },
+      { field: 'characterId?', type: 'string',  optional: true, desc: 'Character ID for character macros. Inferred from active chat if omitted.' },
+      { field: 'commit?',      type: 'boolean', optional: true, desc: 'When false, requests a dry / non-committing resolve — extension macro handlers that honour the flag skip side effects (disk writes, event emissions, etc.). Default: true.' },
+    ],
+  },
+  {
+    name: 'MacrosResolveResult',
+    note: 'Returned by api.utils.macros.resolve().',
+    fields: [
+      { field: 'text',        type: 'string', optional: false, desc: 'Resolved template text.' },
+      { field: 'diagnostics', type: 'Array<{ message, offset, length }>', optional: false, desc: 'Diagnostics from the macro engine (parse errors, unknown macros, etc.).' },
+    ],
+  },
+  // ─── Tokens ──────────────────────────────────────────────────────────────────
+  {
+    name: 'TokenCountOptions',
+    note: 'Options for api.tokens.count* methods.',
+    fields: [
+      { field: 'model?',       type: 'string',             optional: true, desc: 'Explicit model ID to resolve the tokenizer against. Takes precedence over modelSource when both are set.' },
+      { field: 'modelSource?', type: "'main' | 'sidecar'", optional: true, desc: "Which configured model to use when `model` isn't set. 'main' = user's default connection profile (default), 'sidecar' = user's selected sidecar model." },
+    ],
+  },
+  {
+    name: 'TokenCountResult',
+    note: 'Returned by api.tokens.count* methods.',
+    fields: [
+      { field: 'totalTokens',   type: 'number',                             optional: false, desc: 'Total token count.' },
+      { field: 'model',         type: 'string',                             optional: false, desc: 'Model ID actually used to resolve the tokenizer.' },
+      { field: 'modelSource',   type: "'main' | 'sidecar' | 'explicit'",    optional: false, desc: 'Whether the tokenizer model came from the main connection, sidecar selection, or an explicit override.' },
+      { field: 'tokenizerId',   type: 'string | null',                      optional: false, desc: 'Null when no exact tokenizer match was found and an approximate fallback was used.' },
+      { field: 'tokenizerName', type: 'string',                             optional: false, desc: 'Human-readable tokenizer name (empty string when approximate).' },
+      { field: 'approximate',   type: 'boolean',                            optional: false, desc: 'True when Lumiverse fell back to its approximate char/4 heuristic.' },
+    ],
+  },
+  // ─── Characters ──────────────────────────────────────────────────────────────
+  {
+    name: 'CharacterAvatarUpload',
+    note: 'Payload for api.characters.setAvatar(id, avatar).',
+    fields: [
+      { field: 'data',      type: 'Uint8Array', optional: false, desc: 'Raw avatar image bytes. Source from api.utils.http.*, api.files.*, api.enclave.*, etc.' },
+      { field: 'filename?', type: 'string',     optional: true,  desc: 'Optional filename — preserves the file extension when stored.' },
+      { field: 'mimeType?', type: 'string',     optional: true,  desc: "Optional content type. Defaults to 'image/png' on the host side." },
+    ],
+  },
 ];
 
 const KeyTypesTable: FC = () => (
@@ -1359,6 +1410,7 @@ export const API_GROUPS: FnGroup[] = [
       { name: 'template.render',        args: 'template, data?, options?',     desc: 'Two-pass render: Lumiverse macros first, then Handlebars. Returns Promise<string>.' },
       { name: 'template.compile',       args: 'template',                      desc: 'Pre-compile a Handlebars template for sync reuse. No macro resolution.' },
       { name: 'template.registerHelper', args: 'name, fn',                    desc: 'Register a custom Handlebars helper scoped to this script.' },
+      { name: 'macros.resolve',         args: 'template, options?',            desc: 'Resolve Lumiverse macros without the Handlebars pass. Pass { commit: false } for a dry resolve — extension macro handlers that honour the flag skip their side effects (useful for template previews). chatId / characterId default to the active context. Returns Promise<{ text, diagnostics }>.' },
     ],
   },
   {
@@ -1425,11 +1477,13 @@ export const API_GROUPS: FnGroup[] = [
   {
     group: 'api.characters',
     rows: [
-      { name: 'list',   args: 'options?',     desc: 'List characters (paginated). Returns { data, total }.' },
-      { name: 'get',    args: 'id',           desc: 'Get a character by ID. Returns null if not found.' },
-      { name: 'create', args: 'input',        desc: 'Create a new character.' },
-      { name: 'update', args: 'id, input',    desc: 'Update a character.' },
-      { name: 'delete', args: 'id',           desc: 'Delete a character. Returns true if deleted.' },
+      { name: 'list',      args: 'options?',        desc: 'List characters (paginated). Returns { data, total }.' },
+      { name: 'get',       args: 'id',              desc: 'Get a character by ID. Returns null if not found.' },
+      { name: 'getByName', args: 'name',            desc: 'Find the first character whose name exactly matches (case-sensitive). Scans all pages. Returns null if no match.' },
+      { name: 'create',    args: 'input',           desc: 'Create a new character.' },
+      { name: 'setAvatar', args: 'id, avatar',      desc: 'Replace a character\'s avatar image. `avatar` is { data: Uint8Array, filename?, mimeType? }. Useful for image-gen integrations or bulk avatar tooling.' },
+      { name: 'update',    args: 'id, input',       desc: 'Update a character.' },
+      { name: 'delete',    args: 'id',              desc: 'Delete a character. Returns true if deleted.' },
     ],
   },
   {
@@ -1524,6 +1578,14 @@ export const API_GROUPS: FnGroup[] = [
       { name: 'delete', args: 'key',        desc: 'Delete a secret. Returns true if it existed. Requires allowDangerous.' },
       { name: 'has',    args: 'key',        desc: 'Check if a secret exists without decrypting it. Requires allowDangerous.' },
       { name: 'list',   args: '—',          desc: 'List all secret keys for this user and extension. Requires allowDangerous.' },
+    ],
+  },
+  {
+    group: 'api.tokens',
+    rows: [
+      { name: 'countText',     args: 'text, options?',     desc: 'Server-side token count for an arbitrary string. Uses the provider\'s actual tokenizer (falls back to char/4 heuristic with `approximate: true`). Options: { model?, modelSource? } — `model` overrides `modelSource`. Returns { totalTokens, model, modelSource, tokenizerId, tokenizerName, approximate }. Free-tier.' },
+      { name: 'countMessages', args: 'messages, options?', desc: 'Same as countText but for an array of LLMMessage-shaped items. Accepts the output of api.chat.getMessages directly (only role + content are used). Free-tier.' },
+      { name: 'countChat',     args: 'chatId, options?',   desc: 'Count tokens for a live stored chat by ID. Convenient when you want to size a whole chat without fetching messages yourself. Free-tier.' },
     ],
   },
   {

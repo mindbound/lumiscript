@@ -135,6 +135,18 @@ export interface LumiScriptSettings {
    * placeholder `module.exports`.
    */
   defaultLibraryTemplate: string;
+  // ─── Dock Panel ──────────────────────────────────────────────────────────────
+  /**
+   * Which screen edge the LumiScript dock panel attaches to.
+   * Changes apply live: the frontend destroys the current panel and re-requests
+   * it on the new edge when this setting updates. The React tree is re-mounted,
+   * so any open editor state inside the LumiScript panel is reset. In practice
+   * this is rarely an issue because users toggle this setting from the *settings*
+   * panel, not from inside the LumiScript panel itself.
+   * Default: `'right'`. Supported: `'left' | 'right'` (top/bottom would squish
+   * the panel layout and are not exposed).
+   */
+  dockPanelEdge: 'left' | 'right';
 }
 
 export const DEFAULT_TRIGGER_TEMPLATE =
@@ -164,6 +176,7 @@ export const DEFAULT_SETTINGS: LumiScriptSettings = {
   autosaveDebounceMs: 1_200,
   defaultTriggerTemplate: DEFAULT_TRIGGER_TEMPLATE,
   defaultLibraryTemplate: DEFAULT_LIBRARY_TEMPLATE,
+  dockPanelEdge: 'right',
 };
 
 // ─── Execution ────────────────────────────────────────────────────────────────
@@ -227,6 +240,8 @@ export interface LumiScriptAPI {
   commands: CommandsAPI;
   /** Persistent event tracking (track, query, replay). Requires event_tracking permission. */
   events: EventsAPI;
+  /** Server-side token counting helpers. Uses the provider's actual tokenizer rather than character-count heuristics. No permission required. */
+  tokens: TokensAPI;
 }
 
 // ─── Chat API ─────────────────────────────────────────────────────────────────
@@ -876,6 +891,70 @@ export interface UtilsAPI {
      */
     registerHelper(name: string, fn: (...args: unknown[]) => unknown): void;
   };
+
+  /**
+   * Lumiverse macro resolution (`{{char}}`, `{{user}}`, `{{getvar::key}}`,
+   * `{{roll::2d6}}`, extension-registered macros, etc.). Thin wrapper over
+   * `spindle.macros.resolve` exposing the `commit` option for dry resolves.
+   *
+   * Unlike `api.utils.template.render`, this is macro-only — no Handlebars
+   * pass — so the output is whatever the macro engine produced. Use this
+   * when you want to preview what a template WOULD render to without
+   * triggering any side-effecting macro handlers (dry resolves).
+   */
+  macros: {
+    /**
+     * Resolve all macros in a template string.
+     *
+     * `chatId` / `characterId` default to the active context when omitted
+     * (consistent with `api.utils.template.render`). Without either, only
+     * context-free macros (time, random, etc.) resolve.
+     *
+     * `commit: false` requests a dry / non-committing resolve. Extension
+     * macro handlers that honour this flag will skip their side effects
+     * (disk writes, event emissions, external calls). Well-behaved macro
+     * handlers SHOULD honour it; older handlers that don't may still run
+     * their side effects.
+     *
+     * Default: `commit: true` (side effects happen, matching Lumiverse's
+     * normal prompt-assembly behaviour).
+     *
+     * @example
+     * // Preview a template without triggering {{setvar}} writes
+     * const { text, diagnostics } = await api.utils.macros.resolve(
+     *   'Current turn: {{@turn}}. {{incvar::turn}}',
+     *   { commit: false },
+     * );
+     * // `text` contains the rendered output; the {{incvar}} side effect
+     * // is suppressed for macro handlers that honour `commit`.
+     */
+    resolve(
+      template: string,
+      options?: MacrosResolveOptions,
+    ): Promise<MacrosResolveResult>;
+  };
+}
+
+/** Options for `api.utils.macros.resolve`. */
+export interface MacrosResolveOptions {
+  /** Chat ID for context-sensitive macros. Defaults to the active chat. */
+  chatId?: string;
+  /** Character ID for character macros. Inferred from the active chat if omitted. */
+  characterId?: string;
+  /**
+   * When `false`, requests a dry / non-committing resolve — extension macro
+   * handlers should skip side effects (disk writes, event emissions, etc.).
+   * Default: `true` (side effects happen).
+   */
+  commit?: boolean;
+}
+
+/** Result returned by `api.utils.macros.resolve`. */
+export interface MacrosResolveResult {
+  /** Resolved template text. */
+  text: string;
+  /** Diagnostics from the macro engine (parse errors, unknown macros, etc.). */
+  diagnostics: Array<{ message: string; offset: number; length: number }>;
 }
 
 // ─── Files API ────────────────────────────────────────────────────────────────
@@ -1055,6 +1134,19 @@ export interface CharacterCreateInput {
 
 export interface CharacterUpdateInput extends Partial<CharacterCreateInput> {}
 
+/** Payload for `api.characters.setAvatar()`. */
+export interface CharacterAvatarUpload {
+  /**
+   * Raw avatar image bytes. Scripts can source these from `api.utils.http.*`,
+   * `api.files.*`, `api.enclave.*`, or any other byte-producing path.
+   */
+  data: Uint8Array;
+  /** Optional filename — preserves the file extension when stored. */
+  filename?: string;
+  /** Optional content type. Defaults to `image/png` on the host side. */
+  mimeType?: string;
+}
+
 export interface CharactersAPI {
   /** List characters (paginated). Requires characters permission. */
   list(options?: { limit?: number; offset?: number }): Promise<{ data: Character[]; total: number }>;
@@ -1071,6 +1163,14 @@ export interface CharactersAPI {
   getByName(name: string): Promise<Character | null>;
   /** Create a new character. Requires characters permission. */
   create(input: CharacterCreateInput): Promise<Character>;
+  /**
+   * Replace a character's avatar image. Accepts raw bytes; the host handles
+   * storage and image-ID assignment. Returns the updated character record.
+   * Useful for scripts that generate avatars (image-gen integrations), fetch
+   * them from external sources, or bulk-apply from local storage.
+   * Requires characters permission.
+   */
+  setAvatar(id: string, avatar: CharacterAvatarUpload): Promise<Character>;
   /** Update a character. Requires characters permission. */
   update(id: string, input: CharacterUpdateInput): Promise<Character>;
   /** Delete a character. Returns true if deleted. Requires characters permission. */
@@ -2321,6 +2421,74 @@ export interface EventsAPI {
    * Requires event_tracking permission.
    */
   getLatestState(keys: string[]): Promise<Record<string, unknown>>;
+}
+
+// ─── Tokens API ───────────────────────────────────────────────────────────────
+
+/** Options for `api.tokens.countText()` / `countMessages()` / `countChat()`. */
+export interface TokenCountOptions {
+  /**
+   * Explicit model ID to resolve the tokenizer against. Takes precedence over
+   * `modelSource` when both are set. Useful when budgeting for a specific
+   * downstream model rather than "whatever the user has configured."
+   */
+  model?: string;
+  /**
+   * Which configured model to use when `model` is not set.
+   * - `'main'`    → the user's default main connection profile model (default)
+   * - `'sidecar'` → the user's selected sidecar model
+   */
+  modelSource?: 'main' | 'sidecar';
+}
+
+/** Result returned by `api.tokens.count*()` methods. */
+export interface TokenCountResult {
+  /** Total token count. */
+  totalTokens: number;
+  /** Model ID actually used to resolve the tokenizer. */
+  model: string;
+  /** Where the tokenizer model came from: main connection, sidecar selection, or an explicit override. */
+  modelSource: 'main' | 'sidecar' | 'explicit';
+  /** Null when no exact tokenizer match was found and an approximate fallback was used. */
+  tokenizerId: string | null;
+  /** Human-readable tokenizer name (empty string when approximate). */
+  tokenizerName: string;
+  /** True when Lumiverse fell back to its approximate char/4 heuristic. */
+  approximate: boolean;
+}
+
+/**
+ * Server-side token counting. Uses the actual provider tokenizer when
+ * available, falling back to a char/4 heuristic (`approximate: true`) when
+ * the tokenizer for the resolved model isn't bundled.
+ *
+ * No permission required. Useful for:
+ *   - Pre-flight prompt budgeting before `api.llm.generate*`
+ *   - Summariser / chunker scripts that need to fit exact token limits
+ *   - Multi-step chains that want to avoid blowing the context window
+ */
+export interface TokensAPI {
+  /**
+   * Count tokens for an arbitrary text string.
+   *
+   * @example
+   * const { totalTokens } = await api.tokens.countText(longPrompt);
+   * if (totalTokens > 3000) longPrompt = truncate(longPrompt);
+   */
+  countText(text: string, options?: TokenCountOptions): Promise<TokenCountResult>;
+
+  /**
+   * Count tokens for an array of chat-style messages. Accepts the normalised
+   * output of `api.chat.getMessages(...)` directly (only `role` + `content`
+   * are used for counting; other fields are ignored).
+   */
+  countMessages(messages: LLMMessage[], options?: TokenCountOptions): Promise<TokenCountResult>;
+
+  /**
+   * Count tokens for a live stored chat by ID. Convenient when the script
+   * wants to size the chat without fetching messages itself.
+   */
+  countChat(chatId: string, options?: TokenCountOptions): Promise<TokenCountResult>;
 }
 
 /** The `script.*` namespace available inside script bodies */

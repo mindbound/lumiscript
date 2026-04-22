@@ -100,5 +100,24 @@ export function buildUtilsAPI(deps: APIBuildDeps): LumiScriptAPI['utils'] {
         hbs.registerHelper(name, fn as Handlebars.HelperDelegate);
       },
     },
+
+    macros: {
+      async resolve(
+        template: string,
+        options: { chatId?: string; characterId?: string; commit?: boolean } = {},
+      ) {
+        // `commit` defaults to true (host's normal behaviour). Passing it
+        // through as-is means older Lumiverse hosts (pre-0.4.32 types) that
+        // ignore the field still run committing resolves — backward-compat
+        // safe. `chatId` / `characterId` default to the active context for
+        // consistency with `template.render`.
+        return shielded(spindle.macros.resolve(template, {
+          chatId:      options.chatId      ?? activeContext.chatId      ?? undefined,
+          characterId: options.characterId ?? activeContext.characterId ?? undefined,
+          userId:      userId              ?? undefined,
+          commit:      options.commit,
+        }));
+      },
+    },
   };
 }
