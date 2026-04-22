@@ -933,6 +933,50 @@ export interface UtilsAPI {
       options?: MacrosResolveOptions,
     ): Promise<MacrosResolveResult>;
   };
+
+  /**
+   * Image-byte utilities, primarily intended to ease `api.characters.setAvatar`
+   * workflows. No permission required. No image-decoding dependencies — these
+   * are cheap byte-level helpers, not a canvas replacement.
+   *
+   * Out of scope:
+   *   - Format conversion (JPG ↔ PNG etc.) — Lumiverse's setAvatar endpoint
+   *     accepts any common image format; the host normalises.
+   *   - Resize / crop — same reasoning.
+   */
+  image: {
+    /**
+     * Detect an image's MIME type from the first few bytes (magic-byte sniff).
+     * Returns `null` for unrecognised or truncated input.
+     *
+     * Recognises: PNG, JPEG, WebP, GIF (87a + 89a), BMP.
+     *
+     * @example
+     * // Typical setAvatar flow from unknown source bytes:
+     * const mimeType = api.utils.image.detectMime(bytes) ?? 'image/png';
+     * await api.characters.setAvatar(charId, { data: bytes, mimeType });
+     */
+    detectMime(bytes: Uint8Array): string | null;
+
+    /**
+     * Parse a `data:<mime>;base64,<payload>` URL into bytes + MIME.
+     * Returns `null` for malformed input or non-base64 data URIs.
+     *
+     * @example
+     * const parsed = api.utils.image.dataUrlToBytes(apiOutput);
+     * if (parsed) await api.characters.setAvatar(charId, parsed);
+     */
+    dataUrlToBytes(url: string):
+      | { data: Uint8Array; mimeType: string }
+      | null;
+
+    /**
+     * Encode bytes + a MIME type into a `data:<mime>;base64,<payload>` URL.
+     * Useful for previewing proposed avatars in the UI before committing
+     * with `setAvatar`, or for embedding in generated HTML.
+     */
+    bytesToDataUrl(bytes: Uint8Array, mimeType: string): string;
+  };
 }
 
 /** Options for `api.utils.macros.resolve`. */

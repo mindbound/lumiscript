@@ -165,6 +165,7 @@ export const PERM_GROUPS: PermGroup[] = [
       { method: 'api.utils.random.*', perms: [] },
       { method: 'api.utils.template.*', perms: [] },
       { method: 'api.utils.macros.resolve', perms: [] },
+      { method: 'api.utils.image.*', perms: [] },
       { method: 'api.utils.http.*', perms: ['cors_proxy'], note: '+ allowDangerous' },
     ],
   },
@@ -1411,6 +1412,9 @@ export const API_GROUPS: FnGroup[] = [
       { name: 'template.compile',       args: 'template',                      desc: 'Pre-compile a Handlebars template for sync reuse. No macro resolution.' },
       { name: 'template.registerHelper', args: 'name, fn',                    desc: 'Register a custom Handlebars helper scoped to this script.' },
       { name: 'macros.resolve',         args: 'template, options?',            desc: 'Resolve Lumiverse macros without the Handlebars pass. Pass { commit: false } for a dry resolve — extension macro handlers that honour the flag skip their side effects (useful for template previews). chatId / characterId default to the active context. Returns Promise<{ text, diagnostics }>.' },
+      { name: 'image.detectMime',       args: 'bytes',                          desc: 'Magic-byte sniff. Returns image MIME type (image/png, image/jpeg, image/webp, image/gif, image/bmp) or null. Pair with api.characters.setAvatar when the source format is unknown — the host defaults to image/png on missing mimeType.' },
+      { name: 'image.dataUrlToBytes',   args: 'url',                            desc: 'Parse a base64 data URL (data:<mime>;base64,<payload>) into { data: Uint8Array, mimeType }. Returns null for malformed or non-base64 data URIs.' },
+      { name: 'image.bytesToDataUrl',   args: 'bytes, mimeType',                desc: 'Encode bytes + MIME into a base64 data URL. Useful for previewing proposed avatars in the UI before committing via setAvatar.' },
     ],
   },
   {
