@@ -13,6 +13,14 @@
  *   cleaned up automatically when the script is disabled, deleted, or
  *   finishes a one-shot execution (clearByScriptId is called by the
  *   executor and trigger-registry).
+ *
+ * Reserved event prefixes (scripts can subscribe but not emit):
+ *   ls:tool:*        — tool registration / invocation lifecycle
+ *   ls:collection:*  — api.db collection lifecycle (created / dropped /
+ *                       inserted / updated / deleted / size-warning)
+ *   ls:*             — any other `ls:`-prefixed event emitted by the engine
+ *
+ * See `broadcast-bus.ts` for the full enumeration with payload shapes.
  */
 
 import type { LumiScriptAPI } from '../../types/script.js';

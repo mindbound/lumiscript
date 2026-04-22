@@ -15,9 +15,15 @@
  *   *          User-defined event names — anything that doesn't start with ls:.
  *
  * Built-in ls: events emitted automatically by the engine:
- *   ls:tool:invoked      { name, args, result, scriptId, callMs }
- *   ls:tool:registered   { name, scriptId }
- *   ls:tool:unregistered { name, scriptId }
+ *   ls:tool:invoked              { name, args, result, scriptId, callMs }
+ *   ls:tool:registered           { name, scriptId }
+ *   ls:tool:unregistered         { name, scriptId }
+ *   ls:collection:created        { name, scope, scriptId, path }
+ *   ls:collection:dropped        { name, scope, scriptId, path, deletedCount }
+ *   ls:collection:inserted       { name, scope, scriptId, id, record }
+ *   ls:collection:updated        { name, scope, scriptId, count, filterKind }
+ *   ls:collection:deleted        { name, scope, scriptId, count, filterKind }
+ *   ls:collection:size-warning   { name, scope, scriptId, bytes }
  *
  * Lifecycle:
  *   Subscriptions are tagged with the subscribing script's ID.

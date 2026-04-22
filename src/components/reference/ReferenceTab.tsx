@@ -210,6 +210,7 @@ export const PERM_GROUPS: PermGroup[] = [
       { method: 'api.commands.*', perms: [] },
       { method: 'api.events.*', perms: ['event_tracking'] },
       { method: 'api.tokens.*', perms: [] },
+      { method: 'api.db.*', perms: [] },
     ],
   },
 ];
@@ -277,6 +278,36 @@ export const BROADCAST_EVENTS: BroadcastEventRow[] = [
     name:      'ls:macro:unregistered',
     payload:   '{ name, scriptId }',
     emittedBy: 'api.macros.unregister() / auto-cleanup',
+  },
+  {
+    name:      'ls:collection:created',
+    payload:   '{ name, scope, scriptId, path }',
+    emittedBy: 'api.db.collection()',
+  },
+  {
+    name:      'ls:collection:dropped',
+    payload:   '{ name, scope, scriptId, path, deletedCount }',
+    emittedBy: 'api.db.drop()',
+  },
+  {
+    name:      'ls:collection:inserted',
+    payload:   '{ name, scope, scriptId, id, record }',
+    emittedBy: 'collection.insert()',
+  },
+  {
+    name:      'ls:collection:updated',
+    payload:   `{ name, scope, scriptId, count, filterKind: 'all' | 'object' | 'fn' }`,
+    emittedBy: 'collection.update() (only when count > 0)',
+  },
+  {
+    name:      'ls:collection:deleted',
+    payload:   `{ name, scope, scriptId, count, filterKind }`,
+    emittedBy: 'collection.delete() / clear() (clear emits count=-1)',
+  },
+  {
+    name:      'ls:collection:size-warning',
+    payload:   '{ name, scope, scriptId, bytes }',
+    emittedBy: 'auto — collection exceeds 10 MB soft threshold',
   },
 ];
 
@@ -1212,6 +1243,42 @@ export const KEY_TYPES: TypeDoc[] = [
       { field: 'scriptName',  type: 'string',                                optional: false, desc: 'Name of the owning script.' },
     ],
   },
+  // ─── DB ──────────────────────────────────────────────────────────────────────
+  {
+    name: 'DbScope',
+    note: 'Scope of an api.db collection — determines the storage path and resolution requirements. Baked into the collection handle at api.db.collection() time.',
+    fields: [
+      { field: `'script'`,    type: `'script'`,    optional: false, desc: 'Per-scriptId, cross-chat. Default. Stored at db/scripts/{scriptId}/{name}.json. Always resolves (scriptId always present).' },
+      { field: `'character'`, type: `'character'`, optional: false, desc: 'Per-active-character, per-scriptId. Stored at db/characters/{characterId}/{scriptId}/{name}.json. Throws if there is no active character.' },
+      { field: `'chat'`,      type: `'chat'`,      optional: false, desc: 'Per-active-chat, per-scriptId. Stored at db/chats/{chatId}/{scriptId}/{name}.json. Throws if there is no active chat.' },
+    ],
+  },
+  {
+    name: 'CollectionOpts',
+    note: 'Options for api.db.collection(name, opts).',
+    fields: [
+      { field: 'scope?', type: 'DbScope', optional: true, desc: "Scope of the collection. Defaults to 'script'." },
+    ],
+  },
+  {
+    name: 'DbRecord',
+    note: 'Record shape produced by api.db.*. Every inserted record carries id + createdAt + updatedAt alongside user-supplied fields. id and createdAt are immutable (update() silently strips them from the patch). updatedAt is bumped on every successful update.',
+    fields: [
+      { field: 'id',        type: 'string', optional: false, desc: 'UUID v4 auto-assigned at insert (overridable by caller).' },
+      { field: 'createdAt', type: 'number', optional: false, desc: 'Epoch ms — set once at insert. Immutable.' },
+      { field: 'updatedAt', type: 'number', optional: false, desc: 'Epoch ms — bumped to Date.now() on every successful update.' },
+      { field: '[key: string]', type: 'unknown', optional: false, desc: 'User-supplied fields — anything JSON-serializable.' },
+    ],
+  },
+  {
+    name: 'DbFilter',
+    note: 'Filter shapes accepted by find() / findOne() / update() / delete() / count(). The store picks a matching strategy based on the runtime type.',
+    fields: [
+      { field: 'undefined', type: 'undefined', optional: false, desc: 'Matches all records. Used as sugar for "operate on everything".' },
+      { field: 'function',  type: '(record: T) => boolean', optional: false, desc: 'Caller predicate. Full expressive power. A throwing predicate is treated as no-match — errors never propagate.' },
+      { field: 'object',    type: 'Partial<T>', optional: false, desc: `Deep-equality match with dot-notation path resolution. { 'author.name': 'alice' } matches nested fields. Arrays compared via JSON.stringify. No Mongo-style $gt/$in operators — use a function filter or query() for those.` },
+    ],
+  },
   // ─── Events ──────────────────────────────────────────────────────────────────
   {
     name: 'EventTrackOptions',
@@ -1590,6 +1657,22 @@ export const API_GROUPS: FnGroup[] = [
       { name: 'countText',     args: 'text, options?',     desc: 'Server-side token count for an arbitrary string. Uses the provider\'s actual tokenizer (falls back to char/4 heuristic with `approximate: true`). Options: { model?, modelSource? } — `model` overrides `modelSource`. Returns { totalTokens, model, modelSource, tokenizerId, tokenizerName, approximate }. Free-tier.' },
       { name: 'countMessages', args: 'messages, options?', desc: 'Same as countText but for an array of LLMMessage-shaped items. Accepts the output of api.chat.getMessages directly (only role + content are used). Free-tier.' },
       { name: 'countChat',     args: 'chatId, options?',   desc: 'Count tokens for a live stored chat by ID. Convenient when you want to size a whole chat without fetching messages yourself. Free-tier.' },
+    ],
+  },
+  {
+    group: 'api.db',
+    rows: [
+      { name: 'collection',           args: 'name, opts?',            desc: "Open or create a collection. opts.scope = 'script' (default, per-scriptId) / 'character' (per-active-character) / 'chat' (per-active-chat). Path is baked into the handle at creation — throws if scope requires context (e.g. 'chat') that isn't present. Collection name: 1-64 chars, alphanumeric + _ - ., leading char must be alphanumeric." },
+      { name: 'list',                 args: 'scope?',                 desc: 'List collection names visible to this script in the given scope (default `script`). Owner-scoped — cross-script visibility is not supported.' },
+      { name: 'drop',                 args: 'name, scope?',           desc: 'Delete a collection entirely. No-op if the collection does not exist. Fires `ls:collection:dropped` with deletedCount.' },
+      { name: 'collection.insert',    args: 'record',                 desc: 'Insert a record. Auto-assigns id (UUID v4), createdAt, updatedAt unless caller supplies them. Returns the persisted record.' },
+      { name: 'collection.find',      args: 'filter?',                desc: "Find matching records. Filter: undefined = all, Partial<T> = deep-equal with dot-notation paths ({ 'a.b': 1 }), (r) => boolean = caller predicate." },
+      { name: 'collection.findOne',   args: 'filter',                 desc: 'First matching record or null.' },
+      { name: 'collection.update',    args: 'filter, patch',          desc: 'Update all matching records. Returns count. Silently strips id/createdAt/updatedAt from patch — updatedAt is bumped to Date.now() on every match.' },
+      { name: 'collection.delete',    args: 'filter',                 desc: 'Delete all matching records. Returns count.' },
+      { name: 'collection.count',     args: 'filter?',                desc: 'Count matching records (or all if filter omitted).' },
+      { name: 'collection.clear',     args: '—',                      desc: 'Remove all records, leaving an empty collection file.' },
+      { name: 'collection.query',     args: 'jsonQuery',              desc: "Run a jsonquery string against the full collection. Escape hatch for aggregations / sorts / complex projections. Example: 'filter(.margin > 0) | size()'. Throws SyntaxError on malformed queries." },
     ],
   },
   {

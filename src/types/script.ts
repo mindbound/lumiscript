@@ -242,6 +242,8 @@ export interface LumiScriptAPI {
   events: EventsAPI;
   /** Server-side token counting helpers. Uses the provider's actual tokenizer rather than character-count heuristics. No permission required. */
   tokens: TokensAPI;
+  /** JSON-file-backed micro-DB. Per-script / per-character / per-chat collections with CRUD, filter predicates, and jsonquery escape hatch. No permission required. */
+  db: DbAPI;
 }
 
 // ─── Chat API ─────────────────────────────────────────────────────────────────
@@ -2872,6 +2874,178 @@ export interface MacrosAPI {
    * diagnostics, dashboards, or debugging.
    */
   list(): RegisteredMacroInfo[];
+}
+
+// ─── DB API ──────────────────────────────────────────────────────────────────
+
+/**
+ * Record shape produced by `api.db.*`. Every inserted record carries an
+ * auto-generated `id` (UUID v4) plus `createdAt` / `updatedAt` epoch-ms
+ * timestamps. User-supplied fields are preserved alongside these reserved
+ * fields.
+ *
+ * `id` and `createdAt` are immutable — `Collection.update()` silently strips
+ * them from the patch. `updatedAt` is always bumped to `Date.now()` on any
+ * successful update.
+ */
+export interface DbRecord {
+  id: string;
+  createdAt: number;
+  updatedAt: number;
+  [key: string]: unknown;
+}
+
+/**
+ * Scope of a collection — determines the storage path and lifetime.
+ *
+ * - `'script'` (default): per-scriptId, cross-chat. Lives at
+ *   `db/scripts/{scriptId}/{name}.json`. Best for script-wide state
+ *   (counters, caches, user preferences).
+ * - `'character'`: per-active-character, per-scriptId. Lives at
+ *   `db/characters/{characterId}/{scriptId}/{name}.json`. Best for data
+ *   tied to a specific character (dice-roll history, relationship state).
+ * - `'chat'`: per-active-chat, per-scriptId. Lives at
+ *   `db/chats/{chatId}/{scriptId}/{name}.json`. Best for data scoped to
+ *   a single chat session (scene event logs, pacing trackers).
+ *
+ * Path resolution happens once at `collection()` creation, baking the
+ * scoped IDs into the handle. Missing context (e.g. `scope: 'chat'` with
+ * no active chat) throws at creation time.
+ */
+export type DbScope = 'script' | 'character' | 'chat';
+
+/**
+ * Filter shapes accepted by `find()` / `findOne()` / `update()` / `delete()` /
+ * `count()`:
+ *
+ * - `undefined` → matches all records (sugar for "operate on everything").
+ * - Function `(r) => boolean` → caller predicate. Full expressive power,
+ *   but not serialisable across the worker↔host boundary (runs in-script).
+ * - Object `{ 'a.b': value }` → deep-equality match with dot-notation
+ *   path resolution. Arrays compared via `JSON.stringify`. No Mongo-style
+ *   `$gt` / `$in` operators — use a function filter or `query()` for those.
+ */
+export type DbFilter<T = DbRecord> =
+  | undefined
+  | Partial<T>
+  | ((record: T) => boolean);
+
+/**
+ * Options for `api.db.collection(name, opts)`.
+ */
+export interface CollectionOpts {
+  /** Scope of the collection. Defaults to `'script'`. */
+  scope?: DbScope;
+}
+
+/**
+ * A handle to a single JSON-file-backed collection. Obtained via
+ * `api.db.collection(name, opts?)`. Methods are per-operation atomic —
+ * concurrent mutations on the same collection are serialised through a
+ * per-path Promise chain in the backend.
+ *
+ * Reads (`find` / `findOne` / `count` / `query`) snapshot the collection
+ * state at call time and bypass the mutation queue. A read that races a
+ * write may see pre-mutation data; this matches MongoDB-ish consistency
+ * semantics.
+ */
+export interface Collection<T extends DbRecord = DbRecord> {
+  /**
+   * Insert a record. Auto-assigns `id` (UUID v4) and `createdAt` /
+   * `updatedAt` timestamps unless caller supplies them. Returns the
+   * persisted record including the injected fields.
+   */
+  insert(record: Omit<T, 'id' | 'createdAt' | 'updatedAt'> & Partial<Pick<T, 'id' | 'createdAt' | 'updatedAt'>>): Promise<T>;
+
+  /** Find all records matching the filter. `undefined` matches all. */
+  find(filter?: DbFilter<T>): Promise<T[]>;
+
+  /** Find the first record matching the filter. Returns `null` on no match. */
+  findOne(filter: DbFilter<T>): Promise<T | null>;
+
+  /**
+   * Update all records matching the filter with the given patch. Returns
+   * the number of records updated. `id` and `createdAt` cannot be
+   * overwritten — the patch silently strips them. `updatedAt` is always
+   * bumped to `Date.now()`.
+   */
+  update(filter: DbFilter<T>, patch: Partial<T>): Promise<number>;
+
+  /** Delete all records matching the filter. Returns the number deleted. */
+  delete(filter: DbFilter<T>): Promise<number>;
+
+  /** Count records matching the filter. `undefined` counts all. */
+  count(filter?: DbFilter<T>): Promise<number>;
+
+  /** Remove all records, leaving an empty collection file. */
+  clear(): Promise<void>;
+
+  /**
+   * Run a jsonquery string against the full collection. Escape hatch for
+   * aggregations, sorts, and complex projections the filter model doesn't
+   * cover. Throws `SyntaxError` on malformed queries, matching
+   * `api.json.query()` behaviour.
+   *
+   * @example
+   * // Count records with a positive margin:
+   * await collection.query('filter(.margin > 0) | size()');
+   *
+   * @example
+   * // Group by a field and count each bucket:
+   * await collection.query('groupBy(.tier) | map({ tier: .key, count: .values | size() })');
+   */
+  query<R = unknown>(jsonQuery: string): Promise<R>;
+}
+
+/**
+ * `api.db` — script-facing JSON micro-DB namespace. JSON-file-backed
+ * collections with CRUD, filter predicates, and a jsonquery escape hatch.
+ *
+ * Designed for the "dozens to hundreds of records per collection" profile
+ * (dice-roll logs, relationship trackers, scene event logs). Not a
+ * real database — soft-warns at 10 MB per collection, hard-stops at 50 MB.
+ *
+ * No permission required. Collections are always owner-scoped by
+ * `scriptId` — script A cannot read or mutate script B's collections.
+ * Collections persist across script disable / delete; use `drop()` for
+ * explicit cleanup.
+ */
+export interface DbAPI {
+  /**
+   * Open or create a collection. Path is resolved at creation time based
+   * on the scope and the script's active context (chatId / characterId).
+   * Calling this twice with the same (name, scope) returns two distinct
+   * handles that share the same underlying file and mutation queue.
+   *
+   * Throws if the scope requires context the script doesn't have (e.g.
+   * `scope: 'chat'` with no active chat).
+   *
+   * @example
+   * // Script-scoped counter (default):
+   * const counter = await api.db.collection('visits');
+   *
+   * @example
+   * // Character-scoped dice-roll history:
+   * const rolls = await api.db.collection('dice-rolls', { scope: 'character' });
+   * await rolls.insert({ notation: '1d20+3', total: 18 });
+   */
+  collection<T extends DbRecord = DbRecord>(
+    name: string,
+    opts?: CollectionOpts,
+  ): Promise<Collection<T>>;
+
+  /**
+   * List all collection names visible to the calling script in the given
+   * scope (default `'script'`). Only returns collections owned by this
+   * script — cross-script visibility is not supported in v1.
+   */
+  list(scope?: DbScope): Promise<string[]>;
+
+  /**
+   * Delete a collection entirely. No-op if the collection doesn't exist.
+   * Ownership-safe: scripts can only drop their own collections.
+   */
+  drop(name: string, scope?: DbScope): Promise<void>;
 }
 
 // ─── Broadcast API ───────────────────────────────────────────────────────────
