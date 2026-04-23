@@ -148,7 +148,17 @@ describe('matchesFilter — Mongo-style operators', () => {
     expect(matchesFilter(record, { margin: { $gt: NaN as number } })).toBe(false);
   });
 
-  // ── $ne ───────────────────────────────────────────────────────────────────
+  // ── $eq / $ne ─────────────────────────────────────────────────────────────
+
+  test('$eq uses structural equality (explicit form of the literal default)', () => {
+    expect(matchesFilter(record, { tier: { $eq: 'hard' } })).toBe(true);
+    expect(matchesFilter(record, { tier: { $eq: 'easy' } })).toBe(false);
+    expect(matchesFilter(record, { tags: { $eq: ['a', 'b'] } })).toBe(true);
+    expect(matchesFilter(record, { tags: { $eq: ['a', 'c'] } })).toBe(false);
+    // Same result as the literal form — $eq exists for Mongo-syntax symmetry
+    expect(matchesFilter(record, { tier: { $eq: 'hard' } }))
+      .toBe(matchesFilter(record, { tier: 'hard' }));
+  });
 
   test('$ne uses structural inequality', () => {
     expect(matchesFilter(record, { tier: { $ne: 'easy' } })).toBe(true);

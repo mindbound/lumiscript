@@ -131,6 +131,12 @@ function matchOperator(
       return typeof actual === 'number' && typeof arg === 'number' && actual < arg;
     case '$lte':
       return typeof actual === 'number' && typeof arg === 'number' && actual <= arg;
+    case '$eq':
+      // Explicit equivalent of the literal fall-through. Accepted for
+      // symmetry with Mongo-standard syntax — users who write
+      // `{ name: { $eq: 'alice' } }` expect it to work even though
+      // `{ name: 'alice' }` is the idiomatic form.
+      return deepEqual(actual, arg);
     case '$ne':
       return !deepEqual(actual, arg);
     case '$in':

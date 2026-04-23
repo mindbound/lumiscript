@@ -101,7 +101,7 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
       jsDefaults.setDiagnosticsOptions({
         noSemanticValidation: true,
         noSyntaxValidation: false,
-        diagnosticCodesToIgnore: [80001],
+        diagnosticCodesToIgnore: [7044, 80001],
       });
 
       jsDefaults.setCompilerOptions({
