@@ -19,7 +19,7 @@
  */
 
 import { jsonquery } from '@jsonquerylang/jsonquery';
-import type { DbRecord, DbFilter } from '../types/script.js';
+import type { DbRecord, DbFilter, ZodLike } from '../types/script.js';
 import { generateUUID } from '../utils/uuid.js';
 import type { UserStorageAdapter } from '../storage/collection-store.js';
 
@@ -85,10 +85,115 @@ function deepEqual(a: unknown, b: unknown): boolean {
 }
 
 /**
+ * Classify what shape the right-hand side of an object-filter entry is:
+ *   - `regex`    — direct `RegExp` instance shorthand (`{ name: /pat/i }`)
+ *   - `envelope` — operator envelope, every key starts with `$`
+ *                  (`{ margin: { $gt: 0 } }`)
+ *   - `mixed`    — object with BOTH `$`-keys AND non-`$` keys — user error,
+ *                  caller throws
+ *   - `literal`  — anything else; falls through to deep-equality
+ */
+type ExpectedKind = 'regex' | 'envelope' | 'mixed' | 'literal';
+
+function classifyExpected(v: unknown): ExpectedKind {
+  if (v instanceof RegExp) return 'regex';
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) return 'literal';
+  const keys = Object.keys(v);
+  if (keys.length === 0) return 'literal';
+  const dollarCount = keys.reduce((n, k) => (k.startsWith('$') ? n + 1 : n), 0);
+  if (dollarCount === 0) return 'literal';
+  if (dollarCount === keys.length) return 'envelope';
+  return 'mixed';
+}
+
+/**
+ * Match a single operator against a field's actual value.
+ *
+ * Numeric comparisons (`$gt` / `$gte` / `$lt` / `$lte`) return false on any
+ * type mismatch — never throw. Other operators throw on malformed arguments
+ * (invalid `$regex`, non-array `$in` / `$nin`) because those are author
+ * bugs, not "no match" outcomes.
+ *
+ * `envelope` is passed so `$regex` can read its sibling `$options` key.
+ */
+function matchOperator(
+  actual: unknown,
+  op: string,
+  arg: unknown,
+  envelope: Record<string, unknown>,
+): boolean {
+  switch (op) {
+    case '$gt':
+      return typeof actual === 'number' && typeof arg === 'number' && actual > arg;
+    case '$gte':
+      return typeof actual === 'number' && typeof arg === 'number' && actual >= arg;
+    case '$lt':
+      return typeof actual === 'number' && typeof arg === 'number' && actual < arg;
+    case '$lte':
+      return typeof actual === 'number' && typeof arg === 'number' && actual <= arg;
+    case '$ne':
+      return !deepEqual(actual, arg);
+    case '$in':
+      if (!Array.isArray(arg)) {
+        throw new Error('api.db: $in requires an array argument');
+      }
+      return arg.some((x) => deepEqual(actual, x));
+    case '$nin':
+      if (!Array.isArray(arg)) {
+        throw new Error('api.db: $nin requires an array argument');
+      }
+      return !arg.some((x) => deepEqual(actual, x));
+    case '$exists':
+      return (actual !== undefined) === Boolean(arg);
+    case '$regex': {
+      if (typeof actual !== 'string') return false;
+      let pattern: RegExp;
+      if (arg instanceof RegExp) {
+        pattern = arg;
+      } else if (typeof arg === 'string') {
+        const rawOptions = envelope['$options'];
+        const options = typeof rawOptions === 'string' ? rawOptions : undefined;
+        try {
+          pattern = new RegExp(arg, options);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          throw new Error(`api.db: invalid $regex: ${msg}`);
+        }
+      } else {
+        throw new Error('api.db: $regex requires a string or RegExp argument');
+      }
+      return pattern.test(actual);
+    }
+    case '$options':
+      // Sibling key of $regex — the $regex case reads envelope['$options']
+      // directly. Arriving here means the caller should skip this op, but
+      // returning true is a safe fallback (all-match for the key) that
+      // never falsely excludes a record.
+      return true;
+    default:
+      throw new Error(`api.db: unknown operator "${op}"`);
+  }
+}
+
+function matchEnvelope(actual: unknown, envelope: Record<string, unknown>): boolean {
+  for (const [op, arg] of Object.entries(envelope)) {
+    if (op === '$options') continue; // handled alongside $regex
+    if (!matchOperator(actual, op, arg, envelope)) return false;
+  }
+  return true;
+}
+
+/**
  * Test whether `record` matches `filter`:
  *   - `undefined` → always true
  *   - function    → delegate to the predicate
- *   - object      → every (dot-notation key, value) pair matches deeply
+ *   - object      → every (dot-notation key, value) pair matches, where each
+ *                   value is interpreted as either:
+ *                     • `RegExp` instance      — string match shorthand
+ *                     • operator envelope      — `{ $gt, $in, $regex, ... }`
+ *                     • literal                — deep-equality match
+ *
+ * Mixed envelopes (`{ $gt: 5, foo: 1 }`) throw — author bug, fail loud.
  */
 export function matchesFilter<T extends DbRecord>(
   record: T,
@@ -107,7 +212,27 @@ export function matchesFilter<T extends DbRecord>(
   }
   for (const [key, expected] of Object.entries(filter)) {
     const actual = getPath(record, key);
-    if (!deepEqual(actual, expected)) return false;
+    const kind = classifyExpected(expected);
+    switch (kind) {
+      case 'regex': {
+        if (typeof actual !== 'string') return false;
+        if (!(expected as RegExp).test(actual)) return false;
+        break;
+      }
+      case 'envelope': {
+        if (!matchEnvelope(actual, expected as Record<string, unknown>)) return false;
+        break;
+      }
+      case 'mixed':
+        throw new Error(
+          `api.db: mixed operator/literal envelope at filter key "${key}" — ` +
+          `split into separate keys (e.g. {"x": {$gt: 0}, "y": "foo"} not {"x": {$gt: 0, foo: 1}})`,
+        );
+      case 'literal':
+      default:
+        if (!deepEqual(actual, expected)) return false;
+        break;
+    }
   }
   return true;
 }
@@ -133,7 +258,32 @@ export class DbStore<T extends DbRecord = DbRecord> {
     private readonly storage: UserStorageAdapter,
     private readonly getUserId: () => string | undefined,
     private readonly onSizeWarn?: SizeWarnCallback,
+    private readonly schema?: ZodLike<T>,
   ) {}
+
+  /**
+   * Run the schema (if attached) against a candidate record. Throws a
+   * wrapped error matching `api/llm.ts`'s convention on failure —
+   * surfaces the underlying Zod message while identifying which
+   * `api.db` operation triggered the check.
+   *
+   * `context` is the operation label — `'insert'`, `'insertMany[N]'`,
+   * or `'update (id=XYZ)'` — and is interpolated into the thrown
+   * error message verbatim.
+   *
+   * Returns the parsed value so callers can swap in a Zod-transformed
+   * version of the candidate if the schema does shape coercion (e.g.
+   * `.transform()`, `.default()`).
+   */
+  private validate(candidate: unknown, context: string): T {
+    if (!this.schema) return candidate as T;
+    try {
+      return this.schema.parse(candidate);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`api.db: schema validation failed on ${context}: ${msg}`);
+    }
+  }
 
   // ─── Load ────────────────────────────────────────────────────────────────
 
@@ -183,29 +333,100 @@ export class DbStore<T extends DbRecord = DbRecord> {
       createdAt: (record as Partial<T>).createdAt ?? now,
       updatedAt: (record as Partial<T>).updatedAt ?? now,
     } as T;
-    records.push(injected);
+    // Validate AFTER timestamp/id injection so the schema sees the
+    // full record that will land on disk. `validate` returns the parsed
+    // value so Zod transforms (`.default()`, `.transform()`, etc.) are
+    // honored. BUT: Zod's `z.object()` strips unknown keys by default,
+    // which would silently drop our reserved fields. Reserved fields are
+    // LumiScript invariants, not part of the user-data schema — preserve
+    // them explicitly after validation.
+    const validated = this.validate(injected, 'insert') as Record<string, unknown>;
+    const persisted = {
+      ...validated,
+      id:        injected.id,
+      createdAt: injected.createdAt,
+      updatedAt: injected.updatedAt,
+    } as T;
+    records.push(persisted);
     await this.persist(records);
-    return injected;
+    return persisted;
+  }
+
+  /**
+   * Batch-insert N records with a single persist. Auto-injects id / createdAt /
+   * updatedAt per record (all share the same `now` — the batch-insert
+   * semantic, not one-timestamp-per-record). Empty input is a fast no-op.
+   *
+   * Returns the injected records only — not the full collection. Caller is
+   * responsible for the per-record broadcast fan-out; this method fires no
+   * events of its own.
+   */
+  async insertMany(
+    newRecords: Array<Omit<T, 'id' | 'createdAt' | 'updatedAt'> & Partial<Pick<T, 'id' | 'createdAt' | 'updatedAt'>>>,
+  ): Promise<T[]> {
+    if (newRecords.length === 0) return [];
+    const existing = await this.load();
+    const now = Date.now();
+    // Inject first so schema sees the full record shape...
+    const injected = newRecords.map((record) => ({
+      ...record,
+      id:        (record as Partial<T>).id        ?? generateUUID(),
+      createdAt: (record as Partial<T>).createdAt ?? now,
+      updatedAt: (record as Partial<T>).updatedAt ?? now,
+    }) as T);
+    // ...then validate the entire batch BEFORE persist. Throw on first
+    // failure with the offending record's index — no records land if any
+    // fails (atomicity via early-throw). Reserved fields preserved
+    // post-validation (see `insert` for rationale).
+    const validated = injected.map((r, i) => {
+      const parsed = this.validate(r, `insertMany[${i}]`) as Record<string, unknown>;
+      return {
+        ...parsed,
+        id:        r.id,
+        createdAt: r.createdAt,
+        updatedAt: r.updatedAt,
+      } as T;
+    });
+    const combined = [...existing, ...validated];
+    await this.persist(combined);
+    return validated;
   }
 
   async update(filter: DbFilter<T>, patch: Partial<T>): Promise<number> {
     const records = await this.load();
-    let count = 0;
     const now = Date.now();
     // Strip reserved fields from the patch — id and createdAt are
     // immutable, updatedAt is always `now`. Silent strip (no throw) so
     // scripts can pass a record-shaped object without sanitising.
     const { id: _id, createdAt: _createdAt, updatedAt: _updatedAt, ...cleanPatch } = patch as Partial<DbRecord>;
     void _id; void _createdAt; void _updatedAt;
+    // Two-pass so schema validation is atomic: first compute all
+    // merged candidates and validate, then commit to the records array.
+    // If any candidate fails validation, throw before mutating anything —
+    // no partial updates land on disk.
+    const pendingUpdates: Array<{ index: number; merged: T }> = [];
     for (let i = 0; i < records.length; i++) {
       const r = records[i]!;
       if (matchesFilter(r, filter)) {
-        records[i] = { ...r, ...cleanPatch, updatedAt: now } as T;
-        count++;
+        const merged = { ...r, ...cleanPatch, updatedAt: now } as T;
+        const validated = this.validate(merged, `update (id=${r.id})`) as Record<string, unknown>;
+        // Preserve reserved fields regardless of whether the schema strips
+        // them (Zod `z.object()` default). See `insert` for rationale.
+        const committed = {
+          ...validated,
+          id:        r.id,
+          createdAt: r.createdAt,
+          updatedAt: now,
+        } as T;
+        pendingUpdates.push({ index: i, merged: committed });
       }
     }
-    if (count > 0) await this.persist(records);
-    return count;
+    if (pendingUpdates.length === 0) return 0;
+    for (const { index, merged } of pendingUpdates) {
+      records[index] = merged;
+    }
+    await this.persist(records);
+    return pendingUpdates.length;
   }
 
   async delete(filter: DbFilter<T>): Promise<number> {

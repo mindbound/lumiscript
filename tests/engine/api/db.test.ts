@@ -27,6 +27,9 @@ function patchSpindleUserStorage() {
   us.delete = mock(async (path: string) => {
     delete fakeStore[path];
   });
+  us.exists = mock(async (path: string) => {
+    return path in fakeStore;
+  });
 }
 
 beforeEach(() => {
@@ -385,5 +388,144 @@ describe('api.db.list', () => {
     await (await api.collection('snapshot', { scope: 'character' })).insert({ x: 2 } as DbRecord);
 
     expect((await api.list('character')).sort()).toEqual(['rolls', 'snapshot']);
+  });
+});
+
+// ─── insertMany ──────────────────────────────────────────────────────────────
+
+describe('api.db.collection.insertMany', () => {
+  test('persists all records in a single file-write', async () => {
+    const { api } = buildApi();
+    const c = await api.collection('t');
+
+    // Mock setJson counter is on the shared spindle userStorage mock.
+    const setJson = (globalThis as any).spindle.userStorage.setJson;
+    const before = setJson.mock.calls.length;
+
+    await c.insertMany([
+      { label: 'A' } as DbRecord,
+      { label: 'B' } as DbRecord,
+      { label: 'C' } as DbRecord,
+    ]);
+
+    const after = setJson.mock.calls.length;
+    expect(after - before).toBe(1); // one persist for the whole batch
+    expect(await c.count()).toBe(3);
+  });
+
+  test('fires one ls:collection:inserted per record in insertion order', async () => {
+    const { api } = buildApi();
+    const c = await api.collection('t');
+
+    const events: any[] = [];
+    busOn('ls:collection:inserted', p => events.push(p), 'listener');
+
+    const inserted = await c.insertMany([
+      { label: 'A' } as DbRecord,
+      { label: 'B' } as DbRecord,
+      { label: 'C' } as DbRecord,
+    ]);
+
+    expect(events).toHaveLength(3);
+    // Verify ORDER + payload content
+    expect(events.map(e => e.id)).toEqual(inserted.map(r => r.id));
+    expect(events.map(e => e.record.label)).toEqual(['A', 'B', 'C']);
+    // All events carry the same collection metadata
+    for (const e of events) {
+      expect(e.name).toBe('t');
+      expect(e.scope).toBe('script');
+      expect(e.scriptId).toBe('test-script-id');
+    }
+  });
+
+  test('empty array fires no events and does not persist', async () => {
+    const { api } = buildApi();
+    const c = await api.collection('t');
+
+    const events: any[] = [];
+    busOn('ls:collection:inserted', p => events.push(p), 'listener');
+
+    const setJson = (globalThis as any).spindle.userStorage.setJson;
+    const before = setJson.mock.calls.length;
+
+    const result = await c.insertMany([]);
+
+    expect(result).toEqual([]);
+    expect(events).toHaveLength(0);
+    expect(setJson.mock.calls.length - before).toBe(0);
+  });
+
+  test('throws on non-array argument', async () => {
+    const { api } = buildApi();
+    const c = await api.collection('t');
+
+    await expect((c.insertMany as any)('not-an-array'))
+      .rejects.toThrow(/insertMany requires an array/);
+  });
+
+  test('parallel insertMany + insert on same collection serialize cleanly', async () => {
+    const { api } = buildApi();
+    const c = await api.collection('t');
+
+    await Promise.all([
+      c.insertMany([{ batch: 1 } as DbRecord, { batch: 1 } as DbRecord]),
+      c.insert({ single: true } as DbRecord),
+      c.insertMany([{ batch: 2 } as DbRecord]),
+    ]);
+
+    expect(await c.count()).toBe(4);
+  });
+});
+
+// ─── exists ──────────────────────────────────────────────────────────────────
+
+describe('api.db.exists', () => {
+  test('returns true after a collection has records', async () => {
+    const { api } = buildApi();
+    await (await api.collection('rolls')).insert({ x: 1 } as DbRecord);
+
+    expect(await api.exists('rolls')).toBe(true);
+  });
+
+  test('returns false for a collection that has never been written', async () => {
+    const { api } = buildApi();
+    expect(await api.exists('never-created')).toBe(false);
+  });
+
+  test('returns false after drop', async () => {
+    const { api } = buildApi();
+    await (await api.collection('rolls')).insert({ x: 1 } as DbRecord);
+    expect(await api.exists('rolls')).toBe(true);
+
+    await api.drop('rolls');
+    expect(await api.exists('rolls')).toBe(false);
+  });
+
+  test('defaults to script scope when scope omitted', async () => {
+    const { api } = buildApi();
+    await (await api.collection('rolls', { scope: 'character' })).insert({ x: 1 } as DbRecord);
+
+    // rolls exists in CHARACTER scope, not script scope
+    expect(await api.exists('rolls')).toBe(false);
+    expect(await api.exists('rolls', 'character')).toBe(true);
+  });
+
+  test('throws on invalid collection name', async () => {
+    const { api } = buildApi();
+    await expect(api.exists('../evil')).rejects.toThrow(/forbidden path characters/);
+  });
+
+  test('throws when scope requires context the script lacks', async () => {
+    const { api } = buildApi({ activeContext: { chatId: null, characterId: null } });
+    await expect(api.exists('foo', 'chat')).rejects.toThrow(/scope="chat" requires an active chat/);
+    await expect(api.exists('foo', 'character')).rejects.toThrow(/scope="character" requires an active character/);
+  });
+
+  test('ownership: script A cannot see script B\'s collection', async () => {
+    const { api: apiA } = buildApi({ script: { id: 'script-A' } });
+    await (await apiA.collection('rolls')).insert({ x: 1 } as DbRecord);
+
+    const { api: apiB } = buildApi({ script: { id: 'script-B' } });
+    expect(await apiB.exists('rolls')).toBe(false);
   });
 });

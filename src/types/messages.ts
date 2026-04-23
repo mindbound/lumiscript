@@ -19,7 +19,22 @@ import type {
   InjectionInfo,
   RegisteredToolInfo,
   DOMEventData,
+  DbRecord,
 } from './script.js';
+import type { CollectionSummary } from '../engine/db-admin.js';
+
+// ─── Shared payload shapes ────────────────────────────────────────────────────
+
+/**
+ * Snapshot of all variable scopes for the active context. Delivered via
+ * `variables_updated` messages; consumed by the frontend Storage panel.
+ */
+export interface VariablesSnapshot {
+  local:     Record<string, unknown>;
+  global:    Record<string, unknown>;
+  chat:      Record<string, unknown>;
+  character: Record<string, unknown>;
+}
 
 // ─── Frontend → Backend ───────────────────────────────────────────────────────
 
@@ -176,6 +191,30 @@ export type FrontendToBackend =
       scriptId: string;
       tabId: string;
     }
+  // ─── Storage panel — Collections section (admin view) ──────────────
+  | {
+      /** Request a full enumeration of all collections across all
+       *  scripts/scopes. Backend replies with `collections_list`. */
+      type: 'list_collections';
+    }
+  | {
+      /** Load records from a specific collection for the inspect modal.
+       *  Backend replies with `collection_records` echoing the path so
+       *  the frontend can route responses to the correct open modal. */
+      type: 'inspect_collection';
+      path: string;
+      textFilter?: string;
+      limit?: number;
+      offset?: number;
+    }
+  | {
+      /** Delete a collection (and all its records) from admin view.
+       *  Path must match one of the known scope templates — backend
+       *  rejects anything else. Backend replies with updated
+       *  `collections_list` after drop. */
+      type: 'drop_collection';
+      path: string;
+    }
 ;
 
 // ─── Backend → Frontend ───────────────────────────────────────────────────────
@@ -241,12 +280,7 @@ export type BackendToFrontend =
   | {
       /** Current snapshot of all variable scopes for the active context. */
       type: 'variables_updated';
-      variables: {
-        local: Record<string, unknown>;
-        global: Record<string, unknown>;
-        chat: Record<string, unknown>;
-        character: Record<string, unknown>;
-      };
+      variables: VariablesSnapshot;
     }
   // ─── DOM injection commands (backend → frontend) ──────────────────
   | { type: 'dom_inject';          scriptId: string; elementId: string; target: string; html: string; position: string; stableId?: string }
@@ -459,5 +493,27 @@ export type BackendToFrontend =
       type: 'ls_drawer_tab_destroy';
       scriptId: string;
       tabId: string;
+    }
+  // ─── Storage panel — Collections section ───────────────────────────
+  | {
+      /** Full collection list (admin view). Frontend replaces its row
+       *  state with this on receipt. */
+      type: 'collections_list';
+      collections: CollectionSummary[];
+    }
+  | {
+      /** Records for a specific collection, echoing the inspect request
+       *  path so the frontend can route to the right open modal.
+       *  `total` is the count AFTER filter, BEFORE pagination. */
+      type: 'collection_records';
+      path: string;
+      records: DbRecord[];
+      total: number;
+    }
+  | {
+      /** Debounced hint fired in response to any `ls:collection:*`
+       *  broadcast — no payload. Frontend is expected to re-request
+       *  `list_collections` if the Storage panel is currently visible. */
+      type: 'collections_updated';
     }
 ;

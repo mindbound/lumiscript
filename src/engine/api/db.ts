@@ -31,6 +31,7 @@ import type {
   DbAPI,
   DbFilter,
   DbRecord,
+  ZodLike,
   DbScope,
 } from '../../types/script.js';
 import type { APIBuildDeps } from './shared.js';
@@ -104,8 +105,15 @@ export function buildDbAPI(deps: APIBuildDeps): DbAPI {
     name: string,
     scope: DbScope,
     path: string,
+    schema?: ZodLike<T>,
   ): Collection<T> {
-    const store = new DbStore<T>(path, storage, getUserId, makeSizeWarn(name, scope));
+    const store = new DbStore<T>(
+      path,
+      storage,
+      getUserId,
+      makeSizeWarn(name, scope),
+      schema,
+    );
 
     return {
       async insert(record) {
@@ -118,6 +126,26 @@ export function buildDbAPI(deps: APIBuildDeps): DbAPI {
           record: result,
         });
         return result;
+      },
+
+      async insertMany(records) {
+        if (!Array.isArray(records)) {
+          throw new Error('api.db: insertMany requires an array of records');
+        }
+        const inserted = await runExclusive(path, () => store.insertMany(records));
+        // Fire one ls:collection:inserted per record in insertion order,
+        // AFTER the single persist has resolved. Keeps subscriber logic
+        // uniform across insert() and insertMany() — no batch event.
+        for (const record of inserted) {
+          busEmit('ls:collection:inserted', {
+            name,
+            scope,
+            scriptId: script.id,
+            id: record.id,
+            record,
+          });
+        }
+        return inserted;
       },
 
       async find(filter) {
@@ -183,7 +211,7 @@ export function buildDbAPI(deps: APIBuildDeps): DbAPI {
   return {
     async collection<T extends DbRecord = DbRecord>(
       name: string,
-      opts?: CollectionOpts,
+      opts?: CollectionOpts<T>,
     ): Promise<Collection<T>> {
       const scope: DbScope = opts?.scope ?? 'script';
       // `resolvePath` validates name + throws on missing context — do this
@@ -198,7 +226,7 @@ export function buildDbAPI(deps: APIBuildDeps): DbAPI {
         path,
       });
 
-      return makeCollection<T>(name, scope, path);
+      return makeCollection<T>(name, scope, path, opts?.schema);
     },
 
     async list(scope?: DbScope): Promise<string[]> {
@@ -236,6 +264,21 @@ export function buildDbAPI(deps: APIBuildDeps): DbAPI {
         path,
         deletedCount,
       });
+    },
+
+    async exists(name: string, scope?: DbScope): Promise<boolean> {
+      const actualScope: DbScope = scope ?? 'script';
+      assertValidName(name);
+      const path = resolvePath(actualScope, scopeContext(), name);
+      // `spindle.userStorage.exists` is available from types 0.4.34+.
+      // Defensive try/catch in case the upstream surface changes or the
+      // underlying stat fails for reasons other than absence (permission
+      // error on a malformed path, etc.) — return false on any failure.
+      try {
+        return await spindle.userStorage.exists(path, userId ?? undefined);
+      } catch {
+        return false;
+      }
     },
   };
 }

@@ -1,11 +1,13 @@
 import { FC, useState, useEffect, useCallback } from 'react';
-import { Code2, Activity, Zap, ArrowDownToLine, ArrowUpToLine, Timer, ChevronDown, ChevronUp, Wrench, Syringe, Database, RefreshCw, Trash2 } from 'lucide-react';
-import type { Script, LumiScriptSettings, ConsoleEntry, InjectionInfo, RegisteredToolInfo } from '../types/script.js';
-import type { BackendToFrontend, FrontendToBackend } from '../types/messages.js';
+import { Code2, Activity, Zap, ArrowDownToLine, ArrowUpToLine, Timer, ChevronDown, ChevronUp, Wrench, Syringe, Database, Trash2 } from 'lucide-react';
+import type { Script, LumiScriptSettings, ConsoleEntry, InjectionInfo, RegisteredToolInfo, DbRecord } from '../types/script.js';
+import type { BackendToFrontend, FrontendToBackend, VariablesSnapshot } from '../types/messages.js';
 import type { ActiveContext } from './manage/BindingsSection.js';
 import type { ExecutionDot } from './manage/ScriptListItem.js';
+import type { CollectionSummary } from '../engine/db-admin.js';
 import { DEFAULT_SETTINGS } from '../types/script.js';
 import { ManagePanel } from './manage/ManagePanel.js';
+import { StorageTab } from './storage/StorageTab.js';
 
 interface ScriptExecInfo {
   dot: ExecutionDot;
@@ -37,7 +39,7 @@ interface LumiScriptPanelProps {
   sendToBackend: (msg: FrontendToBackend) => void;
 }
 
-type TabId = 'manage' | 'status';
+type TabId = 'manage' | 'status' | 'storage';
 
 export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
   onBackendMessage,
@@ -61,12 +63,32 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
   const [injections, setInjections] = useState<InjectionInfo[]>([]);
   const [tools, setTools] = useState<RegisteredToolInfo[]>([]);
 
-  const [variables, setVariables] = useState<{
-    local: Record<string, unknown>;
-    global: Record<string, unknown>;
-    chat: Record<string, unknown>;
-    character: Record<string, unknown>;
-  } | null>(null);
+  const [variables, setVariables] = useState<VariablesSnapshot | null>(null);
+
+  /** Storage-tab collection list. `null` before first load; `[]` means
+   *  no collections on disk. Populated by `collections_list` messages;
+   *  re-requested on Storage-tab activation + on every debounced
+   *  `collections_updated` broadcast hint. */
+  const [collections, setCollections] = useState<CollectionSummary[] | null>(null);
+
+  /** Path of the collection currently open in the Inspect modal.
+   *  `null` when the modal is closed. */
+  const [inspectPath, setInspectPath] = useState<string | null>(null);
+  /** Records returned from the last `inspect_collection` response for the
+   *  currently-open modal. `null` = loading. */
+  const [inspectRecords, setInspectRecords] = useState<DbRecord[] | null>(null);
+  /** Post-filter, pre-pagination count — drives "page N of M matching". */
+  const [inspectTotal, setInspectTotal] = useState<number>(0);
+  /** Bumps on every `collections_updated` hint so an open inspect modal
+   *  can re-fetch its records (the modal owns its own filter/offset, so
+   *  Panel can't dispatch the fetch directly — a token dep does it). */
+  const [collectionsRefreshToken, setCollectionsRefreshToken] = useState(0);
+
+  /** Collection the user is about to drop. `null` = confirmation dialog
+   *  is closed. Holding the full summary (not just the path) lets the
+   *  dialog show scope, size, and the resolved display name without
+   *  re-looking-up from the collections list. */
+  const [dropTarget, setDropTarget] = useState<CollectionSummary | null>(null);
 
   /** Per-trigger invocation counter (session-local, increments on execution_started) */
   const [invocationCounts, setInvocationCounts] = useState<Record<string, number>>({});
@@ -101,6 +123,39 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
 
         case 'variables_updated':
           setVariables(msg.variables);
+          break;
+
+        case 'collections_list':
+          setCollections(msg.collections);
+          break;
+
+        case 'collection_records':
+          // Ignore stale responses — if the user closed the modal or
+          // switched to a different collection between request and
+          // response, drop this payload. Compare against the current
+          // inspectPath via a functional setter to avoid a stale-closure
+          // read (this handler is registered in a single useEffect).
+          setInspectRecords(prev => {
+            // Defer: the panel-level `inspectPath` state check happens
+            // in the effect that dispatches the request; here we just
+            // accept any arriving payload. The filter/offset effect
+            // below re-dispatches when state changes, so last-write-wins
+            // naturally matches the current state.
+            void prev;
+            return msg.records;
+          });
+          setInspectTotal(msg.total);
+          break;
+
+        case 'collections_updated':
+          // Debounced hint from the backend (any `ls:collection:*` event
+          // caused a mutation). Always re-request the full list — even
+          // when the Storage tab isn't the active tab — so switching to
+          // it later shows fresh state without a perceptible load.
+          sendToBackend({ type: 'list_collections' });
+          // Bump the refresh token so an open inspect modal re-fetches
+          // with its current filter/offset.
+          setCollectionsRefreshToken(t => t + 1);
           break;
 
         case 'injections_updated':
@@ -246,6 +301,16 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
     return unsub;
   }, [onBackendMessage, sendToBackend]);
 
+  // Auto-refresh the Collections list when the Storage tab becomes active.
+  // Live updates between activations are driven by `collections_updated`
+  // broadcast hints (handled above). A fresh request on activation covers
+  // the cold-start case (first time the user opens the tab this session).
+  useEffect(() => {
+    if (activeTab === 'storage') {
+      sendToBackend({ type: 'list_collections' });
+    }
+  }, [activeTab, sendToBackend]);
+
   const clearConsole = useCallback((scriptId: string) => {
     setExecState(prev => ({
       ...prev,
@@ -295,11 +360,18 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
           <Activity size={11} style={{ display: 'inline', marginRight: 4 }} />
           Status
         </button>
+        <button
+          className={`ls-tab-pill${activeTab === 'storage' ? ' ls-active' : ''}`}
+          onClick={() => setActiveTab('storage')}
+        >
+          <Database size={11} style={{ display: 'inline', marginRight: 4 }} />
+          Storage
+        </button>
       </div>
 
       {/* Tab content */}
       <div style={{ flex: 1, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-        {activeTab === 'manage' ? (
+        {activeTab === 'manage' && (
           <ManagePanel
             scripts={scripts}
             activeContext={activeContext}
@@ -313,15 +385,53 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
             onScriptOpened={handleScriptOpened}
             sendToBackend={sendToBackend}
           />
-        ) : (
+        )}
+        {activeTab === 'status' && (
           <StatusTab
             scripts={scripts}
             execInfo={execState.scriptExecInfo}
             invocationCounts={invocationCounts}
             injections={injections}
             tools={tools}
-            variables={variables}
             sendToBackend={sendToBackend}
+          />
+        )}
+        {activeTab === 'storage' && (
+          <StorageTab
+            variables={variables}
+            collections={collections}
+            scripts={scripts}
+            sendToBackend={sendToBackend}
+            inspectPath={inspectPath}
+            inspectRecords={inspectRecords}
+            inspectTotal={inspectTotal}
+            inspectRefreshToken={collectionsRefreshToken}
+            onInspect={(path) => {
+              // Clear the old records immediately so the modal shows a
+              // "loading…" state while the new request is in flight — and
+              // so stale data never flashes if the user opens modal → close
+              // → reopen on a different collection.
+              setInspectPath(path);
+              setInspectRecords(null);
+              setInspectTotal(0);
+            }}
+            dropTarget={dropTarget}
+            onDrop={setDropTarget}
+            onDropConfirm={() => {
+              if (!dropTarget) return;
+              const path = dropTarget.path;
+              // If the user is inspecting the collection they just confirmed
+              // to drop, close the inspect modal alongside the dialog — it'd
+              // otherwise show stale records for a collection that no longer
+              // exists (until the next collections_updated round-trip).
+              if (inspectPath === path) {
+                setInspectPath(null);
+                setInspectRecords(null);
+                setInspectTotal(0);
+              }
+              sendToBackend({ type: 'drop_collection', path });
+              setDropTarget(null);
+            }}
           />
         )}
       </div>
@@ -338,24 +448,16 @@ const DOT_TITLE: Record<ExecutionDot, string> = {
   error:   'Last run failed',
 };
 
-interface VariablesSnapshot {
-  local: Record<string, unknown>;
-  global: Record<string, unknown>;
-  chat: Record<string, unknown>;
-  character: Record<string, unknown>;
-}
-
 interface StatusTabProps {
   scripts: Script[];
   execInfo: Record<string, ScriptExecInfo>;
   invocationCounts: Record<string, number>;
   injections: InjectionInfo[];
   tools: RegisteredToolInfo[];
-  variables: VariablesSnapshot | null;
   sendToBackend: (msg: FrontendToBackend) => void;
 }
 
-const StatusTab: FC<StatusTabProps> = ({ scripts, execInfo, invocationCounts, injections, tools, variables, sendToBackend }) => {
+const StatusTab: FC<StatusTabProps> = ({ scripts, execInfo, invocationCounts, injections, tools, sendToBackend }) => {
   const enabled = scripts.filter(s => s.type === 'trigger' && s.enabled);
 
   /** Quick lookup: scriptId → script name for injection attribution. */
@@ -493,8 +595,7 @@ const StatusTab: FC<StatusTabProps> = ({ scripts, execInfo, invocationCounts, in
         </div>
       </div>
 
-      {/* ── Variables Inspector section ──────────────────────────────────── */}
-      <VariablesSection variables={variables} sendToBackend={sendToBackend} />
+      {/* Variables section migrated to Storage tab in v0.20.0 */}
 
       {/* ── Active Injections section ───────────────────────────────────────── */}
       <div className="ls-status-section">
@@ -562,94 +663,5 @@ const StatusTab: FC<StatusTabProps> = ({ scripts, execInfo, invocationCounts, in
   );
 };
 
-// ─── Variables Inspector component ───────────────────────────────────────────
-
-const SCOPE_LABELS: Array<{ key: keyof VariablesSnapshot; label: string; hint?: string }> = [
-  { key: 'local',     label: 'local',     hint: 'Per-chat ({{getvar}})' },
-  { key: 'global',    label: 'global',    hint: 'Cross-chat ({{getgvar}})' },
-  { key: 'chat',      label: 'chat',      hint: 'Chat metadata ({{@key}})' },
-  { key: 'character', label: 'character',  hint: 'Per-character card' },
-];
-
-function formatValue(v: unknown): string {
-  if (v === undefined) return 'undefined';
-  if (v === null) return 'null';
-  if (typeof v === 'string') return v.length > 80 ? v.slice(0, 77) + '…' : v;
-  try {
-    const s = JSON.stringify(v);
-    return s.length > 80 ? s.slice(0, 77) + '…' : s;
-  } catch { return String(v); }
-}
-
-const VariablesSection: FC<{
-  variables: VariablesSnapshot | null;
-  sendToBackend: (msg: FrontendToBackend) => void;
-}> = ({ variables, sendToBackend }) => {
-  const [expandedScopes, setExpandedScopes] = useState<Set<string>>(new Set(['local', 'global', 'chat', 'character']));
-
-  const toggleScope = (scope: string) => {
-    setExpandedScopes(prev => {
-      const next = new Set(prev);
-      if (next.has(scope)) next.delete(scope);
-      else next.add(scope);
-      return next;
-    });
-  };
-
-  const totalKeys = variables
-    ? Object.values(variables).reduce((sum, scope) => sum + Object.keys(scope).length, 0)
-    : 0;
-
-  return (
-    <div className="ls-status-section">
-      <div className="ls-inject-header">
-        <Database size={10} />
-        Variables
-        {totalKeys > 0 && <span className="ls-inject-count">{totalKeys}</span>}
-        <button
-          className="ls-vars-refresh"
-          title="Refresh variables"
-          onClick={() => sendToBackend({ type: 'get_variables' })}
-        >
-          <RefreshCw size={10} />
-        </button>
-      </div>
-      <div className="ls-status-section-body">
-        {!variables ? (
-          <div className="ls-section-empty">Click refresh to load variables</div>
-        ) : totalKeys === 0 ? (
-          <div className="ls-section-empty">No variables in active context</div>
-        ) : (
-          SCOPE_LABELS.map(({ key, label, hint }) => {
-            const scope = variables[key];
-            const keys = Object.keys(scope);
-            const isExpanded = expandedScopes.has(key);
-            if (keys.length === 0) return null;
-            return (
-              <div key={key} className="ls-vars-scope">
-                <button className="ls-vars-scope-header" onClick={() => toggleScope(key)}>
-                  {isExpanded ? <ChevronDown size={10} /> : <ChevronUp size={10} />}
-                  <span className="ls-vars-scope-name">{label}</span>
-                  {hint && <span className="ls-vars-scope-hint">{hint}</span>}
-                  <span className="ls-vars-scope-count">{keys.length}</span>
-                </button>
-                {isExpanded && (
-                  <div className="ls-vars-scope-body">
-                    {keys.sort().map(k => (
-                      <div key={k} className="ls-vars-entry">
-                        <span className="ls-vars-key">{k}</span>
-                        <span className="ls-vars-value" title={String(scope[k])}>
-                          {formatValue(scope[k])}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })
-        )}
-      </div>
-    </div>
-  );
-};
+// Variables inspector extracted to src/components/storage/VariablesSection.tsx
+// in v0.20.0. Storage tab (src/components/storage/StorageTab.tsx) now owns it.

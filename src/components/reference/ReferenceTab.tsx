@@ -1255,9 +1255,10 @@ export const KEY_TYPES: TypeDoc[] = [
   },
   {
     name: 'CollectionOpts',
-    note: 'Options for api.db.collection(name, opts).',
+    note: 'Options for api.db.collection(name, opts). Generic over the record type so schema (if provided) infers field shapes.',
     fields: [
-      { field: 'scope?', type: 'DbScope', optional: true, desc: "Scope of the collection. Defaults to 'script'." },
+      { field: 'scope?',  type: 'DbScope',    optional: true, desc: "Scope of the collection. Defaults to 'script'." },
+      { field: 'schema?', type: 'ZodLike<T>', optional: true, desc: 'Optional Zod schema (or any object with a parse(data): T method) applied on every write — insert / insertMany / update. On update the MERGED record is validated against the full schema, not the raw patch. Validation failures throw `api.db: schema validation failed on <op>: <msg>`. find / findOne / count / query are NOT validated — if your schema evolves, use drop() + re-insert rather than expecting lazy migration.' },
     ],
   },
   {
@@ -1272,11 +1273,12 @@ export const KEY_TYPES: TypeDoc[] = [
   },
   {
     name: 'DbFilter',
-    note: 'Filter shapes accepted by find() / findOne() / update() / delete() / count(). The store picks a matching strategy based on the runtime type.',
+    note: 'Filter shapes accepted by find() / findOne() / update() / delete() / count(). The store picks a matching strategy based on the runtime type. Operator envelopes (LumiScript 0.20.0+) unlock Mongo-style comparisons without dropping to a function filter.',
     fields: [
-      { field: 'undefined', type: 'undefined', optional: false, desc: 'Matches all records. Used as sugar for "operate on everything".' },
-      { field: 'function',  type: '(record: T) => boolean', optional: false, desc: 'Caller predicate. Full expressive power. A throwing predicate is treated as no-match — errors never propagate.' },
-      { field: 'object',    type: 'Partial<T>', optional: false, desc: `Deep-equality match with dot-notation path resolution. { 'author.name': 'alice' } matches nested fields. Arrays compared via JSON.stringify. No Mongo-style $gt/$in operators — use a function filter or query() for those.` },
+      { field: 'undefined',          type: 'undefined',                optional: false, desc: 'Matches all records. Used as sugar for "operate on everything".' },
+      { field: 'function',           type: '(record: T) => boolean',   optional: false, desc: 'Caller predicate. Full expressive power. A throwing predicate is treated as no-match — errors never propagate.' },
+      { field: 'object (literal)',   type: 'Partial<T>',               optional: false, desc: "Deep-equality match with dot-notation path resolution. { 'author.name': 'alice' } matches nested fields. Arrays compared via JSON.stringify." },
+      { field: 'object (envelope)',  type: '{ $op: value, ... }',      optional: false, desc: 'Value position accepts an operator envelope — all keys must start with `$`; mixed-key envelopes throw. Supported: $gt, $gte, $lt, $lte, $ne, $in, $nin, $exists, $regex. Example: { margin: { $gt: 0 }, tier: { $in: ["hard", "very_hard"] } }. Numeric comparisons return false on type mismatch (never throw); bad arg shapes ($in without array, invalid $regex) throw. $regex also accepts a RegExp instance shorthand: { name: /alice/i }. $options sibling is honored alongside $regex for flag control.' },
     ],
   },
   // ─── Events ──────────────────────────────────────────────────────────────────
@@ -1662,17 +1664,19 @@ export const API_GROUPS: FnGroup[] = [
   {
     group: 'api.db',
     rows: [
-      { name: 'collection',           args: 'name, opts?',            desc: "Open or create a collection. opts.scope = 'script' (default, per-scriptId) / 'character' (per-active-character) / 'chat' (per-active-chat). Path is baked into the handle at creation — throws if scope requires context (e.g. 'chat') that isn't present. Collection name: 1-64 chars, alphanumeric + _ - ., leading char must be alphanumeric." },
-      { name: 'list',                 args: 'scope?',                 desc: 'List collection names visible to this script in the given scope (default `script`). Owner-scoped — cross-script visibility is not supported.' },
-      { name: 'drop',                 args: 'name, scope?',           desc: 'Delete a collection entirely. No-op if the collection does not exist. Fires `ls:collection:dropped` with deletedCount.' },
-      { name: 'collection.insert',    args: 'record',                 desc: 'Insert a record. Auto-assigns id (UUID v4), createdAt, updatedAt unless caller supplies them. Returns the persisted record.' },
-      { name: 'collection.find',      args: 'filter?',                desc: "Find matching records. Filter: undefined = all, Partial<T> = deep-equal with dot-notation paths ({ 'a.b': 1 }), (r) => boolean = caller predicate." },
-      { name: 'collection.findOne',   args: 'filter',                 desc: 'First matching record or null.' },
-      { name: 'collection.update',    args: 'filter, patch',          desc: 'Update all matching records. Returns count. Silently strips id/createdAt/updatedAt from patch — updatedAt is bumped to Date.now() on every match.' },
-      { name: 'collection.delete',    args: 'filter',                 desc: 'Delete all matching records. Returns count.' },
-      { name: 'collection.count',     args: 'filter?',                desc: 'Count matching records (or all if filter omitted).' },
-      { name: 'collection.clear',     args: '—',                      desc: 'Remove all records, leaving an empty collection file.' },
-      { name: 'collection.query',     args: 'jsonQuery',              desc: "Run a jsonquery string against the full collection. Escape hatch for aggregations / sorts / complex projections. Example: 'filter(.margin > 0) | size()'. Throws SyntaxError on malformed queries." },
+      { name: 'collection',            args: 'name, opts?',            desc: "Open or create a collection. opts.scope = 'script' (default, per-scriptId) / 'character' (per-active-character) / 'chat' (per-active-chat). opts.schema (0.20.0+) attaches a ZodLike validator applied on every write. Path is baked into the handle at creation — throws if scope requires context (e.g. 'chat') that isn't present. Collection name: 1-64 chars, alphanumeric + _ - ., leading char must be alphanumeric." },
+      { name: 'list',                  args: 'scope?',                 desc: 'List collection names visible to this script in the given scope (default `script`). Owner-scoped — cross-script visibility is not supported.' },
+      { name: 'exists',                args: 'name, scope?',           desc: 'Cheap existence check — true if the collection file exists, false otherwise. Does NOT load or parse. Ownership-safe: scope paths bake in the calling script id, so exists only sees this script\'s own collections. (0.20.0+)' },
+      { name: 'drop',                  args: 'name, scope?',           desc: 'Delete a collection entirely. No-op if the collection does not exist. Fires `ls:collection:dropped` with deletedCount.' },
+      { name: 'collection.insert',     args: 'record',                 desc: 'Insert a record. Auto-assigns id (UUID v4), createdAt, updatedAt unless caller supplies them. Returns the persisted record. With schema: validates AFTER injection; reserved fields (id/createdAt/updatedAt) are preserved even when the schema strips unknown keys.' },
+      { name: 'collection.insertMany', args: 'records',                desc: 'Batch-insert N records with a single file-write. All records share one timestamp (batch-commit semantic). Atomicity: validation + size guard run on the final array before persist — if any record fails, NOTHING lands. Fires one `ls:collection:inserted` per record in insertion order after the persist resolves. Empty array is a fast no-op. (0.20.0+)' },
+      { name: 'collection.find',       args: 'filter?',                desc: "Find matching records. Filter: undefined = all, Partial<T> = literal match with dot-notation paths, (r) => boolean = caller predicate, or operator envelope { $gt, $in, $regex, ... } per-value (0.20.0+). Direct RegExp shorthand also works: { name: /alice/i }." },
+      { name: 'collection.findOne',    args: 'filter',                 desc: 'First matching record or null.' },
+      { name: 'collection.update',     args: 'filter, patch',          desc: 'Update all matching records. Returns count. Silently strips id/createdAt/updatedAt from patch — updatedAt is bumped to Date.now() on every match. With schema: validates the MERGED record against the full schema (not the patch alone); atomic (no records persist if any validation fails).' },
+      { name: 'collection.delete',     args: 'filter',                 desc: 'Delete all matching records. Returns count.' },
+      { name: 'collection.count',      args: 'filter?',                desc: 'Count matching records (or all if filter omitted).' },
+      { name: 'collection.clear',      args: '—',                      desc: 'Remove all records, leaving an empty collection file.' },
+      { name: 'collection.query',      args: 'jsonQuery',              desc: "Run a jsonquery string against the full collection. Escape hatch for aggregations / sorts / complex projections. Example: 'filter(.margin > 0) | size()'. Throws SyntaxError on malformed queries." },
     ],
   },
   {

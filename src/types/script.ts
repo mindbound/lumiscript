@@ -2933,9 +2933,28 @@ export type DbFilter<T = DbRecord> =
 /**
  * Options for `api.db.collection(name, opts)`.
  */
-export interface CollectionOpts {
+export interface CollectionOpts<T extends DbRecord = DbRecord> {
   /** Scope of the collection. Defaults to `'script'`. */
   scope?: DbScope;
+  /**
+   * Optional Zod schema (or any object with a `parse(data): T` method)
+   * applied on every write — `insert`, `insertMany`, and `update`.
+   *
+   * On `update`, the validated candidate is the *merged* record
+   * (`{ ...existing, ...patch, updatedAt: now }`), not the raw patch —
+   * this preserves the invariant that every stored record conforms to
+   * the schema.
+   *
+   * Validation failures throw `Error('api.db: schema validation failed
+   * on <op>: <zod-message>')`. `find` / `findOne` / `count` / `query`
+   * are NOT validated (no read-side checks) — if your schema evolves,
+   * use `drop()` + re-insert rather than expecting lazy migration.
+   *
+   * Attaching a schema to a collection that already contains records
+   * violating it is a no-op at creation time; the next mutation will
+   * surface the issue.
+   */
+  schema?: ZodLike<T>;
 }
 
 /**
@@ -2956,6 +2975,29 @@ export interface Collection<T extends DbRecord = DbRecord> {
    * persisted record including the injected fields.
    */
   insert(record: Omit<T, 'id' | 'createdAt' | 'updatedAt'> & Partial<Pick<T, 'id' | 'createdAt' | 'updatedAt'>>): Promise<T>;
+
+  /**
+   * Batch-insert multiple records with a single file-write. Each record is
+   * processed the same as `insert()` — auto-id, auto-timestamps unless
+   * caller-provided. All records in a batch share the same `createdAt` /
+   * `updatedAt` timestamp (the batch-commit semantic).
+   *
+   * Broadcast: fires one `ls:collection:inserted` event per record in
+   * insertion order, AFTER the single persist resolves. Subscribers
+   * always see individual events; there is no `inserted-many` event.
+   *
+   * Atomicity: if validation (schema) or size governance rejects the
+   * batch, NO records are persisted. Empty input is a fast no-op that
+   * returns `[]` and fires no broadcasts.
+   *
+   * @example
+   * const rolls = await api.db.collection('dice-rolls', { scope: 'character' });
+   * await rolls.insertMany([
+   *   { notation: '1d20+3', total: 18, outcome: 'success' },
+   *   { notation: '2d6',    total: 7,  outcome: null },
+   * ]);
+   */
+  insertMany(records: Array<Omit<T, 'id' | 'createdAt' | 'updatedAt'> & Partial<Pick<T, 'id' | 'createdAt' | 'updatedAt'>>>): Promise<T[]>;
 
   /** Find all records matching the filter. `undefined` matches all. */
   find(filter?: DbFilter<T>): Promise<T[]>;
@@ -3031,7 +3073,7 @@ export interface DbAPI {
    */
   collection<T extends DbRecord = DbRecord>(
     name: string,
-    opts?: CollectionOpts,
+    opts?: CollectionOpts<T>,
   ): Promise<Collection<T>>;
 
   /**
@@ -3046,6 +3088,23 @@ export interface DbAPI {
    * Ownership-safe: scripts can only drop their own collections.
    */
   drop(name: string, scope?: DbScope): Promise<void>;
+
+  /**
+   * Quick existence check — returns `true` if the collection's backing
+   * file exists in the given scope, `false` otherwise. Does NOT load or
+   * parse the file, so it's cheap to call speculatively before an
+   * `insert` / `insertMany` workflow. Ownership-safe: scope paths bake
+   * in the calling script's id, so `exists` only sees this script's
+   * own collections.
+   *
+   * @example
+   * if (!(await api.db.exists('dice-rolls', 'character'))) {
+   *   // seed initial state
+   *   await (await api.db.collection('dice-rolls', { scope: 'character' }))
+   *     .insert({ ...defaultRoll });
+   * }
+   */
+  exists(name: string, scope?: DbScope): Promise<boolean>;
 }
 
 // ─── Broadcast API ───────────────────────────────────────────────────────────

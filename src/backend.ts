@@ -52,6 +52,12 @@ import {
 } from './engine/drawer-tab-registry.js';
 import { resolveContextMenu } from './engine/api/ui.js';
 import { checkMinimumHostVersion } from './utils/host-version.js';
+import {
+  enumerateAllCollections,
+  inspectCollection,
+  isValidCollectionPath,
+} from './engine/db-admin.js';
+import { on as busOn } from './engine/broadcast-bus.js';
 
 // ─── Active user + permission tracking ───────────────────────────────────────
 
@@ -196,6 +202,50 @@ async function pushVariables(userId: string | null): Promise<void> {
       character: character as Record<string, unknown>,
     },
   });
+}
+
+/**
+ * Enumerate all collections across scripts/scopes and push the summary
+ * to the frontend's Storage panel. Stat failures on individual paths
+ * don't fail the whole call — those rows just surface as zero-sized.
+ */
+async function pushCollections(userId: string | null): Promise<void> {
+  const collections = await enumerateAllCollections(userId ?? undefined);
+  send({ type: 'collections_list', collections });
+}
+
+// ─── `ls:collection:*` broadcast → `collections_updated` forwarder ───────────
+//
+// Scripts emit broadcast events on every collection mutation. The Storage
+// panel wants to refresh on change, but wiring one frontend message per
+// broadcast would thrash the panel during rapid inserts (e.g. a 100-record
+// insertMany). Debounce 200ms after the LAST event so the frontend's
+// subsequent `list_collections` request sees a settled state.
+const COLLECTIONS_UPDATE_DEBOUNCE_MS = 200;
+const BACKEND_BROADCAST_OWNER = '__lumiscript_backend__';
+const COLLECTION_BROADCAST_EVENTS = [
+  'ls:collection:created',
+  'ls:collection:dropped',
+  'ls:collection:inserted',
+  'ls:collection:updated',
+  'ls:collection:deleted',
+  'ls:collection:size-warning',
+] as const;
+
+let collectionsUpdateTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleCollectionsUpdate(): void {
+  if (collectionsUpdateTimer !== null) clearTimeout(collectionsUpdateTimer);
+  collectionsUpdateTimer = setTimeout(() => {
+    collectionsUpdateTimer = null;
+    send({ type: 'collections_updated' });
+  }, COLLECTIONS_UPDATE_DEBOUNCE_MS);
+}
+
+for (const event of COLLECTION_BROADCAST_EVENTS) {
+  // Sentinel `scriptId` — the broadcast bus's `clearByScriptId` fires on
+  // script lifecycle events only, and no real script will ever own this
+  // id, so the subscription persists for the worker's lifetime.
+  busOn(event, () => scheduleCollectionsUpdate(), BACKEND_BROADCAST_OWNER);
 }
 
 // ─── Prompt injection handlers ────────────────────────────────────────────────
@@ -377,6 +427,66 @@ spindle.onFrontendMessage(async (raw, userId) => {
 
       case 'get_variables': {
         await pushVariables(userId);
+        break;
+      }
+
+      // ── Storage panel: Collections (admin view) ─────────────────────────
+      case 'list_collections': {
+        await pushCollections(userId);
+        break;
+      }
+
+      case 'inspect_collection': {
+        // Path is supplied by frontend — validated inside inspectCollection
+        // before any storage read. Invalid paths throw, which we catch
+        // and surface as an empty result rather than crashing the handler.
+        try {
+          const result = await inspectCollection(
+            msg.path,
+            { textFilter: msg.textFilter, limit: msg.limit, offset: msg.offset },
+            userId ?? undefined,
+          );
+          send({
+            type: 'collection_records',
+            path: msg.path,
+            records: result.records,
+            total: result.total,
+          });
+        } catch (err) {
+          spindle.log.warn(
+            `[LumiScript] inspect_collection failed for "${msg.path}": ` +
+            (err instanceof Error ? err.message : String(err)),
+          );
+          send({
+            type: 'collection_records',
+            path: msg.path,
+            records: [],
+            total: 0,
+          });
+        }
+        break;
+      }
+
+      case 'drop_collection': {
+        // Defense: reject anything that doesn't match a known scope path
+        // template — frontend should never send these, but this prevents
+        // any other userStorage path from being targeted.
+        if (!isValidCollectionPath(msg.path)) {
+          spindle.log.warn(
+            `[LumiScript] drop_collection rejected invalid path "${msg.path}"`,
+          );
+          break;
+        }
+        try {
+          await spindle.userStorage.delete(msg.path, userId ?? undefined);
+        } catch (err) {
+          spindle.log.warn(
+            `[LumiScript] drop_collection failed for "${msg.path}": ` +
+            (err instanceof Error ? err.message : String(err)),
+          );
+        }
+        // Refresh immediately rather than waiting for the debounced hint.
+        await pushCollections(userId);
         break;
       }
 

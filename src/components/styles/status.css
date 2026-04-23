@@ -34,10 +34,145 @@
   grid-template-rows:
     minmax(0, 3fr)
     minmax(0, 2fr)
-    minmax(0, 2fr)
     minmax(0, 2fr);
   row-gap: 4px;
   overflow: hidden;
+}
+
+/*
+ * Storage tab grid — same machinery as .ls-status-list, different row
+ * count. Phase 5a has just Variables (single row); Phase 5b adds the
+ * Collections section below it (switches to 2 rows). The same
+ * `minmax(0, Xfr)` + `overflow: hidden` discipline keeps each section's
+ * scroll internal to its row so the sidebar itself never scrolls.
+ */
+.ls-storage-list {
+  flex: 1;
+  min-height: 0;
+  padding: 4px;
+  display: grid;
+  grid-template-rows:
+    minmax(0, 1fr)  /* Variables */
+    minmax(0, 1fr); /* Collections */
+  row-gap: 4px;
+  overflow: hidden;
+}
+
+/* ─── Collections section ─────────────────────────────────────────────── */
+
+.ls-collections-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+}
+
+.ls-collections-row {
+  display: grid;
+  grid-template-columns:
+    minmax(0, 2fr)    /* name — give most space, names are user-meaningful */
+    52px               /* scope — badge only fits "SCRIPT" / "CHAR" / "CHAT" */
+    minmax(0, 1fr)    /* owner */
+    54px               /* size — "999 KB" is longest realistic */
+    60px               /* updated — "just now" / "59m ago" */
+    44px;              /* actions — two 20px buttons + gap */
+  column-gap: 4px;
+  align-items: center;
+  padding: 3px 6px;
+  border-radius: 3px;
+}
+
+.ls-collections-row:not(.ls-collections-header-row):hover {
+  background: var(--lumiverse-fill-1, rgba(255, 255, 255, 0.04));
+}
+
+.ls-collections-header-row {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--lumiverse-text-2, rgba(255, 255, 255, 0.5));
+  background: var(--lumiverse-fill-0, rgba(0, 0, 0, 0.3));
+}
+/* Header alignment follows the content column it introduces — Name +
+   Owner default to left, Scope is centered (matches the badge), Size +
+   Updated right-align (matches tabular-nums data cells). */
+.ls-collections-header-row > span:nth-child(2) { text-align: center; }
+.ls-collections-header-row > span:nth-child(4),
+.ls-collections-header-row > span:nth-child(5) { text-align: right; }
+
+.ls-collections-name {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ls-collections-scope {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 1px 5px;
+  border-radius: 2px;
+  text-align: center;
+  background: var(--lumiverse-fill-1, rgba(255, 255, 255, 0.06));
+  color: var(--lumiverse-text-2, rgba(255, 255, 255, 0.7));
+}
+.ls-collections-scope[data-scope="script"]    { background: rgba(88, 166, 255, 0.18); color: rgb(120, 180, 255); }
+.ls-collections-scope[data-scope="character"] { background: rgba(236, 147, 87, 0.18);  color: rgb(246, 175, 125); }
+.ls-collections-scope[data-scope="chat"]      { background: rgba(142, 209, 134, 0.18); color: rgb(174, 229, 168); }
+
+.ls-collections-owner {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--lumiverse-text-2, rgba(255, 255, 255, 0.7));
+}
+.ls-collections-owner-unknown {
+  color: var(--lumiverse-text-3, rgba(255, 255, 255, 0.4));
+  font-style: italic;
+}
+
+.ls-collections-size,
+.ls-collections-updated {
+  color: var(--lumiverse-text-2, rgba(255, 255, 255, 0.7));
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.ls-collections-actions {
+  display: flex;
+  gap: 2px;
+}
+
+.ls-collections-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: transparent;
+  color: var(--lumiverse-text-2, rgba(255, 255, 255, 0.6));
+  border-radius: 3px;
+  cursor: pointer;
+  transition: background 120ms, color 120ms;
+}
+.ls-collections-action:not(:disabled):hover {
+  background: var(--lumiverse-fill-2, rgba(255, 255, 255, 0.08));
+  color: var(--lumiverse-text-1, rgba(255, 255, 255, 0.9));
+}
+.ls-collections-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+.ls-collections-action-danger:not(:disabled):hover {
+  color: var(--lumiverse-danger, rgb(246, 130, 130));
 }
 
 /*
