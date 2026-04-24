@@ -32,6 +32,7 @@ import {
   cleanupScript,
   updateElementHtml,
   setDraggable,
+  collectDescendantIds,
 } from '../dom-registry.js';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -76,7 +77,23 @@ export function createDOMHandle(elementId: string, deps: APIBuildDeps): DOMHandl
 
     remove(): void {
       gate();
-      // Clear listeners in registry (frontend will also detach on remove)
+      // Cascade to children first (entries registered via `injectChild`
+      // with `parentElementId: elementId`). Without this, removing a
+      // parent leaves orphan entries in the registry — on next replay,
+      // those children would emit `dom_inject` with dead parent refs
+      // and get dropped with a warn. Collected before unregistration so
+      // Map iteration stays consistent.
+      //
+      // Per-child `dom_remove` ensures the frontend's `elementMap` also
+      // sheds its entries. The parent's DOM removal cascades visually
+      // (browser removes the subtree), but elementMap refs to detached
+      // DOM would linger without explicit remove messages.
+      const descendants = collectDescendantIds(elementId);
+      for (const childId of descendants) {
+        clearListeners(childId);
+        unregisterElement(childId);
+        send({ type: 'dom_remove', elementId: childId });
+      }
       clearListeners(elementId);
       unregisterElement(elementId);
       send({ type: 'dom_remove', elementId });
@@ -110,6 +127,62 @@ export function createDOMHandle(elementId: string, deps: APIBuildDeps): DOMHandl
       // same `dom_make_draggable` message after the element is re-injected.
       setDraggable(elementId, handleSelector);
       send({ type: 'dom_make_draggable', elementId, handleSelector });
+    },
+
+    injectChild(
+      target: string,
+      html: string,
+      options: DOMInjectOptions = {},
+    ): DOMHandle {
+      gate();
+      const scriptId = deps.script.id;
+      const { position = 'beforeend', id: stableId } = options;
+
+      // ── Idempotent injection via stable ID ───────────────────────────
+      // Stable-IDs are scripted-scoped (not parent-scoped) — if the user
+      // passes an ID that already resolves, we update that existing
+      // element in place regardless of which parent it was originally
+      // injected under. This is consistent with `api.ui.dom.inject` and
+      // keeps the two entry points interchangeable for scripts that
+      // switch between document-scoped and handle-scoped injection.
+      if (stableId) {
+        const existingId = resolveStableId(scriptId, stableId);
+        if (existingId) {
+          const cleared = clearListeners(existingId);
+          for (const { listenerId, event } of cleared) {
+            send({ type: 'dom_unlisten', elementId: existingId, listenerId, event });
+          }
+          updateElementHtml(existingId, html);
+          send({ type: 'dom_update', elementId: existingId, html });
+          return createDOMHandle(existingId, deps);
+        }
+      }
+
+      // ── New injection, scoped to this parent ─────────────────────────
+      // `parentElementId: elementId` tells the frontend to resolve `target`
+      // via this handle's element-map ref, not via `document.querySelector`.
+      // Works even when the parent is orphaned (drawer tab not yet clicked,
+      // modal/widget body pre-mount) — the element-map holds the ref
+      // regardless of live-tree membership.
+      const childId = nextDOMId('de');
+      registerElement(childId, scriptId, stableId, {
+        kind: 'selector',
+        target,
+        position,
+        initialHtml: html,
+        parentElementId: elementId,
+      });
+      send({
+        type: 'dom_inject',
+        scriptId,
+        elementId: childId,
+        target,
+        html,
+        position,
+        stableId,
+        parentElementId: elementId,
+      });
+      return createDOMHandle(childId, deps);
     },
   };
 }

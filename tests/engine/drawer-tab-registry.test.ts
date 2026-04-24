@@ -1,11 +1,15 @@
-import { describe, test, expect, beforeEach } from 'bun:test';
+import { describe, test, expect, beforeEach, mock } from 'bun:test';
 import {
   registerTab,
+  hasTab,
   getTab,
   destroyTab,
+  addActivateHandler,
+  dispatchActivation,
   updateTitle,
   updateShortName,
   updateBadge,
+  countByScript,
   clearByScript,
   listReplayMessages,
   __reset,
@@ -35,17 +39,102 @@ describe('registerTab', () => {
     expect(entry.options.iconSvg).toBe('<svg/>');
   });
 
-  test('throws on duplicate (scriptId, tabId)', () => {
-    registerTab('s1', 'x', 'dt_1', 'X', undefined, {});
-    expect(() => registerTab('s1', 'x', 'dt_2', 'X2', undefined, {}))
-      .toThrow(/duplicate tab id/);
-  });
-
   test('two scripts can share the same tabId without collision', () => {
     registerTab('script-A', 'shared', 'dt_a', 'A', undefined, {});
     registerTab('script-B', 'shared', 'dt_b', 'B', undefined, {});
     expect(getTab('script-A', 'shared')!.title).toBe('A');
     expect(getTab('script-B', 'shared')!.title).toBe('B');
+  });
+});
+
+// ─── Same-(scriptId, tabId) replace — v0.22.1 behaviour ─────────────────────
+
+describe('registerTab — replace semantics', () => {
+  test('same-(scriptId, tabId) re-register silently replaces (no throw)', () => {
+    registerTab('s1', 'dash', 'dt_1', 'First', undefined, {});
+    // Prior behaviour (v0.22.0): threw "duplicate tab id".
+    // New behaviour (v0.22.1): silent replace — matches input-bar-action
+    // registry so manual re-run of a script while iterating works.
+    expect(() => registerTab('s1', 'dash', 'dt_2', 'Second', 'Sec', {
+      description: 'updated',
+    })).not.toThrow();
+  });
+
+  test('replace updates title / shortName / options / rootElementId', () => {
+    registerTab('s1', 'x', 'dt_1', 'Old', 'Ol', {
+      description: 'first version',
+    });
+    registerTab('s1', 'x', 'dt_2', 'New', 'Ne', {
+      description:  'second version',
+      iconSvg:      '<svg/>',
+    });
+    const entry = getTab('s1', 'x')!;
+    expect(entry.rootElementId).toBe('dt_2');
+    expect(entry.title).toBe('New');
+    expect(entry.shortName).toBe('Ne');
+    expect(entry.options.description).toBe('second version');
+    expect(entry.options.iconSvg).toBe('<svg/>');
+  });
+
+  test('replace clears old activate handlers (stale-closure hygiene)', () => {
+    registerTab('s1', 'x', 'dt_1', 'X', undefined, {});
+    const oldHandler = mock(() => {});
+    addActivateHandler('s1', 'x', oldHandler);
+    expect(getTab('s1', 'x')!.activateHandlers.size).toBe(1);
+
+    // Re-register — old handler must be cleared. A stale closure from a
+    // prior trigger run shouldn't fire when the host activates the freshly
+    // re-registered tab.
+    registerTab('s1', 'x', 'dt_2', 'X', undefined, {});
+    expect(getTab('s1', 'x')!.activateHandlers.size).toBe(0);
+
+    // Simulate an activation — old handler should NOT fire.
+    dispatchActivation('s1', 'x');
+    expect(oldHandler).toHaveBeenCalledTimes(0);
+  });
+
+  test('replace resets badge to null (prior run\'s badge state cleared)', () => {
+    registerTab('s1', 'x', 'dt_1', 'X', undefined, {});
+    updateBadge('s1', 'x', '7');
+    expect(getTab('s1', 'x')!.badge).toBe('7');
+    registerTab('s1', 'x', 'dt_2', 'X', undefined, {});
+    expect(getTab('s1', 'x')!.badge).toBeNull();
+  });
+
+  test('replace does NOT increment the entry count', () => {
+    registerTab('s1', 'x', 'dt_1', 'X', undefined, {});
+    expect(countByScript('s1')).toBe(1);
+    registerTab('s1', 'x', 'dt_2', 'X', undefined, {});
+    expect(countByScript('s1')).toBe(1);
+  });
+
+  test('two scripts can independently register the same tabId without collision', () => {
+    registerTab('script-A', 'shared', 'dt_a', 'A Title', undefined, {});
+    registerTab('script-B', 'shared', 'dt_b', 'B Title', undefined, {});
+    expect(getTab('script-A', 'shared')!.title).toBe('A Title');
+    expect(getTab('script-B', 'shared')!.title).toBe('B Title');
+    expect(countByScript('script-A')).toBe(1);
+    expect(countByScript('script-B')).toBe(1);
+  });
+});
+
+// ─── hasTab — used by the API builder to gate the stack-limit checks ────────
+
+describe('hasTab', () => {
+  test('returns false when the entry is absent', () => {
+    expect(hasTab('s1', 'nope')).toBe(false);
+  });
+
+  test('returns true after registerTab, false after destroyTab', () => {
+    registerTab('s1', 'x', 'dt_1', 'X', undefined, {});
+    expect(hasTab('s1', 'x')).toBe(true);
+    destroyTab('s1', 'x');
+    expect(hasTab('s1', 'x')).toBe(false);
+  });
+
+  test('ownership-scoped — hasTab(otherScript, sameId) is false', () => {
+    registerTab('script-A', 'x', 'dt_a', 'X', undefined, {});
+    expect(hasTab('script-B', 'x')).toBe(false);
   });
 });
 

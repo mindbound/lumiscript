@@ -191,6 +191,47 @@ describe('buildReplayMessages — cross-registry ordering', () => {
 
     expect(ixListen).toBeLessThan(ixDraggable);
   });
+
+  test('shell body update comes BEFORE a shell-scoped child inject', () => {
+    // Motivating bug: a shell-scoped `DOMHandle.injectChild()` (e.g.
+    // `tab.root.injectChild('[data-grid]', html, { id })`) resolves its
+    // target against the parent's inner DOM. If the shell body's update
+    // replays AFTER the child inject, the target isn't there yet and the
+    // inject silently drops. Fix: shell updates precede non-shell injects.
+
+    // Parent shell — drawer tab body
+    registerTab('s1', 'dash', 'dt_shell', 'Dashboard', undefined, {});
+    registerElement('dt_shell', 's1');
+    updateElementHtml('dt_shell', '<div><span data-grid></span></div>');
+
+    // Child inject via injectChild — target resolves inside dt_shell's body
+    registerElement('grid-child', 's1', undefined, {
+      kind: 'selector',
+      target: '[data-grid]',
+      position: 'beforeend',
+      initialHtml: '<div>icons here</div>',
+      parentElementId: 'dt_shell',
+    });
+
+    const msgs = buildReplayMessages();
+    const types = msgs.map(m => m.type);
+
+    const ixTabRegister = types.indexOf('ls_drawer_tab_register');
+    const ixShellUpdate = msgs.findIndex(
+      m => m.type === 'dom_update' && (m as { elementId?: string }).elementId === 'dt_shell',
+    );
+    const ixChildInject = msgs.findIndex(
+      m => m.type === 'dom_inject' && (m as { elementId?: string }).elementId === 'grid-child',
+    );
+
+    expect(ixTabRegister).toBeGreaterThanOrEqual(0);
+    expect(ixShellUpdate).toBeGreaterThanOrEqual(0);
+    expect(ixChildInject).toBeGreaterThanOrEqual(0);
+
+    // Tab register → shell body populated → child inject can resolve its target.
+    expect(ixTabRegister).toBeLessThan(ixShellUpdate);
+    expect(ixShellUpdate).toBeLessThan(ixChildInject);
+  });
 });
 
 // ─── Realistic dogfood (Roll-Dice-ish) ──────────────────────────────────────

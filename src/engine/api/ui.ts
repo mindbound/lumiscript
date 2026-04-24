@@ -55,6 +55,7 @@ import {
   registerAction,
   hasAction,
   countByScript as countActionsByScript,
+  listByScript as listActionsByScript,
   updateLabel as updateActionLabel,
   updateEnabled as updateActionEnabled,
   addClickHandler as addActionClickHandler,
@@ -71,8 +72,10 @@ import {
 } from '../float-widget-registry.js';
 import {
   registerTab,
+  hasTab,
   countByScript as countTabsByScript,
   countTotal as countTotalTabs,
+  listByScript as listTabsByScript,
   addActivateHandler,
   destroyTab,
   updateTitle as updateTabTitle,
@@ -367,9 +370,17 @@ export function buildUIAPI(deps: APIBuildDeps): Omit<LumiScriptAPI['ui'], 'dom'>
       if (!isReplace) {
         const live = countActionsByScript(scriptId);
         if (live >= INPUT_BAR_ACTION_STACK_LIMIT) {
+          // Enumerate the currently-registered IDs so scripts iterating
+          // on their action set can spot stale entries (common pattern:
+          // renaming an action between runs leaves the old id in the
+          // registry until next disable / delete). Sorted alphabetically
+          // so the list is stable across runs.
+          const registered = listActionsByScript(scriptId).slice().sort();
           throw new Error(
-            `api.ui.registerInputBarAction: stack limit reached (${INPUT_BAR_ACTION_STACK_LIMIT} actions open for this script).` +
-            ` Call destroy() on an existing action before registering another.`,
+            `api.ui.registerInputBarAction: stack limit reached (${INPUT_BAR_ACTION_STACK_LIMIT} actions open for this script, attempting to add "${actionId}"). ` +
+            `Currently registered: [${registered.join(', ')}]. ` +
+            `Call destroy() on an existing action before registering another, ` +
+            `or disable + re-enable the script to clear stale registrations.`,
           );
         }
       }
@@ -544,25 +555,43 @@ export function buildUIAPI(deps: APIBuildDeps): Omit<LumiScriptAPI['ui'], 'dom'>
         throw new Error('api.ui.registerDrawerTab: options.title must be a non-empty string.');
       }
 
-      // ── Pre-check per-script cap ─────────────────────────────────────
-      const liveForScript = countTabsByScript(scriptId);
-      if (liveForScript >= DRAWER_TAB_PER_SCRIPT_LIMIT) {
-        throw new Error(
-          `api.ui.registerDrawerTab: per-script limit reached (${DRAWER_TAB_PER_SCRIPT_LIMIT} drawer tab per script).` +
-          ` Call destroy() on the existing tab before registering another.`,
-        );
-      }
+      // ── Pre-check stack limits ───────────────────────────────────────
+      // Skip both checks when this is a REPLACE — re-registering a tab
+      // that's already live for this script doesn't grow either stack,
+      // so neither limit should reject it. Matters for the common pattern
+      // of manually re-running a script (via the Run button or event
+      // re-fire) while iterating — without this, every second run hits
+      // the per-script cap until the user disable-enables to fire
+      // `ls:teardown` and clean up.
+      //
+      // Mirrors `registerInputBarAction`: same `isReplace` gate, same
+      // motivation. Checked against registry state (which persists across
+      // script re-executions until teardown), not the API handle.
+      const isReplace = hasTab(scriptId, options.id);
+      if (!isReplace) {
+        const liveForScript = countTabsByScript(scriptId);
+        if (liveForScript >= DRAWER_TAB_PER_SCRIPT_LIMIT) {
+          // Enumerate the currently-registered tab IDs for this script so
+          // scripts iterating on their registration can spot stale entries.
+          const registered = listTabsByScript(scriptId).slice().sort();
+          throw new Error(
+            `api.ui.registerDrawerTab: per-script limit reached (${DRAWER_TAB_PER_SCRIPT_LIMIT} drawer tab per script, attempting to add "${options.id}"). ` +
+            `Currently registered: [${registered.join(', ')}]. ` +
+            `Call destroy() on the existing tab before registering another, ` +
+            `or disable + re-enable the script to clear stale registrations.`,
+          );
+        }
 
-      // ── Pre-check LS-wide cap ────────────────────────────────────────
-      // LumiScript is one Spindle extension, so all user scripts share
-      // the 4-tab host quota. Fail fast with a message that names the
-      // global rather than per-script exhaustion — different remedy.
-      const liveTotal = countTotalTabs();
-      if (liveTotal >= DRAWER_TAB_TOTAL_LIMIT) {
-        throw new Error(
-          `api.ui.registerDrawerTab: LumiScript drawer-tab quota exhausted (${DRAWER_TAB_TOTAL_LIMIT} total across all scripts).` +
-          ` Another script must destroy its tab before this one can register.`,
-        );
+        // LumiScript is one Spindle extension, so all user scripts share
+        // the 4-tab host quota. Fail fast with a message that names the
+        // global rather than per-script exhaustion — different remedy.
+        const liveTotal = countTotalTabs();
+        if (liveTotal >= DRAWER_TAB_TOTAL_LIMIT) {
+          throw new Error(
+            `api.ui.registerDrawerTab: LumiScript drawer-tab quota exhausted (${DRAWER_TAB_TOTAL_LIMIT} total across all scripts, attempting to add "${options.id}"). ` +
+            `Another script must destroy its tab before this one can register.`,
+          );
+        }
       }
 
       // ── Allocate IDs ─────────────────────────────────────────────────

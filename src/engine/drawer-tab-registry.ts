@@ -73,11 +73,27 @@ function key(scriptId: string, tabId: string): string {
 // ─── Lifecycle ───────────────────────────────────────────────────────────────
 
 /**
- * Register a new drawer tab. Called synchronously from the API builder
- * before the `ls_drawer_tab_register` message is sent.
+ * Register a new drawer tab, or replace an existing one with the same
+ * `(scriptId, tabId)` key. Called synchronously from the API builder before
+ * the `ls_drawer_tab_register` message is sent to the frontend (which itself
+ * destroys + recreates the host-side Spindle handle when it sees a duplicate
+ * key — matches how the input-bar action handler works).
  *
- * Throws if `(scriptId, tabId)` is already registered — first-wins ownership
- * policy mirroring input-bar actions.
+ * Replace semantics — mirrors `input-bar-action-registry.registerAction`:
+ *   - Old `activateHandlers` are CLEARED — they're closures from a prior
+ *     script run and the user's re-register expresses a fresh handle.
+ *   - `title` / `shortName` / `options` come from the new call (so edits to
+ *     the tab metadata between runs land correctly).
+ *   - `badge` resets to `null` — the new run hasn't called `setBadge` yet;
+ *     if the prior run had set one, treating the new run as a full reset
+ *     is the least surprising default.
+ *   - `rootElementId` is fresh each register (allocated upstream in
+ *     `api/ui.ts` via `nextDOMId('dt')`). The frontend's drawer-tab
+ *     handler destroys its stale element binding when the new register
+ *     arrives, so the new rootElementId takes over cleanly.
+ *
+ * Cross-script collision isn't possible at this layer — the key includes
+ * `scriptId`. Two scripts may share a `tabId` without conflict.
  */
 export function registerTab(
   scriptId: string,
@@ -88,12 +104,6 @@ export function registerTab(
   options: DrawerTabRegisterOptions,
 ): DrawerTabEntry {
   const k = key(scriptId, tabId);
-  if (tabs.has(k)) {
-    throw new Error(
-      `api.ui.registerDrawerTab: duplicate tab id "${tabId}" for this script. ` +
-      `Call handle.destroy() before re-registering.`,
-    );
-  }
   const entry: DrawerTabEntry = {
     scriptId,
     tabId,
@@ -106,6 +116,16 @@ export function registerTab(
   };
   tabs.set(k, entry);
   return entry;
+}
+
+/**
+ * Whether a drawer tab with this `(scriptId, tabId)` is already live.
+ * Used by the API builder to gate the per-script + total stack-limit
+ * pre-checks: a replace shouldn't count against either limit since it
+ * doesn't add a new entry.
+ */
+export function hasTab(scriptId: string, tabId: string): boolean {
+  return tabs.has(key(scriptId, tabId));
 }
 
 /**

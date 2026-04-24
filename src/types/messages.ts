@@ -301,7 +301,24 @@ export type BackendToFrontend =
       variables: VariablesSnapshot;
     }
   // ─── DOM injection commands (backend → frontend) ──────────────────
-  | { type: 'dom_inject';          scriptId: string; elementId: string; target: string; html: string; position: string; stableId?: string }
+  | {
+      /**
+       * Inject HTML into a CSS target. When `parentElementId` is set, the
+       * selector is resolved relative to that element (via the frontend's
+       * element-map ref) instead of via `document.querySelector`. Enables
+       * injecting into lazy-mounted / orphaned elements (modal / widget /
+       * drawer-tab bodies before their parent mounts into the live DOM).
+       * Omit `parentElementId` for document-scoped inject (default).
+       */
+      type: 'dom_inject';
+      scriptId: string;
+      elementId: string;
+      target: string;
+      html: string;
+      position: string;
+      stableId?: string;
+      parentElementId?: string;
+    }
   | { type: 'dom_inject_at_message'; scriptId: string; elementId: string; messageId: string; html: string; position: 'header' | 'footer'; stableId?: string }
   | { type: 'dom_update';          elementId: string; html: string }
   | { type: 'dom_remove';          elementId: string }

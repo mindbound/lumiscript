@@ -49,6 +49,16 @@ export interface DOMElementEntry {
   /** Only for `kind: 'message'`. `'header'` or `'footer'`. */
   messagePosition?: 'header' | 'footer';
   /**
+   * Only for `kind: 'selector'` elements created via `DOMHandle.injectChild()`.
+   * The elementId of the handle's bound element — frontend uses this to
+   * scope the `target` selector via the element-map instead of
+   * `document.querySelector`, so injects into orphaned parents (unmounted
+   * drawer-tab bodies, etc.) resolve correctly.
+   * On replay, re-emitted with the `dom_inject` message so the frontend
+   * re-scopes the query after reconnect.
+   */
+  parentElementId?: string;
+  /**
    * HTML last delivered to the frontend for this element:
    *   - For `kind: 'selector'` / `'message'`, set to the `html` arg on the
    *     initial `inject()` call and updated on every subsequent `update()`.
@@ -91,6 +101,14 @@ export interface DOMRegisterExtras {
   messageId?: string;
   messagePosition?: 'header' | 'footer';
   initialHtml?: string;
+  /**
+   * When set, the `target` selector is resolved relative to the element
+   * with this id (via the frontend's element-map), not via
+   * `document.querySelector`. Used by `DOMHandle.injectChild()` so scripts
+   * can inject into a parent that isn't yet in the live DOM (orphaned
+   * modal / widget / drawer-tab bodies).
+   */
+  parentElementId?: string;
 }
 
 // ─── Registry state ──────────────────────────────────────────────────────────
@@ -133,6 +151,7 @@ export function registerElement(
     position: extras?.position,
     messageId: extras?.messageId,
     messagePosition: extras?.messagePosition,
+    parentElementId: extras?.parentElementId,
     lastHtml: extras?.initialHtml,
     listeners: new Map(),
   };
@@ -187,6 +206,38 @@ export function unregisterElement(elementId: string): void {
     stableIdIndex.delete(stableKey(entry.scriptId, entry.stableId));
   }
   elements.delete(elementId);
+}
+
+/**
+ * Walk the `parentElementId` tree rooted at `elementId` and return every
+ * descendant's elementId. Traversal is iterative (stack-based — no recursion
+ * depth cap) and pre-order: each element is listed before its own
+ * descendants. Self-loops or cross-links are not possible by construction
+ * (scripts can only inject a child of an already-existing handle), but if
+ * one did occur the repeat-detection guard below prevents an infinite loop.
+ *
+ * Used by \`DOMHandle.remove()\` to cascade cleanup — without this, a script
+ * that removes a parent (or destroys a shell whose body has children from
+ * \`injectChild\`) would leave orphan entries in the registry with stale
+ * \`parentElementId\` refs. On next replay those children would emit
+ * \`dom_inject\` messages with dead parents, the frontend would drop them
+ * with a warn, and the orphans would live until the next script disable.
+ */
+export function collectDescendantIds(elementId: string): string[] {
+  const descendants: string[] = [];
+  const seen = new Set<string>([elementId]);
+  const stack: string[] = [elementId];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    for (const [id, entry] of elements) {
+      if (entry.parentElementId === current && !seen.has(id)) {
+        seen.add(id);
+        descendants.push(id);
+        stack.push(id);
+      }
+    }
+  }
+  return descendants;
 }
 
 /**
@@ -345,6 +396,12 @@ export function listElementInjectMessages(): import('../types/messages.js').Back
     if (entry.kind === 'shell') continue;
     if (entry.lastHtml === undefined) continue;
     if (entry.kind === 'selector') {
+      // `parentElementId` only set for `DOMHandle.injectChild()` entries —
+      // preserved on replay so the frontend re-scopes the selector lookup
+      // to the (post-reconnect) parent element's subtree. Parent shell
+      // registers (modal/widget/tab) are flushed earlier in the cross-
+      // registry order, so by the time this inject replays, the parent
+      // is already rebound in elementMap.
       out.push({
         type: 'dom_inject',
         scriptId: entry.scriptId,
@@ -353,6 +410,7 @@ export function listElementInjectMessages(): import('../types/messages.js').Back
         html: entry.lastHtml,
         position: entry.position ?? 'beforeend',
         stableId: entry.stableId,
+        parentElementId: entry.parentElementId,
       });
     } else if (entry.kind === 'message') {
       out.push({

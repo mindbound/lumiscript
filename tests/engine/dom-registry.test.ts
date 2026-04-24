@@ -13,6 +13,7 @@ import {
   cleanupScript,
   updateElementHtml,
   setDraggable,
+  collectDescendantIds,
   listStyleReplayMessages,
   listElementInjectMessages,
   listShellUpdateMessages,
@@ -85,6 +86,92 @@ describe('unregisterElement', () => {
 
   test('no-ops on unknown element', () => {
     expect(() => unregisterElement('nonexistent')).not.toThrow();
+  });
+
+  test('does NOT cascade on its own — caller must use collectDescendantIds', () => {
+    // Contract test: unregisterElement is a leaf operation. The cascade
+    // lives in the API layer (DOMHandle.remove) so callers that want a
+    // single-element unregister (e.g. destroyed-element cleanup from a
+    // different code path) aren't forced into cascade semantics.
+    registerElement('parent', 'script1');
+    registerElement('child',  'script1', undefined, {
+      kind: 'selector', target: '[x]', position: 'beforeend',
+      initialHtml: '<i/>', parentElementId: 'parent',
+    });
+
+    unregisterElement('parent');
+    expect(getElement('parent')).toBeUndefined();
+    expect(getElement('child')).toBeDefined();  // child NOT auto-removed here
+  });
+});
+
+// ─── collectDescendantIds ───────────────────────────────────────────────────
+
+describe('collectDescendantIds', () => {
+  test('returns [] for a leaf element (no children)', () => {
+    registerElement('leaf', 'script1');
+    expect(collectDescendantIds('leaf')).toEqual([]);
+  });
+
+  test('returns direct children (one level)', () => {
+    registerElement('parent', 'script1');
+    registerElement('c1', 'script1', undefined, {
+      kind: 'selector', target: '[a]', position: 'beforeend',
+      initialHtml: '<i/>', parentElementId: 'parent',
+    });
+    registerElement('c2', 'script1', undefined, {
+      kind: 'selector', target: '[b]', position: 'beforeend',
+      initialHtml: '<i/>', parentElementId: 'parent',
+    });
+    const ids = collectDescendantIds('parent').sort();
+    expect(ids).toEqual(['c1', 'c2']);
+  });
+
+  test('traverses nested descendants (grandchildren)', () => {
+    registerElement('root', 'script1');
+    registerElement('child', 'script1', undefined, {
+      kind: 'selector', target: '[a]', position: 'beforeend',
+      initialHtml: '<i/>', parentElementId: 'root',
+    });
+    registerElement('grandchild', 'script1', undefined, {
+      kind: 'selector', target: '[b]', position: 'beforeend',
+      initialHtml: '<i/>', parentElementId: 'child',
+    });
+    registerElement('ggrandchild', 'script1', undefined, {
+      kind: 'selector', target: '[c]', position: 'beforeend',
+      initialHtml: '<i/>', parentElementId: 'grandchild',
+    });
+    const ids = collectDescendantIds('root').sort();
+    expect(ids).toEqual(['child', 'ggrandchild', 'grandchild']);
+  });
+
+  test('returns [] for an unknown parent id', () => {
+    expect(collectDescendantIds('nonexistent')).toEqual([]);
+  });
+
+  test('excludes unrelated siblings (scoped to descendant tree)', () => {
+    registerElement('a', 'script1');
+    registerElement('b', 'script1');
+    registerElement('a-child', 'script1', undefined, {
+      kind: 'selector', target: '[x]', position: 'beforeend',
+      initialHtml: '<i/>', parentElementId: 'a',
+    });
+    registerElement('b-child', 'script1', undefined, {
+      kind: 'selector', target: '[y]', position: 'beforeend',
+      initialHtml: '<i/>', parentElementId: 'b',
+    });
+    expect(collectDescendantIds('a')).toEqual(['a-child']);
+    expect(collectDescendantIds('b')).toEqual(['b-child']);
+  });
+
+  test('handles self-loop defensively (never-terminates guard)', () => {
+    // Synthetic state that shouldn't arise from the API but the
+    // iterator should still terminate — proves the `seen` guard works.
+    registerElement('self', 'script1');
+    // Manually point an entry at itself to simulate a cycle.
+    const entry = getElement('self')!;
+    entry.parentElementId = 'self';
+    expect(collectDescendantIds('self')).toEqual([]);  // itself isn't a descendant of itself
   });
 });
 
@@ -354,6 +441,38 @@ describe('listElementInjectMessages', () => {
       kind: 'selector', target: '#r', position: 'beforeend',
     });
     expect(listElementInjectMessages()).toEqual([]);
+  });
+
+  test('injectChild-registered entries carry parentElementId on replay', () => {
+    // Shell parent (drawer tab body, modal root, etc.)
+    registerElement('shell1', 'script1');
+    // Child injected via injectChild — tracks parentElementId so the
+    // frontend can re-scope the selector lookup on reconnect.
+    registerElement('child1', 'script1', undefined, {
+      kind: 'selector',
+      target: '[data-grid]',
+      position: 'beforeend',
+      initialHtml: '<div class="grid">…</div>',
+      parentElementId: 'shell1',
+    });
+
+    const msgs = listElementInjectMessages();
+    expect(msgs).toHaveLength(1);
+    const m = msgs[0]!;
+    if (m.type !== 'dom_inject') throw new Error('unreachable');
+    expect(m.elementId).toBe('child1');
+    expect(m.parentElementId).toBe('shell1');
+    expect(m.target).toBe('[data-grid]');
+  });
+
+  test('document-scoped inject entries have undefined parentElementId on replay', () => {
+    registerElement('e1', 'script1', undefined, {
+      kind: 'selector', target: '#root', position: 'beforeend', initialHtml: '<div/>',
+    });
+    const msgs = listElementInjectMessages();
+    const m = msgs[0]!;
+    if (m.type !== 'dom_inject') throw new Error('unreachable');
+    expect(m.parentElementId).toBeUndefined();
   });
 });
 

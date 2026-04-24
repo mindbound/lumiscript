@@ -2286,6 +2286,27 @@ export interface DOMHandle {
    *                        When omitted, the entire element is both handle and move target.
    */
   makeDraggable(handleSelector?: string): void;
+  /**
+   * Inject HTML as a descendant of this handle's bound element. Target
+   * selector is resolved RELATIVE to this element via the backend's
+   * element-map ref, NOT via `document.querySelector`. Returns a fresh
+   * `DOMHandle` for the injected child.
+   *
+   * Use when the parent may be orphaned at inject time — drawer tabs
+   * mount lazily on first activation, modal / widget bodies mount when
+   * their parent shell mounts. `api.ui.dom.inject` (document-scoped)
+   * fails on those; `injectChild` works regardless of mount state.
+   *
+   * For document-scoped injection outside a handle's subtree, keep
+   * using `api.ui.dom.inject` directly.
+   *
+   * **Sanitization note.** The scoped path does NOT run the host's
+   * DOMPurify sanitization on `html` (the manual insert can't reach
+   * orphaned parents via the host API). Sanitize untrusted HTML
+   * yourself before calling `injectChild`; script-generated markup
+   * with safe interpolation is fine.
+   */
+  injectChild(target: string, html: string, options?: DOMInjectOptions): DOMHandle;
 }
 
 /** DOM injection and styling API exposed as `api.ui.dom`. */

@@ -1743,6 +1743,13 @@ export const BUILTIN_COUNCIL_PROMPT: FnRow[] = [
   { name: 'debug.formatReport',       args: 'options',                     desc: 'Comprehensive one-call dump: member snapshot + identity + system prompt + all messages, stitched together. What you reach for when you want the whole picture in one console.log.' },
 ];
 
+export const BUILTIN_ICONS: FnRow[] = [
+  { name: 'svg',                      args: 'Record<IconName, string>',    desc: 'Map of icon name to inline SVG string. Direct-property access is sync and typed — e.g. svg.heart returns a 24×24 <svg>…</svg> string with stroke: currentColor and fill: none. Drop straight into iconSvg options (except input-bar actions — see forInputBar) or DOM-injected HTML templates.' },
+  { name: 'sized',                    args: 'name, pixels',                desc: 'Return svg[name] with width/height attributes overridden to pixels. viewBox is preserved so the icon scales cleanly. Throws on unknown name or non-positive pixels. All other default attrs (fill, stroke, stroke-width, stroke-linecap, stroke-linejoin) pass through unchanged.' },
+  { name: 'forInputBar',              args: 'name',                        desc: 'Equivalent to sized(name, 14). Use for api.ui.registerInputBarAction iconSvg — the host renders input-bar icons in a 14×14 slot, and the default 24×24 svg[name] overflows and misaligns with the label. For drawer tabs / float widgets / DOM injections, the default size is usually fine.' },
+  { name: 'names',                    args: '()',                          desc: 'All available icon names — returns a FRESH array each call, so scripts can safely mutate it (e.g. filter in place for a picker UI) without corrupting the canonical list or affecting subsequent callers.' },
+];
+
 export const BUILTIN_TYPES: TypeDoc[] = [
   {
     name: 'MessageFooterOptions / MessageHeaderOptions',
@@ -1863,11 +1870,14 @@ const BuiltinLibrariesSection: FC = () => (
   <>
     <p className="ls-ref-muted" style={{ marginBottom: 8 }}>
       Built-in libraries are loaded via <Code>{"script.require('ls:<name>')"}</Code>.
-      Two are currently shipped: <Code>ls:components</Code> (DOM widget factories — all operations
-      attributed to the calling script; injection components require <Code>app_manipulation</Code>,
-      HTML builders are free) and <Code>ls:council-prompt</Code> (pure string helpers for
-      replicating Lumiverse's built-in Council sidecar prompt in extension tools; no permissions
-      required; only meaningful when the tool was invoked as part of a Council cycle).
+      Three are currently shipped: <Code>ls:components</Code> (DOM widget factories — all
+      operations attributed to the calling script; injection components require{' '}
+      <Code>app_manipulation</Code>, HTML builders are free); <Code>ls:council-prompt</Code>{' '}
+      (pure string helpers for replicating Lumiverse's built-in Council sidecar prompt in
+      extension tools; no permissions required; only meaningful when the tool was invoked as
+      part of a Council cycle); and <Code>ls:icons</Code> (a curated ~150-icon Lucide subset as
+      pre-serialized SVG strings, ready to drop into <Code>iconSvg</Code> options or DOM
+      templates; no permissions required).
     </p>
 
     <table className="ls-ref-table">
@@ -1889,6 +1899,14 @@ const BuiltinLibrariesSection: FC = () => (
         ))}
         <GroupHeader label="ls:council-prompt" cols={3} />
         {BUILTIN_COUNCIL_PROMPT.map(row => (
+          <tr key={row.name}>
+            <td><Code>{row.name}</Code></td>
+            <td><span className="ls-ref-muted">{row.args}</span></td>
+            <td><span className="ls-ref-muted">{row.desc}</span></td>
+          </tr>
+        ))}
+        <GroupHeader label="ls:icons" cols={3} />
+        {BUILTIN_ICONS.map(row => (
           <tr key={row.name}>
             <td><Code>{row.name}</Code></td>
             <td><span className="ls-ref-muted">{row.args}</span></td>

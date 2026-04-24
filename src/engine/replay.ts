@@ -22,7 +22,15 @@
  *      the parent's register message, or the frontend's DOM handler resolves
  *      `elementId → (nothing)`.
  *
- *   3. **Listeners + draggable wire last.** Every listener / drag wiring
+ *   3. **Shell bodies are populated BEFORE any inject that targets into them.**
+ *      Scripts use `DOMHandle.injectChild(selector, html, ...)` to insert a
+ *      child into a shell body (drawer tab / widget / modal root). The
+ *      child inject's selector is resolved against the parent's element-map
+ *      ref via `querySelector` — which only finds a match if the parent's
+ *      INNER HTML has been populated first. So shell updates must fire
+ *      before non-shell injects that depend on them.
+ *
+ *   4. **Listeners + draggable wire last.** Every listener / drag wiring
  *      needs its target element already mounted.
  *
  * The final order:
@@ -31,8 +39,8 @@
  *     2. ls_input_bar_action_register         (listInputBarActionReplayMessages)
  *     3. ls_drawer_tab_register + set_badge   (listDrawerTabReplayMessages)
  *     4. ls_float_widget_create + move + set_visible  (listFloatWidgetReplayMessages)
- *     5. dom_inject / dom_inject_at_message   (listElementInjectMessages)
- *     6. dom_update for shells                (listShellUpdateMessages)
+ *     5. dom_update for shells                (listShellUpdateMessages)
+ *     6. dom_inject / dom_inject_at_message   (listElementInjectMessages)
  *     7. dom_listen                           (listListenerReplayMessages)
  *     8. dom_make_draggable                   (listDraggableReplayMessages)
  *
@@ -71,12 +79,12 @@ import {
  */
 export function buildReplayMessages(): BackendToFrontend[] {
   return [
-    ...listStyleReplayMessages(),            // 1. CSS first
+    ...listStyleReplayMessages(),            // 1. CSS first (avoids FOUC)
     ...listInputBarActionReplayMessages(),   // 2. Host-UI: popover rows
-    ...listDrawerTabReplayMessages(),        // 3. Host-UI: sidebar tabs (+ shells)
-    ...listFloatWidgetReplayMessages(),      // 4. Host-UI: overlay widgets (+ shells)
-    ...listElementInjectMessages(),          // 5. Standalone DOM injections
-    ...listShellUpdateMessages(),            // 6. Fill in tab / widget body HTML
+    ...listDrawerTabReplayMessages(),        // 3. Host-UI: sidebar tabs (+ shells registered)
+    ...listFloatWidgetReplayMessages(),      // 4. Host-UI: overlay widgets (+ shells registered)
+    ...listShellUpdateMessages(),            // 5. Fill tab / widget body HTML (so children below resolve)
+    ...listElementInjectMessages(),          // 6. Standalone + shell-scoped DOM injections
     ...listListenerReplayMessages(),         // 7. Re-attach event listeners
     ...listDraggableReplayMessages(),        // 8. Re-wire makeDraggable
   ];

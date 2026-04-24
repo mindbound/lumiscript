@@ -57,6 +57,8 @@ export function isBuiltinName(name: string): boolean {
 
 import { createComponentsLibrary } from './builtins/components.js';
 import { createCouncilPromptLibrary } from './builtins/council-prompt.js';
+import { createIconsLibrary } from './builtins/icons.js';
 
 registerBuiltin('ls:components',      createComponentsLibrary);
 registerBuiltin('ls:council-prompt',  createCouncilPromptLibrary);
+registerBuiltin('ls:icons',           createIconsLibrary);

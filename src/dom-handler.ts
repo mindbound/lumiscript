@@ -242,17 +242,71 @@ export function installDOMHandler(
     switch (msg.type) {
       // ── Inject ─────────────────────────────────────────────────────
       case 'dom_inject': {
-        const { scriptId, elementId, target, html, position, stableId } = msg;
+        const { scriptId, elementId, target, html, position, stableId, parentElementId } = msg;
+
+        // Defensive idempotency guard. Replay on `frontend_ready` shouldn't
+        // hit a pre-populated elementMap in normal flow (frontend is fresh
+        // after mount), but if `frontend_ready` ever double-fires (dev HMR
+        // quirks, rapid extension toggles) or the backend accidentally
+        // double-emits, we'd otherwise insert the same element twice and
+        // overwrite the elementMap ref, leaving the earlier element
+        // orphaned in the DOM. Skip silently with a warn — the existing
+        // entry is still valid and script ops routed via elementId will
+        // still resolve correctly.
+        if (elementMap.has(elementId)) {
+          console.warn(`[LumiScript] dom_inject: elementId "${elementId}" already in elementMap — skipping duplicate insert`);
+          break;
+        }
 
         // Wrap HTML in a scoped container
         const wrappedHtml = `<div data-ls-script="${scriptId}" data-ls-el="${elementId}">${html}</div>`;
 
-        const el = ctx.dom.inject(target, wrappedHtml, position as InsertPosition);
-        elementMap.set(elementId, el);
-        elementScripts.set(elementId, scriptId);
+        let el: Element | null = null;
 
-        if (stableId) {
-          stableIndex.set(stableKey(scriptId, stableId), elementId);
+        if (parentElementId) {
+          // ── Scoped inject (from `DOMHandle.injectChild`) ───────────
+          // Resolve `target` relative to the parent element via the
+          // element-map ref, not via `document.querySelector`. This is
+          // the key affordance: `elementMap` holds the parent's ref
+          // even while the parent is orphaned (drawer tab not yet
+          // clicked, modal body pre-mount), so scripts can populate
+          // their UI at startup instead of waiting for user activation.
+          const parent = elementMap.get(parentElementId);
+          if (!parent) {
+            console.warn(
+              `[LumiScript] dom_inject: parentElementId "${parentElementId}" not in elementMap — drop`,
+            );
+            break;
+          }
+          const targetEl = parent.querySelector(target);
+          if (!targetEl) {
+            console.warn(
+              `[LumiScript] dom_inject: selector "${target}" not found within parent "${parentElementId}" — drop`,
+            );
+            break;
+          }
+          // Manual insert to mirror Spindle's wrapper nesting. `ctx.dom.inject`
+          // uses `document.querySelector` which can't resolve inside orphaned
+          // subtrees, so we can't delegate to it on this path. Note: this
+          // bypasses the host's DOMPurify pass — acceptable here because
+          // the content originates from user-written script code (already
+          // trusted in LumiScript's model); the outer `data-ls-script` attr
+          // still applies for scoped-CSS isolation via `@scope`.
+          const spindleWrapper = document.createElement('div');
+          spindleWrapper.setAttribute('data-spindle-ext', '');
+          spindleWrapper.innerHTML = wrappedHtml;
+          targetEl.insertAdjacentElement(position as InsertPosition, spindleWrapper);
+          el = spindleWrapper;
+        } else {
+          el = ctx.dom.inject(target, wrappedHtml, position as InsertPosition);
+        }
+
+        if (el) {
+          elementMap.set(elementId, el);
+          elementScripts.set(elementId, scriptId);
+          if (stableId) {
+            stableIndex.set(stableKey(scriptId, stableId), elementId);
+          }
         }
         break;
       }

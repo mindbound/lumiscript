@@ -678,6 +678,7 @@ export const createComponentsLibrary: BuiltinLibraryFactory = (api) => {
       remove: handle.remove.bind(handle),
       on: handle.on.bind(handle),
       makeDraggable: handle.makeDraggable.bind(handle),
+      injectChild: handle.injectChild.bind(handle),
       isCollapsed: () => collapsed,
       setCollapsed(next: boolean) {
         collapsed = next;
@@ -859,6 +860,7 @@ export const createComponentsLibrary: BuiltinLibraryFactory = (api) => {
       remove: handle.remove.bind(handle),
       on: handle.on.bind(handle),
       makeDraggable: handle.makeDraggable.bind(handle),
+      injectChild: handle.injectChild.bind(handle),
       setValue(newValue: number, newLabel?: string): void {
         if (newLabel !== undefined) currentLabel = newLabel;
         handle.update(buildProgressHtml(
