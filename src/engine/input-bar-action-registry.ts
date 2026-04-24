@@ -12,8 +12,14 @@
  *
  * Lifecycle:
  *   - `registerAction` records an entry + its initial label/enabled state.
- *     Rejects duplicates with a clear error (the caller — `api.ui` builder
- *     — pre-checks the stack limit before calling this).
+ *     Same-(scriptId, actionId) re-registration replaces the entry (and
+ *     clears its old click handlers — stale closures from a prior script
+ *     run). Matches `tool-store` and `macro-store`: silent replace for
+ *     same-script re-registration so trigger scripts can be called
+ *     naively from events like `SETTINGS_UPDATED` without bespoke handle
+ *     management. The key scheme (`${scriptId}:${actionId}`) makes
+ *     cross-script collision impossible at the registry level — two
+ *     scripts may share an `actionId` without conflict.
  *   - `destroyAction` drops the entry and returns the click handlers that
  *     were registered on it, so the caller can clear them explicitly. The
  *     frontend does its own cleanup on `ls_input_bar_action_destroy`.
@@ -24,9 +30,11 @@
  *     disable / delete teardown paths).
  *
  * Unlike tools and macros, input-bar actions do NOT participate in the
- * per-execution auto-stale diff pattern — they're explicitly registered
- * once per session (not re-declared on every script re-run) and persist
- * until `destroy()` or teardown.
+ * per-execution auto-stale diff pattern — the registry doesn't track
+ * "which actions did this run declare" and prune the rest. Replace-on-
+ * re-register is enough for the common trigger-invocation pattern; if a
+ * script stops declaring an action, the leftover entry disappears on
+ * script disable / delete via `clearByScript`.
  */
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -51,11 +59,21 @@ function key(scriptId: string, actionId: string): string {
 // ─── Action lifecycle ────────────────────────────────────────────────────────
 
 /**
- * Register a new action. Called synchronously from the API builder before
- * the `ls_input_bar_action_register` message is sent to the frontend.
+ * Register a new action, or replace an existing one with the same
+ * `(scriptId, actionId)` key. Called synchronously from the API builder
+ * before the `ls_input_bar_action_register` message is sent to the
+ * frontend (which itself destroys + recreates the host button when it
+ * sees a duplicate key).
  *
- * Throws if `(scriptId, actionId)` is already registered — mirrors the
- * first-wins ownership policy used by tools / macros.
+ * Replace semantics:
+ *   - Old click handlers are CLEARED — they're closures from a prior
+ *     script run and the user's re-register expresses a fresh handle.
+ *   - `label` and `enabled` come from the new call (effectively an
+ *     in-place `setLabel` + `setEnabled`).
+ *
+ * Matches `tool-store.addTool` and `macro-store.addMacro` for the
+ * trigger-re-invocation case. The key includes `scriptId`, so
+ * cross-script collision isn't a possibility at this layer.
  */
 export function registerAction(
   scriptId: string,
@@ -64,12 +82,6 @@ export function registerAction(
   enabled: boolean,
 ): InputBarActionEntry {
   const k = key(scriptId, actionId);
-  if (actions.has(k)) {
-    throw new Error(
-      `api.ui.registerInputBarAction: duplicate action id "${actionId}" for this script. ` +
-      `Call handle.destroy() before re-registering.`,
-    );
-  }
   const entry: InputBarActionEntry = {
     scriptId,
     actionId,
@@ -79,6 +91,15 @@ export function registerAction(
   };
   actions.set(k, entry);
   return entry;
+}
+
+/**
+ * Whether an action with this `(scriptId, actionId)` is already live.
+ * Used by the API builder to gate the stack-limit pre-check: a replace
+ * shouldn't count against the limit since it doesn't add a new entry.
+ */
+export function hasAction(scriptId: string, actionId: string): boolean {
+  return actions.has(key(scriptId, actionId));
 }
 
 /**

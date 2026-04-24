@@ -545,6 +545,84 @@ interface UtilsAPI {
      */
     registerHelper(name: string, fn: (...args: unknown[]) => unknown): void;
   };
+
+  /**
+   * Lumiverse macro resolution (\`{{char}}\`, \`{{user}}\`, \`{{getvar::key}}\`,
+   * \`{{roll::2d6}}\`, etc.). Thin wrapper over \`spindle.macros.resolve\`.
+   *
+   * Unlike \`api.utils.template.render\`, this is macro-only — no Handlebars
+   * pass — so use this when you want to preview what a template WOULD render
+   * to without triggering side-effecting macros (via \`commit: false\`).
+   */
+  macros: {
+    /**
+     * Resolve all macros in a template string.
+     *
+     * \`commit: false\` requests a dry resolve; well-behaved extension macro
+     * handlers skip side effects (disk writes, event emissions). Default:
+     * \`commit: true\` (matches normal prompt-assembly behaviour).
+     *
+     * @example
+     * const { text, diagnostics } = await api.utils.macros.resolve(
+     *   'Current turn: {{@turn}}. {{incvar::turn}}',
+     *   { commit: false },
+     * );
+     */
+    resolve(
+      template: string,
+      options?: MacrosResolveOptions,
+    ): Promise<MacrosResolveResult>;
+  };
+
+  /**
+   * Image-byte utilities, primarily intended to ease \`api.characters.setAvatar\`
+   * workflows. No permission required. Cheap byte-level helpers, not a canvas
+   * replacement — no format conversion or resize/crop (setAvatar normalises).
+   */
+  image: {
+    /**
+     * Detect an image's MIME type from the first few bytes (magic-byte sniff).
+     * Returns \`null\` for unrecognised or truncated input. Recognises PNG,
+     * JPEG, WebP, GIF (87a + 89a), BMP.
+     * @example
+     * const mime = api.utils.image.detectMime(bytes) ?? 'image/png';
+     * await api.characters.setAvatar(charId, { data: bytes, mimeType: mime });
+     */
+    detectMime(bytes: Uint8Array): string | null;
+
+    /**
+     * Parse a \`data:<mime>;base64,<payload>\` URL into bytes + MIME.
+     * Returns \`null\` for malformed input or non-base64 data URIs.
+     */
+    dataUrlToBytes(url: string): { data: Uint8Array; mimeType: string } | null;
+
+    /**
+     * Encode bytes + a MIME type into a \`data:<mime>;base64,<payload>\` URL.
+     * Useful for previewing proposed avatars or embedding in generated HTML.
+     */
+    bytesToDataUrl(bytes: Uint8Array, mimeType: string): string;
+  };
+}
+
+/** Options for \`api.utils.macros.resolve\`. */
+interface MacrosResolveOptions {
+  /** Chat ID for context-sensitive macros. Defaults to the active chat. */
+  chatId?: string;
+  /** Character ID for character macros. Inferred from the active chat if omitted. */
+  characterId?: string;
+  /**
+   * When \`false\`, requests a dry / non-committing resolve — well-behaved
+   * extension macro handlers skip side effects. Default: \`true\`.
+   */
+  commit?: boolean;
+}
+
+/** Result returned by \`api.utils.macros.resolve\`. */
+interface MacrosResolveResult {
+  /** Resolved template text. */
+  text: string;
+  /** Diagnostics from the macro engine. */
+  diagnostics: Array<{ message: string; offset: number; length: number }>;
 }
 
 // ─── UI API ───────────────────────────────────────────────────────────────────
@@ -619,6 +697,73 @@ interface UIAPI {
    * if (text !== null) { // user submitted }
    */
   editText(title?: string, value?: string, options?: { placeholder?: string }): Promise<string | null>;
+
+  /**
+   * Open a DOM-owned modal — script has full control of the body via the
+   * returned handle's \`root\` (a \`DOMHandle\`). Requires app_manipulation
+   * permission. Host limit: 2 modals per extension.
+   * @example
+   * const modal = api.ui.showAdvancedModal({ title: 'Details', width: 520 });
+   * modal.root.update(\`<div class="stats">Loading…</div>\`);
+   * modal.onDismiss(reason => console.log('closed:', reason));
+   */
+  showAdvancedModal(options: AdvancedModalOptions): AdvancedModalHandle;
+
+  /**
+   * Show a popover context menu at the given screen coordinates. Resolves with
+   * the \`key\` of the selected item, or \`null\` if the user dismissed the menu.
+   * @example
+   * handle.on('contextmenu', async (data) => {
+   *   const key = await api.ui.showContextMenu({
+   *     position: { x: 200, y: 300 },
+   *     items: [
+   *       { key: 'edit', label: 'Edit' },
+   *       { key: 'delete', label: 'Delete', danger: true },
+   *     ],
+   *   });
+   *   if (key === 'delete') { ... }
+   * });
+   */
+  showContextMenu(options: ShowContextMenuOptions): Promise<string | null>;
+
+  /**
+   * Register an action in the chat input bar's Extras popover. Returns a
+   * handle for subsequent setLabel / setEnabled / onClick / destroy calls.
+   * Same-id re-registration silently replaces the existing entry — safe to
+   * call from recurring event handlers (e.g. SETTINGS_UPDATED).
+   * Host limits: 4 per extension, 12 global.
+   * @example
+   * const action = api.ui.registerInputBarAction({
+   *   id: 'summarize', label: 'Summarize chat', iconSvg: '<svg>...</svg>',
+   * });
+   * action.onClick(() => { ... });
+   */
+  registerInputBarAction(options: InputBarActionOptions): InputBarActionHandle;
+
+  /**
+   * Create a draggable floating widget over the chat viewport. The body DOM
+   * is fully script-owned via \`handle.root\`. Requires ui_panels permission.
+   * Host limit: 2 widgets per script, 8 global.
+   * @example
+   * const w = api.ui.createFloatWidget({ width: 200, height: 80, initialPosition: { x: 100, y: 100 } });
+   * w.root.update(\`<div>Hello</div>\`);
+   * w.onDragEnd(pos => console.log('dropped at', pos));
+   */
+  createFloatWidget(options: FloatWidgetOptions): FloatWidgetHandle;
+
+  /**
+   * Register a tab in the ViewportDrawer sidebar. The tab body is script-owned
+   * via \`handle.root\`. Automatically appears in the command palette (Ctrl+K).
+   * LumiScript enforces at most 1 drawer tab per script.
+   * @example
+   * const tab = api.ui.registerDrawerTab({
+   *   id: 'dashboard', title: 'Script Dashboard', shortName: 'Dash',
+   *   iconSvg: '<svg>...</svg>',
+   * });
+   * tab.root.update(\`<div class="dash">…</div>\`);
+   * tab.onActivate(() => { ... });
+   */
+  registerDrawerTab(options: DrawerTabOptions): DrawerTabHandle;
 
   /**
    * Send an OS-level push notification to the user's devices.
@@ -754,6 +899,232 @@ interface ModalHandle {
   close(): Promise<void>;
 }
 
+// ─── Advanced modal (DOM-owned body) ─────────────────────────────────────────
+
+/**
+ * Options for \`api.ui.showAdvancedModal()\`.
+ *
+ * Unlike \`showModal()\`, which renders a structured item list, advanced modals
+ * give the script full control over the body via a \`DOMHandle\` returned on
+ * \`handle.root\`.
+ */
+interface AdvancedModalOptions {
+  /** Modal header title. Required. */
+  title: string;
+  /** Width in pixels. Default: 420. Clamped to viewport by the host. */
+  width?: number;
+  /** Maximum height in pixels. Default: 520. Clamped to viewport by the host. */
+  maxHeight?: number;
+  /**
+   * When \`true\`, clicking the backdrop no longer dismisses the modal — the
+   * user must use the close button, or the script must call \`dismiss()\`.
+   */
+  persistent?: boolean;
+}
+
+/**
+ * Why an advanced modal was dismissed.
+ *
+ * - \`'user'\` — user clicked the close button, the backdrop, or pressed Escape.
+ * - \`'script'\` — the script called \`handle.dismiss()\`.
+ * - \`'teardown'\` — the script was disabled or deleted while the modal was open.
+ */
+type AdvancedModalDismissReason = 'user' | 'script' | 'teardown';
+
+/**
+ * Handle returned by \`api.ui.showAdvancedModal()\`. Scripts own the modal body
+ * via \`root\` — a \`DOMHandle\` bound to the modal's content container.
+ * Host-enforced limit: 2 modals per extension.
+ */
+interface AdvancedModalHandle {
+  /** UUID identifying this modal instance. Available synchronously. */
+  readonly modalId: string;
+  /** \`DOMHandle\` bound to the modal's content container. */
+  readonly root: DOMHandle;
+  /** Has the modal been dismissed? Flips to true on any dismissal path. */
+  readonly dismissed: boolean;
+  /** Update the modal header title. */
+  setTitle(title: string): void;
+  /** Close the modal programmatically. Safe to call after dismissal (no-op). */
+  dismiss(): void;
+  /**
+   * Register a handler that fires once when the modal is dismissed. Receives
+   * the dismissal reason. Returns an unsubscribe function. If already
+   * dismissed, the handler fires on the next microtask.
+   */
+  onDismiss(handler: (reason: AdvancedModalDismissReason) => void): () => void;
+}
+
+// ─── Context menu (request-response) ─────────────────────────────────────────
+
+/** A single entry in \`api.ui.showContextMenu()\`'s items array. */
+interface ContextMenuItem {
+  /** Stable key returned when this item is selected. Required. */
+  key: string;
+  /** Display text. Ignored when \`type === 'divider'\`. */
+  label: string;
+  /** Entry type. Default: 'item'. */
+  type?: 'item' | 'divider';
+  /** Greyed out and not clickable. Default: false. */
+  disabled?: boolean;
+  /** Rendered in red / danger style. Default: false. */
+  danger?: boolean;
+  /** Highlighted to indicate current selection. Default: false. */
+  active?: boolean;
+}
+
+/** Options for \`api.ui.showContextMenu()\`. */
+interface ShowContextMenuOptions {
+  /** Screen coordinates to anchor the menu. Typically from a pointer event. */
+  position: { x: number; y: number };
+  /** Menu entries. */
+  items: ContextMenuItem[];
+}
+
+// ─── Input bar actions (lifecycle) ───────────────────────────────────────────
+
+/** Options for \`api.ui.registerInputBarAction()\`. */
+interface InputBarActionOptions {
+  /**
+   * Unique identifier within your script. Used by the handle for subsequent
+   * calls — pick something stable. Same-id re-registration silently replaces
+   * the existing entry and clears old click handlers.
+   */
+  id: string;
+  /** Display label shown in the Extras popover row. */
+  label: string;
+  /** Inline SVG string (sanitized). Rendered at 14x14. */
+  iconSvg?: string;
+  /** URL to an icon image. Takes precedence over \`iconSvg\`. */
+  iconUrl?: string;
+  /** When false, the action is hidden from the popover. Default: true. */
+  enabled?: boolean;
+}
+
+/**
+ * Handle returned by \`api.ui.registerInputBarAction()\`. Actions appear in the
+ * Extras popover on the chat input bar. Host-enforced limits: 4 per extension,
+ * 12 global.
+ */
+interface InputBarActionHandle {
+  /** The action's identifier — the same \`id\` passed in options. */
+  readonly actionId: string;
+  /** Update the display label. Safe to call after destroy (no-op). */
+  setLabel(label: string): void;
+  /** Show or hide the action. Disabled actions are hidden, not greyed. */
+  setEnabled(enabled: boolean): void;
+  /**
+   * Register a click handler. Multiple handlers fan out. Returns an
+   * unsubscribe function. The Extras popover auto-closes after a click.
+   */
+  onClick(handler: () => void): () => void;
+  /** Remove the action and clear all click handlers. Idempotent. */
+  destroy(): void;
+}
+
+// ─── Float widgets (lifecycle, DOM-owned) ────────────────────────────────────
+
+/** Options for \`api.ui.createFloatWidget()\`. */
+interface FloatWidgetOptions {
+  /** Widget width in pixels. */
+  width: number;
+  /** Widget height in pixels. */
+  height: number;
+  /** Starting position in viewport coordinates. */
+  initialPosition?: { x: number; y: number };
+  /** Snap to the nearest screen edge after drag. Default: false. */
+  snapToEdge?: boolean;
+  /** Hover tooltip text. */
+  tooltip?: string;
+  /**
+   * Strip default container chrome (border, background, shadow, radius).
+   * The script fully owns presentation via \`handle.root\` + \`addStyle\`.
+   */
+  chromeless?: boolean;
+}
+
+/**
+ * Handle returned by \`api.ui.createFloatWidget()\`. Float widgets are small
+ * draggable overlays. The body DOM is fully script-owned via \`handle.root\`.
+ * Host-enforced limit: 2 widgets per script, 8 global.
+ */
+interface FloatWidgetHandle {
+  /** UUID identifying this widget instance. */
+  readonly widgetId: string;
+  /** \`DOMHandle\` bound to the widget's content container. */
+  readonly root: DOMHandle;
+  /** Move the widget to new viewport coordinates. */
+  moveTo(x: number, y: number): void;
+  /** Current cached position. May briefly lag host clamps. */
+  getPosition(): { x: number; y: number };
+  /** Show or hide the widget. */
+  setVisible(visible: boolean): void;
+  /** Current cached visibility state. */
+  isVisible(): boolean;
+  /**
+   * Register a handler fired after the user completes a drag gesture.
+   * Returns an unsubscribe function. Multiple handlers supported.
+   */
+  onDragEnd(handler: (pos: { x: number; y: number }) => void): () => void;
+  /** Remove the widget. Idempotent — subsequent calls are no-ops. */
+  destroy(): void;
+}
+
+// ─── Drawer tabs (lifecycle, DOM-owned) ──────────────────────────────────────
+
+/** Options for \`api.ui.registerDrawerTab()\`. */
+interface DrawerTabOptions {
+  /** Unique identifier within your script. Pick something stable. */
+  id: string;
+  /**
+   * Full display title. Shown in the panel header and the command palette
+   * listing (Ctrl+K).
+   */
+  title: string;
+  /**
+   * Short label rendered beneath the sidebar icon. Keep to ~8 characters;
+   * longer values are truncated. Defaults to a truncation of \`title\`.
+   */
+  shortName?: string;
+  /** One-line description shown in the command palette. */
+  description?: string;
+  /** Extra terms for command-palette fuzzy search. */
+  keywords?: string[];
+  /** Title shown in the panel header navbar. Defaults to \`title\`. */
+  headerTitle?: string;
+  /** Inline SVG string for the sidebar icon. Rendered at 20x20. */
+  iconSvg?: string;
+  /** URL to an icon image. Mutually exclusive with \`iconSvg\`. */
+  iconUrl?: string;
+}
+
+/**
+ * Handle returned by \`api.ui.registerDrawerTab()\`. Drawer tabs live in the
+ * ViewportDrawer sidebar and automatically appear in the command palette.
+ * LumiScript enforces at most 1 drawer tab per script.
+ */
+interface DrawerTabHandle {
+  /** The tab's identifier — the same \`id\` passed in options. */
+  readonly tabId: string;
+  /** \`DOMHandle\` bound to the tab's content container. */
+  readonly root: DOMHandle;
+  /** Update the full title. */
+  setTitle(title: string): void;
+  /** Update the sidebar icon label. */
+  setShortName(shortName: string): void;
+  /** Show a badge next to the tab icon. Pass \`null\` to clear. */
+  setBadge(text: string | null): void;
+  /** Programmatically switch the drawer to this tab. */
+  activate(): void;
+  /**
+   * Register a handler fired when the user switches to this tab. Returns an
+   * unsubscribe function.
+   */
+  onActivate(handler: () => void): () => void;
+  /** Remove the tab. Idempotent — subsequent calls are no-ops. */
+  destroy(): void;
+}
+
 // ─── Files API ────────────────────────────────────────────────────────────────
 
 interface FileStatResult {
@@ -844,6 +1215,16 @@ interface CharacterCreateInput {
 }
 interface CharacterUpdateInput extends Partial<CharacterCreateInput> {}
 
+/** Payload for \`api.characters.setAvatar()\`. */
+interface CharacterAvatarUpload {
+  /** Raw avatar image bytes. Source via http, files, enclave, etc. */
+  data: Uint8Array;
+  /** Optional filename — preserves the file extension when stored. */
+  filename?: string;
+  /** Optional content type. Defaults to \`image/png\` on the host side. */
+  mimeType?: string;
+}
+
 interface CharactersAPI {
   /** List characters (paginated). Requires characters permission. */
   list(options?: { limit?: number; offset?: number }): Promise<{ data: Character[]; total: number }>;
@@ -858,6 +1239,18 @@ interface CharactersAPI {
   getByName(name: string): Promise<Character | null>;
   /** Create a new character. Requires characters permission. */
   create(input: CharacterCreateInput): Promise<Character>;
+  /**
+   * Replace a character's avatar image. Accepts raw bytes; the host handles
+   * storage and image-ID assignment. Useful for image-gen integrations,
+   * external fetches, or bulk avatar application. Pair with
+   * \`api.utils.image.detectMime\` for unknown-source bytes.
+   * Requires characters permission.
+   * @example
+   * const bytes = new Uint8Array(await (await fetch(url)).arrayBuffer());
+   * const mimeType = api.utils.image.detectMime(bytes) ?? 'image/png';
+   * await api.characters.setAvatar(charId, { data: bytes, mimeType });
+   */
+  setAvatar(id: string, avatar: CharacterAvatarUpload): Promise<Character>;
   /** Update a character. Requires characters permission. */
   update(id: string, input: CharacterUpdateInput): Promise<Character>;
   /** Delete a character by ID. Requires characters permission. */
@@ -995,6 +1388,58 @@ interface ToolInvocationArgs {
   __deadlineMs?: number;
   [key: string]: unknown;
 }
+
+/**
+ * Personality snapshot of the Council member that triggered a tool invocation.
+ * Populated on \`ToolInvocationContext.councilMember\` only for Council paths.
+ */
+interface CouncilMemberContext {
+  /** Unique Council member id (Council settings row id). */
+  memberId: string;
+  /** Source Lumia item id this member is backed by. */
+  itemId: string;
+  /** Pack id the Lumia item lives in. */
+  packId: string;
+  /** Pack name the Lumia item lives in. */
+  packName: string;
+  /** Display name of the Lumia item (also used as the member name). */
+  name: string;
+  /** Freeform role description (e.g. "Plot Enforcer"). */
+  role: string;
+  /** Probability (0-100) that this member participates in each generation. */
+  chance: number;
+  /** Relative URL to the member's avatar, or null. */
+  avatarUrl: string | null;
+  /** Lumia "definition" field — physical/identity description. */
+  definition: string;
+  /** Lumia "personality" field. */
+  personality: string;
+  /** Lumia "behavior" field — behavioural patterns. */
+  behavior: string;
+  /** Gender identity marker (0=unspecified, 1=feminine, 2=masculine). */
+  genderIdentity: 0 | 1 | 2;
+}
+
+/**
+ * Third argument to tool handlers — invocation context delivered by the host.
+ * Populated on Lumiverse hosts with spindle-types 0.4.18+; undefined on older.
+ */
+interface ToolInvocationContext {
+  /**
+   * Council-member snapshot when the tool was invoked via a Council cycle.
+   * Undefined for inline function-calling, \`api.tools.invoke()\`, or older hosts.
+   * Pass this to \`buildCouncilMessages\` from \`ls:council-prompt\`.
+   */
+  councilMember?: CouncilMemberContext;
+  /**
+   * Structured chat context for Council invocations — same content as
+   * \`args.context\` but with role boundaries preserved. Prefer this over the
+   * flattened string when available. Requires host commit 993544c8+ / spindle-
+   * types 0.4.26+; undefined on older hosts.
+   */
+  contextMessages?: LLMMessage[];
+}
+
 interface ToolDefinition {
   /** Human-readable name shown in the Council tools list. */
   display_name: string;
@@ -1005,7 +1450,11 @@ interface ToolDefinition {
   /** When true, the tool appears in Lumiverse's Council tools list. Default: false. */
   council_eligible?: boolean;
 }
-type ToolHandler = (args: ToolInvocationArgs, api: LumiScriptAPI) => string | Promise<string>;
+type ToolHandler = (
+  args: ToolInvocationArgs,
+  api: LumiScriptAPI,
+  ctx?: ToolInvocationContext,
+) => string | Promise<string>;
 interface RegisteredToolInfo {
   name: string; display_name: string; description: string;
   parameters?: Record<string, unknown>; council_eligible: boolean;
@@ -1198,6 +1647,263 @@ interface EventsAPI {
   getLatestState(keys: string[]): Promise<Record<string, unknown>>;
 }
 
+// ─── Macros API ──────────────────────────────────────────────────────────────
+
+/** Parameter passed to a pull-mode macro handler at resolution time. */
+interface MacroContext {
+  /** The bare macro name (no \`{{}}\`, no arguments). */
+  name: string;
+  /** Argument tokens parsed from the macro invocation. */
+  args: string[];
+  /** Environment context populated by the macro engine. */
+  env?: {
+    character?: { id?: string; name?: string; [k: string]: unknown };
+    chat?:      { id?: string; [k: string]: unknown };
+    names?:     { char?: string; user?: string; [k: string]: unknown };
+    variables?: { local?: Record<string, string>; global?: Record<string, string> };
+    [k: string]: unknown;
+  };
+  /** True when resolved inside a scoped block (e.g. \`{{if::…}}…{{/if}}\`). */
+  isScoped?: boolean;
+  /** Body text for scoped macros. */
+  body?: string;
+}
+
+type MacroHandler = (ctx: MacroContext) => string | Promise<string>;
+
+interface MacroDefinition {
+  /** Human-readable description shown in preset editors and macro browsers. */
+  description: string;
+  /** Category label. Default: 'extension:lumiscript:user'. */
+  category?: string;
+  /** Return-type hint for value coercion. Default string. */
+  returnType?: 'string' | 'integer' | 'number' | 'boolean';
+  /** Argument schema shown to preset authors. */
+  args?: { name: string; description?: string; required?: boolean }[];
+}
+
+/** Returned by api.macros.list(). */
+interface RegisteredMacroInfo {
+  name: string;
+  description: string;
+  category: string;
+  returnType?: 'string' | 'integer' | 'number' | 'boolean';
+  args?: { name: string; description?: string; required?: boolean }[];
+  /** Push = registered without handler (value set via updateValue). Pull = handler-backed. */
+  mode: 'push' | 'pull';
+  /** Most recent value pushed via updateValue. Only meaningful in push mode. */
+  lastValue?: string;
+  scriptId: string;
+  scriptName: string;
+}
+
+/**
+ * Register Lumiverse macros from scripts. Two modes:
+ *  - **Push** (no handler) — set values via \`updateValue(name, value)\`.
+ *  - **Pull** (with handler) — computed at resolution time.
+ *
+ * No permission required. Reserved LS-internal names (\`lumiScriptActive\`,
+ * the 7 char-var macros + aliases) can't be overwritten.
+ */
+interface MacrosAPI {
+  /**
+   * Register a macro.
+   * @example
+   * // Push mode:
+   * api.macros.register('playerMood', { description: 'Current mood' });
+   * api.macros.updateValue('playerMood', 'curious');
+   * @example
+   * // Pull mode:
+   * api.macros.register('randomLine', { description: 'Random flavor' }, (ctx) => {
+   *   return pickRandomLine(ctx.args[0]);
+   * });
+   */
+  register(name: string, def: MacroDefinition, handler?: MacroHandler): void;
+  /** Push a new value for a push-mode macro. Throws if the macro is pull-mode. */
+  updateValue(name: string, value: string): void;
+  /** Unregister a macro owned by this script. No-op if not found or not owned. */
+  unregister(name: string): void;
+  /** List all currently registered macros across all scripts. */
+  list(): RegisteredMacroInfo[];
+}
+
+// ─── Tokens API ──────────────────────────────────────────────────────────────
+
+/** Options accepted by every \`api.tokens.*\` method. */
+interface TokenCountOptions {
+  /** Explicit model name (overrides modelSource). */
+  model?: string;
+  /** Which LLM profile's tokenizer to use. Default: 'main'. */
+  modelSource?: 'main' | 'sidecar';
+}
+
+/** Shape returned by every \`api.tokens.*\` method. */
+interface TokenCountResult {
+  totalTokens: number;
+  model: string;
+  modelSource: 'main' | 'sidecar';
+  tokenizerId: string;
+  tokenizerName: string;
+  /** \`true\` when no tokenizer matched; count fell back to char/4 heuristic. */
+  approximate: boolean;
+}
+
+/**
+ * Server-side token counting using the provider's actual tokenizer.
+ * Free-tier. Falls back to char/4 heuristic with \`approximate: true\`
+ * when no tokenizer matches the selected connection.
+ */
+interface TokensAPI {
+  /**
+   * Count tokens in an arbitrary string.
+   * @example
+   * const { totalTokens } = await api.tokens.countText(prompt);
+   */
+  countText(text: string, options?: TokenCountOptions): Promise<TokenCountResult>;
+  /**
+   * Count tokens across an array of \`{ role, content }\` messages — accepts
+   * the output of \`api.chat.getMessages()\` directly.
+   */
+  countMessages(messages: LLMMessage[], options?: TokenCountOptions): Promise<TokenCountResult>;
+  /** Count tokens for a live stored chat by ID. */
+  countChat(chatId: string, options?: TokenCountOptions): Promise<TokenCountResult>;
+}
+
+// ─── DB API ──────────────────────────────────────────────────────────────────
+
+/**
+ * Record shape produced by \`api.db.*\`. Every inserted record carries
+ * auto-generated \`id\` + \`createdAt\` / \`updatedAt\` timestamps. \`id\` and
+ * \`createdAt\` are immutable — \`update()\` silently strips them from the
+ * patch. \`updatedAt\` bumps to Date.now() on every successful update.
+ */
+interface DbRecord {
+  id: string;
+  createdAt: number;
+  updatedAt: number;
+  [key: string]: unknown;
+}
+
+/** Scope of a collection — determines the storage path + lifetime. */
+type DbScope = 'script' | 'character' | 'chat';
+
+/**
+ * Filter shapes accepted by find / findOne / update / delete / count:
+ *
+ *   - \`undefined\` → matches all records.
+ *   - function \`(r) => boolean\` → caller predicate.
+ *   - object (literal) \`Partial<T>\` → deep-equality with dot-notation
+ *     path resolution. \`{ 'author.name': 'alice' }\` works on nested fields.
+ *   - object (operator envelope) \`{ field: { $op: arg, ... } }\` — all keys
+ *     inside the envelope must start with \`$\`. Mixed-key envelopes throw.
+ *
+ * Supported operators (LumiScript 0.20.0+):
+ *   - \`$eq\` / \`$ne\` — structural (in)equality.
+ *   - \`$gt\` / \`$gte\` / \`$lt\` / \`$lte\` — numeric comparison (type-mismatch = false, never throws).
+ *   - \`$in\` / \`$nin\` — membership / non-membership in an array.
+ *   - \`$exists: true | false\` — field presence (null counts as present).
+ *   - \`$regex\` — string pattern. Accepts a \`RegExp\` instance OR
+ *     \`{ $regex: 'pat', $options?: 'i' }\`. Direct \`RegExp\` value is
+ *     also accepted as a shorthand: \`{ name: /alice/i }\`.
+ */
+type DbFilter<T = DbRecord> =
+  | undefined
+  | Partial<T>
+  | ((record: T) => boolean);
+
+interface CollectionOpts<T extends DbRecord = DbRecord> {
+  /** Scope of the collection. Defaults to 'script'. */
+  scope?: DbScope;
+  /**
+   * Optional Zod (or any \`parse(data): T\`) schema applied on every write —
+   * insert / insertMany / update. On update the MERGED record is validated,
+   * not the raw patch. Reserved fields are preserved even when Zod's
+   * default object-schema strips unknown keys. \`find\` / \`findOne\` /
+   * \`count\` / \`query\` are NOT validated — schema evolution is drop + re-insert.
+   */
+  schema?: ZodLike<T>;
+}
+
+interface Collection<T extends DbRecord = DbRecord> {
+  /**
+   * Insert one record. Auto-assigns id / createdAt / updatedAt.
+   * @example
+   * await rolls.insert({ notation: '1d20+3', total: 18 });
+   */
+  insert(record: Omit<T, 'id' | 'createdAt' | 'updatedAt'> & Partial<Pick<T, 'id' | 'createdAt' | 'updatedAt'>>): Promise<T>;
+  /**
+   * Batch-insert N records with a single file-write. All share the same
+   * timestamp (batch-commit semantic). Atomic: if schema/size guard rejects
+   * any record, nothing lands. Fires one \`ls:collection:inserted\` event
+   * per record in insertion order. (0.20.0+)
+   * @example
+   * await rolls.insertMany([
+   *   { notation: '1d20+3', total: 18 },
+   *   { notation: '2d6',    total:  7 },
+   * ]);
+   */
+  insertMany(records: Array<Omit<T, 'id' | 'createdAt' | 'updatedAt'> & Partial<Pick<T, 'id' | 'createdAt' | 'updatedAt'>>>): Promise<T[]>;
+  /**
+   * Find all records matching the filter. \`undefined\` matches all.
+   * Filter accepts literal partials, function predicates, or operator
+   * envelopes — see DbFilter.
+   * @example
+   * await rolls.find({ margin: { $gt: 0 }, tier: { $in: ['hard', 'very_hard'] } });
+   */
+  find(filter?: DbFilter<T>): Promise<T[]>;
+  /** Find the first record matching the filter. Returns null on no match. */
+  findOne(filter: DbFilter<T>): Promise<T | null>;
+  /**
+   * Update matching records with the given patch. Returns count.
+   * id / createdAt / updatedAt cannot be overwritten — stripped silently.
+   * updatedAt bumps to Date.now() on every match.
+   */
+  update(filter: DbFilter<T>, patch: Partial<T>): Promise<number>;
+  /** Delete matching records. Returns count. */
+  delete(filter: DbFilter<T>): Promise<number>;
+  /** Count matching records (or all if filter omitted). */
+  count(filter?: DbFilter<T>): Promise<number>;
+  /** Remove all records, leaving an empty collection file. */
+  clear(): Promise<void>;
+  /**
+   * Run a jsonquery string against the full collection. Escape hatch for
+   * aggregations / sorts / projections beyond the filter model.
+   * @example
+   * await rolls.query('groupBy(.difficultyTier) | mapValues(size())');
+   */
+  query<R = unknown>(jsonQuery: string): Promise<R>;
+}
+
+/**
+ * JSON-file-backed micro-DB namespace. Collections are owner-scoped by
+ * scriptId — scripts cannot see or mutate other scripts' collections.
+ * No permission required. Size governance: soft-warn at 10 MB, hard-stop
+ * at 50 MB per collection.
+ */
+interface DbAPI {
+  /**
+   * Open or create a collection. Path resolves at creation and is baked
+   * into the handle. Throws if the scope requires context the script
+   * lacks (e.g. \`scope: 'chat'\` with no active chat).
+   * @example
+   * const rolls = await api.db.collection('dice-rolls', {
+   *   scope: 'character',
+   *   schema: z.object({ notation: z.string(), total: z.number().int() }),
+   * });
+   */
+  collection<T extends DbRecord = DbRecord>(name: string, opts?: CollectionOpts<T>): Promise<Collection<T>>;
+  /** List collection names in the given scope (default 'script'). Owner-scoped. */
+  list(scope?: DbScope): Promise<string[]>;
+  /** Delete a collection entirely. No-op if it doesn't exist. */
+  drop(name: string, scope?: DbScope): Promise<void>;
+  /**
+   * O(1) existence check for a collection file. Does NOT load or parse.
+   * Ownership-safe — only sees this script's own collections.
+   * (0.20.0+)
+   */
+  exists(name: string, scope?: DbScope): Promise<boolean>;
+}
+
 // ─── Top-level API ────────────────────────────────────────────────────────────
 
 interface LumiScriptAPI {
@@ -1228,6 +1934,12 @@ interface LumiScriptAPI {
   commands: CommandsAPI;
   /** Persistent event tracking (track, query, replay). Requires event_tracking permission. */
   events: EventsAPI;
+  /** Register custom Lumiverse macros for use in prompt templates. No permission required. */
+  macros: MacrosAPI;
+  /** Token counting for prompt-budget planning. No permission required. */
+  tokens: TokensAPI;
+  /** JSON-file-backed micro-DB. Owner-scoped collections, no permission required. */
+  db: DbAPI;
 }
 
 interface ScriptNamespace {
@@ -1250,6 +1962,91 @@ interface ScriptNamespace {
   require(nameOrId: string): Promise<unknown>;
   /** Type-safe overload for the built-in components library. */
   require(nameOrId: 'ls:components'): Promise<LSComponentsExports>;
+  /** Type-safe overload for the built-in council-prompt library. */
+  require(nameOrId: 'ls:council-prompt'): Promise<LSCouncilPromptExports>;
+}
+
+// ─── Built-in library: ls:council-prompt ────────────────────────────────────
+
+/** Options for \`buildCouncilSystemPrompt\` from \`ls:council-prompt\`. */
+interface CouncilSystemPromptOptions {
+  /**
+   * Council member snapshot. Unwrap from \`ctx.councilMember\` — this helper is
+   * only meaningful when the tool was invoked via a Council execution cycle.
+   */
+  councilMember: CouncilMemberContext;
+  /** Tool display-name + description + optional per-tool prompt directive. */
+  tool: {
+    display_name: string;
+    description: string;
+    /** Tool-specific directive appended after the description. */
+    prompt?: string;
+  };
+  /** Per-tool word budget. Pass 0 or omit to skip the brevity note. */
+  maxWordsPerTool?: number;
+  /** Whether the tool may direct the user-character's actions. Default false. */
+  allowUserControl?: boolean;
+  /**
+   * Additional text appended after \`tool.prompt\`, before the brevity note.
+   * Include your own leading \`\\n\\n\` if you want paragraph separation.
+   */
+  dynamicSuffix?: string;
+}
+
+/** Options for \`buildCouncilMessages\` from \`ls:council-prompt\`. */
+interface CouncilMessagesOptions extends CouncilSystemPromptOptions {
+  /** Tool invocation args. Used as a fallback source of chat context. */
+  args: ToolInvocationArgs;
+  /**
+   * Structured chat context from \`ToolInvocationContext.contextMessages\`.
+   * Preferred when available (preserves role boundaries for better voice
+   * continuity). Requires Lumiverse host 993544c8+ / spindle-types 0.4.26+.
+   */
+  contextMessages?: LLMMessage[];
+}
+
+/**
+ * Exports of the \`ls:council-prompt\` built-in library. Helpers for building
+ * Council-voice system prompts and message arrays that mirror Lumiverse's
+ * built-in sidecar Council tool prompt construction.
+ * @example
+ * const { buildCouncilMessages } = await script.require('ls:council-prompt');
+ * api.tools.register('analyze_tone', def, async (args, api, ctx) => {
+ *   if (!ctx?.councilMember) return await api.llm.generate([{ role: 'user', content: args.context ?? '' }]);
+ *   const messages = buildCouncilMessages({
+ *     councilMember: ctx.councilMember,
+ *     contextMessages: ctx.contextMessages,
+ *     args,
+ *     tool: { display_name: 'Tone Analyzer', description: 'Analyze emotional tone.' },
+ *     maxWordsPerTool: 100,
+ *   });
+ *   return await api.llm.generate(messages);
+ * });
+ */
+interface LSCouncilPromptExports {
+  /** Member identity block — "WHO YOU ARE" + "INSTRUCTION" when personality fields exist. */
+  buildCouncilIdentity(councilMember: CouncilMemberContext): string;
+  /** Role-note line for the given member, or empty string when role is blank. */
+  roleNote(councilMember: CouncilMemberContext): string;
+  /** Brevity directive for the given word budget, or empty string when 0. */
+  brevityNote(maxWords: number): string;
+  /** User-control guidance block. Pass false to get the "do not direct" note. */
+  userControlNote(allow: boolean): string;
+  /** Full Council-voice system prompt. Composes the blocks above + tool spec. */
+  buildCouncilSystemPrompt(options: CouncilSystemPromptOptions): string;
+  /**
+   * Assemble the full Council-voice message array (system + context + user).
+   * Pass directly to \`api.llm.generate()\`.
+   */
+  buildCouncilMessages(options: CouncilMessagesOptions): LLMMessage[];
+  /** Debug pretty-printers. Return framed strings safe to \`console.log\`. */
+  debug: {
+    formatMember(councilMember: CouncilMemberContext): string;
+    formatIdentity(councilMember: CouncilMemberContext): string;
+    formatSystemPrompt(options: CouncilSystemPromptOptions): string;
+    formatMessages(options: CouncilMessagesOptions): string;
+    formatReport(options: CouncilMessagesOptions): string;
+  };
 }
 
 // ─── Built-in library: ls:components ────────────────────────────────────────

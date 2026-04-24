@@ -53,6 +53,7 @@ import {
 } from '../advanced-modal-registry.js';
 import {
   registerAction,
+  hasAction,
   countByScript as countActionsByScript,
   updateLabel as updateActionLabel,
   updateEnabled as updateActionEnabled,
@@ -343,25 +344,35 @@ export function buildUIAPI(deps: APIBuildDeps): Omit<LumiScriptAPI['ui'], 'dom'>
         throw new Error('api.ui.registerInputBarAction: options.id must be a non-empty string.');
       }
 
-      // ── Pre-check stack limit ────────────────────────────────────────
-      // Host enforces ≤ 4 per extension; we pre-check here so the overflow
-      // surfaces as a synchronous throw with a clear message instead of a
-      // silent no-op on the frontend.
-      const live = countActionsByScript(scriptId);
-      if (live >= INPUT_BAR_ACTION_STACK_LIMIT) {
-        throw new Error(
-          `api.ui.registerInputBarAction: stack limit reached (${INPUT_BAR_ACTION_STACK_LIMIT} actions open for this script).` +
-          ` Call destroy() on an existing action before registering another.`,
-        );
-      }
-
       const actionId = options.id;
       const label    = options.label;
       const enabled  = options.enabled !== false;  // default: true
 
-      // Registers in the backend registry. Throws on duplicate (scriptId,
-      // actionId) — first-wins ownership policy mirroring tools / macros.
-      // Done BEFORE sending the frontend message so a rejected registration
+      // ── Pre-check stack limit ────────────────────────────────────────
+      // Host enforces ≤ 4 per extension; we pre-check here so the overflow
+      // surfaces as a synchronous throw with a clear message instead of a
+      // silent no-op on the frontend.
+      //
+      // Skip the check when this is a REPLACE — re-registering an action
+      // that's already live for this script doesn't grow the stack, so
+      // the limit shouldn't reject it. Matters for trigger-script patterns
+      // that call registerInputBarAction from a recurring event handler
+      // (e.g. SETTINGS_UPDATED) while at or near the limit.
+      const isReplace = hasAction(scriptId, actionId);
+      if (!isReplace) {
+        const live = countActionsByScript(scriptId);
+        if (live >= INPUT_BAR_ACTION_STACK_LIMIT) {
+          throw new Error(
+            `api.ui.registerInputBarAction: stack limit reached (${INPUT_BAR_ACTION_STACK_LIMIT} actions open for this script).` +
+            ` Call destroy() on an existing action before registering another.`,
+          );
+        }
+      }
+
+      // Register (or replace) in the backend registry. Same-(scriptId,
+      // actionId) re-registration overwrites the entry and clears old
+      // click handlers — matches tool-store / macro-store behaviour. Done
+      // BEFORE sending the frontend message so a rejected registration
       // never leaks a live action to the host.
       registerAction(scriptId, actionId, label, enabled);
 
