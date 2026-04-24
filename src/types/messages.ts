@@ -39,6 +39,24 @@ export interface VariablesSnapshot {
 // ─── Frontend → Backend ───────────────────────────────────────────────────────
 
 export type FrontendToBackend =
+  | {
+      /**
+       * Emitted by the frontend as the very first message on mount — before
+       * `get_scripts` / `get_settings` / etc. — so the backend knows the
+       * React tree is live and ready to receive outbound register messages.
+       *
+       * Two paths on the backend side:
+       *   - First-ever arrival (`triggersInitialized: false`): normal cold
+       *     start — load storage, init triggers, fire `ls:startup`. User
+       *     scripts register their UI as usual.
+       *   - Subsequent arrivals (`triggersInitialized: true`): browser
+       *     refresh. The backend worker is still alive with all registries
+       *     populated; replay every live registration to the newly-mounted
+       *     frontend so actions / tabs / widgets / DOM come back without
+       *     re-running user-script code.
+       */
+      type: 'frontend_ready';
+    }
   | { type: 'get_scripts' }
   | { type: 'get_settings' }
   | { type: 'get_active_context' }

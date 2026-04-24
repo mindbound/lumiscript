@@ -58,6 +58,7 @@ import {
   isValidCollectionPath,
 } from './engine/db-admin.js';
 import { on as busOn } from './engine/broadcast-bus.js';
+import { buildReplayMessages } from './engine/replay.js';
 
 // ─── Active user + permission tracking ───────────────────────────────────────
 
@@ -380,6 +381,12 @@ spindle.onFrontendMessage(async (raw, userId) => {
   // passes because neither sync step reads the active-context state — bindings
   // only fire on subsequent Lumiverse events, by which point the awaited
   // context has already landed.
+  //
+  // `justInitialized` captures whether THIS invocation ran the cold-start
+  // block, so the `frontend_ready` handler below can distinguish cold start
+  // (nothing to replay — scripts haven't registered yet) from a refresh
+  // reconnect (worker survived, registries populated, replay required).
+  const justInitialized = !triggersInitialized;
   if (!triggersInitialized) {
     triggersInitialized = true;
     const contextPromise = refreshActiveContext(activeUserId);
@@ -398,6 +405,26 @@ spindle.onFrontendMessage(async (raw, userId) => {
 
   try {
     switch (msg.type) {
+      // ── Frontend lifecycle ──────────────────────────────────────────────
+      case 'frontend_ready': {
+        // On cold start, the init block above this switch already ran and
+        // registries are still empty (user scripts register asynchronously
+        // via `ls:startup`). Nothing to replay.
+        //
+        // On reconnect (browser refresh — worker survived), `triggersInitialized`
+        // was already true when this handler started, so `justInitialized` is
+        // false. Walk the per-registry replay builders and re-emit every
+        // live registration so input-bar actions, drawer tabs, float widgets,
+        // and DOM injections come back without user-script code re-running.
+        //
+        // Modals + in-flight prompt()/confirm()/showContextMenu() do NOT
+        // replay — refresh is treated as user-interrupt on those (correct UX).
+        if (!justInitialized) {
+          for (const replayMsg of buildReplayMessages()) send(replayMsg);
+        }
+        break;
+      }
+
       // ── Read ────────────────────────────────────────────────────────────
       case 'get_scripts': {
         pushScripts();

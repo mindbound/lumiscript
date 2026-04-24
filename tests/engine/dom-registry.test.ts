@@ -11,6 +11,13 @@ import {
   registerStyle,
   unregisterStyle,
   cleanupScript,
+  updateElementHtml,
+  setDraggable,
+  listStyleReplayMessages,
+  listElementInjectMessages,
+  listShellUpdateMessages,
+  listListenerReplayMessages,
+  listDraggableReplayMessages,
   __reset,
 } from '../../src/engine/dom-registry.js';
 
@@ -206,5 +213,252 @@ describe('cleanupScript', () => {
     const result = cleanupScript('nonexistent');
     expect(result.elementIds).toEqual([]);
     expect(result.styleIds).toEqual([]);
+  });
+});
+
+// ─── updateElementHtml / setDraggable — new helpers ─────────────────────────
+
+describe('updateElementHtml', () => {
+  test('updates lastHtml on a selector-kind element', () => {
+    registerElement('e1', 's1', undefined, {
+      kind: 'selector', target: '#root', position: 'beforeend', initialHtml: '<div/>',
+    });
+    expect(getElement('e1')!.lastHtml).toBe('<div/>');
+    updateElementHtml('e1', '<span>new</span>');
+    expect(getElement('e1')!.lastHtml).toBe('<span>new</span>');
+  });
+
+  test('updates lastHtml on a shell element (starts undefined)', () => {
+    registerElement('e1', 's1');
+    expect(getElement('e1')!.lastHtml).toBeUndefined();
+    updateElementHtml('e1', '<p>content</p>');
+    expect(getElement('e1')!.lastHtml).toBe('<p>content</p>');
+  });
+
+  test('no-ops on unknown element', () => {
+    expect(() => updateElementHtml('ghost', '<x/>')).not.toThrow();
+  });
+});
+
+describe('setDraggable', () => {
+  test('flags element as draggable, stores handle selector', () => {
+    registerElement('e1', 's1');
+    setDraggable('e1', '.titlebar');
+    const entry = getElement('e1')!;
+    expect(entry.draggable).toBe(true);
+    expect(entry.draggableHandleSelector).toBe('.titlebar');
+  });
+
+  test('handle selector is optional', () => {
+    registerElement('e1', 's1');
+    setDraggable('e1');
+    expect(getElement('e1')!.draggable).toBe(true);
+    expect(getElement('e1')!.draggableHandleSelector).toBeUndefined();
+  });
+});
+
+// ─── listStyleReplayMessages ─────────────────────────────────────────────────
+
+describe('listStyleReplayMessages', () => {
+  test('empty registry returns []', () => {
+    expect(listStyleReplayMessages()).toEqual([]);
+  });
+
+  test('emits one dom_add_style per style with cached css', () => {
+    registerStyle('s1', 'script1', '.a { color: red }');
+    registerStyle('s2', 'script1', '.b { color: blue }');
+    const msgs = listStyleReplayMessages();
+    expect(msgs).toHaveLength(2);
+
+    for (const m of msgs) {
+      if (m.type !== 'dom_add_style') throw new Error('unreachable');
+      expect(m.scriptId).toBe('script1');
+      expect(['.a { color: red }', '.b { color: blue }']).toContain(m.css);
+    }
+  });
+
+  test('styles without cached css are skipped (legacy entries)', () => {
+    registerStyle('s1', 'script1'); // no css — legacy
+    registerStyle('s2', 'script1', '.b { }');
+    const msgs = listStyleReplayMessages();
+    expect(msgs).toHaveLength(1);
+    const m = msgs[0]!;
+    if (m.type !== 'dom_add_style') throw new Error('unreachable');
+    expect(m.styleId).toBe('s2');
+  });
+
+  test('unregistered styles disappear from replay', () => {
+    registerStyle('s1', 'script1', '.a {}');
+    unregisterStyle('s1');
+    expect(listStyleReplayMessages()).toEqual([]);
+  });
+});
+
+// ─── listElementInjectMessages ───────────────────────────────────────────────
+
+describe('listElementInjectMessages', () => {
+  test('empty registry returns []', () => {
+    expect(listElementInjectMessages()).toEqual([]);
+  });
+
+  test('emits dom_inject for selector-kind elements using lastHtml', () => {
+    registerElement('e1', 'script1', 'stable-a', {
+      kind: 'selector', target: '#root', position: 'beforeend', initialHtml: '<div>initial</div>',
+    });
+    updateElementHtml('e1', '<div>updated</div>');
+
+    const msgs = listElementInjectMessages();
+    expect(msgs).toHaveLength(1);
+    const m = msgs[0]!;
+    if (m.type !== 'dom_inject') throw new Error('unreachable');
+    expect(m.scriptId).toBe('script1');
+    expect(m.elementId).toBe('e1');
+    expect(m.target).toBe('#root');
+    expect(m.html).toBe('<div>updated</div>');
+    expect(m.position).toBe('beforeend');
+    expect(m.stableId).toBe('stable-a');
+  });
+
+  test('emits dom_inject_at_message for message-kind elements', () => {
+    registerElement('e1', 'script1', undefined, {
+      kind: 'message', messageId: 'msg-uuid', messagePosition: 'footer', initialHtml: '<p>hi</p>',
+    });
+
+    const msgs = listElementInjectMessages();
+    expect(msgs).toHaveLength(1);
+    const m = msgs[0]!;
+    if (m.type !== 'dom_inject_at_message') throw new Error('unreachable');
+    expect(m.messageId).toBe('msg-uuid');
+    expect(m.position).toBe('footer');
+    expect(m.html).toBe('<p>hi</p>');
+  });
+
+  test('shell-kind elements are excluded from inject replay', () => {
+    registerElement('shell1', 'script1'); // default kind 'shell'
+    registerElement('e1', 'script1', undefined, {
+      kind: 'selector', target: '#r', position: 'beforeend', initialHtml: '<div/>',
+    });
+
+    const msgs = listElementInjectMessages();
+    expect(msgs).toHaveLength(1);
+    const m = msgs[0]!;
+    if (m.type !== 'dom_inject') throw new Error('unreachable');
+    expect(m.elementId).toBe('e1');
+  });
+
+  test('elements without lastHtml are skipped', () => {
+    // This models a pathological state — selector element registered but
+    // never sent HTML. Shouldn't happen in practice, but guards against
+    // emitting a broken dom_inject with undefined html.
+    registerElement('e1', 'script1', undefined, {
+      kind: 'selector', target: '#r', position: 'beforeend',
+    });
+    expect(listElementInjectMessages()).toEqual([]);
+  });
+});
+
+// ─── listShellUpdateMessages ─────────────────────────────────────────────────
+
+describe('listShellUpdateMessages', () => {
+  test('empty registry returns []', () => {
+    expect(listShellUpdateMessages()).toEqual([]);
+  });
+
+  test('emits dom_update for shell elements with lastHtml', () => {
+    registerElement('shell1', 'script1'); // default kind 'shell'
+    updateElementHtml('shell1', '<div>tab body</div>');
+
+    const msgs = listShellUpdateMessages();
+    expect(msgs).toHaveLength(1);
+    const m = msgs[0]!;
+    if (m.type !== 'dom_update') throw new Error('unreachable');
+    expect(m.elementId).toBe('shell1');
+    expect(m.html).toBe('<div>tab body</div>');
+  });
+
+  test('shells without lastHtml are skipped (never content-pushed)', () => {
+    registerElement('shell1', 'script1');
+    // no updateElementHtml
+    expect(listShellUpdateMessages()).toEqual([]);
+  });
+
+  test('non-shell elements are excluded from shell-update replay', () => {
+    registerElement('e1', 'script1', undefined, {
+      kind: 'selector', target: '#r', position: 'beforeend', initialHtml: '<div/>',
+    });
+    expect(listShellUpdateMessages()).toEqual([]);
+  });
+});
+
+// ─── listListenerReplayMessages ──────────────────────────────────────────────
+
+describe('listListenerReplayMessages', () => {
+  test('empty registry returns []', () => {
+    expect(listListenerReplayMessages()).toEqual([]);
+  });
+
+  test('emits dom_listen per (elementId, listenerId) pair', () => {
+    registerElement('e1', 'script1');
+    registerElement('e2', 'script1');
+    addListener('e1', 'l1', 'click', () => {});
+    addListener('e1', 'l2', 'input', () => {});
+    addListener('e2', 'l3', 'click', () => {});
+
+    const msgs = listListenerReplayMessages();
+    expect(msgs).toHaveLength(3);
+
+    const keys = msgs.map(m => {
+      if (m.type !== 'dom_listen') throw new Error('unreachable');
+      return `${m.elementId}:${m.listenerId}:${m.event}`;
+    }).sort();
+    expect(keys).toEqual([
+      'e1:l1:click',
+      'e1:l2:input',
+      'e2:l3:click',
+    ]);
+  });
+
+  test('cleared listeners do not appear in replay', () => {
+    registerElement('e1', 'script1');
+    addListener('e1', 'l1', 'click', () => {});
+    clearListeners('e1');
+    expect(listListenerReplayMessages()).toEqual([]);
+  });
+});
+
+// ─── listDraggableReplayMessages ─────────────────────────────────────────────
+
+describe('listDraggableReplayMessages', () => {
+  test('empty registry returns []', () => {
+    expect(listDraggableReplayMessages()).toEqual([]);
+  });
+
+  test('emits dom_make_draggable for each flagged element', () => {
+    registerElement('e1', 'script1');
+    registerElement('e2', 'script1');
+    setDraggable('e1', '.handle');
+    setDraggable('e2');  // no handle selector
+
+    const msgs = listDraggableReplayMessages();
+    expect(msgs).toHaveLength(2);
+
+    const byElement = new Map(msgs.map(m => {
+      if (m.type !== 'dom_make_draggable') throw new Error('unreachable');
+      return [m.elementId, m];
+    }));
+
+    const e1 = byElement.get('e1')!;
+    if (e1.type !== 'dom_make_draggable') throw new Error('unreachable');
+    expect(e1.handleSelector).toBe('.handle');
+
+    const e2 = byElement.get('e2')!;
+    if (e2.type !== 'dom_make_draggable') throw new Error('unreachable');
+    expect(e2.handleSelector).toBeUndefined();
+  });
+
+  test('non-draggable elements are excluded', () => {
+    registerElement('e1', 'script1');
+    // never called setDraggable
+    expect(listDraggableReplayMessages()).toEqual([]);
   });
 });

@@ -1,10 +1,10 @@
-import type { SpindleFrontendContext, SpindleDockPanelHandle } from 'lumiverse-spindle-types';
+import type { SpindleFrontendContext } from 'lumiverse-spindle-types';
 import { StrictMode } from 'react';
-import { createRoot, type Root } from 'react-dom/client';
+import { createRoot } from 'react-dom/client';
 import { PANEL_CSS } from './components/styles/index.js';
 import { LumiScriptPanel } from './components/LumiScriptPanel.js';
 import { SettingsPanel } from './components/settings/SettingsPanel.js';
-import type { BackendToFrontend, FrontendToBackend } from './types/messages.js';
+import type { FrontendToBackend } from './types/messages.js';
 import { installDOMHandler } from './dom-handler.js';
 import { installModalHandler } from './modal-handler.js';
 import { installContextMenuHandler } from './context-menu-handler.js';
@@ -111,71 +111,50 @@ export function setup(ctx: SpindleFrontendContext) {
   const cleanupDrawerTabs = installDrawerTabHandler(ctx, virtualOnBackendMessage, sendToBackend);
   cleanups.push(cleanupDrawerTabs);
 
+  // ─── Frontend-ready signal ──────────────────────────────────────────────
+  // Fire AFTER every sub-handler above has subscribed to the message bus,
+  // so any replay messages the backend fans out in response are guaranteed
+  // to reach a subscribed handler. Replay messages are routed by `type`
+  // (dom_*, ls_input_bar_action_register, ls_drawer_tab_register, etc.),
+  // so every installXxxHandler above must have run first.
+  //
+  // The backend distinguishes two cases:
+  //   - First-ever `frontend_ready` (`triggersInitialized: false`): cold
+  //     start. Load storage, init triggers, fire `ls:startup`. User scripts
+  //     register their UI as usual — registries are empty before this.
+  //   - Subsequent `frontend_ready` (`triggersInitialized: true`): browser
+  //     refresh. Replay every live registry entry so actions, tabs,
+  //     widgets, and DOM content come back without user-script code
+  //     re-running.
+  sendToBackend({ type: 'frontend_ready' });
+
   // ─── Dock Panel ─────────────────────────────────────────────────────────
-  // The edge (left/right) is controlled by `LumiScriptSettings.dockPanelEdge`,
-  // which changes live: when the user flips the setting, the current panel is
-  // destroyed and a fresh one is requested on the new edge. React state inside
-  // the panel is reset — acceptable because the user is in the Settings panel
-  // (not the LS panel) at the moment they change this. Settings arrive
-  // asynchronously via `settings_updated`, so we mount with the default edge
-  // at setup time and remount once if the stored value differs.
-  let currentPanel: SpindleDockPanelHandle | null = null;
-  let currentRoot:  Root                    | null = null;
-  let currentEdge:  'left' | 'right'               = 'right';
-
-  function mountDockPanel(edge: 'left' | 'right') {
-    // Teardown previous instance (if any) before claiming the new edge —
-    // the host enforces "1 dock panel per edge per extension" so we can't
-    // leave the old one live while requesting the new one.
-    if (currentRoot)  { try { currentRoot.unmount(); } catch { /* ignore */ } currentRoot  = null; }
-    if (currentPanel) { try { currentPanel.destroy(); } catch { /* ignore */ } currentPanel = null; }
-
-    currentPanel = ctx.ui.requestDockPanel({
-      edge,
-      title: 'LumiScript',
-      size: 420,
-      minSize: 280,
-      maxSize: 720,
-      resizable: true,
-      startCollapsed: true,
-    });
-    currentRoot = createRoot(currentPanel.root);
-    currentRoot.render(
-      <StrictMode>
-        <LumiScriptPanel
-          onBackendMessage={virtualOnBackendMessage}
-          sendToBackend={sendToBackend}
-        />
-      </StrictMode>,
-    );
-    currentEdge = edge;
-  }
-
-  // Initial mount with the default edge. If the user's stored setting is
-  // `'left'`, the subsequent `settings_updated` message below will trigger
-  // a one-time remount onto the correct edge (~100ms flash at cold start,
-  // acceptable cost).
-  mountDockPanel('right');
-
-  // Single cleanup covers whatever the current panel + root are at teardown
-  // time — remounting replaces these refs in place, so teardown always hits
-  // the live pair.
+  // We request `edge: 'right'` unconditionally — Lumiverse upstream
+  // (commit 4c3a2bd, Apr 2026) rewrites horizontal edges to the user's
+  // chosen side via the native Spindle Dock placement control, so an
+  // extension-level override would only compete with that setting.
+  const dockPanel = ctx.ui.requestDockPanel({
+    edge: 'right',
+    title: 'LumiScript',
+    size: 420,
+    minSize: 280,
+    maxSize: 720,
+    resizable: true,
+    startCollapsed: true,
+  });
+  const dockRoot = createRoot(dockPanel.root);
+  dockRoot.render(
+    <StrictMode>
+      <LumiScriptPanel
+        onBackendMessage={virtualOnBackendMessage}
+        sendToBackend={sendToBackend}
+      />
+    </StrictMode>,
+  );
   cleanups.push(() => {
-    if (currentRoot)  { try { currentRoot.unmount(); } catch { /* ignore */ } }
-    if (currentPanel) { try { currentPanel.destroy(); } catch { /* ignore */ } }
+    try { dockRoot.unmount();   } catch { /* ignore */ }
+    try { dockPanel.destroy();  } catch { /* ignore */ }
   });
-
-  // Re-mount on `dockPanelEdge` change. We subscribe to `settings_updated`
-  // and only act when the edge actually differs from what we mounted last —
-  // other setting changes (font size, autosave delay, etc.) don't need to
-  // tear down the dock panel.
-  const unsubDockSettings = virtualOnBackendMessage((raw) => {
-    const msg = raw as BackendToFrontend;
-    if (msg.type !== 'settings_updated') return;
-    const edge = msg.settings.dockPanelEdge === 'left' ? 'left' : 'right';
-    if (edge !== currentEdge) mountDockPanel(edge);
-  });
-  cleanups.push(unsubDockSettings);
 
   // ─── Settings Panel ──────────────────────────────────────────────────────
   const settingsMount = ctx.ui.mount('settings_extensions');

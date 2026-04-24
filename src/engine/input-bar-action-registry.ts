@@ -44,6 +44,10 @@ export interface InputBarActionEntry {
   actionId: string;
   label: string;
   enabled: boolean;
+  /** Inline SVG string (sanitized at render time). Set by the API at register. */
+  iconSvg?: string;
+  /** URL to an icon image. Takes precedence over `iconSvg` on the host side. */
+  iconUrl?: string;
   clickHandlers: Set<() => void>;
 }
 
@@ -80,6 +84,8 @@ export function registerAction(
   actionId: string,
   label: string,
   enabled: boolean,
+  iconSvg?: string,
+  iconUrl?: string,
 ): InputBarActionEntry {
   const k = key(scriptId, actionId);
   const entry: InputBarActionEntry = {
@@ -87,6 +93,8 @@ export function registerAction(
     actionId,
     label,
     enabled,
+    iconSvg,
+    iconUrl,
     clickHandlers: new Set(),
   };
   actions.set(k, entry);
@@ -226,6 +234,41 @@ export function clearByScript(scriptId: string): void {
   for (const [k, entry] of actions) {
     if (entry.scriptId === scriptId) actions.delete(k);
   }
+}
+
+// ─── Replay (frontend reconnect) ─────────────────────────────────────────────
+
+/**
+ * Build the list of `BackendToFrontend` messages that re-create every live
+ * input-bar action on a freshly-mounted frontend (e.g. after a browser
+ * refresh). Folds the current `label` / `enabled` / icons into a single
+ * `ls_input_bar_action_register` per entry — no follow-up `set_label` /
+ * `set_enabled` messages are needed because the register message already
+ * carries those fields.
+ *
+ * Insertion order is iteration order of the underlying Map, which matches
+ * registration order — preserves stable ordering in the frontend popover.
+ *
+ * Pure function: does not mutate the registry or send any messages. The
+ * caller in `backend.ts` is responsible for flushing the output via
+ * `spindle.sendToFrontend()`.
+ */
+export function listReplayMessages(): import('../types/messages.js').BackendToFrontend[] {
+  const out: import('../types/messages.js').BackendToFrontend[] = [];
+  for (const entry of actions.values()) {
+    out.push({
+      type: 'ls_input_bar_action_register',
+      scriptId: entry.scriptId,
+      actionId: entry.actionId,
+      options: {
+        label:   entry.label,
+        iconSvg: entry.iconSvg,
+        iconUrl: entry.iconUrl,
+        enabled: entry.enabled,
+      },
+    });
+  }
+  return out;
 }
 
 // ─── Test-only reset ─────────────────────────────────────────────────────────

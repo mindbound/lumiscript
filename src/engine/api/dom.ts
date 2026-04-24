@@ -30,6 +30,8 @@ import {
   removeListener,
   clearListeners,
   cleanupScript,
+  updateElementHtml,
+  setDraggable,
 } from '../dom-registry.js';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -66,6 +68,9 @@ export function createDOMHandle(elementId: string, deps: APIBuildDeps): DOMHandl
 
     update(html: string): void {
       gate();
+      // Keep the registry's `lastHtml` in sync so replay-on-reconnect
+      // restores the most recent content, not the initial one.
+      updateElementHtml(elementId, html);
       send({ type: 'dom_update', elementId, html });
     },
 
@@ -101,6 +106,9 @@ export function createDOMHandle(elementId: string, deps: APIBuildDeps): DOMHandl
 
     makeDraggable(handleSelector?: string): void {
       gate();
+      // Flag the entry as draggable so replay-on-reconnect can re-emit the
+      // same `dom_make_draggable` message after the element is re-injected.
+      setDraggable(elementId, handleSelector);
       send({ type: 'dom_make_draggable', elementId, handleSelector });
     },
   };
@@ -135,6 +143,7 @@ export function buildDOMAPI(deps: APIBuildDeps): LumiScriptAPI['ui']['dom'] {
           for (const { listenerId, event } of cleared) {
             send({ type: 'dom_unlisten', elementId: existingId, listenerId, event });
           }
+          updateElementHtml(existingId, html);
           send({ type: 'dom_update', elementId: existingId, html });
           return createHandle(existingId);
         }
@@ -142,7 +151,12 @@ export function buildDOMAPI(deps: APIBuildDeps): LumiScriptAPI['ui']['dom'] {
 
       // ── New injection ────────────────────────────────────────────────
       const elementId = nextId('de');
-      registerElement(elementId, scriptId, stableId);
+      registerElement(elementId, scriptId, stableId, {
+        kind: 'selector',
+        target,
+        position,
+        initialHtml: html,
+      });
       send({
         type: 'dom_inject',
         scriptId,
@@ -171,6 +185,7 @@ export function buildDOMAPI(deps: APIBuildDeps): LumiScriptAPI['ui']['dom'] {
           for (const { listenerId, event } of cleared) {
             send({ type: 'dom_unlisten', elementId: existingId, listenerId, event });
           }
+          updateElementHtml(existingId, html);
           send({ type: 'dom_update', elementId: existingId, html });
           return createHandle(existingId);
         }
@@ -178,7 +193,12 @@ export function buildDOMAPI(deps: APIBuildDeps): LumiScriptAPI['ui']['dom'] {
 
       // ── New injection ────────────────────────────────────────────────
       const elementId = nextId('de');
-      registerElement(elementId, scriptId, stableId);
+      registerElement(elementId, scriptId, stableId, {
+        kind: 'message',
+        messageId,
+        messagePosition: position,
+        initialHtml: html,
+      });
       send({
         type: 'dom_inject_at_message',
         scriptId,
@@ -194,7 +214,7 @@ export function buildDOMAPI(deps: APIBuildDeps): LumiScriptAPI['ui']['dom'] {
     addStyle(css: string): { remove(): void } {
       gate();
       const styleId = nextId('ds');
-      registerStyle(styleId, scriptId);
+      registerStyle(styleId, scriptId, css);
       send({ type: 'dom_add_style', scriptId, styleId, css });
 
       return {

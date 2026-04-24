@@ -75,6 +75,9 @@ import {
   countTotal as countTotalTabs,
   addActivateHandler,
   destroyTab,
+  updateTitle as updateTabTitle,
+  updateShortName as updateTabShortName,
+  updateBadge as updateTabBadge,
 } from '../drawer-tab-registry.js';
 
 /** Maximum concurrent advanced modals per extension (host-enforced). */
@@ -347,6 +350,8 @@ export function buildUIAPI(deps: APIBuildDeps): Omit<LumiScriptAPI['ui'], 'dom'>
       const actionId = options.id;
       const label    = options.label;
       const enabled  = options.enabled !== false;  // default: true
+      const iconSvg  = options.iconSvg;
+      const iconUrl  = options.iconUrl;
 
       // ── Pre-check stack limit ────────────────────────────────────────
       // Host enforces ≤ 4 per extension; we pre-check here so the overflow
@@ -374,7 +379,7 @@ export function buildUIAPI(deps: APIBuildDeps): Omit<LumiScriptAPI['ui'], 'dom'>
       // click handlers — matches tool-store / macro-store behaviour. Done
       // BEFORE sending the frontend message so a rejected registration
       // never leaks a live action to the host.
-      registerAction(scriptId, actionId, label, enabled);
+      registerAction(scriptId, actionId, label, enabled, iconSvg, iconUrl);
 
       spindle.sendToFrontend({
         type: 'ls_input_bar_action_register',
@@ -382,8 +387,8 @@ export function buildUIAPI(deps: APIBuildDeps): Omit<LumiScriptAPI['ui'], 'dom'>
         actionId,
         options: {
           label,
-          iconSvg: options.iconSvg,
-          iconUrl: options.iconUrl,
+          iconSvg,
+          iconUrl,
           enabled,
         },
       });
@@ -452,17 +457,21 @@ export function buildUIAPI(deps: APIBuildDeps): Omit<LumiScriptAPI['ui'], 'dom'>
       const widgetId      = crypto.randomUUID();
       const rootElementId = nextDOMId('fw');
 
-      // Seed position cache with the requested initial position. The host
-      // may place elsewhere on first mount if `initialPosition` is omitted;
-      // the first drag-end echo will correct the cache when that happens.
-      const initialX = options.initialPosition?.x ?? 0;
-      const initialY = options.initialPosition?.y ?? 0;
-
       // Register in both registries BEFORE sending the create message so
       // any follow-up DOM op fired synchronously after this call resolves
-      // the elementId correctly.
+      // the elementId correctly. The widget registry seeds its position
+      // cache from `options.initialPosition` — the host may place elsewhere
+      // on first mount if that's omitted, and the first drag-end echo
+      // corrects the cache when that happens.
       registerElement(rootElementId, scriptId);
-      registerWidget(widgetId, rootElementId, scriptId, initialX, initialY);
+      registerWidget(widgetId, rootElementId, scriptId, {
+        width:           options.width,
+        height:          options.height,
+        initialPosition: options.initialPosition,
+        snapToEdge:      options.snapToEdge,
+        tooltip:         options.tooltip,
+        chromeless:      options.chromeless,
+      });
 
       // ── Construct the handle ───────────────────────────────────────────
       const root = createDOMHandle(rootElementId, deps);
@@ -563,7 +572,20 @@ export function buildUIAPI(deps: APIBuildDeps): Omit<LumiScriptAPI['ui'], 'dom'>
       // Register both entries BEFORE sending the create message so any
       // synchronous follow-up DOM op on `.root` finds the elementId.
       registerElement(rootElementId, scriptId);
-      registerTab(scriptId, tabId, rootElementId);   // throws on duplicate
+      registerTab(
+        scriptId,
+        tabId,
+        rootElementId,
+        options.title,
+        options.shortName,
+        {
+          description: options.description,
+          keywords:    options.keywords,
+          headerTitle: options.headerTitle,
+          iconSvg:     options.iconSvg,
+          iconUrl:     options.iconUrl,
+        },
+      );   // throws on duplicate
 
       // ── Construct the handle ─────────────────────────────────────────
       const root = createDOMHandle(rootElementId, deps);
@@ -575,14 +597,17 @@ export function buildUIAPI(deps: APIBuildDeps): Omit<LumiScriptAPI['ui'], 'dom'>
         root,
         setTitle(title: string): void {
           if (destroyed) return;
+          if (!updateTabTitle(scriptId, tabId, title)) return;
           spindle.sendToFrontend({ type: 'ls_drawer_tab_set_title', scriptId, tabId, title });
         },
         setShortName(shortName: string): void {
           if (destroyed) return;
+          if (!updateTabShortName(scriptId, tabId, shortName)) return;
           spindle.sendToFrontend({ type: 'ls_drawer_tab_set_short_name', scriptId, tabId, shortName });
         },
         setBadge(text: string | null): void {
           if (destroyed) return;
+          if (!updateTabBadge(scriptId, tabId, text)) return;
           spindle.sendToFrontend({ type: 'ls_drawer_tab_set_badge', scriptId, tabId, badge: text });
         },
         activate(): void {

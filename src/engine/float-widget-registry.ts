@@ -27,10 +27,25 @@
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
+/**
+ * Static widget options captured at register time (never mutated). Live state
+ * — x / y / visible — rides on the entry itself.
+ */
+export interface FloatWidgetRegisterOptions {
+  width: number;
+  height: number;
+  initialPosition?: { x: number; y: number };
+  snapToEdge?: boolean;
+  tooltip?: string;
+  chromeless?: boolean;
+}
+
 export interface FloatWidgetEntry {
   widgetId: string;
   rootElementId: string;
   scriptId: string;
+  /** Frozen options from the original create call. Needed for replay. */
+  options: FloatWidgetRegisterOptions;
   x: number;
   y: number;
   visible: boolean;
@@ -61,13 +76,15 @@ export function registerWidget(
   widgetId: string,
   rootElementId: string,
   scriptId: string,
-  initialX: number,
-  initialY: number,
+  options: FloatWidgetRegisterOptions,
 ): FloatWidgetEntry {
+  const initialX = options.initialPosition?.x ?? 0;
+  const initialY = options.initialPosition?.y ?? 0;
   const entry: FloatWidgetEntry = {
     widgetId,
     rootElementId,
     scriptId,
+    options,
     x: initialX,
     y: initialY,
     visible: true,
@@ -184,6 +201,62 @@ export function liveWidgetsByScript(scriptId: string): string[] {
     }
   }
   return ids;
+}
+
+// ─── Replay (frontend reconnect) ─────────────────────────────────────────────
+
+/**
+ * Build the list of `BackendToFrontend` messages that re-create every live
+ * float widget on a freshly-mounted frontend.
+ *
+ * Per live (non-destroyed) entry:
+ *   - One `ls_float_widget_create` with the original register options.
+ *   - An `ls_float_widget_move` iff the cached `(x, y)` differs from the
+ *     initial position requested in options — preserves the user's dragged
+ *     placement across refresh.
+ *   - An `ls_float_widget_set_visible` iff the widget is currently hidden
+ *     (`visible: true` is the default so we skip the message in that case).
+ *
+ * Destroyed entries (awaiting `dropEntry`) are skipped — replay matches
+ * the live state observable via the handle's `getPosition` / `isVisible`.
+ */
+export function listReplayMessages(): import('../types/messages.js').BackendToFrontend[] {
+  const out: import('../types/messages.js').BackendToFrontend[] = [];
+  for (const entry of widgets.values()) {
+    if (entry.destroyed) continue;
+    out.push({
+      type: 'ls_float_widget_create',
+      scriptId: entry.scriptId,
+      widgetId: entry.widgetId,
+      rootElementId: entry.rootElementId,
+      options: {
+        width:           entry.options.width,
+        height:          entry.options.height,
+        initialPosition: entry.options.initialPosition,
+        snapToEdge:      entry.options.snapToEdge,
+        tooltip:         entry.options.tooltip,
+        chromeless:      entry.options.chromeless,
+      },
+    });
+    const initialX = entry.options.initialPosition?.x ?? 0;
+    const initialY = entry.options.initialPosition?.y ?? 0;
+    if (entry.x !== initialX || entry.y !== initialY) {
+      out.push({
+        type: 'ls_float_widget_move',
+        widgetId: entry.widgetId,
+        x: entry.x,
+        y: entry.y,
+      });
+    }
+    if (!entry.visible) {
+      out.push({
+        type: 'ls_float_widget_set_visible',
+        widgetId: entry.widgetId,
+        visible: false,
+      });
+    }
+  }
+  return out;
 }
 
 // ─── Test-only reset ─────────────────────────────────────────────────────────

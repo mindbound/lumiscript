@@ -135,18 +135,6 @@ export interface LumiScriptSettings {
    * placeholder `module.exports`.
    */
   defaultLibraryTemplate: string;
-  // ─── Dock Panel ──────────────────────────────────────────────────────────────
-  /**
-   * Which screen edge the LumiScript dock panel attaches to.
-   * Changes apply live: the frontend destroys the current panel and re-requests
-   * it on the new edge when this setting updates. The React tree is re-mounted,
-   * so any open editor state inside the LumiScript panel is reset. In practice
-   * this is rarely an issue because users toggle this setting from the *settings*
-   * panel, not from inside the LumiScript panel itself.
-   * Default: `'right'`. Supported: `'left' | 'right'` (top/bottom would squish
-   * the panel layout and are not exposed).
-   */
-  dockPanelEdge: 'left' | 'right';
 }
 
 export const DEFAULT_TRIGGER_TEMPLATE =
@@ -176,7 +164,6 @@ export const DEFAULT_SETTINGS: LumiScriptSettings = {
   autosaveDebounceMs: 1_200,
   defaultTriggerTemplate: DEFAULT_TRIGGER_TEMPLATE,
   defaultLibraryTemplate: DEFAULT_LIBRARY_TEMPLATE,
-  dockPanelEdge: 'right',
 };
 
 // ─── Execution ────────────────────────────────────────────────────────────────

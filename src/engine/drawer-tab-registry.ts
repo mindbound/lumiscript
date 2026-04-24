@@ -30,10 +30,34 @@
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
+/**
+ * Static options captured at register time (never mutated). The live-mutable
+ * title / shortName / badge ride on the entry itself, not here, so updates
+ * via `setTitle` / `setShortName` / `setBadge` don't have to clone this.
+ */
+export interface DrawerTabRegisterOptions {
+  description?: string;
+  keywords?: string[];
+  headerTitle?: string;
+  iconSvg?: string;
+  iconUrl?: string;
+}
+
 export interface DrawerTabEntry {
   scriptId: string;
   tabId: string;
   rootElementId: string;
+  /** Frozen options from the original register call. */
+  options: DrawerTabRegisterOptions;
+  /** Current title (live — updates on `handle.setTitle(…)`). */
+  title: string;
+  /** Current short name (live — updates on `handle.setShortName(…)`). */
+  shortName?: string;
+  /**
+   * Current badge (live — updates on `handle.setBadge(…)`).
+   * `null` means "no badge"; differs from `undefined` (never set).
+   */
+  badge: string | null;
   activateHandlers: Set<() => void>;
 }
 
@@ -59,6 +83,9 @@ export function registerTab(
   scriptId: string,
   tabId: string,
   rootElementId: string,
+  title: string,
+  shortName: string | undefined,
+  options: DrawerTabRegisterOptions,
 ): DrawerTabEntry {
   const k = key(scriptId, tabId);
   if (tabs.has(k)) {
@@ -71,10 +98,47 @@ export function registerTab(
     scriptId,
     tabId,
     rootElementId,
+    options,
+    title,
+    shortName,
+    badge: null,
     activateHandlers: new Set(),
   };
   tabs.set(k, entry);
   return entry;
+}
+
+/**
+ * Update the cached title. Called by `handle.setTitle(…)` before the outbound
+ * `ls_drawer_tab_set_title` message. Returns true if the entry exists.
+ */
+export function updateTitle(scriptId: string, tabId: string, title: string): boolean {
+  const entry = getTab(scriptId, tabId);
+  if (!entry) return false;
+  entry.title = title;
+  return true;
+}
+
+/**
+ * Update the cached short name. Called by `handle.setShortName(…)` before
+ * the outbound `ls_drawer_tab_set_short_name` message.
+ */
+export function updateShortName(scriptId: string, tabId: string, shortName: string): boolean {
+  const entry = getTab(scriptId, tabId);
+  if (!entry) return false;
+  entry.shortName = shortName;
+  return true;
+}
+
+/**
+ * Update the cached badge. `null` clears the badge. Called by `handle.setBadge(…)`
+ * before the outbound `ls_drawer_tab_set_badge` message.
+ */
+export function updateBadge(scriptId: string, tabId: string, badge: string | null): boolean {
+  const entry = getTab(scriptId, tabId);
+  if (!entry) return false;
+  entry.badge = badge;
+  return true;
 }
 
 /**
@@ -180,6 +244,52 @@ export function clearByScript(scriptId: string): void {
   for (const [k, entry] of tabs) {
     if (entry.scriptId === scriptId) tabs.delete(k);
   }
+}
+
+// ─── Replay (frontend reconnect) ─────────────────────────────────────────────
+
+/**
+ * Build the list of `BackendToFrontend` messages that re-create every live
+ * drawer tab on a freshly-mounted frontend.
+ *
+ * Per entry:
+ *   - One `ls_drawer_tab_register` with the current live `title` /
+ *     `shortName` folded into the options (so we don't also need to emit
+ *     `set_title` / `set_short_name`).
+ *   - An additional `ls_drawer_tab_set_badge` iff the tab has a non-null
+ *     badge — the register message doesn't carry a `badge` field.
+ *
+ * Pure function: does not mutate the registry or send any messages.
+ */
+export function listReplayMessages(): import('../types/messages.js').BackendToFrontend[] {
+  const out: import('../types/messages.js').BackendToFrontend[] = [];
+  for (const entry of tabs.values()) {
+    out.push({
+      type: 'ls_drawer_tab_register',
+      scriptId: entry.scriptId,
+      tabId: entry.tabId,
+      rootElementId: entry.rootElementId,
+      options: {
+        id:          entry.tabId,
+        title:       entry.title,
+        shortName:   entry.shortName,
+        description: entry.options.description,
+        keywords:    entry.options.keywords,
+        headerTitle: entry.options.headerTitle,
+        iconSvg:     entry.options.iconSvg,
+        iconUrl:     entry.options.iconUrl,
+      },
+    });
+    if (entry.badge !== null) {
+      out.push({
+        type: 'ls_drawer_tab_set_badge',
+        scriptId: entry.scriptId,
+        tabId: entry.tabId,
+        badge: entry.badge,
+      });
+    }
+  }
+  return out;
 }
 
 // ─── Test-only reset ─────────────────────────────────────────────────────────

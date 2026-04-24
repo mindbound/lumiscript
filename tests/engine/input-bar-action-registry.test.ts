@@ -11,6 +11,7 @@ import {
   countByScript,
   listByScript,
   clearByScript,
+  listReplayMessages,
   __reset,
 } from '../../src/engine/input-bar-action-registry.js';
 
@@ -230,5 +231,101 @@ describe('listByScript', () => {
     expect(listByScript('script-A').sort()).toEqual(['alpha', 'beta']);
     expect(listByScript('script-B')).toEqual(['gamma']);
     expect(listByScript('script-C')).toEqual([]);
+  });
+});
+
+// ─── listReplayMessages (frontend reconnect) ─────────────────────────────────
+
+describe('listReplayMessages', () => {
+  test('returns empty array when no actions are registered', () => {
+    expect(listReplayMessages()).toEqual([]);
+  });
+
+  test('emits one ls_input_bar_action_register per live entry', () => {
+    registerAction('s1', 'one', 'One', true, '<svg>one</svg>', undefined);
+    registerAction('s1', 'two', 'Two', false, undefined, 'https://icon.png');
+
+    const msgs = listReplayMessages();
+    expect(msgs).toHaveLength(2);
+
+    const byAction = new Map(msgs.map(m => {
+      if (m.type !== 'ls_input_bar_action_register') throw new Error('wrong type');
+      return [m.actionId, m];
+    }));
+
+    const one = byAction.get('one')!;
+    if (one.type !== 'ls_input_bar_action_register') throw new Error('unreachable');
+    expect(one.scriptId).toBe('s1');
+    expect(one.options.label).toBe('One');
+    expect(one.options.enabled).toBe(true);
+    expect(one.options.iconSvg).toBe('<svg>one</svg>');
+    expect(one.options.iconUrl).toBeUndefined();
+
+    const two = byAction.get('two')!;
+    if (two.type !== 'ls_input_bar_action_register') throw new Error('unreachable');
+    expect(two.options.label).toBe('Two');
+    expect(two.options.enabled).toBe(false);
+    expect(two.options.iconSvg).toBeUndefined();
+    expect(two.options.iconUrl).toBe('https://icon.png');
+  });
+
+  test('folds post-register updateLabel into the register message', () => {
+    registerAction('s1', 'x', 'Original', true);
+    updateLabel('s1', 'x', 'Updated');
+
+    const msgs = listReplayMessages();
+    expect(msgs).toHaveLength(1);
+    const msg = msgs[0]!;
+    if (msg.type !== 'ls_input_bar_action_register') throw new Error('unreachable');
+    expect(msg.options.label).toBe('Updated');
+  });
+
+  test('folds post-register updateEnabled into the register message', () => {
+    registerAction('s1', 'x', 'X', true);
+    updateEnabled('s1', 'x', false);
+
+    const msgs = listReplayMessages();
+    expect(msgs).toHaveLength(1);
+    const msg = msgs[0]!;
+    if (msg.type !== 'ls_input_bar_action_register') throw new Error('unreachable');
+    expect(msg.options.enabled).toBe(false);
+  });
+
+  test('destroyed actions are excluded from replay', () => {
+    registerAction('s1', 'keep', 'K', true);
+    registerAction('s1', 'drop', 'D', true);
+    destroyAction('s1', 'drop');
+
+    const msgs = listReplayMessages();
+    expect(msgs).toHaveLength(1);
+    const msg = msgs[0]!;
+    if (msg.type !== 'ls_input_bar_action_register') throw new Error('unreachable');
+    expect(msg.actionId).toBe('keep');
+  });
+
+  test('clearByScript prunes the script\'s entries from replay', () => {
+    registerAction('s1', 'a', 'A', true);
+    registerAction('s2', 'b', 'B', true);
+    clearByScript('s1');
+
+    const msgs = listReplayMessages();
+    expect(msgs).toHaveLength(1);
+    const msg = msgs[0]!;
+    if (msg.type !== 'ls_input_bar_action_register') throw new Error('unreachable');
+    expect(msg.scriptId).toBe('s2');
+  });
+
+  test('replay output is stable (idempotent between calls)', () => {
+    registerAction('s1', 'x', 'X', true, '<svg/>');
+    const first = listReplayMessages();
+    const second = listReplayMessages();
+    expect(second).toEqual(first);
+  });
+
+  test('multiple scripts\' actions all appear in replay', () => {
+    registerAction('script-A', 'x', 'AX', true);
+    registerAction('script-B', 'x', 'BX', true);
+    registerAction('script-C', 'y', 'CY', false);
+    expect(listReplayMessages()).toHaveLength(3);
   });
 });
