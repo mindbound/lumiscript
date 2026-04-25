@@ -160,7 +160,9 @@
   color: var(--lumiverse-text-2, rgba(255, 255, 255, 0.6));
 }
 .ls-inspect-search:focus-within {
-  border-color: var(--lumiverse-accent);
+  /* Hard-coded fallback — `--lumiverse-accent` doesn't always cascade
+   * into portal modals under <body>. See `.ls-edit-btn-save`. */
+  border-color: var(--lumiverse-accent, rgb(147, 112, 219));
 }
 .ls-inspect-search-input {
   flex: 1;
@@ -204,8 +206,23 @@
   background: var(--lumiverse-fill-1, rgba(255, 255, 255, 0.04));
 }
 .ls-inspect-mode-btn[aria-checked="true"] {
-  color: var(--lumiverse-accent);
-  background: color-mix(in srgb, var(--lumiverse-accent) 22%, transparent);
+  /* Same theme-token caveat as `.ls-edit-btn-save` — `--lumiverse-accent`
+   * is populated by the theme engine on certain ancestor scopes only and
+   * doesn't cascade into portal-rendered modals under <body>. Without
+   * hard-coded fallbacks the active state collapses visually into the
+   * inactive one (color-mix() with an unset var produces an invalid
+   * value → transparent). Mirror the `.ls-drop-btn-confirm` pattern with
+   * concrete RGB fallbacks so the segmented-control selection always
+   * reads at a glance regardless of where the theme engine reaches. */
+  color: var(--lumiverse-accent, rgb(147, 112, 219));
+  background: color-mix(in srgb, var(--lumiverse-accent, rgb(147, 112, 219)) 22%, transparent);
+}
+.ls-inspect-mode-btn[aria-checked="true"]:hover {
+  /* Slightly stronger fill on hover — keeps the selected button visibly
+   * "pressed" even when the mouse is over it (default :hover would
+   * otherwise apply the unchecked hover styles to the checked one). */
+  color: var(--lumiverse-accent, rgb(147, 112, 219));
+  background: color-mix(in srgb, var(--lumiverse-accent, rgb(147, 112, 219)) 30%, transparent);
 }
 
 /* jsonquery error banner — sits between the toolbar and the records
@@ -587,7 +604,7 @@
   background: var(--lumiverse-fill-2, rgba(255, 255, 255, 0.08));
 }
 .ls-drop-btn-cancel:focus-visible {
-  outline: 2px solid var(--lumiverse-accent);
+  outline: 2px solid var(--lumiverse-accent, rgb(147, 112, 219));
   outline-offset: 1px;
 }
 .ls-drop-btn-confirm {

@@ -43,6 +43,10 @@ export interface InputBarActionEntry {
   scriptId: string;
   actionId: string;
   label: string;
+  /** Optional secondary line shown beneath the label in the Extras
+   *  popover row. Set at register-time or via `handle.setSubtitle()`;
+   *  `undefined` collapses the row back to single-line. */
+  subtitle?: string;
   enabled: boolean;
   /** Inline SVG string (sanitized at render time). Set by the API at register. */
   iconSvg?: string;
@@ -86,12 +90,14 @@ export function registerAction(
   enabled: boolean,
   iconSvg?: string,
   iconUrl?: string,
+  subtitle?: string,
 ): InputBarActionEntry {
   const k = key(scriptId, actionId);
   const entry: InputBarActionEntry = {
     scriptId,
     actionId,
     label,
+    subtitle,
     enabled,
     iconSvg,
     iconUrl,
@@ -131,6 +137,23 @@ export function updateLabel(scriptId: string, actionId: string, label: string): 
   const entry = getAction(scriptId, actionId);
   if (!entry) return false;
   entry.label = label;
+  return true;
+}
+
+/**
+ * Update (or clear) an action's stored subtitle. Pass `undefined` to
+ * clear; pass a string to set/replace. Same return semantics as
+ * `updateLabel` — `false` if the action is gone so the caller skips
+ * the outbound message.
+ */
+export function updateSubtitle(
+  scriptId: string,
+  actionId: string,
+  subtitle: string | undefined,
+): boolean {
+  const entry = getAction(scriptId, actionId);
+  if (!entry) return false;
+  entry.subtitle = subtitle;
   return true;
 }
 
@@ -261,10 +284,15 @@ export function listReplayMessages(): import('../types/messages.js').BackendToFr
       scriptId: entry.scriptId,
       actionId: entry.actionId,
       options: {
-        label:   entry.label,
-        iconSvg: entry.iconSvg,
-        iconUrl: entry.iconUrl,
-        enabled: entry.enabled,
+        label:    entry.label,
+        // Fold the current subtitle into the register message — same
+        // pattern as label / enabled / icons. A separate
+        // `set_subtitle` follow-up isn't needed because this register
+        // re-creates the host action from scratch with the live state.
+        subtitle: entry.subtitle,
+        iconSvg:  entry.iconSvg,
+        iconUrl:  entry.iconUrl,
+        enabled:  entry.enabled,
       },
     });
   }

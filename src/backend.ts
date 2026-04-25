@@ -12,7 +12,8 @@ import { registerLumiScriptMacros, updateLumiScriptActiveMacro } from './macros.
 import { TriggerRegistry } from './engine/trigger-registry.js';
 import { generateUUID } from './utils/uuid.js';
 import { readFile } from 'fs/promises';
-import { listByMode, listAll, clearEphemeral, clearByScriptId } from './engine/injection-store.js';
+import { listByMode, listAll, clearEphemeral, clearByScriptId, type InjectionEntry } from './engine/injection-store.js';
+import { applyLumiScriptInjections } from './engine/interceptor-pipeline.js';
 import {
   clearByScriptId as clearToolsByScriptId,
   listAll as listAllTools,
@@ -263,49 +264,74 @@ for (const event of COLLECTION_BROADCAST_EVENTS) {
 // Enriches the spindle context object with a `_lumiScriptInjections` key BEFORE
 // prompt assembly. The interceptor (below) reads this key from the context it
 // receives and prepends the entries to the assembled message array.
+//
+// Pass the FULL `InjectionEntry` shape through (not just `{ content, role }`)
+// so the interceptor can resolve per-injection breakdown labels via the
+// entries' `scriptId` + `id` fields. `_lumiScriptInjections` is a private
+// channel between our two registered handlers — Lumiverse host doesn't
+// inspect or pass it through to other extensions, so the shape is safe to
+// expose internally.
 spindle.registerContextHandler(async (ctx) => {
   const entries = listByMode('context');
   if (entries.length === 0) return ctx;
   return {
     ...(ctx as Record<string, unknown>),
-    _lumiScriptInjections: entries.map(e => ({ content: e.content, role: e.role })),
+    _lumiScriptInjections: entries,
   };
 }, 50);
 
 // Interceptor (post-assembly) — two responsibilities, in order:
 //
 //  1. mode:'context' injections: reads _lumiScriptInjections from the spindle
-//     context (populated by the context handler above) and PREPENDS them at index
-//     0, before all assembled content. Ephemeral context entries are cleared here.
+//     context (populated by the context handler above) and PREPENDS them at
+//     index 0, before all assembled content. Ephemeral context entries are
+//     cleared here.
+//  2. mode:'intercept' injections: splices each entry at depth from the END
+//     of the message array. Ephemeral entries cleared after.
 //
-//  2. mode:'intercept' injections: splices each entry at depth from the END of
-//     the message array. Ephemeral entries cleared after.
+// Splicing + breakdown computation lives in the pure
+// `applyLumiScriptInjections` helper (see `engine/interceptor-pipeline.ts`)
+// so it can be unit-tested without a mock spindle. The helper returns
+// breakdown entries pointing at each injected message — surfaced via
+// `InterceptorResultDTO.breakdown` (spindle-types 0.4.37+) so each
+// injection appears as a first-class row in Lumiverse's Prompt Breakdown
+// / Dry Run UI attributed to LumiScript with a per-script label.
+//
+// Backwards-compat: when the breakdown is empty (no LS injections this
+// round), return the legacy `LlmMessageDTO[]` shape. Older hosts that
+// don't parse the `InterceptorResultDTO` object form pass through
+// unchanged in the common no-injection path; only chats where LumiScript
+// actively injected pay the object-form serialization cost.
 spindle.registerInterceptor(async (messages, context) => {
-  let result = [...messages];
   const ctx = context as Record<string, unknown>;
-
-  // ── 1. Context-mode: prepend before all assembled content (index 0) ───────
-  const ctxInjections = ctx?._lumiScriptInjections as Array<{ content: string; role: string }> | undefined;
-  if (ctxInjections && ctxInjections.length > 0) {
-    result = [
-      ...ctxInjections.map(e => ({
-        role: e.role as 'system' | 'user' | 'assistant',
-        content: e.content,
-      })),
-      ...result,
-    ];
-    clearEphemeral('context');
-  }
-
-  // ── 2. Intercept-mode: splice at depth from end of assembled array ─────────
+  const ctxInjections = ctx?._lumiScriptInjections as InjectionEntry[] | undefined;
   const interceptEntries = listByMode('intercept');
-  for (const e of interceptEntries) {
-    const idx = Math.max(0, result.length - e.depth);
-    result.splice(idx, 0, { role: e.role as 'system' | 'user' | 'assistant', content: e.content });
-  }
-  clearEphemeral('intercept');
 
-  return result;
+  // Fast-path: no LumiScript injections in flight — pass through with
+  // zero allocation (the helper would do the same work, but skipping it
+  // here keeps the no-op interceptor cycle indistinguishable from a
+  // pre-LumiScript cost profile).
+  if ((!ctxInjections || ctxInjections.length === 0) && interceptEntries.length === 0) {
+    return messages;
+  }
+
+  const { messages: result, breakdown } = applyLumiScriptInjections(
+    messages,
+    ctxInjections ?? [],
+    interceptEntries,
+    (scriptId) => scriptStorage.getScript(scriptId)?.name ?? scriptId,
+  );
+
+  if (ctxInjections && ctxInjections.length > 0) clearEphemeral('context');
+  if (interceptEntries.length > 0) clearEphemeral('intercept');
+
+  // Only surface the InterceptorResultDTO object form when we have
+  // breakdown data to attach. Defensive against any host build that
+  // hasn't parsed the union return type cleanly — the legacy array
+  // shape is the cheapest correct fall-through.
+  return breakdown.length > 0
+    ? { messages: result, breakdown }
+    : result;
 }, 50);
 
 // ─── Tool invocation dispatch ─────────────────────────────────────────────────

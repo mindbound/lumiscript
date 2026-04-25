@@ -1728,11 +1728,19 @@ export interface ShowContextMenuOptions {
 export interface InputBarActionOptions {
   /**
    * Unique identifier within your script. Used by the handle for subsequent
-   * `setLabel` / `setEnabled` / `destroy` calls — pick something stable.
+   * `setLabel` / `setSubtitle` / `setEnabled` / `destroy` calls — pick
+   * something stable.
    */
   id: string;
   /** Display label shown in the Extras popover row. */
   label: string;
+  /**
+   * Optional secondary line rendered beneath the label in the Extras
+   * popover row. Useful for short status strings ("Last roll: 17"),
+   * keyboard shortcuts, or one-line descriptions. Omit (or pass
+   * `undefined` via `setSubtitle`) for a single-line row.
+   */
+  subtitle?: string;
   /** Inline SVG string (sanitized upstream via DOMPurify). Rendered at 14×14. */
   iconSvg?: string;
   /** URL to an icon image. Takes precedence over `iconSvg` if both are set. */
@@ -1757,6 +1765,12 @@ export interface InputBarActionHandle {
   readonly actionId: string;
   /** Update the display label. Safe to call after dismissal (no-op). */
   setLabel(label: string): void;
+  /**
+   * Update (or clear) the secondary line beneath the label. Pass
+   * `undefined` to remove a previously-set subtitle and collapse the
+   * row back to single-line. Safe to call after `destroy()` (no-op).
+   */
+  setSubtitle(subtitle?: string): void;
   /**
    * Show or hide the action in the popover. Disabled actions are hidden
    * entirely rather than greyed out. Safe to call after `destroy()` (no-op).

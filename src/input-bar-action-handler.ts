@@ -25,6 +25,7 @@ import type { BackendToFrontend, FrontendToBackend } from './types/messages.js';
 type InputBarActionMessage = Extract<BackendToFrontend,
   | { type: 'ls_input_bar_action_register' }
   | { type: 'ls_input_bar_action_set_label' }
+  | { type: 'ls_input_bar_action_set_subtitle' }
   | { type: 'ls_input_bar_action_set_enabled' }
   | { type: 'ls_input_bar_action_destroy' }
 >;
@@ -33,6 +34,7 @@ function isInputBarActionMessage(msg: unknown): msg is InputBarActionMessage {
   const t = (msg as { type?: string })?.type;
   return t === 'ls_input_bar_action_register'
       || t === 'ls_input_bar_action_set_label'
+      || t === 'ls_input_bar_action_set_subtitle'
       || t === 'ls_input_bar_action_set_enabled'
       || t === 'ls_input_bar_action_destroy';
 }
@@ -81,6 +83,7 @@ export function installInputBarActionHandler(
           handle = ctx.ui.registerInputBarAction({
             id:       msg.actionId,
             label:    msg.options.label,
+            subtitle: msg.options.subtitle,
             iconSvg:  msg.options.iconSvg,
             iconUrl:  msg.options.iconUrl,
             enabled:  msg.options.enabled,
@@ -115,6 +118,22 @@ export function installInputBarActionHandler(
         const handle = actions.get(k);
         if (!handle) break;
         try { handle.setLabel(msg.label); } catch { /* host error — ignore */ }
+        break;
+      }
+
+      // ── Set Subtitle ───────────────────────────────────────────────────
+      // `subtitle: undefined` is the canonical "clear" — the host's
+      // SpindleInputBarActionHandle.setSubtitle signature accepts
+      // `string | undefined` and treats undefined as removal. Older
+      // host builds without subtitle support don't expose `setSubtitle`
+      // on the handle; the typeof guard keeps us forward-compatible
+      // (LumiScript's bumped types declare it, but a user running an
+      // older Lumiverse build might still hit a runtime miss).
+      case 'ls_input_bar_action_set_subtitle': {
+        const handle = actions.get(k);
+        if (!handle) break;
+        if (typeof handle.setSubtitle !== 'function') break;
+        try { handle.setSubtitle(msg.subtitle); } catch { /* host error — ignore */ }
         break;
       }
 

@@ -475,6 +475,11 @@ export type BackendToFrontend =
       actionId: string;
       options: {
         label: string;
+        /** Optional second-line subtitle. Host-side feature added in
+         *  spindle-types 0.4.36 — older hosts ignore the field
+         *  silently, which is the correct fall-back for this kind of
+         *  cosmetic enrichment. */
+        subtitle?: string;
         iconSvg?: string;
         iconUrl?: string;
         enabled?: boolean;
@@ -486,6 +491,17 @@ export type BackendToFrontend =
       scriptId: string;
       actionId: string;
       label: string;
+    }
+  | {
+      /**
+       * Update (or clear) the subtitle of a registered input-bar
+       * action. `subtitle: undefined` removes a previously-set
+       * subtitle — the host re-renders the row as single-line.
+       */
+      type: 'ls_input_bar_action_set_subtitle';
+      scriptId: string;
+      actionId: string;
+      subtitle: string | undefined;
     }
   | {
       /**

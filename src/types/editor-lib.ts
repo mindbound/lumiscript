@@ -728,15 +728,20 @@ interface UIAPI {
 
   /**
    * Register an action in the chat input bar's Extras popover. Returns a
-   * handle for subsequent setLabel / setEnabled / onClick / destroy calls.
-   * Same-id re-registration silently replaces the existing entry — safe to
-   * call from recurring event handlers (e.g. SETTINGS_UPDATED).
-   * Host limits: 4 per extension, 12 global.
+   * handle for subsequent setLabel / setSubtitle / setEnabled / onClick /
+   * destroy calls. Same-id re-registration silently replaces the existing
+   * entry — safe to call from recurring event handlers (e.g.
+   * SETTINGS_UPDATED). Host limits: 4 per extension, 12 global.
    * @example
    * const action = api.ui.registerInputBarAction({
-   *   id: 'summarize', label: 'Summarize chat', iconSvg: '<svg>...</svg>',
+   *   id: 'summarize', label: 'Summarize chat',
+   *   subtitle: 'Last run: never',
+   *   iconSvg: '<svg>...</svg>',
    * });
-   * action.onClick(() => { ... });
+   * action.onClick(async () => {
+   *   const ts = new Date().toLocaleTimeString();
+   *   action.setSubtitle(\`Last run: \${ts}\`);
+   * });
    */
   registerInputBarAction(options: InputBarActionOptions): InputBarActionHandle;
 
@@ -1032,6 +1037,13 @@ interface InputBarActionOptions {
   /** Display label shown in the Extras popover row. */
   label: string;
   /**
+   * Optional secondary line rendered beneath the label in the Extras
+   * popover row. Useful for short status strings (\`"Last roll: 17"\`),
+   * keyboard shortcuts, or one-line descriptions. Omit (or pass
+   * \`undefined\` via \`setSubtitle\`) for a single-line row.
+   */
+  subtitle?: string;
+  /**
    * Inline SVG string (sanitized). The host renders it inside a 14x14 slot
    * via CSS — **the SVG must carry width="14" height="14" attrs** or it
    * overflows and misaligns with the label. When using \`ls:icons\`, call
@@ -1055,6 +1067,12 @@ interface InputBarActionHandle {
   readonly actionId: string;
   /** Update the display label. Safe to call after destroy (no-op). */
   setLabel(label: string): void;
+  /**
+   * Update (or clear) the secondary line beneath the label. Pass
+   * \`undefined\` to remove a previously-set subtitle and collapse the
+   * row back to single-line. Safe to call after destroy (no-op).
+   */
+  setSubtitle(subtitle?: string): void;
   /** Show or hide the action. Disabled actions are hidden, not greyed. */
   setEnabled(enabled: boolean): void;
   /**

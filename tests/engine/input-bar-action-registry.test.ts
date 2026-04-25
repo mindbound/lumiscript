@@ -4,6 +4,7 @@ import {
   hasAction,
   getAction,
   updateLabel,
+  updateSubtitle,
   updateEnabled,
   addClickHandler,
   destroyAction,
@@ -327,5 +328,95 @@ describe('listReplayMessages', () => {
     registerAction('script-B', 'x', 'BX', true);
     registerAction('script-C', 'y', 'CY', false);
     expect(listReplayMessages()).toHaveLength(3);
+  });
+});
+
+// ─── subtitle support ─────────────────────────────────────────────────────────
+
+describe('subtitle', () => {
+  test('registerAction stores subtitle when supplied', () => {
+    registerAction('s1', 'x', 'X', true, undefined, undefined, 'Last roll: 17');
+    const entry = getAction('s1', 'x');
+    expect(entry?.subtitle).toBe('Last roll: 17');
+  });
+
+  test('registerAction leaves subtitle undefined when not supplied', () => {
+    registerAction('s1', 'x', 'X', true);
+    const entry = getAction('s1', 'x');
+    expect(entry?.subtitle).toBeUndefined();
+  });
+
+  test('updateSubtitle replaces the stored value', () => {
+    registerAction('s1', 'x', 'X', true, undefined, undefined, 'old');
+    expect(updateSubtitle('s1', 'x', 'new')).toBe(true);
+    expect(getAction('s1', 'x')?.subtitle).toBe('new');
+  });
+
+  test('updateSubtitle with undefined clears the stored value', () => {
+    registerAction('s1', 'x', 'X', true, undefined, undefined, 'set');
+    expect(updateSubtitle('s1', 'x', undefined)).toBe(true);
+    expect(getAction('s1', 'x')?.subtitle).toBeUndefined();
+  });
+
+  test('updateSubtitle returns false on unknown action (no-op)', () => {
+    expect(updateSubtitle('s1', 'missing', 'x')).toBe(false);
+  });
+
+  test('updateSubtitle is ownership-scoped — different script can\'t mutate', () => {
+    registerAction('script-A', 'x', 'X', true, undefined, undefined, 'A');
+    expect(updateSubtitle('script-B', 'x', 'B')).toBe(false);
+    expect(getAction('script-A', 'x')?.subtitle).toBe('A');
+  });
+
+  test('replace-on-re-register replaces subtitle alongside other fields', () => {
+    registerAction('s1', 'x', 'X', true, undefined, undefined, 'first');
+    registerAction('s1', 'x', 'X', true, undefined, undefined, 'second');
+    expect(getAction('s1', 'x')?.subtitle).toBe('second');
+  });
+
+  test('replace-on-re-register without subtitle clears the prior value', () => {
+    // Replace semantics build a fresh entry — a re-register that omits
+    // subtitle should NOT keep the stale one (matches how iconSvg /
+    // iconUrl are handled at the same layer).
+    registerAction('s1', 'x', 'X', true, undefined, undefined, 'first');
+    registerAction('s1', 'x', 'X', true);
+    expect(getAction('s1', 'x')?.subtitle).toBeUndefined();
+  });
+
+  test('listReplayMessages folds the current subtitle into the register message', () => {
+    registerAction('s1', 'x', 'X', true, undefined, undefined, 'set at register');
+    const msgs = listReplayMessages();
+    expect(msgs).toHaveLength(1);
+    const msg = msgs[0]!;
+    if (msg.type !== 'ls_input_bar_action_register') throw new Error('unreachable');
+    expect(msg.options.subtitle).toBe('set at register');
+  });
+
+  test('listReplayMessages folds post-register updateSubtitle into the register message', () => {
+    registerAction('s1', 'x', 'X', true);
+    updateSubtitle('s1', 'x', 'set later');
+    const msgs = listReplayMessages();
+    const msg = msgs[0]!;
+    if (msg.type !== 'ls_input_bar_action_register') throw new Error('unreachable');
+    expect(msg.options.subtitle).toBe('set later');
+  });
+
+  test('listReplayMessages emits subtitle as undefined when never set', () => {
+    registerAction('s1', 'x', 'X', true);
+    const msgs = listReplayMessages();
+    const msg = msgs[0]!;
+    if (msg.type !== 'ls_input_bar_action_register') throw new Error('unreachable');
+    expect(msg.options.subtitle).toBeUndefined();
+  });
+
+  test('listReplayMessages folds a post-register clear into the register message', () => {
+    // Subtitle set at register, then explicitly cleared via updateSubtitle —
+    // replay should reflect the cleared state, not the original.
+    registerAction('s1', 'x', 'X', true, undefined, undefined, 'will be cleared');
+    updateSubtitle('s1', 'x', undefined);
+    const msgs = listReplayMessages();
+    const msg = msgs[0]!;
+    if (msg.type !== 'ls_input_bar_action_register') throw new Error('unreachable');
+    expect(msg.options.subtitle).toBeUndefined();
   });
 });

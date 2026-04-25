@@ -57,6 +57,7 @@ import {
   countByScript as countActionsByScript,
   listByScript as listActionsByScript,
   updateLabel as updateActionLabel,
+  updateSubtitle as updateActionSubtitle,
   updateEnabled as updateActionEnabled,
   addClickHandler as addActionClickHandler,
   destroyAction,
@@ -352,6 +353,7 @@ export function buildUIAPI(deps: APIBuildDeps): Omit<LumiScriptAPI['ui'], 'dom'>
 
       const actionId = options.id;
       const label    = options.label;
+      const subtitle = options.subtitle;
       const enabled  = options.enabled !== false;  // default: true
       const iconSvg  = options.iconSvg;
       const iconUrl  = options.iconUrl;
@@ -390,7 +392,7 @@ export function buildUIAPI(deps: APIBuildDeps): Omit<LumiScriptAPI['ui'], 'dom'>
       // click handlers — matches tool-store / macro-store behaviour. Done
       // BEFORE sending the frontend message so a rejected registration
       // never leaks a live action to the host.
-      registerAction(scriptId, actionId, label, enabled, iconSvg, iconUrl);
+      registerAction(scriptId, actionId, label, enabled, iconSvg, iconUrl, subtitle);
 
       spindle.sendToFrontend({
         type: 'ls_input_bar_action_register',
@@ -398,6 +400,7 @@ export function buildUIAPI(deps: APIBuildDeps): Omit<LumiScriptAPI['ui'], 'dom'>
         actionId,
         options: {
           label,
+          subtitle,
           iconSvg,
           iconUrl,
           enabled,
@@ -419,6 +422,14 @@ export function buildUIAPI(deps: APIBuildDeps): Omit<LumiScriptAPI['ui'], 'dom'>
           spindle.sendToFrontend({
             type: 'ls_input_bar_action_set_label',
             scriptId, actionId, label: nextLabel,
+          });
+        },
+        setSubtitle(nextSubtitle?: string): void {
+          if (destroyed) return;
+          if (!updateActionSubtitle(scriptId, actionId, nextSubtitle)) return;
+          spindle.sendToFrontend({
+            type: 'ls_input_bar_action_set_subtitle',
+            scriptId, actionId, subtitle: nextSubtitle,
           });
         },
         setEnabled(nextEnabled: boolean): void {
