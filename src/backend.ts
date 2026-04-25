@@ -954,7 +954,6 @@ spindle.onFrontendMessage(async (raw, userId) => {
         publishActiveCharId();
 
         const runId = generateUUID();
-        const ctx = getActiveContext();
 
         executionStatusStore.markRunning(script.id);
         send({
@@ -985,9 +984,15 @@ spindle.onFrontendMessage(async (raw, userId) => {
         const toolsRegisteredThisRun  = new Set<string>();
         const macrosRegisteredThisRun = new Set<string>();
 
+        // No `activeContext` option — `buildScriptAPI` substitutes a
+        // live-reading view so any handlers the script registers (tools,
+        // input-bar actions, drawer tabs, modal dismiss callbacks, …)
+        // see the CURRENT context when they fire later, not the snapshot
+        // from this run-time. Static refresh of `ctx` already happened
+        // above via `refreshActiveContext`; binding.ts is the source of
+        // truth from here on out.
         const result = await executeScript(script, {
           grantedPermissions,
-          activeContext: { chatId: ctx.chatId, characterId: ctx.characterId },
           userId: activeUserId,
           onConsole: (entry) => {
             send({ type: 'console_entry', scriptId: script.id, runId, entry });

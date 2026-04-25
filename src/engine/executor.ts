@@ -65,12 +65,30 @@ import { buildMacrosAPI   } from './api/macros.js';
 import { buildTokensAPI   } from './api/tokens.js';
 import { buildDbAPI       } from './api/db.js';
 import { resolveBuiltin, isBuiltinName } from './builtin-library-registry.js';
+import { getActiveChatId, getActiveCharacterId } from './binding.js';
 
 // ─── Executor options ─────────────────────────────────────────────────────────
 
 export interface ExecutorOptions {
   grantedPermissions: Set<string>;
-  activeContext: {
+  /**
+   * Optional snapshot override of the active chat / character context.
+   *
+   * **Production callers should omit this field.** When omitted,
+   * `buildScriptAPI` substitutes a live-reading view backed by
+   * `binding.ts`'s module-scope state — so long-lived handlers that
+   * outlive the originating script execution (tool invocations,
+   * input-bar onClick, drawer-tab onActivate, modal onDismiss, widget
+   * onDragEnd) see the CURRENT context at handler-call time rather
+   * than a stale snapshot frozen at registration time.
+   *
+   * Tests pass a snapshot here when they want a deterministic context
+   * isolated from the live `binding.ts` state. Production paths in
+   * `backend.ts` and `trigger-registry.ts` rely on the live view —
+   * trigger-fire context updates already flow through `binding.ts`'s
+   * setters, so the live view always sees the right values.
+   */
+  activeContext?: {
     chatId: string | null;
     characterId: string | null;
   };
@@ -252,13 +270,36 @@ export async function executeScript(
 export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiScriptAPI {
   const {
     grantedPermissions,
-    activeContext,
+    activeContext: providedContext,
     userId,
     onToolsChanged,
     toolsRegisteredThisRun,
     macrosRegisteredThisRun,
   } = options;
   const hasPerm = (p: string) => grantedPermissions.has(p);
+
+  // Pass a LIVE-reading view of the active context to API builders so
+  // closures captured by long-lived handlers (tool invocations,
+  // input-bar onClick, drawer-tab onActivate, modal onDismiss, widget
+  // onDragEnd) read the CURRENT context at handler-call time rather
+  // than the snapshot from registration time. Without this, any tool
+  // registered before the user opened a chat would forever see
+  // `chatId: null, characterId: null` regardless of subsequent
+  // context changes — manifesting as e.g. `api.db.collection({ scope:
+  // 'character' })` throwing "requires an active character" mid-spar.
+  //
+  // `binding.ts`'s module-scope state is mutated atomically by
+  // `setActiveContext` in `backend.ts`'s Lumiverse-event handlers, so
+  // these getters always return the current truth.
+  //
+  // Tests can opt out via the `activeContext` option override — useful
+  // for deterministic context within a unit test that doesn't want to
+  // touch global binding.ts state. Production callers (`backend.ts`,
+  // `trigger-registry.ts`) omit the option and get the live view.
+  const activeContext: APIBuildDeps['activeContext'] = providedContext ?? {
+    get chatId()      { return getActiveChatId(); },
+    get characterId() { return getActiveCharacterId(); },
+  };
 
   const deps: APIBuildDeps = {
     script,

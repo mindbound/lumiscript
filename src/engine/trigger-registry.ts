@@ -24,7 +24,7 @@ import type { Script } from '../types/script.js';
 import type { BackendToFrontend } from '../types/messages.js';
 import type { ExecutorOptions } from './executor.js';
 import { executeScript, HARD_LIMIT_MS } from './executor.js';
-import { isAnyBindingSatisfied, getActiveContext } from './binding.js';
+import { isAnyBindingSatisfied } from './binding.js';
 import { executionStatusStore } from './execution-status.js';
 import { generateUUID } from '../utils/uuid.js';
 import type { ScriptStorage } from '../storage/script-storage.js';
@@ -172,7 +172,9 @@ export class TriggerRegistry {
         if (!isAnyBindingSatisfied(currentScript.bindings)) return;
 
         // ── Build execution context ────────────────────────────────────────
-        const ctx = getActiveContext();
+        // No `activeContext` snapshot — `buildScriptAPI` substitutes a
+        // live-reading view sourced from `binding.ts`. See the comment
+        // on `ExecutorOptions.activeContext` for the full rationale.
         const runId = generateUUID();
 
         const eventData: Record<string, unknown> = {
@@ -224,8 +226,7 @@ export class TriggerRegistry {
           grantedPermissions,
           userId,
           scriptStorage,
-          activeContext: ctx,
-          eventData,
+              eventData,
           onConsole: (entry) =>
             this.sendToFrontend({ type: 'console_entry', scriptId: currentScript.id, runId, entry }),
           onToolsChanged,
@@ -422,7 +423,6 @@ export class TriggerRegistry {
    */
   private async fireStartup(script: Script): Promise<void> {
     const { grantedPermissions, userId, scriptStorage, onToolsChanged, scriptTimeoutMs } = this.getDeps();
-    const ctx = getActiveContext();
     const runId = generateUUID();
 
     executionStatusStore.markRunning(script.id);
@@ -445,7 +445,6 @@ export class TriggerRegistry {
       grantedPermissions,
       userId,
       scriptStorage,
-      activeContext: ctx,
       eventData: { __event: LS_STARTUP },
       onConsole: (entry) =>
         this.sendToFrontend({ type: 'console_entry', scriptId: script.id, runId, entry }),
@@ -535,7 +534,6 @@ export class TriggerRegistry {
     if (!script.enabled && reason === 'deleted') return;
 
     const { grantedPermissions, userId, scriptStorage, onToolsChanged, scriptTimeoutMs } = this.getDeps();
-    const ctx = getActiveContext();
     const runId = generateUUID();
 
     executionStatusStore.markRunning(script.id);
@@ -550,7 +548,6 @@ export class TriggerRegistry {
       grantedPermissions,
       userId,
       scriptStorage,
-      activeContext: ctx,
       eventData: { __event: LS_TEARDOWN, reason, scriptId: script.id, scriptName: script.name },
       onConsole: (entry) =>
         this.sendToFrontend({ type: 'console_entry', scriptId: script.id, runId, entry }),
