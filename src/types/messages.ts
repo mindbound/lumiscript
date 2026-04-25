@@ -21,7 +21,7 @@ import type {
   DOMEventData,
   DbRecord,
 } from './script.js';
-import type { CollectionSummary } from '../engine/db-admin.js';
+import type { CollectionSummary, CollectionStats } from '../engine/db-admin.js';
 
 // ─── Shared payload shapes ────────────────────────────────────────────────────
 
@@ -222,6 +222,21 @@ export type FrontendToBackend =
       type: 'inspect_collection';
       path: string;
       textFilter?: string;
+      /** When true, the backend's text filter walks the full record tree
+       *  recursively (matching string values at any depth) rather than
+       *  the default top-level-only shallow match. Default: false. */
+      deepFilter?: boolean;
+      /**
+       * Power-user mode — pass a jsonquery expression (e.g.
+       * `filter(.hp > 50)` or `pipe(filter(.tier == "hard"), sort(.created))`).
+       * Mutually exclusive with `textFilter`: when this is set, the
+       * backend ignores `textFilter` and `deepFilter` and runs the
+       * query against the records array.
+       *
+       * Errors (parse / runtime / non-array result) are returned via
+       * `collection_records.error` rather than throwing on the wire.
+       */
+      jsonqueryFilter?: string;
       limit?: number;
       offset?: number;
     }
@@ -231,6 +246,67 @@ export type FrontendToBackend =
        *  rejects anything else. Backend replies with updated
        *  `collections_list` after drop. */
       type: 'drop_collection';
+      path: string;
+    }
+  | {
+      /** Lightweight record-count query — used by the drop confirmation
+       *  dialog so the user knows how many records they're about to
+       *  permanently delete. Backend replies with `collection_count`
+       *  echoing the path. Reads the file once (length-only); doesn't
+       *  load records into the response. */
+      type: 'count_collection';
+      path: string;
+    }
+  | {
+      /**
+       * Admin-side per-record update from the InspectModal's edit
+       * surface. `patch` is the full user-data shape (reserved fields
+       * `id` / `createdAt` / `updatedAt` are stripped backend-side
+       * regardless of what's passed). The mutation queues through
+       * `runExclusive` for the same path used by `api.db.update()`,
+       * so admin and script writes stay serialized.
+       *
+       * Backend emits `ls:collection:updated` on success — the existing
+       * debounced `collections_updated` forwarder picks it up and the
+       * open inspect modal re-fetches via its `refreshToken` bump.
+       * Errors (record not found, size cap, malformed patch) surface
+       * as a `spindle.toast.error`, matching the script-execution
+       * failure pattern.
+       */
+      type: 'update_record';
+      path: string;
+      recordId: string;
+      patch: Record<string, unknown>;
+    }
+  | {
+      /**
+       * Admin-side per-record deletion from the InspectModal. Like
+       * `update_record`, this queues through `runExclusive` and emits
+       * `ls:collection:deleted` on success so the existing refresh
+       * pipeline picks the change up. Errors surface via toast.
+       *
+       * Lightweight inline confirm in the UI (two-click pill on the
+       * record header) — no full dialog like the per-collection drop,
+       * since one-record loss is recoverable in spirit (the broadcast
+       * is observable; user can re-insert via a one-shot script).
+       */
+      type: 'delete_record';
+      path: string;
+      recordId: string;
+    }
+  | {
+      /**
+       * Request a per-field aggregate analysis of a collection — drives
+       * the InspectModal's Stats tab. Computes: per-field presence,
+       * type distribution, distinct primitive cardinality, top values,
+       * and numeric range when applicable.
+       *
+       * No filter / pagination params: stats are always over the full
+       * collection (the 50 MB cap bounds the cost). Backend replies
+       * with `collection_stats` echoing the path so the modal can
+       * route the response to the correct open instance.
+       */
+      type: 'analyze_collection';
       path: string;
     }
 ;
@@ -544,11 +620,38 @@ export type BackendToFrontend =
       path: string;
       records: DbRecord[];
       total: number;
+      /**
+       * Set when the inspect request failed — only relevant for
+       * `jsonqueryFilter` mode (parse errors, runtime errors, or
+       * non-array query results). Frontend renders this inline below
+       * the filter input so the user can fix their query without
+       * losing context. `records` is `[]` and `total` is `0` whenever
+       * `error` is present.
+       */
+      error?: string;
     }
   | {
       /** Debounced hint fired in response to any `ls:collection:*`
        *  broadcast — no payload. Frontend is expected to re-request
        *  `list_collections` if the Storage panel is currently visible. */
       type: 'collections_updated';
+    }
+  | {
+      /** Record count for a specific collection — reply to `count_collection`.
+       *  `count` is the number of records (`-1` indicates the collection
+       *  is missing or unreadable; UI should hide the count rather than
+       *  show "0" which is a legitimate empty-collection state). */
+      type: 'collection_count';
+      path: string;
+      count: number;
+    }
+  | {
+      /** Per-field aggregate stats — reply to `analyze_collection`.
+       *  Empty `fields` is a valid result (collection is empty, missing,
+       *  or contains only reserved fields). Frontend renders an empty-
+       *  state placeholder rather than a blank view in that case. */
+      type: 'collection_stats';
+      path: string;
+      stats: CollectionStats;
     }
 ;

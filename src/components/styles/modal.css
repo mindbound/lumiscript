@@ -99,6 +99,45 @@
   max-width: 420px;
 }
 
+/* ── View tabs (Records / Stats) ─────────────────────────────────────────
+ *
+ * Sits between the modal header and the filter toolbar — small, low-
+ * profile horizontal tab strip. Pressed-state tab carries an accent
+ * underline; unpressed tabs are muted text only. Designed to be
+ * unobtrusive so it doesn't compete with the per-record action chips
+ * below.
+ */
+.ls-inspect-tabs {
+  display: flex;
+  gap: 0;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--lumiverse-border);
+  flex-shrink: 0;
+}
+.ls-inspect-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px; /* overlap the tabs row's border for clean underline */
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.55));
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: color 120ms, border-color 120ms;
+}
+.ls-inspect-tab:hover {
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.9));
+}
+.ls-inspect-tab[aria-selected="true"] {
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.95));
+  border-bottom-color: var(--lumiverse-accent, rgb(147, 112, 219));
+  font-weight: 600;
+}
+
 .ls-inspect-toolbar {
   display: flex;
   align-items: center;
@@ -132,6 +171,64 @@
   color: var(--lumiverse-text-1);
   font-size: 12px;
   font-family: ui-monospace, Menlo, Consolas, monospace;
+}
+
+/* Filter mode selector (v0.23+) — segmented control next to the
+   search input. Three buttons (shallow / deep / jsonquery), exactly
+   one pressed at a time. Active mode highlighted in the accent color
+   with a subtle fill so the user can spot at a glance whether the
+   filter is text-string or a typed query. Replaces the v0.23-Phase-3
+   `ls-inspect-deep-toggle` single-toggle with a tri-state radio. */
+.ls-inspect-mode-selector {
+  display: inline-flex;
+  gap: 1px;
+  padding: 1px;
+  border-radius: 4px;
+  background: var(--lumiverse-fill-2, rgba(255, 255, 255, 0.06));
+}
+.ls-inspect-mode-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 20px;
+  border: none;
+  background: transparent;
+  color: var(--lumiverse-text-2, rgba(255, 255, 255, 0.5));
+  border-radius: 3px;
+  cursor: pointer;
+  transition: background 120ms, color 120ms;
+}
+.ls-inspect-mode-btn:hover {
+  color: var(--lumiverse-text-1, rgba(255, 255, 255, 0.9));
+  background: var(--lumiverse-fill-1, rgba(255, 255, 255, 0.04));
+}
+.ls-inspect-mode-btn[aria-checked="true"] {
+  color: var(--lumiverse-accent);
+  background: color-mix(in srgb, var(--lumiverse-accent) 22%, transparent);
+}
+
+/* jsonquery error banner — sits between the toolbar and the records
+   body, only when the backend returned an error (parse, runtime, or
+   non-array result for a jsonquery expression). Replaced by the
+   normal records body as soon as a clean response arrives. */
+.ls-inspect-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px 12px;
+  margin: 0 12px 8px 12px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--lumiverse-danger, rgb(246, 130, 130)) 12%, transparent);
+  color: var(--lumiverse-danger, rgb(246, 130, 130));
+  font-size: 11px;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  line-height: 1.4;
+  word-break: break-word;
+}
+.ls-inspect-error svg {
+  flex-shrink: 0;
+  margin-top: 1px;
 }
 
 .ls-inspect-pager {
@@ -234,6 +331,153 @@
   padding: 0;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* JSON syntax highlighting (v0.23+) — applied via a lightweight
+   regex-based highlighter in InspectModal.tsx that wraps tokens in
+   `<span class="ls-json-…">`. Color choices:
+     - keys     → accent (Lumiverse purple) — primary visual anchor
+     - strings  → green-ish — distinct from numeric / structural
+     - numbers  → blue-ish — tabular-nums-feel for record IDs / counts
+     - bools    → orange-ish — small, distinct
+     - null     → muted italic — recedes visually, the absence-of-value
+   The colors loosely echo the scope-chip palette in CollectionsSection
+   (script=blue, character=orange, chat=green) for theme consistency,
+   though they're applied in a different visual context (JSON pane). */
+/* JSON token classes are unscoped intentionally — `highlightJson` is
+   used by both the Records pane and the EditRecordModal overlay layer,
+   and any future surface that renders the same output should pick up
+   the palette automatically. */
+.ls-json-key    { color: var(--lumiverse-accent, rgb(147, 112, 219)); }
+.ls-json-string { color: rgb(174, 229, 168); }
+.ls-json-number { color: rgb(120, 180, 255); }
+.ls-json-bool   { color: rgb(246, 175, 125); }
+.ls-json-null   {
+  color: var(--lumiverse-text-3, rgba(255, 255, 255, 0.4));
+  font-style: italic;
+}
+
+/* ── Stats view (Inspect modal → Stats tab) ───────────────────────────────
+ *
+ * Per-field aggregate cards. Grid layout that wraps responsively as the
+ * modal is resized. Each card is self-contained — header (name + presence),
+ * type chips, optional numeric range, optional top-values chip list.
+ */
+.ls-inspect-stats-body {
+  /* Override the records-mode `display: flex` on `.ls-inspect-body` —
+   * stats panel manages its own layout via the inner grid. */
+  display: block;
+  overflow: auto;
+  padding: 14px 16px;
+}
+.ls-inspect-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.ls-inspect-stats-summary {
+  font-size: 12px;
+  color: var(--lumiverse-text-2, rgba(255, 255, 255, 0.7));
+}
+.ls-inspect-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 10px;
+}
+.ls-inspect-stats-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--lumiverse-fill-1, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 4px;
+}
+.ls-inspect-stats-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ls-inspect-stats-card-name {
+  flex: 1;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--lumiverse-accent, rgb(147, 112, 219));
+  word-break: break-all;
+}
+.ls-inspect-stats-card-presence {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--lumiverse-text-2, rgba(255, 255, 255, 0.7));
+  flex-shrink: 0;
+}
+.ls-inspect-stats-card-types {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.ls-stats-type {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  padding: 1px 6px;
+  border-radius: 2px;
+  letter-spacing: 0.2px;
+}
+.ls-stats-type-string  { background: rgba(174, 229, 168, 0.15); color: rgb(174, 229, 168); }
+.ls-stats-type-number  { background: rgba(120, 180, 255, 0.15); color: rgb(120, 180, 255); }
+.ls-stats-type-bool    { background: rgba(246, 175, 125, 0.18); color: rgb(246, 175, 125); }
+.ls-stats-type-null    { background: rgba(255, 255, 255, 0.06); color: rgba(255, 255, 255, 0.55); font-style: italic; }
+.ls-stats-type-complex { background: rgba(255, 255, 255, 0.08); color: rgba(255, 255, 255, 0.7); }
+.ls-inspect-stats-card-numeric {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--lumiverse-text-2, rgba(255, 255, 255, 0.7));
+}
+.ls-inspect-stats-card-numeric strong {
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.95));
+}
+.ls-inspect-stats-card-values {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ls-inspect-stats-card-values-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--lumiverse-text-3, rgba(255, 255, 255, 0.5));
+}
+.ls-inspect-stats-card-values-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.ls-inspect-stats-value-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px;
+  background: var(--lumiverse-fill-2, rgba(255, 255, 255, 0.06));
+  border-radius: 3px;
+  font-size: 10.5px;
+  max-width: 100%;
+}
+.ls-inspect-stats-value-chip code {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
+}
+.ls-inspect-stats-value-count {
+  font-variant-numeric: tabular-nums;
+  color: var(--lumiverse-text-3, rgba(255, 255, 255, 0.55));
 }
 
 /* ─── Drop confirmation dialog (Storage tab → Collections → Trash) ────── */
@@ -358,4 +602,176 @@
 .ls-drop-btn-confirm:focus-visible {
   outline: 2px solid var(--lumiverse-danger, rgb(246, 130, 130));
   outline-offset: 2px;
+}
+
+/* ── Edit record modal ─────────────────────────────────────────────────────
+ *
+ * Reuses the drop-card sizing primitive but slightly wider + taller
+ * because the textarea needs room. Body shares spacing with the drop
+ * dialog so the actions row aligns visually if both modals are stacked
+ * (rare, but it can happen during a confirm + edit interleave).
+ */
+.ls-edit-card {
+  /* Pin to a definite height so the inner flex chain has something to
+   * resolve `flex: 1` against — without this, the body sizes to its
+   * content and the textarea's min-height can push the actions row
+   * past the card's max-height, where `.ls-modal-card { overflow: hidden }`
+   * clips the Save button entirely. */
+  width: min(640px, 92vw);
+  height: min(86vh, 720px);
+  max-height: 90vh;
+}
+.ls-edit-body {
+  /* `flex: 1` so the body fills the card's vertical space — required for
+   * the textarea's `flex: 1; min-height: 0` to resolve correctly inside. */
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px 16px;
+  min-height: 0;
+}
+.ls-edit-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--lumiverse-text-2, rgba(255, 255, 255, 0.7));
+}
+.ls-edit-meta-label {
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  opacity: 0.7;
+}
+.ls-edit-meta-value {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--lumiverse-text-1);
+  word-break: break-all;
+}
+.ls-edit-hint {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--lumiverse-text-3, rgba(255, 255, 255, 0.55));
+}
+.ls-edit-hint code {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  padding: 0 3px;
+  background: var(--lumiverse-fill-1, rgba(255, 255, 255, 0.05));
+  border-radius: 2px;
+}
+/* ── Live syntax-highlighted editor (textarea + pre overlay) ─────────────
+ *
+ * The wrap is a positioning context. The `<pre>` and `<textarea>` both
+ * fill it absolutely with IDENTICAL typography, padding, border, and
+ * box model, so glyphs in the textarea sit pixel-on-pixel over the
+ * highlighted spans in the `<pre>`. Any divergence (font-size, line-
+ * height, padding, even box-sizing) breaks alignment as the user
+ * scrolls — the cardinal sin of this technique. Keep these rules in
+ * lock-step if you ever touch one.
+ */
+.ls-edit-textarea-wrap {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 4px;
+  background: var(--lumiverse-fill-1, rgba(255, 255, 255, 0.04));
+  overflow: hidden; /* clip the inner overlay so its rounded corners stay clean */
+  transition: border-color 120ms;
+}
+.ls-edit-textarea-wrap:focus-within {
+  border-color: var(--lumiverse-accent, rgb(147, 112, 219));
+}
+
+.ls-edit-textarea,
+.ls-edit-textarea-highlight {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 10px 12px;
+  border: 0;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow: auto;
+  tab-size: 2;
+  box-sizing: border-box;
+}
+
+.ls-edit-textarea-highlight {
+  /* The visible highlighted layer. `pointer-events: none` lets all
+   * mouse / touch input pass through to the textarea below. The
+   * textarea controls the actual scroll; an onScroll handler in the
+   * component mirrors scrollTop/scrollLeft here in lock-step. */
+  pointer-events: none;
+  background: transparent;
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.9));
+}
+
+.ls-edit-textarea {
+  /* The interactive layer. Text is transparent (the `<pre>` underneath
+   * draws it); only the caret + selection highlight remain visible.
+   * `caret-color` keeps the caret ink against the rendered tokens. */
+  background: transparent;
+  color: transparent;
+  caret-color: var(--lumiverse-text, rgba(255, 255, 255, 0.9));
+  resize: none;
+  outline: none;
+  /* Selection visibility — without an explicit override, the
+   * transparent-text trick can leave selection invisible on some
+   * browsers. Light tint over the rendered tokens reads cleanly. */
+}
+.ls-edit-textarea::selection {
+  background: rgba(147, 112, 219, 0.35);
+}
+.ls-edit-error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  font-size: 11px;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  color: var(--lumiverse-danger, rgb(246, 130, 130));
+  background: rgba(246, 130, 130, 0.1);
+  border: 1px solid rgba(246, 130, 130, 0.25);
+  border-radius: 3px;
+  word-break: break-word;
+}
+.ls-edit-btn-save {
+  /* `--lumiverse-accent` and `--lumiverse-accent-fg` are set dynamically
+   * by the theme engine, but only on certain ancestor scopes — they do
+   * NOT cascade into portal-rendered modals under <body>. Without a
+   * hard-coded fallback the button background falls through to the
+   * universal `button { background: 0 0 }` and disappears against the
+   * modal backdrop. Mirror `.ls-drop-btn-confirm`'s pattern: provide a
+   * literal Lumiverse-purple fallback for both background AND text so
+   * the button is always visible regardless of theme-engine reach. */
+  background: var(--lumiverse-accent, rgb(147, 112, 219));
+  border: 1px solid transparent;
+  color: var(--lumiverse-accent-fg, #ffffff);
+  font-weight: 600;
+}
+.ls-edit-btn-save:hover {
+  background: var(--lumiverse-accent, rgb(167, 132, 239));
+  filter: brightness(1.08);
+}
+.ls-edit-btn-save:focus-visible {
+  outline: 2px solid var(--lumiverse-accent, rgb(147, 112, 219));
+  outline-offset: 2px;
+}
+
+/* The actions row must not shrink — `flex-shrink: 0` keeps Save +
+ * Cancel pinned at the bottom of the body even when the textarea is
+ * fully expanded. Without this, `display: flex; flex-direction: column`
+ * on the body would let the actions get squashed when the body's
+ * intrinsic content height equals or exceeds the available space. */
+.ls-edit-body .ls-drop-actions {
+  flex-shrink: 0;
 }

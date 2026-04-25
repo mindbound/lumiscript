@@ -55,6 +55,10 @@ import { checkMinimumHostVersion } from './utils/host-version.js';
 import {
   enumerateAllCollections,
   inspectCollection,
+  countCollection,
+  analyzeCollection,
+  updateRecord,
+  deleteRecord,
   isValidCollectionPath,
 } from './engine/db-admin.js';
 import { on as busOn } from './engine/broadcast-bus.js';
@@ -467,17 +471,27 @@ spindle.onFrontendMessage(async (raw, userId) => {
         // Path is supplied by frontend — validated inside inspectCollection
         // before any storage read. Invalid paths throw, which we catch
         // and surface as an empty result rather than crashing the handler.
+        // jsonquery errors don't throw — they come back via result.error
+        // and are forwarded transparently to the frontend for inline
+        // display below the filter input.
         try {
           const result = await inspectCollection(
             msg.path,
-            { textFilter: msg.textFilter, limit: msg.limit, offset: msg.offset },
+            {
+              textFilter:      msg.textFilter,
+              deepFilter:      msg.deepFilter,
+              jsonqueryFilter: msg.jsonqueryFilter,
+              limit:           msg.limit,
+              offset:          msg.offset,
+            },
             userId ?? undefined,
           );
           send({
-            type: 'collection_records',
-            path: msg.path,
+            type:    'collection_records',
+            path:    msg.path,
             records: result.records,
-            total: result.total,
+            total:   result.total,
+            error:   result.error,
           });
         } catch (err) {
           spindle.log.warn(
@@ -485,10 +499,10 @@ spindle.onFrontendMessage(async (raw, userId) => {
             (err instanceof Error ? err.message : String(err)),
           );
           send({
-            type: 'collection_records',
-            path: msg.path,
+            type:    'collection_records',
+            path:    msg.path,
             records: [],
-            total: 0,
+            total:   0,
           });
         }
         break;
@@ -514,6 +528,71 @@ spindle.onFrontendMessage(async (raw, userId) => {
         }
         // Refresh immediately rather than waiting for the debounced hint.
         await pushCollections(userId);
+        break;
+      }
+
+      case 'count_collection': {
+        // Lightweight record-count query for the drop confirmation
+        // dialog. countCollection returns -1 for missing / malformed
+        // paths; the frontend handler treats that as "unknown" and
+        // hides the count line rather than displaying "0 records"
+        // (which would imply a legitimate empty collection).
+        const count = await countCollection(msg.path, userId ?? undefined);
+        send({ type: 'collection_count', path: msg.path, count });
+        break;
+      }
+
+      case 'update_record': {
+        // Admin-side per-record edit from the InspectModal. Mutation
+        // routes through `runExclusive` for the same path lock used by
+        // `api.db.update()` so concurrent script + admin writes
+        // serialize. On success the broadcast forwarder picks up
+        // `ls:collection:updated` and the open inspect modal re-fetches
+        // via its `refreshToken` bump. Failures (record missing, size
+        // cap, write error) surface through a toast — same pattern as
+        // script-execution failures.
+        const result = await updateRecord(
+          msg.path,
+          msg.recordId,
+          msg.patch,
+          userId ?? undefined,
+        );
+        if (!result.success) {
+          spindle.log.warn(
+            `[LumiScript] update_record failed for "${msg.path}" id=${msg.recordId}: ${result.error}`,
+          );
+          spindle.toast.error(result.error ?? 'Failed to update record', {
+            title: 'Storage — edit record',
+          });
+        }
+        break;
+      }
+
+      case 'analyze_collection': {
+        // Aggregate stats for the InspectModal's Stats tab. Always
+        // walks the full collection (no pagination); the 50 MB cap
+        // bounds cost. Errors degrade to an empty stats result rather
+        // than throwing — the UI shows a "no records" placeholder so
+        // a stale path doesn't crash the modal.
+        const stats = await analyzeCollection(msg.path, userId ?? undefined);
+        send({ type: 'collection_stats', path: msg.path, stats });
+        break;
+      }
+
+      case 'delete_record': {
+        const result = await deleteRecord(
+          msg.path,
+          msg.recordId,
+          userId ?? undefined,
+        );
+        if (!result.success) {
+          spindle.log.warn(
+            `[LumiScript] delete_record failed for "${msg.path}" id=${msg.recordId}: ${result.error}`,
+          );
+          spindle.toast.error(result.error ?? 'Failed to delete record', {
+            title: 'Storage — delete record',
+          });
+        }
         break;
       }
 

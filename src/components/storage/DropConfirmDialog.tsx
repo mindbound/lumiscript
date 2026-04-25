@@ -21,31 +21,46 @@ import { useEffect, useRef, type FC } from 'react';
 import { createPortal } from 'react-dom';
 import { X, Trash2, AlertTriangle } from 'lucide-react';
 import type { CollectionSummary } from '../../engine/db-admin.js';
+import { formatBytes, SCOPE_LABEL_LONG } from './utils.js';
 
-/** Human-readable byte count (duplicated from CollectionsSection — tiny,
- *  not worth a shared helper). */
-function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
-  const value = bytes / Math.pow(1024, i);
-  return `${i === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[i]}`;
+/**
+ * Resolve a "Belongs to: <name>" line for character / chat scopes.
+ * Returns null for script scope (the owner script name already covers
+ * the identity), or when the host didn't resolve a name (deleted
+ * character / chat, permission revoked) — caller can then fall back
+ * to displaying just the path, which is enough for disambiguation.
+ */
+function scopeIdentityLine(c: CollectionSummary): { label: string; name: string; id: string } | null {
+  if (c.scope === 'character' && c.characterName && c.characterId) {
+    return { label: 'Character', name: c.characterName, id: c.characterId };
+  }
+  if (c.scope === 'chat' && c.chatName && c.chatId) {
+    return { label: 'Chat', name: c.chatName, id: c.chatId };
+  }
+  return null;
 }
-
-const SCOPE_LABEL: Record<CollectionSummary['scope'], string> = {
-  script:    'Script-scoped',
-  character: 'Character-scoped',
-  chat:      'Chat-scoped',
-};
 
 export interface DropConfirmDialogProps {
   target: CollectionSummary;
+  /**
+   * Number of records in the target collection — drives the "you're
+   * about to delete N records" line.
+   *   - `null`       → still loading the count from the backend; show
+   *                    a brief loading state.
+   *   - `-1`         → backend couldn't read the file (missing /
+   *                    malformed); hide the count line entirely so we
+   *                    don't display "0 records" which would imply a
+   *                    legitimate empty collection.
+   *   - `0` and up   → real record count; show the line.
+   */
+  recordCount: number | null;
   onConfirm: () => void;
   onCancel: () => void;
 }
 
 export const DropConfirmDialog: FC<DropConfirmDialogProps> = ({
   target,
+  recordCount,
   onConfirm,
   onCancel,
 }) => {
@@ -139,12 +154,42 @@ export const DropConfirmDialog: FC<DropConfirmDialogProps> = ({
             <div className="ls-drop-target-name">{target.name}</div>
             <div className="ls-drop-target-meta">
               <span className="ls-drop-target-scope" data-scope={target.scope}>
-                {SCOPE_LABEL[target.scope]}
+                {SCOPE_LABEL_LONG[target.scope]}
               </span>
               <span className="ls-drop-target-size">{formatBytes(target.sizeBytes)}</span>
             </div>
+            {(() => {
+              const ident = scopeIdentityLine(target);
+              if (!ident) return null;
+              return (
+                <div
+                  style={{ marginTop: 6, fontSize: 12, opacity: 0.85 }}
+                  title={`${ident.label.toLowerCase()}Id: ${ident.id}`}
+                >
+                  {ident.label}: <strong>{ident.name}</strong>
+                </div>
+              );
+            })()}
             <div className="ls-drop-target-path" title={target.path}>{target.path}</div>
           </div>
+
+          {/* Record count — driven by the count_collection request the
+              parent dispatches when the dialog opens. Three rendering
+              states: loading (shows a subtle "Loading record count…"),
+              known (shows the number), or unknown (-1 → hide entirely
+              so we don't bluff a "0 records" claim about a file we
+              couldn't read). */}
+          {recordCount === null ? (
+            <div style={{ marginTop: 6, fontSize: 12, opacity: 0.55 }}>
+              Counting records…
+            </div>
+          ) : recordCount >= 0 ? (
+            <div style={{ marginTop: 6, fontSize: 12 }}>
+              {recordCount === 0
+                ? 'Collection is currently empty.'
+                : <>Will delete <strong>{recordCount.toLocaleString()}</strong> {recordCount === 1 ? 'record' : 'records'}.</>}
+            </div>
+          ) : null}
 
           <div className="ls-drop-warning">
             <AlertTriangle size={12} />

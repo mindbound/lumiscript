@@ -175,6 +175,128 @@
   color: var(--lumiverse-danger, rgb(246, 130, 130));
 }
 
+/* ─── Collections: filter row above the table (v0.23+) ──────────────── */
+
+.ls-collections-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  margin-bottom: 4px;
+  border-radius: 3px;
+  background: var(--lumiverse-fill-0, rgba(0, 0, 0, 0.18));
+}
+
+.ls-collections-filter-search {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+  padding: 0 4px;
+  background: var(--lumiverse-fill);
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 3px;
+  color: var(--lumiverse-text-2, rgba(255, 255, 255, 0.6));
+}
+.ls-collections-filter-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--lumiverse-text);
+  font-family: inherit;
+  font-size: 11px;
+  padding: 3px 0;
+  outline: none;
+}
+.ls-collections-filter-clear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  border-radius: 2px;
+  cursor: pointer;
+  opacity: 0.6;
+}
+.ls-collections-filter-clear:hover {
+  opacity: 1;
+  background: var(--lumiverse-fill-2, rgba(255, 255, 255, 0.08));
+}
+
+.ls-collections-filter-chips {
+  display: inline-flex;
+  gap: 3px;
+}
+.ls-collections-filter-chip {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 2px 6px;
+  border-radius: 2px;
+  border: 1px solid transparent;
+  background: var(--lumiverse-fill-1, rgba(255, 255, 255, 0.06));
+  color: var(--lumiverse-text-2, rgba(255, 255, 255, 0.5));
+  cursor: pointer;
+  user-select: none;
+  transition: opacity 120ms, background 120ms, color 120ms;
+}
+.ls-collections-filter-chip[aria-pressed="false"] {
+  opacity: 0.45;
+}
+.ls-collections-filter-chip[aria-pressed="true"][data-scope="script"]    { background: rgba(88, 166, 255, 0.18);  color: rgb(120, 180, 255); }
+.ls-collections-filter-chip[aria-pressed="true"][data-scope="character"] { background: rgba(236, 147, 87, 0.18);  color: rgb(246, 175, 125); }
+.ls-collections-filter-chip[aria-pressed="true"][data-scope="chat"]      { background: rgba(142, 209, 134, 0.18); color: rgb(174, 229, 168); }
+
+.ls-collections-filter-count {
+  font-size: 10px;
+  color: var(--lumiverse-text-3, rgba(255, 255, 255, 0.45));
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  padding-left: 2px;
+}
+
+/* ─── Collections: sortable header cells (v0.23+) ────────────────────── */
+
+/* Sortable headers — flex layout per cell so the text + sort indicator
+   align together as one inline group. The cell ITSELF is a grid item
+   that stretches to fill its column, so we use `justify-content` to
+   echo the original `text-align` rules at the flex layer (text-align
+   is ignored on flex containers because their children are flex
+   children, not inline content). The nth-child selectors mirror the
+   data-cell alignment: Scope centered, Size + Updated right-aligned. */
+.ls-collections-header-row > span.ls-collections-sortable {
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  transition: color 120ms;
+}
+.ls-collections-header-row > span.ls-collections-sortable:nth-child(2) {
+  justify-content: center;
+}
+.ls-collections-header-row > span.ls-collections-sortable:nth-child(4),
+.ls-collections-header-row > span.ls-collections-sortable:nth-child(5) {
+  justify-content: flex-end;
+}
+.ls-collections-header-row > span.ls-collections-sortable:hover {
+  color: var(--lumiverse-text-1, rgba(255, 255, 255, 0.9));
+}
+.ls-collections-sort-icon {
+  opacity: 0.4;
+  flex-shrink: 0;
+}
+.ls-collections-sort-icon-active {
+  opacity: 1;
+  color: var(--lumiverse-accent);
+}
+
 /*
  * Section wrapper — one per grid row. Clips its body scroll via
  * `overflow: hidden` so the pinned header never scrolls with the content.

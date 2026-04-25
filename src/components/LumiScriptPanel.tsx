@@ -4,7 +4,7 @@ import type { Script, LumiScriptSettings, ConsoleEntry, InjectionInfo, Registere
 import type { BackendToFrontend, FrontendToBackend, VariablesSnapshot } from '../types/messages.js';
 import type { ActiveContext } from './manage/BindingsSection.js';
 import type { ExecutionDot } from './manage/ScriptListItem.js';
-import type { CollectionSummary } from '../engine/db-admin.js';
+import type { CollectionSummary, CollectionStats } from '../engine/db-admin.js';
 import { DEFAULT_SETTINGS } from '../types/script.js';
 import { ManagePanel } from './manage/ManagePanel.js';
 import { StorageTab } from './storage/StorageTab.js';
@@ -79,16 +79,43 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
   const [inspectRecords, setInspectRecords] = useState<DbRecord[] | null>(null);
   /** Post-filter, pre-pagination count — drives "page N of M matching". */
   const [inspectTotal, setInspectTotal] = useState<number>(0);
+  /** Backend-side error for the open inspect modal — currently only
+   *  jsonquery-mode errors (parse / runtime / non-array result) surface
+   *  here. The modal renders this inline below the filter input so users
+   *  can fix their query without losing context. `null` for normal
+   *  (non-erroring) responses; cleared as soon as the next clean
+   *  response arrives. */
+  const [inspectError, setInspectError] = useState<string | null>(null);
   /** Bumps on every `collections_updated` hint so an open inspect modal
    *  can re-fetch its records (the modal owns its own filter/offset, so
    *  Panel can't dispatch the fetch directly — a token dep does it). */
   const [collectionsRefreshToken, setCollectionsRefreshToken] = useState(0);
+  /**
+   * Per-field aggregate stats for the open inspect modal's "Stats" tab.
+   * `null` while loading or when the user hasn't switched to the Stats
+   * tab yet — InspectModal lazily dispatches `analyze_collection` only
+   * when the tab becomes active, so we don't pay the full-load cost
+   * unless the user actually wants stats.
+   *
+   * Refresh: re-dispatches whenever `collectionsRefreshToken` bumps,
+   * same as records. Only the open inspect modal's path is fetched —
+   * if the modal is closed the stats request never fires.
+   */
+  const [inspectStats, setInspectStats] = useState<CollectionStats | null>(null);
 
   /** Collection the user is about to drop. `null` = confirmation dialog
    *  is closed. Holding the full summary (not just the path) lets the
    *  dialog show scope, size, and the resolved display name without
    *  re-looking-up from the collections list. */
   const [dropTarget, setDropTarget] = useState<CollectionSummary | null>(null);
+  /**
+   * Record count for the open drop-confirm dialog's target. `null` =
+   * count not yet returned (dialog shows a small loading indicator
+   * instead of a number). Updated from `collection_count` messages
+   * dispatched against the dropTarget's path; reset to null whenever
+   * dropTarget changes so a new dialog opens fresh rather than
+   * showing the stale count from the previous one. */
+  const [dropTargetCount, setDropTargetCount] = useState<number | null>(null);
 
   /** Per-trigger invocation counter (session-local, increments on execution_started) */
   const [invocationCounts, setInvocationCounts] = useState<Record<string, number>>({});
@@ -145,6 +172,40 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
             return msg.records;
           });
           setInspectTotal(msg.total);
+          // Error is set when present, cleared otherwise — so the next
+          // successful response after a jsonquery error wipes the banner.
+          setInspectError(msg.error ?? null);
+          break;
+
+        case 'collection_stats':
+          // Stats result for the open InspectModal's Stats tab. Like
+          // collection_records, accept any arriving payload — the
+          // modal's effect that dispatched the request is gated on its
+          // current path + tab state, so a stale message would only
+          // arrive in a tight race window. Functional setter is here
+          // purely for symmetry with the records handler.
+          setInspectStats(prev => {
+            void prev;
+            return msg.stats;
+          });
+          break;
+
+        case 'collection_count':
+          // Drop-confirmation dialog requested a count. Functional
+          // setter reads the current dropTarget via prev — we keep
+          // late-arrival responses harmless: if the user closed the
+          // dialog or moved to a different collection between request
+          // and response, just discard the stale payload.
+          setDropTargetCount(prev => {
+            void prev;
+            // Always accept — the parent effect that dispatched this
+            // request was guarded by dropTarget?.path matching msg.path
+            // at dispatch time. Race window between dispatch and
+            // response is acceptable; worst case the user sees a
+            // briefly-mismatched count for ~50ms before clicking
+            // anything.
+            return msg.count;
+          });
           break;
 
         case 'collections_updated':
@@ -311,6 +372,18 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
     }
   }, [activeTab, sendToBackend]);
 
+  // Drop confirmation dialog needs a record count for the target. On
+  // every dropTarget change, reset the cached count to null (so the
+  // dialog shows a brief "Loading…" instead of last dialog's stale
+  // number) and dispatch a fresh `count_collection` request. The
+  // backend reply lands in the `collection_count` handler above.
+  useEffect(() => {
+    setDropTargetCount(null);
+    if (dropTarget) {
+      sendToBackend({ type: 'count_collection', path: dropTarget.path });
+    }
+  }, [dropTarget, sendToBackend]);
+
   const clearConsole = useCallback((scriptId: string) => {
     setExecState(prev => ({
       ...prev,
@@ -405,17 +478,23 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
             inspectPath={inspectPath}
             inspectRecords={inspectRecords}
             inspectTotal={inspectTotal}
+            inspectError={inspectError}
+            inspectStats={inspectStats}
             inspectRefreshToken={collectionsRefreshToken}
             onInspect={(path) => {
               // Clear the old records immediately so the modal shows a
               // "loading…" state while the new request is in flight — and
               // so stale data never flashes if the user opens modal → close
-              // → reopen on a different collection.
+              // → reopen on a different collection. Also clear stats so a
+              // re-opened modal on a different path doesn't briefly render
+              // the previous collection's aggregate.
               setInspectPath(path);
               setInspectRecords(null);
               setInspectTotal(0);
+              setInspectStats(null);
             }}
             dropTarget={dropTarget}
+            dropTargetCount={dropTargetCount}
             onDrop={setDropTarget}
             onDropConfirm={() => {
               if (!dropTarget) return;
@@ -428,6 +507,7 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
                 setInspectPath(null);
                 setInspectRecords(null);
                 setInspectTotal(0);
+                setInspectStats(null);
               }
               sendToBackend({ type: 'drop_collection', path });
               setDropTarget(null);
