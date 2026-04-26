@@ -1290,6 +1290,30 @@ export interface Character {
   imageId: string | null;
   /** World book IDs attached to this character. */
   worldBookIds: string[];
+  /**
+   * Raw extensions blob — a free-form map of namespaced keys for extension-
+   * specific state attached directly to the character row. Complements the
+   * `extra` bag on chat messages: that one is per-message, this one is
+   * per-character. Reads return the full object (host no longer redacts as
+   * of spindle-types 0.4.39).
+   *
+   * **Best practices:**
+   *  - **Namespace your keys.** Use a unique prefix (your script id, or a
+   *    reverse-DNS-style identifier) to avoid collisions with other extensions
+   *    or future Lumiverse features. Lumiverse-internal state (world books,
+   *    expressions, alternate fields) lives at host-reserved keys that
+   *    aren't namespaced via the script-id convention; reading any of those
+   *    is fine but writing to them is not advised.
+   *  - **Keep values JSON-serializable.** The blob persists as JSON in the
+   *    database.
+   *
+   * Writes go through `update({ extensions: { 'your-key': value } })` and
+   * shallow-merge into the existing object (top-level keys you provide
+   * overwrite; omitted keys are preserved). Nested objects are replaced
+   * wholesale at the top level, NOT recursively merged — read–modify–write
+   * inside your script if you need to merge a sub-tree.
+   */
+  extensions: Record<string, unknown>;
   createdAt: number;
   updatedAt: number;
 }
@@ -1309,6 +1333,12 @@ export interface CharacterCreateInput {
   creator?: string;
   /** Replace the character's world book attachments. Pass [] to detach all. Omit to leave unchanged. */
   worldBookIds?: string[];
+  /**
+   * Initial extension data to seed the character with on creation. See
+   * `Character.extensions` for the namespacing + JSON-serialization
+   * conventions; the same shallow-merge rules apply on subsequent updates.
+   */
+  extensions?: Record<string, unknown>;
 }
 
 export interface CharacterUpdateInput extends Partial<CharacterCreateInput> {}

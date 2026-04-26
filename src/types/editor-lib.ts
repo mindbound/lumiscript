@@ -1387,6 +1387,16 @@ interface Character {
   alternateGreetings: string[]; creator: string; imageId: string | null;
   /** World book IDs attached to this character. */
   worldBookIds: string[];
+  /**
+   * Free-form extensions blob — namespace your keys (e.g. \`'my-script:state'\`).
+   * Complements the \`extra\` bag on chat messages: per-character, not per-message.
+   * Reads return the full object. Writes via \`update({ extensions: { ... } })\`
+   * shallow-merge into existing — top-level keys you provide overwrite, omitted
+   * keys are preserved. Nested objects are replaced wholesale (NOT recursively
+   * merged) — read-modify-write inside your script if you need sub-tree merge.
+   * Keep values JSON-serializable.
+   */
+  extensions: Record<string, unknown>;
   createdAt: number; updatedAt: number;
 }
 interface CharacterCreateInput {
@@ -1396,6 +1406,8 @@ interface CharacterCreateInput {
   tags?: string[]; alternateGreetings?: string[]; creator?: string;
   /** Replace the character's world book attachments. Pass [] to detach all. Omit to leave unchanged. */
   worldBookIds?: string[];
+  /** Initial extension data. See \`Character.extensions\` for namespacing + JSON conventions. */
+  extensions?: Record<string, unknown>;
 }
 interface CharacterUpdateInput extends Partial<CharacterCreateInput> {}
 

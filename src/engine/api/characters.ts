@@ -39,6 +39,12 @@ function mapCharacter(dto: import('lumiverse-spindle-types').CharacterDTO): Char
     creator:                 dto.creator,
     imageId:                 dto.image_id,
     worldBookIds:            dto.world_book_ids,
+    // Spindle-types 0.4.39+ surfaces the full `extensions` blob to extensions
+    // (it used to redact and only expose `world_book_ids`). Older Lumiverse
+    // hosts or older spindle-types builds may not populate this — fall back
+    // to an empty object so scripts can rely on the field being present
+    // without guarding for `undefined` on every access.
+    extensions:              (dto as { extensions?: Record<string, unknown> }).extensions ?? {},
     createdAt:               dto.created_at,
     updatedAt:               dto.updated_at,
   };
@@ -61,6 +67,9 @@ function toCreateDTO(
     alternate_greetings:       input.alternateGreetings,
     creator:                   input.creator,
     world_book_ids:            input.worldBookIds,
+    // Pass-through. Host shallow-merges into existing extensions on update;
+    // initial value on create. JSON-serialization is the host's responsibility.
+    extensions:                input.extensions,
   };
 }
 

@@ -19,6 +19,7 @@ const charDTO = {
   system_prompt: '', post_history_instructions: '', tags: ['tag1'],
   alternate_greetings: [], creator: 'me', image_id: null,
   world_book_ids: ['wb-1', 'wb-2'],
+  extensions: { 'my-script:state': { phase: 'intro' } },
   created_at: '2026-01-01', updated_at: '2026-01-02',
 };
 
@@ -76,6 +77,63 @@ describe('update', () => {
     await api.update('char-1', { name: 'Updated', postHistoryInstructions: 'new' });
     const call = mockSpindle.characters.update.mock.calls[0] as any;
     expect(call[1].post_history_instructions).toBe('new');
+  });
+});
+
+// ─── extensions blob — read + write surfaces (spindle-types 0.4.39+) ────────
+//
+// CharacterDTO.extensions is a free-form namespaced map for extension-specific
+// state attached directly to the character row. The host shallow-merges the
+// `extensions` field on update; LumiScript's mapping layer just passes it
+// through (no special serialization).
+
+describe('extensions field', () => {
+  test('mapCharacter exposes the full extensions blob on read', async () => {
+    mockSpindle.characters.get.mockReturnValueOnce(Promise.resolve(charDTO));
+    const api = buildApi();
+    const result = await api.get('char-1');
+    expect(result!.extensions).toEqual({ 'my-script:state': { phase: 'intro' } });
+  });
+
+  test('mapCharacter falls back to {} when DTO omits extensions (older host)', async () => {
+    // Forward-compat: an older Lumiverse host or older spindle-types build
+    // may not populate the field. The mapping layer fills in `{}` so scripts
+    // can rely on the field being present without per-access guards.
+    const legacyDTO = { ...charDTO, extensions: undefined };
+    mockSpindle.characters.get.mockReturnValueOnce(Promise.resolve(legacyDTO));
+    const api = buildApi();
+    const result = await api.get('char-1');
+    expect(result!.extensions).toEqual({});
+  });
+
+  test('toCreateDTO passes extensions through verbatim on create', async () => {
+    mockSpindle.characters.create.mockReturnValueOnce(Promise.resolve(charDTO));
+    const api = buildApi();
+    await api.create({
+      name: 'Alice',
+      extensions: { 'my-script:state': { phase: 'intro' } },
+    });
+    const call = mockSpindle.characters.create.mock.calls[0] as any;
+    expect(call[0].extensions).toEqual({ 'my-script:state': { phase: 'intro' } });
+  });
+
+  test('toUpdateDTO passes extensions through verbatim on update (host shallow-merges)', async () => {
+    mockSpindle.characters.update.mockReturnValueOnce(Promise.resolve(charDTO));
+    const api = buildApi();
+    await api.update('char-1', {
+      extensions: { 'my-script:state': { phase: 'climax' } },
+    });
+    const call = mockSpindle.characters.update.mock.calls[0] as any;
+    expect(call[1].extensions).toEqual({ 'my-script:state': { phase: 'climax' } });
+  });
+
+  test('extensions can be omitted from update (other fields still flow through)', async () => {
+    mockSpindle.characters.update.mockReturnValueOnce(Promise.resolve(charDTO));
+    const api = buildApi();
+    await api.update('char-1', { name: 'Renamed' });
+    const call = mockSpindle.characters.update.mock.calls[0] as any;
+    expect(call[1].name).toBe('Renamed');
+    expect(call[1].extensions).toBeUndefined();
   });
 });
 

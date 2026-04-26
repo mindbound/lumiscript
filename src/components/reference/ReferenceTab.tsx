@@ -997,6 +997,7 @@ export const KEY_TYPES: TypeDoc[] = [
       { field: 'alternateGreetings',      type: 'string[]', optional: false, desc: 'Additional greeting variants.' },
       { field: 'imageId',                 type: 'string | null', optional: false, desc: 'Avatar image ID. Null if no avatar.' },
       { field: 'worldBookIds',            type: 'string[]',     optional: false, desc: 'World book IDs attached to this character.' },
+      { field: 'extensions',              type: 'Record<string, unknown>', optional: false, desc: 'Free-form extension data attached to the character (per-character analog of message.extra). Namespace your keys (e.g. "my-script:state") to avoid collisions with other extensions / Lumiverse-internal fields. Reads return the full blob; writes via update() shallow-merge into existing — top-level keys overwrite, omitted keys preserved, nested objects replaced wholesale (NOT recursively merged). Keep values JSON-serializable.' },
       { field: 'createdAt',               type: 'number',   optional: false, desc: 'Creation timestamp (Unix ms).' },
       { field: 'updatedAt',               type: 'number',   optional: false, desc: 'Last update timestamp (Unix ms).' },
     ],
@@ -1016,6 +1017,7 @@ export const KEY_TYPES: TypeDoc[] = [
       { field: 'alternateGreetings?',     type: 'string[]', optional: true,  desc: 'Additional greeting variants.' },
       { field: 'creator?',                type: 'string',   optional: true,  desc: 'Creator name / attribution.' },
       { field: 'worldBookIds?',           type: 'string[]', optional: true,  desc: 'World book IDs to attach. Pass [] to detach all. Omit to leave unchanged.' },
+      { field: 'extensions?',             type: 'Record<string, unknown>', optional: true, desc: 'Initial extension data to seed the character with. See `Character.extensions` for the namespacing + JSON-serialization conventions. Subsequent updates use the same shallow-merge rules.' },
     ],
   },
   {
@@ -1033,6 +1035,7 @@ export const KEY_TYPES: TypeDoc[] = [
       { field: 'alternateGreetings?',     type: 'string[]', optional: true,  desc: 'Additional greeting variants.' },
       { field: 'creator?',                type: 'string',   optional: true,  desc: 'Creator name / attribution.' },
       { field: 'worldBookIds?',           type: 'string[]', optional: true,  desc: 'Replace world book attachments. Pass [] to detach all.' },
+      { field: 'extensions?',             type: 'Record<string, unknown>', optional: true, desc: 'Shallow-merged into existing extensions on the character. Top-level keys you provide overwrite, omitted keys are preserved, nested objects are replaced wholesale (not recursively merged). Pass an empty object to leave the field unchanged. See `Character.extensions` for the full semantics.' },
     ],
   },
   // ─── Chats ───────────────────────────────────────────────────────────────────
