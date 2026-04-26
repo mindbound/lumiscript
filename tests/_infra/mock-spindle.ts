@@ -28,6 +28,26 @@ export function createMockSpindle() {
     registerMacroInterceptor: mock(() => {}),
     registerMessageContentProcessor: mock(() => {}),
 
+    // ─── Council (read-only, free tier) ────────────────────────────────
+    council: {
+      getSettings: mock(() => Promise.resolve({
+        councilMode: false,
+        members: [],
+        toolsSettings: {
+          mode: 'sidecar' as const,
+          timeoutMs: 30000,
+          sidecarContextWindow: 10,
+          includeUserPersona: true,
+          includeCharacterInfo: true,
+          includeWorldInfo: true,
+          allowUserControl: true,
+          maxWordsPerTool: 0,
+        },
+      })),
+      getMembers: mock(() => Promise.resolve([])),
+      getAvailableLumiaItems: mock(() => Promise.resolve([])),
+    },
+
     // ─── Tools ─────────────────────────────────────────────────────────
     registerTool: mock(() => {}),
     unregisterTool: mock(() => {}),

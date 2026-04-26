@@ -213,6 +213,8 @@ export interface LumiScriptAPI {
   worldInfo: WorldInfoAPI;
   /** Persona (identity profile) CRUD + active persona switching. Requires personas permission. */
   personas: PersonasAPI;
+  /** Read-only access to the user's Council configuration: settings, members, and the available Lumia-item pool. No permission required. */
+  council: CouncilAPI;
   /** Requires allowDangerous */
   files: FilesAPI;
   /** AES-256-GCM encrypted per-user secret storage. Requires allowDangerous. */
@@ -2786,7 +2788,115 @@ export interface ToolDefinition {
  * Requires Lumiverse host commit `8d310f8` or later for the `councilMember`
  * field to be populated; older hosts omit it and scripts see `undefined`.
  */
-export type { CouncilMemberContext } from 'lumiverse-spindle-types';
+import type {
+  CouncilMember as CouncilMember_,
+  CouncilMemberContext as CouncilMemberContext_,
+  CouncilToolsSettings as CouncilToolsSettings_,
+  CouncilSettings as CouncilSettings_,
+} from 'lumiverse-spindle-types';
+// Re-export under their canonical names so scripts can import them
+// directly from LumiScript's public type surface.
+export type CouncilMember = CouncilMember_;
+export type CouncilMemberContext = CouncilMemberContext_;
+export type CouncilToolsSettings = CouncilToolsSettings_;
+export type CouncilSettings = CouncilSettings_;
+
+/**
+ * A Lumia item available in the user's installed packs — a single
+ * character/entity definition that can be assigned to a Council member.
+ * LumiScript-shaped (camelCase) mapping of upstream `LumiaItemDTO`.
+ *
+ * The full pool returned by `api.council.getAvailableLumiaItems()` is a
+ * superset of what's currently assigned to Council members; assignments
+ * live in `CouncilSettings.members` (which `api.council.getMembers()`
+ * returns enriched with the corresponding Lumia fields as
+ * `CouncilMemberContext[]`).
+ */
+export interface LumiaItem {
+  id: string;
+  packId: string;
+  name: string;
+  /**
+   * Relative URL to the avatar image (e.g. `/api/v1/images/{id}`), or null
+   * when no avatar is set. The path is host-served — fetch via
+   * `api.utils.http.*` if you need the bytes, or pass through to UI
+   * surfaces that accept relative URLs (host serves them transparently).
+   */
+  avatarUrl: string | null;
+  /** Display name of the pack author. */
+  authorName: string;
+  /** Physical / identity description (free-form text). */
+  definition: string;
+  /** Personality description (free-form text). */
+  personality: string;
+  /** Behavioural patterns (free-form text). */
+  behavior: string;
+  /**
+   * Gender identity marker. Per spindle-types 0.4.40 council types:
+   * `0` = unspecified, `1` = feminine, `2` = masculine. Note: upstream
+   * docs (council.md) describe a wider four-value range
+   * (0=feminine, 1=masculine, 2=neutral, 3=any) — this is a documented
+   * type-vs-doc inconsistency in 0.4.40; LumiScript matches the typed
+   * surface for now and will widen if/when upstream reconciles.
+   */
+  genderIdentity: 0 | 1 | 2;
+  /** Pack-author-supplied version string (e.g. `"1.0.0"`). */
+  version: string;
+  /** Sort index within the pack (lower values render first). */
+  sortOrder: number;
+  /** Creation timestamp (Unix seconds). */
+  createdAt: number;
+  /** Last update timestamp (Unix seconds). */
+  updatedAt: number;
+}
+
+/**
+ * `api.council` — read-only access to the user's active Council
+ * configuration: settings, currently-assigned members with full Lumia
+ * context, and the broader pool of available Lumia items across the
+ * user's installed packs.
+ *
+ * **No permission required** — Lumiverse exposes Council config to all
+ * extensions on the free tier (no `council` permission to declare).
+ *
+ * Common use cases:
+ *  - Tailor a script's narrative output to the active directors (e.g. read
+ *    `getMembers()` and weight prompts toward members with high `chance`).
+ *  - Build a Council-aware UI (e.g. drawer tab listing members with
+ *    avatars + roles).
+ *  - Audit which Lumia items a user has installed without surfacing a tool.
+ *
+ * **Note on `api.tools.*` Council tools:** if a script's tool handler is
+ * invoked via the Council execution path, the active member's
+ * `CouncilMemberContext` is delivered to the handler automatically as the
+ * second arg (`ctx.councilMember`). `api.council.getMembers()` is for
+ * inspecting Council state OUTSIDE a tool execution cycle — script
+ * startup, drawer-tab activation, scheduled reads, etc.
+ */
+export interface CouncilAPI {
+  /**
+   * Get the user's full Council settings: mode flag, members list, and
+   * tool-execution settings (timeout, sidecar context window, etc.).
+   * Returns the verbatim `CouncilSettings` shape from spindle-types.
+   */
+  getSettings(): Promise<CouncilSettings>;
+
+  /**
+   * Get the user's currently-assigned Council members with full Lumia
+   * context (role + chance from the assignment, plus avatar / definition /
+   * personality / behavior from the source Lumia item). Returns the
+   * verbatim `CouncilMemberContext[]` shape from spindle-types.
+   */
+  getMembers(): Promise<CouncilMemberContext[]>;
+
+  /**
+   * Get all Lumia items the user has access to across their installed
+   * packs. Superset of `getMembers()` — includes items not currently
+   * assigned to a Council member. Returns LumiScript-shaped `LumiaItem[]`
+   * (camelCase mapping of the upstream snake_case DTO).
+   */
+  getAvailableLumiaItems(): Promise<LumiaItem[]>;
+}
 
 /**
  * Optional context object passed to `ToolHandler` as the third parameter.

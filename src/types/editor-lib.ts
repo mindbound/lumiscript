@@ -1573,6 +1573,124 @@ interface PersonasAPI {
   getWorldBook(personaId: string): Promise<WorldInfo | null>;
 }
 
+// ─── Council API (read-only, free tier) ──────────────────────────────────────
+
+/** A single Council member assignment (member id + Lumia binding + role/chance). */
+interface CouncilMember {
+  id: string;
+  packId: string;
+  packName: string;
+  itemId: string;
+  itemName: string;
+  /** Tool names this member is assigned. */
+  tools: string[];
+  /** Freeform role description (e.g. \`"Plot Enforcer"\`). */
+  role: string;
+  /** Probability (0–100) that this member participates each generation. */
+  chance: number;
+}
+
+/** Settings governing Council tool execution. */
+interface CouncilToolsSettings {
+  /** @deprecated Tools are active when any member has tools assigned. */
+  enabled?: boolean;
+  /** \`'sidecar'\` uses a separate LLM; \`'inline'\` sends tools as function definitions to the main LLM. */
+  mode: 'sidecar' | 'inline';
+  /** Timeout per tool call in ms. */
+  timeoutMs: number;
+  /** Number of recent chat messages to include in sidecar context. */
+  sidecarContextWindow: number;
+  includeUserPersona: boolean;
+  includeCharacterInfo: boolean;
+  includeWorldInfo: boolean;
+  /** Whether the user can trigger individual tools on demand. */
+  allowUserControl: boolean;
+  /** Word limit per tool response (0 = unlimited). */
+  maxWordsPerTool: number;
+  /** When true, council tools aren't re-executed on regenerations / swipes — last results are reused from chat metadata. */
+  retainResultsForRegens?: boolean;
+}
+
+/** Top-level Council configuration object persisted per user. */
+interface CouncilSettings {
+  councilMode: boolean;
+  members: CouncilMember[];
+  toolsSettings: CouncilToolsSettings;
+}
+
+/**
+ * Personality snapshot of a Council member (assignment + Lumia source data
+ * merged into one record). Returned by \`api.council.getMembers()\` and also
+ * delivered as the second arg to \`api.tools.register\` handlers when invoked
+ * via the Council execution path.
+ */
+interface CouncilMemberContext {
+  memberId: string;
+  itemId: string;
+  packId: string;
+  packName: string;
+  name: string;
+  /** Freeform role description. */
+  role: string;
+  /** Probability (0–100) that this member participates each generation. */
+  chance: number;
+  /** Relative URL to the avatar (e.g. \`/api/v1/images/{id}\`), or null. */
+  avatarUrl: string | null;
+  /** Lumia "definition" field — physical/identity description. */
+  definition: string;
+  /** Lumia "personality" field. */
+  personality: string;
+  /** Lumia "behavior" field — behavioural patterns. */
+  behavior: string;
+  /** \`0\` = unspecified, \`1\` = feminine, \`2\` = masculine (per spindle-types 0.4.40). */
+  genderIdentity: 0 | 1 | 2;
+}
+
+/**
+ * A Lumia item available in the user's installed packs. Returned by
+ * \`api.council.getAvailableLumiaItems()\`. Superset of what's currently
+ * assigned to Council members (assignments live in
+ * \`CouncilSettings.members\` / \`CouncilMemberContext[]\`).
+ */
+interface LumiaItem {
+  id: string;
+  packId: string;
+  name: string;
+  /** Relative URL to the avatar image, or null when no avatar is set. */
+  avatarUrl: string | null;
+  authorName: string;
+  /** Physical / identity description. */
+  definition: string;
+  personality: string;
+  /** Behavioural patterns. */
+  behavior: string;
+  /** \`0\` = unspecified, \`1\` = feminine, \`2\` = masculine. */
+  genderIdentity: 0 | 1 | 2;
+  /** Pack-author-supplied version string. */
+  version: string;
+  /** Sort index within the pack (lower renders first). */
+  sortOrder: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * \`api.council\` — read-only access to the user's Council configuration.
+ * No permission required (free-tier surface). Useful for tailoring scripts
+ * to the user's narrative directors. If you need the active Council member
+ * inside a tool handler, prefer the \`ctx.councilMember\` arg passed
+ * automatically to \`api.tools.register\` handlers — \`api.council\` is for
+ * inspecting Council state OUTSIDE a tool execution cycle.
+ */
+interface CouncilAPI {
+  /** Get the user's full Council settings (mode, members, tool settings). */
+  getSettings(): Promise<CouncilSettings>;
+  /** Get currently-assigned Council members with full Lumia context. */
+  getMembers(): Promise<CouncilMemberContext[]>;
+  /** Get all Lumia items available to the user across installed packs. */
+  getAvailableLumiaItems(): Promise<LumiaItem[]>;
+}
+
 // ─── Tools API ────────────────────────────────────────────────────────────────
 
 interface ToolInvocationArgs {
@@ -2250,6 +2368,8 @@ interface LumiScriptAPI {
   worldInfo: WorldInfoAPI;
   /** Persona CRUD + active persona switching. Requires personas permission. */
   personas: PersonasAPI;
+  /** Read-only access to the user's Council configuration: settings, members, and the available Lumia-item pool. No permission required. */
+  council: CouncilAPI;
   /** File storage across three tiers. Requires allowDangerous. */
   files: FilesAPI;
   /** AES-256-GCM encrypted per-user secret storage. Requires allowDangerous. */

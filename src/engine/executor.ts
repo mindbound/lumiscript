@@ -55,6 +55,7 @@ import { buildCharactersAPI } from './api/characters.js';
 import { buildChatsAPI      } from './api/chats-session.js';
 import { buildWorldInfoAPI  } from './api/world-info.js';
 import { buildPersonasAPI  } from './api/personas.js';
+import { buildCouncilAPI   } from './api/council.js';
 import { buildToolsAPI     } from './api/tools.js';
 import { buildBroadcastAPI } from './api/broadcast.js';
 import { buildEnclaveAPI   } from './api/enclave.js';
@@ -348,6 +349,7 @@ export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiSc
     chats:      buildChatsAPI(deps),
     worldInfo:  buildWorldInfoAPI(deps),
     personas:   buildPersonasAPI(deps),
+    council:    buildCouncilAPI(deps),
     tools:      buildToolsAPI(deps, () => api),
     macros:     buildMacrosAPI(deps),
     broadcast:  buildBroadcastAPI(deps),
