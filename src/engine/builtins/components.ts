@@ -62,6 +62,13 @@ const CHEVRON_DOWN_SVG =
 // ─── CSS constants ───────────────────────────────────────────────────────────
 
 const MESSAGE_FOOTER_CSS = `
+/* Default (Bubble-mode) styling: footer sits INSIDE the bubble's content
+   stack below the message text. The hairline border-top + 4px margin-top
+   acts as a separator from content above it within the same container.
+   Minimal-mode footers (see [data-ls-mode="minimal"] block below) use a
+   different visual model — they sit as a sibling BELOW the card in the
+   virtualRow, escaping the constrained .bubble flex item so they can span
+   the full row width. See dom-handler.ts \`dom_inject_at_message\`. */
 .ls-comp-msg-footer {
   display: flex;
   flex-wrap: wrap;
@@ -77,6 +84,58 @@ const MESSAGE_FOOTER_CSS = `
   transition: opacity var(--lumiverse-transition-fast, 0.15s);
 }
 .ls-comp-msg-footer:hover {
+  opacity: 1;
+}
+/* Minimal-mode footer: dom-handler stamps \`data-ls-mode="minimal"\` on
+   the outer LS wrapper and inserts AFTER the .card in the .virtualRow
+   (rather than inside .bubble), so the footer escapes Minimal's
+   constrained \`.bubble\` flex item (\`max-width: 85%\`) and spans the
+   full row width. The wrapper sits one level above .ls-comp-msg-footer,
+   so the descendant selector is what matches.
+
+   Mirror of the messageHeader pattern (see MESSAGE_HEADER_CSS), flipped
+   vertically: 3-sided frame matching Minimal's .card (bottom + left +
+   right; no top), rounded BOTTOM corners only, and a negative margin-top
+   that overlaps into the card's rounded bottom corners + z-index so the
+   footer's flat top paints over them. The card and footer then read as
+   a single continuous frame.
+
+   Differences from MESSAGE_HEADER_CSS:
+   - Minimal's .card uses \`border: 1px solid var(--lcs-glass-border)\`
+     (real 1px border), not Bubble's \`box-shadow: 0 0 0 0.5px\` half-pixel
+     trick, so we use a real 1px border to match weight.
+   - No per-tint variants — Minimal's .card has a flat \`--lcs-glass-bg\`
+     (the per-side color comes from the accent bar via .card::before, not
+     from a gradient layer), so a single neutral background suffices.
+   - Opacity transition on \`> *\` (children) instead of the parent, for
+     the same reason as the header: parent opacity would make the frame
+     itself fade, partially revealing the card's rounded corners through
+     the overlap zone on hover. */
+:scope[data-ls-mode="minimal"] .ls-comp-msg-footer {
+  /* Top padding (18px) keeps content below the negative-margin overlap
+     zone (14px), leaving 4px breathing room. */
+  padding: 18px 14px 6px;
+  border-top: none;
+  border-left: 1px solid var(--lcs-glass-border, rgba(255, 255, 255, 0.06));
+  border-right: 1px solid var(--lcs-glass-border, rgba(255, 255, 255, 0.06));
+  border-bottom: 1px solid var(--lcs-glass-border, rgba(255, 255, 255, 0.06));
+  border-radius: 0 0 var(--lcs-radius, 14px) var(--lcs-radius, 14px);
+  background: var(--lcs-glass-bg, rgba(20, 17, 28, 0.92));
+  /* Overlap into the card's rounded bottom corners and paint over them. */
+  margin-top: -14px;
+  position: relative;
+  z-index: 1;
+  /* Frame stays solid; opacity moves to children. */
+  opacity: 1;
+}
+:scope[data-ls-mode="minimal"] .ls-comp-msg-footer > * {
+  opacity: 0.7;
+  transition: opacity var(--lumiverse-transition-fast, 0.15s);
+}
+:scope[data-ls-mode="minimal"] .ls-comp-msg-footer:hover {
+  opacity: 1;
+}
+:scope[data-ls-mode="minimal"] .ls-comp-msg-footer:hover > * {
   opacity: 1;
 }
 /* Collapsible variant: rather than override the base display: flex with
@@ -147,22 +206,124 @@ const MESSAGE_FOOTER_CSS = `
 `;
 
 const MESSAGE_HEADER_CSS = `
+/* The header sits OUTSIDE the host's .card (which is the bubble's
+   visual frame + the actions-pill positioning context). To make it
+   read as a top-section of the bubble rather than a separate floating
+   element, replicate the bubble's frame from outside:
+     - matching base background (multi-layer glass gradient + glass-bg)
+     - matching pseudo-border via box-shadow (0.5px outline)
+     - rounded TOP corners only (radius matches host's .card)
+     - flat BOTTOM, with a negative margin-bottom that overlaps into
+       the bubble's rounded top corners — combined with z-index, this
+       hides the bubble's top corner curvature so the header's flat
+       bottom flushes seamlessly into the bubble's flat sides.
+   Per-tint variants below (\`[data-ls-tint="..."]\`) match the host's
+   per-message-side tint gradients so character / user messages get
+   the matching slight blue / orange wash. \`data-ls-tint\` is set by
+   the dom-handler at injection time by reading the host's
+   \`.card[data-part]\` attribute. */
 .ls-comp-msg-header {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 0.3rem 0.75rem;
-  padding: 4px 10px;
-  margin-bottom: 4px;
-  border-bottom: 1px solid var(--lumiverse-border, rgba(255,255,255,0.06));
+  /* Bottom padding (18px) keeps content above the negative-margin
+     overlap zone (14px), leaving 4px breathing room. */
+  padding: 6px 14px 18px;
   font-size: 0.75rem;
   line-height: 1.5;
   color: var(--lumiverse-text-muted, var(--lumiverse-text-secondary, #a0a0a0));
+
+  /* Visual frame matching host's .card — see
+     frontend/src/components/chat/BubbleMessage.module.css:2-21 */
+  border-radius: var(--lcs-radius, 14px) var(--lcs-radius, 14px) 0 0;
+  background:
+    linear-gradient(145deg,
+      rgba(255, 255, 255, 0.022) 0%,
+      rgba(255, 255, 255, 0.007) 40%,
+      rgba(255, 255, 255, 0.013) 100%),
+    var(--lcs-glass-bg, rgba(20, 17, 28, 0.92));
+
+  /* Three-sided outline (top + left + right; NO bottom). The host's
+     .card uses \`box-shadow: 0 0 0 0.5px ...\` for a uniform 4-side
+     pseudo-border, but a bottom outline on us would land inside the
+     bubble's frame and \"shine through\" — most visibly on
+     .card:hover where the bubble's background brightens. We replicate
+     the 0.5px outline only on the three sides where it makes sense.
+     Each shadow is a directional offset of the box's shape (no spread),
+     so the shadow follows our \`border-radius\` curves at the top
+     corners and stays straight along the bottom-square sides. */
+  box-shadow:
+    0 -0.5px 0 0 var(--lcs-glass-border, rgba(255, 255, 255, 0.06)),
+    -0.5px 0 0 0 var(--lcs-glass-border, rgba(255, 255, 255, 0.06)),
+    0.5px 0 0 0 var(--lcs-glass-border, rgba(255, 255, 255, 0.06));
+
+  /* Overlap into the bubble's top rounded corners and paint over
+     them. Without this, the bubble's 14px-radius top corners would
+     be visible under our flat-bottom header, creating a "two stacked
+     cards" look. \`position: relative; z-index: 1\` ensures the
+     header (and its background) paints above the .card's top edge. */
+  margin-bottom: -14px;
+  position: relative;
+  z-index: 1;
+}
+
+/* Apply the muted-then-hover opacity transition to the header's
+   element children (toggle button, body, user-passed wrappers) rather
+   than the header itself. If we put \`opacity: 0.7\` on the parent,
+   the entire box (including the bubble-matched background) becomes
+   semi-transparent — the bubble's rounded top corners then become
+   partially visible THROUGH the header in the negative-margin overlap
+   zone, and the visible-then-hidden transition on hover produces a
+   subtle "the bubble jumps" effect. Keeping the parent fully opaque
+   (frame stays solid) and fading only the content element-children
+   gives a cleaner result.
+   Edge case: plain text passed directly inside a non-collapsible
+   header (no wrapping element) won't fade — child-element selector
+   doesn't match text nodes. Acceptable: such content is unusual,
+   and "always visible" is a defensible default. */
+.ls-comp-msg-header > * {
   opacity: 0.7;
   transition: opacity var(--lumiverse-transition-fast, 0.15s);
 }
-.ls-comp-msg-header:hover {
+.ls-comp-msg-header:hover > * {
   opacity: 1;
+}
+
+/* Per-tint backgrounds — match host's
+   .character / .user gradient layers in BubbleMessage.module.css:42-57.
+   \`data-ls-tint\` is on the LS wrapper element (parent of
+   \`.ls-comp-msg-header\`), set at injection time by dom-handler.ts
+   from the host \`.card[data-part]\` attribute. \`streaming\` shares
+   character's tint — streaming bubbles are character-side and
+   transition to \`character\` once generation completes.
+
+   The \`:scope\` prefix is required: the wrapper IS the @scope root
+   (same element carries \`data-ls-script\` and \`data-ls-tint\`).
+   Per CSS scope spec, selectors inside a @scope block are
+   relative-selectors, with an implicit \`:scope \` (descendant
+   combinator) prefix. So a bare \`[data-ls-tint]\` would mean
+   \`:scope [data-ls-tint]\` and look for a DESCENDANT with the
+   attribute — which doesn't exist. \`:scope[data-ls-tint]\` matches
+   the root WITH that attribute, which is what we want. */
+:scope[data-ls-tint="character"] .ls-comp-msg-header,
+:scope[data-ls-tint="streaming"] .ls-comp-msg-header {
+  background:
+    linear-gradient(145deg, var(--lcs-glass-char-tint, rgba(100, 120, 255, 0.03)) 0%, transparent 40%),
+    linear-gradient(145deg,
+      rgba(255, 255, 255, 0.022) 0%,
+      rgba(255, 255, 255, 0.007) 40%,
+      rgba(255, 255, 255, 0.013) 100%),
+    var(--lcs-glass-bg, rgba(20, 17, 28, 0.92));
+}
+:scope[data-ls-tint="user"] .ls-comp-msg-header {
+  background:
+    linear-gradient(225deg, var(--lcs-glass-user-tint, rgba(255, 180, 100, 0.03)) 0%, transparent 40%),
+    linear-gradient(145deg,
+      rgba(255, 255, 255, 0.022) 0%,
+      rgba(255, 255, 255, 0.007) 40%,
+      rgba(255, 255, 255, 0.013) 100%),
+    var(--lcs-glass-bg, rgba(20, 17, 28, 0.92));
 }
 /* Collapsible variant: rather than override the base display: flex with
    display: block (which in practice loses the cascade against <button>

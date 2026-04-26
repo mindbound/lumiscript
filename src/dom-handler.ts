@@ -315,23 +315,83 @@ export function installDOMHandler(
       case 'dom_inject_at_message': {
         const { scriptId, elementId, messageId, html, position, stableId } = msg;
 
-        const doInject = (bubbleEl: Element) => {
-          const wrappedHtml = `<div data-ls-script="${scriptId}" data-ls-el="${elementId}">${html}</div>`;
-          // For 'header', inject right before the bubble's _header_ div
-          // (avatar / name / meta-pill row), so our header sits above the
-          // chat bubble header and clear of the actions pill.
-          // For 'footer', append to the bubble itself.
-          let target: Element = bubbleEl;
+        // Two distinct insertion strategies depending on `position`:
+        //
+        // - `'header'`: insert as the FIRST CHILD of the outer
+        //   `[data-message-id]` element (the host's `VirtualRow`
+        //   wrapper, see `frontend/src/components/chat/MessageList.tsx`
+        //   `VirtualRow`). That wrapper sits OUTSIDE the message bubble's
+        //   `.card` element, which is the host's `position: relative`
+        //   ancestor for the absolutely-positioned BubbleActions pill
+        //   (`top: 20px; right: 24px; z-index: 5` against `.card`).
+        //   Inserting here gives the LS header a full-width banner
+        //   position above the bubble, in normal flow within the
+        //   virtualized row, with zero risk of overlap with the actions
+        //   pill regardless of viewport / hover / touch state.
+        //
+        //   Both `.virtualRow` (outer) AND `.card` (inner) carry
+        //   `data-message-id`. `document.querySelector` returns the
+        //   outer one in tree order, so a plain
+        //   `[data-message-id="..."]` selector on the row root is
+        //   exactly what we want.
+        //
+        // - `'footer'`: placement depends on chat-style mode:
+        //
+        //     * Bubble mode (`data-component="BubbleMessage"`): append
+        //       inside the bubble (`[class*="_bubble_"]`). In Bubble
+        //       mode `.bubble` IS the full content container of the
+        //       card (avatar + header + content + footer all live
+        //       inside it), so footer-inside-bubble naturally spans
+        //       the full message width. Below the actions-pill zone,
+        //       no overlap concerns.
+        //
+        //     * Minimal mode (`data-component="MinimalMessage"`):
+        //       append as the LAST CHILD of the outer
+        //       `[data-message-id]` element (mirror of the header
+        //       placement, but at the row's bottom). In Minimal mode
+        //       `.bubble` is just the inner text-block flex item with
+        //       `flex: 1; max-width: 85%`, sitting beside the avatar
+        //       and `.actionsWrap` — so a footer inserted there would
+        //       only span the text-block width, not the whole row.
+        //       Inserting after `.card` in the `.virtualRow` wrapper
+        //       gives the footer the full row width as users expect.
+        //
+        // Mode + tint detection (`data-ls-mode`, `data-ls-tint`): we
+        // sniff the inner card's `data-component` and `data-part`
+        // attributes (`MinimalMessage`/`BubbleMessage` and `'user'` /
+        // `'character'` / `'streaming'` respectively) and stamp them
+        // on the LS wrapper. Used by `ls:components`
+        // messageHeader/messageFooter CSS to apply the matching
+        // per-mode and per-tint variants so the inserted element
+        // reads as a visual extension of the host's message frame.
+        // Falls back to Bubble mode + `'character'` tint when the
+        // card isn't found or carries no attribute — those are the
+        // host's defaults and the safest assumption.
+        const doInject = (rowEl: Element) => {
+          const cardEl = rowEl.querySelector('[data-part]');
+          const part = cardEl?.getAttribute('data-part') ?? 'character';
+          const mode = cardEl?.getAttribute('data-component') === 'MinimalMessage'
+            ? 'minimal'
+            : 'bubble';
+
+          const tintAttr = position === 'header' ? ` data-ls-tint="${part}"` : '';
+          const modeAttr = ` data-ls-mode="${mode}"`;
+          const wrappedHtml = `<div data-ls-script="${scriptId}" data-ls-el="${elementId}"${tintAttr}${modeAttr}>${html}</div>`;
+
+          let target: Element;
           let insertPos: InsertPosition;
           if (position === 'header') {
-            const headerEl = bubbleEl.querySelector('[class*="_header_"]');
-            if (headerEl) {
-              target = headerEl;
-              insertPos = 'beforebegin';
-            } else {
-              insertPos = 'afterbegin';
-            }
+            target = rowEl;
+            insertPos = 'afterbegin';
+          } else if (position === 'footer' && mode === 'minimal') {
+            // Minimal mode: span full row width by escaping the
+            // constrained `.bubble` flex item — see comment above.
+            target = rowEl;
+            insertPos = 'beforeend';
           } else {
+            // Bubble mode footer: existing in-bubble placement.
+            const bubble = findBubble(rowEl);
+            target = bubble ?? rowEl;
             insertPos = 'beforeend';
           }
           const el = ctx.dom.inject(target as any, wrappedHtml, insertPos);
@@ -346,8 +406,7 @@ export function installDOMHandler(
         const messageEl = document.querySelector(selector);
 
         if (messageEl) {
-          const bubble = findBubble(messageEl);
-          if (bubble) doInject(bubble);
+          doInject(messageEl);
           break;
         }
 
@@ -360,8 +419,7 @@ export function installDOMHandler(
           .then((msgEl) => {
             pendingInjections.delete(elementId);
             if (cancelled) return;
-            const bubble = findBubble(msgEl);
-            if (bubble) doInject(bubble);
+            doInject(msgEl);
           })
           .catch(() => {
             pendingInjections.delete(elementId);
