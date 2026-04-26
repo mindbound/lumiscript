@@ -2,6 +2,7 @@ import { describe, test, expect, beforeEach, mock } from 'bun:test';
 import { buildChatAPI } from '../../../src/engine/api/chat.js';
 import { createTestDeps } from '../../_infra/mock-deps.js';
 import { listAll, clearAll as clearInjections } from '../../../src/engine/injection-store.js';
+import { listAll as listProcessorEntries } from '../../../src/engine/message-content-processor-registry.js';
 let mockSpindle: any;
 
 beforeEach(() => {
@@ -335,5 +336,106 @@ describe('isMessageHidden', () => {
   test('throws when chat_mutation permission denied', () => {
     const api = buildApi({ hasPerm: () => false });
     expect(() => api.isMessageHidden('msg-1')).toThrow('PERMISSION_DENIED');
+  });
+});
+
+// ─── registerContentProcessor ───────────────────────────────────────────────
+//
+// The thin layer above `message-content-processor-registry`. Registry-internal
+// behaviour (priority sort, chain threading, extra-delta semantics, swipe-
+// origin extra dropping, timeout isolation) is covered in
+// `tests/engine/message-content-processor-registry.test.ts`. Concerns at this
+// layer: permission gating, handle shape, validation passthrough.
+
+describe('registerContentProcessor', () => {
+  test('returns a handle with id and remove() when permission granted', () => {
+    const api = buildApi();
+    const handle = api.registerContentProcessor(() => undefined, { id: 'p1' });
+    expect(handle.id).toBe('p1');
+    expect(typeof handle.remove).toBe('function');
+    expect(listProcessorEntries().length).toBe(1);
+  });
+
+  test('throws PERMISSION_DENIED when chat_mutation is denied', () => {
+    const api = buildApi({ hasPerm: () => false });
+    expect(() => api.registerContentProcessor(() => undefined)).toThrow(
+      /PERMISSION_DENIED:chat_mutation/,
+    );
+    expect(listProcessorEntries().length).toBe(0);
+  });
+
+  test('auto-generates id when omitted', () => {
+    const api = buildApi();
+    const handle = api.registerContentProcessor(() => undefined);
+    expect(typeof handle.id).toBe('string');
+    expect(handle.id.length).toBeGreaterThan(0);
+  });
+
+  test('propagates registry validation errors verbatim', () => {
+    const api = buildApi();
+    expect(() =>
+      api.registerContentProcessor(undefined as unknown as () => void),
+    ).toThrow(/handler must be a function/);
+    expect(() =>
+      api.registerContentProcessor(() => undefined, { priority: NaN }),
+    ).toThrow(/priority must be finite/);
+  });
+});
+
+describe('handle.remove (content processor)', () => {
+  test('removes the entry from the registry', () => {
+    const api = buildApi();
+    const handle = api.registerContentProcessor(() => undefined, { id: 'p1' });
+    expect(listProcessorEntries().length).toBe(1);
+    handle.remove();
+    expect(listProcessorEntries().length).toBe(0);
+  });
+
+  test('is idempotent', () => {
+    const api = buildApi();
+    const handle = api.registerContentProcessor(() => undefined);
+    expect(() => {
+      handle.remove();
+      handle.remove();
+    }).not.toThrow();
+  });
+
+  test('only removes the entry owned by the calling script', () => {
+    const apiA = buildApi({ script: { id: 'script-1', name: 'A' } });
+    const apiB = buildApi({ script: { id: 'script-2', name: 'B' } });
+    apiB.registerContentProcessor(() => undefined, { id: 'shared' });
+    const handleA = apiA.registerContentProcessor(() => undefined, { id: 'shared' });
+    expect(listProcessorEntries().length).toBe(2);
+    handleA.remove();
+    const remaining = listProcessorEntries();
+    expect(remaining.length).toBe(1);
+    expect(remaining[0]!.scriptId).toBe('script-2');
+  });
+});
+
+describe('listContentProcessors', () => {
+  test('returns empty list when none are registered', () => {
+    const api = buildApi();
+    expect(api.listContentProcessors()).toEqual([]);
+  });
+
+  test('returns snapshots across all scripts', () => {
+    const apiA = buildApi({ script: { id: 's1', name: 'A' } });
+    const apiB = buildApi({ script: { id: 's2', name: 'B' } });
+    apiA.registerContentProcessor(() => undefined, { id: 'a1', priority: 10, origin: 'create' });
+    apiB.registerContentProcessor(() => undefined, { id: 'b1', priority: 50 });
+    const list = apiA.listContentProcessors();
+    expect(list.length).toBe(2);
+    const a = list.find((e) => e.id === 'a1')!;
+    expect(a.scriptId).toBe('s1');
+    expect(a.priority).toBe(10);
+    expect(a.origins).toEqual(['create']);
+    const b = list.find((e) => e.id === 'b1')!;
+    expect(b.origins).toBeNull();
+  });
+
+  test('does not require chat_mutation permission (un-gated diagnostic)', () => {
+    const api = buildApi({ hasPerm: () => false });
+    expect(() => api.listContentProcessors()).not.toThrow();
   });
 });

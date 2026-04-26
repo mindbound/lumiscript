@@ -9,6 +9,7 @@
 import { describe, test, expect, mock, beforeEach } from 'bun:test';
 import { dispatchToolInvocation } from '../../src/engine/tool-invocation.js';
 import { addTool, type ToolEntry } from '../../src/engine/tool-store.js';
+import type { ToolInvocationContext } from '../../src/types/script.js';
 import { on as busOn } from '../../src/engine/broadcast-bus.js';
 import { executionStatusStore } from '../../src/engine/execution-status.js';
 import { setActiveContext, resetContext } from '../../src/engine/binding.js';
@@ -72,7 +73,7 @@ describe('dispatchToolInvocation — return value', () => {
   });
 
   test('forwards the invocation args to the handler', async () => {
-    const handler = mock((_args: Record<string, unknown>): string => 'ok');
+    const handler = mock((_args: Record<string, unknown>, _ctx?: ToolInvocationContext): string => 'ok');
     seedTool({ handler });
     await dispatchToolInvocation({
       toolName: 'roll_dice',
@@ -93,7 +94,7 @@ describe('dispatchToolInvocation — return value', () => {
 
 describe('dispatchToolInvocation — invocation context', () => {
   test('forwards councilMember + requestId to the handler when the payload carries them', async () => {
-    const handler = mock((_args: Record<string, unknown>): string => 'ok');
+    const handler = mock((_args: Record<string, unknown>, _ctx?: ToolInvocationContext): string => 'ok');
     seedTool({ handler });
 
     const councilMember = {
@@ -118,7 +119,7 @@ describe('dispatchToolInvocation — invocation context', () => {
       councilMember,
     });
 
-    const receivedCtx = handler.mock.calls[0]![1] as Record<string, unknown>;
+    const receivedCtx = handler.mock.calls[0]![1] as ToolInvocationContext;
     expect(receivedCtx).toBeDefined();
     expect(receivedCtx.requestId).toBe('req-abc-123');
     expect(receivedCtx.councilMember).toEqual(councilMember);
@@ -129,7 +130,7 @@ describe('dispatchToolInvocation — invocation context', () => {
     // councilMember) and pre-993544c8 hosts (no contextMessages) that only
     // send { toolName, args }. Handler must still get a ctx object — just
     // with all optional fields undefined, not a missing second argument.
-    const handler = mock((_args: Record<string, unknown>): string => 'ok');
+    const handler = mock((_args: Record<string, unknown>, _ctx?: ToolInvocationContext): string => 'ok');
     seedTool({ handler });
 
     await dispatchToolInvocation({
@@ -137,7 +138,7 @@ describe('dispatchToolInvocation — invocation context', () => {
       args:     {},
     });
 
-    const receivedCtx = handler.mock.calls[0]![1] as Record<string, unknown>;
+    const receivedCtx = handler.mock.calls[0]![1] as ToolInvocationContext;
     expect(receivedCtx).toBeDefined();
     expect(receivedCtx.requestId).toBeUndefined();
     expect(receivedCtx.councilMember).toBeUndefined();
@@ -147,13 +148,17 @@ describe('dispatchToolInvocation — invocation context', () => {
   test('forwards contextMessages to the handler when the payload carries them', async () => {
     // Lumiverse 993544c8+ / spindle-types 0.4.26+ — structured chat context
     // alongside (or preferred over) the flattened args.context string.
-    const handler = mock((_args: Record<string, unknown>): string => 'ok');
+    const handler = mock((_args: Record<string, unknown>, _ctx?: ToolInvocationContext): string => 'ok');
     seedTool({ handler });
 
+    // `as const` on each `role` so the literal type narrows to the
+    // 'system' | 'user' | 'assistant' branches of LLMMessage["role"] —
+    // without it, the inferred shape `{ role: string; ... }[]` doesn't
+    // satisfy `LLMMessage[]` for the deep-equal comparison below.
     const contextMessages = [
-      { role: 'system',    content: '## Character Information\nName: Miyo' },
-      { role: 'assistant', content: 'first greeting message' },
-      { role: 'user',      content: 'first user reply' },
+      { role: 'system'    as const, content: '## Character Information\nName: Miyo' },
+      { role: 'assistant' as const, content: 'first greeting message' },
+      { role: 'user'      as const, content: 'first user reply' },
     ];
 
     await dispatchToolInvocation({
@@ -163,7 +168,7 @@ describe('dispatchToolInvocation — invocation context', () => {
       contextMessages,
     });
 
-    const receivedCtx = handler.mock.calls[0]![1] as Record<string, unknown>;
+    const receivedCtx = handler.mock.calls[0]![1] as ToolInvocationContext;
     expect(receivedCtx).toBeDefined();
     expect(receivedCtx.contextMessages).toEqual(contextMessages);
     // Other ctx fields still forwarded correctly alongside.
@@ -322,8 +327,8 @@ describe('dispatchToolInvocation — handler errors', () => {
     ).rejects.toThrow('boom');
 
     const calls = sendToFrontend.mock.calls.map((c: unknown[]) => c[0] as Record<string, unknown>);
-    const started = calls.find((c) => c.type === 'execution_started' && c.scriptId === 'script-1');
-    const ended   = calls.find((c) => c.type === 'execution_ended'   && c.scriptId === 'script-1');
+    const started = calls.find((c: Record<string, unknown>) => c.type === 'execution_started' && c.scriptId === 'script-1');
+    const ended   = calls.find((c: Record<string, unknown>) => c.type === 'execution_ended'   && c.scriptId === 'script-1');
     expect(started).toBeDefined();
     expect((started as any).scriptName).toBe('Dice Roller');
     expect(ended).toBeDefined();

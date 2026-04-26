@@ -50,6 +50,22 @@ export interface APIBuildDeps {
    * the updated script body no longer creates. Mirrors `toolsRegisteredThisRun`.
    */
   macrosRegisteredThisRun?: Set<string>;
+  /**
+   * Per-execution macro-interceptor-registration tracker. When present,
+   * `buildMacrosAPI` adds the resolved id of every successful
+   * `registerInterceptor` call to this set. Consumed by
+   * `macro-interceptor-registry.diffAndCleanStale` at post-execution to
+   * drop entries the new script body no longer creates. Same shape and
+   * intent as `macrosRegisteredThisRun` — but for interceptor handlers,
+   * keyed on entry id rather than macro name.
+   */
+  macroInterceptorsRegisteredThisRun?: Set<string>;
+  /**
+   * Per-execution message-content-processor-registration tracker. Mirrors
+   * `macroInterceptorsRegisteredThisRun` for the
+   * `api.chat.registerContentProcessor` surface.
+   */
+  contentProcessorsRegisteredThisRun?: Set<string>;
 }
 
 // ─── Shared utility functions ─────────────────────────────────────────────────

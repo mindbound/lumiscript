@@ -8,7 +8,7 @@ import {
   type SizeWarnCallback,
 } from '../../src/engine/db-store.js';
 import type { UserStorageAdapter } from '../../src/storage/collection-store.js';
-import type { DbRecord } from '../../src/types/script.js';
+import type { DbRecord, DbFilter } from '../../src/types/script.js';
 
 // ─── In-memory UserStorageAdapter ────────────────────────────────────────────
 
@@ -144,8 +144,13 @@ describe('matchesFilter — Mongo-style operators', () => {
   });
 
   test('numeric comparison with NaN is always false', () => {
-    expect(matchesFilter({ ...record, margin: NaN as number }, { margin: { $gt: 0 } })).toBe(false);
-    expect(matchesFilter(record, { margin: { $gt: NaN as number } })).toBe(false);
+    // Filter cast: TS infers `Partial<typeof record>`, narrowing `margin` to
+    // `number`, so an operator-object filter ({ $gt }) doesn't satisfy the
+    // typed contract — but the runtime supports it. The `DbFilter` cast
+    // restores the wider DbRecord-shaped expectation that matchesFilter
+    // implements.
+    expect(matchesFilter({ ...record, margin: NaN as number }, { margin: { $gt: 0 } } as DbFilter)).toBe(false);
+    expect(matchesFilter(record, { margin: { $gt: NaN as number } } as DbFilter)).toBe(false);
   });
 
   // ── $eq / $ne ─────────────────────────────────────────────────────────────
@@ -297,8 +302,12 @@ describe('matchesFilter — Mongo-style operators', () => {
 
   test('operators work with dot-notation paths', () => {
     const r = { ...record, meta: { score: 42 } as Record<string, unknown> };
-    expect(matchesFilter(r, { 'meta.score': { $gt: 40 } })).toBe(true);
-    expect(matchesFilter(r, { 'meta.score': { $in: [42, 43] } })).toBe(true);
+    // Filter cast: dot-notation keys ('meta.score') aren't in the typed
+    // record's surface keys, so `Partial<typeof r>` rejects them at type
+    // level. The runtime path-traversal works regardless. Cast to
+    // `DbFilter` to express the runtime contract.
+    expect(matchesFilter(r, { 'meta.score': { $gt: 40 } } as DbFilter)).toBe(true);
+    expect(matchesFilter(r, { 'meta.score': { $in: [42, 43] } } as DbFilter)).toBe(true);
   });
 });
 
@@ -307,7 +316,7 @@ describe('matchesFilter — Mongo-style operators', () => {
 describe('DbStore.insert', () => {
   test('auto-generates id, createdAt, updatedAt', async () => {
     const store = makeStore();
-    const record = await store.insert({ x: 1 } as DbRecord);
+    const record = await store.insert({ x: 1 });
 
     expect(typeof record.id).toBe('string');
     expect(record.id.length).toBeGreaterThan(0);
@@ -319,7 +328,7 @@ describe('DbStore.insert', () => {
 
   test('preserves caller fields alongside injected ones', async () => {
     const store = makeStore();
-    const record = await store.insert({ total: 18, notation: '1d20+3' } as DbRecord);
+    const record = await store.insert({ total: 18, notation: '1d20+3' });
 
     expect(record.total).toBe(18);
     expect(record.notation).toBe('1d20+3');
@@ -327,14 +336,14 @@ describe('DbStore.insert', () => {
 
   test('honors caller-supplied id when present', async () => {
     const store = makeStore();
-    const record = await store.insert({ id: 'custom-id', x: 1 } as DbRecord);
+    const record = await store.insert({ id: 'custom-id', x: 1 });
 
     expect(record.id).toBe('custom-id');
   });
 
   test('persists to the configured path', async () => {
     const store = makeStore('db/scripts/s-X/foo.json');
-    await store.insert({ x: 1 } as DbRecord);
+    await store.insert({ x: 1 });
 
     expect(storage.setJsonCalls).toHaveLength(1);
     expect(storage.setJsonCalls[0]!.path).toBe('db/scripts/s-X/foo.json');
@@ -342,7 +351,7 @@ describe('DbStore.insert', () => {
 
   test('returns the full record including injected fields', async () => {
     const store = makeStore();
-    const record = await store.insert({ x: 1 } as DbRecord);
+    const record = await store.insert({ x: 1 });
 
     const found = await store.find();
     expect(found).toHaveLength(1);
@@ -358,9 +367,9 @@ describe('DbStore.insertMany', () => {
     storage.setJsonCalls = [];
 
     const inserted = await store.insertMany([
-      { x: 1 } as DbRecord,
-      { x: 2 } as DbRecord,
-      { x: 3 } as DbRecord,
+      { x: 1 },
+      { x: 2 },
+      { x: 3 },
     ]);
 
     expect(inserted).toHaveLength(3);
@@ -371,11 +380,11 @@ describe('DbStore.insertMany', () => {
 
   test('returns only the newly-inserted records, not the full collection', async () => {
     const store = makeStore();
-    await store.insert({ pre: 'existing' } as DbRecord);
+    await store.insert({ pre: 'existing' });
 
     const inserted = await store.insertMany([
-      { label: 'A' } as DbRecord,
-      { label: 'B' } as DbRecord,
+      { label: 'A' },
+      { label: 'B' },
     ]);
 
     expect(inserted).toHaveLength(2);
@@ -388,8 +397,8 @@ describe('DbStore.insertMany', () => {
   test('auto-injects id/createdAt/updatedAt per record', async () => {
     const store = makeStore();
     const inserted = await store.insertMany([
-      { x: 1 } as DbRecord,
-      { x: 2 } as DbRecord,
+      { x: 1 },
+      { x: 2 },
     ]);
 
     for (const r of inserted) {
@@ -405,9 +414,9 @@ describe('DbStore.insertMany', () => {
   test('all records in a batch share the same timestamp', async () => {
     const store = makeStore();
     const inserted = await store.insertMany([
-      { x: 1 } as DbRecord,
-      { x: 2 } as DbRecord,
-      { x: 3 } as DbRecord,
+      { x: 1 },
+      { x: 2 },
+      { x: 3 },
     ]);
 
     const timestamps = new Set(inserted.map(r => r.createdAt));
@@ -427,8 +436,8 @@ describe('DbStore.insertMany', () => {
   test('honors caller-supplied id / createdAt when provided', async () => {
     const store = makeStore();
     const inserted = await store.insertMany([
-      { id: 'explicit-id', x: 1 } as DbRecord,
-      { createdAt: 42, x: 2 } as DbRecord,
+      { id: 'explicit-id', x: 1 },
+      { createdAt: 42, x: 2 },
     ]);
 
     expect(inserted[0]!.id).toBe('explicit-id');
@@ -437,14 +446,14 @@ describe('DbStore.insertMany', () => {
 
   test('size-guard applies to the combined post-persist array (hard limit)', async () => {
     const store = makeStore();
-    await store.insert({ v: 'small' } as DbRecord);
+    await store.insert({ v: 'small' });
     storage.setJsonCalls = [];
 
     // One oversized blob in the batch tips the whole collection past the limit.
     const huge = 'x'.repeat(60 * 1024 * 1024);
     await expect(store.insertMany([
-      { ok: 'little' } as DbRecord,
-      { blob: huge } as DbRecord,
+      { ok: 'little' },
+      { blob: huge },
     ])).rejects.toThrow(/DB_SIZE_EXCEEDED/);
 
     // Atomicity: neither new record lands on disk
@@ -463,16 +472,16 @@ describe('DbStore.find', () => {
 
   test('returns all records when filter is undefined', async () => {
     const store = makeStore();
-    await store.insert({ x: 1 } as DbRecord);
-    await store.insert({ x: 2 } as DbRecord);
+    await store.insert({ x: 1 });
+    await store.insert({ x: 2 });
 
     expect(await store.find()).toHaveLength(2);
   });
 
   test('filters by object predicate', async () => {
     const store = makeStore();
-    await store.insert({ tier: 'hard', margin: 3 } as DbRecord);
-    await store.insert({ tier: 'easy', margin: 12 } as DbRecord);
+    await store.insert({ tier: 'hard', margin: 3 });
+    await store.insert({ tier: 'easy', margin: 12 });
 
     const hard = await store.find({ tier: 'hard' });
     expect(hard).toHaveLength(1);
@@ -481,8 +490,8 @@ describe('DbStore.find', () => {
 
   test('filters by function predicate', async () => {
     const store = makeStore();
-    await store.insert({ margin: 3 } as DbRecord);
-    await store.insert({ margin: -5 } as DbRecord);
+    await store.insert({ margin: 3 });
+    await store.insert({ margin: -5 });
 
     const positives = await store.find((r: DbRecord) => (r.margin as number) > 0);
     expect(positives).toHaveLength(1);
@@ -492,8 +501,8 @@ describe('DbStore.find', () => {
 describe('DbStore.findOne', () => {
   test('returns first match', async () => {
     const store = makeStore();
-    await store.insert({ tier: 'hard', n: 1 } as DbRecord);
-    await store.insert({ tier: 'hard', n: 2 } as DbRecord);
+    await store.insert({ tier: 'hard', n: 1 });
+    await store.insert({ tier: 'hard', n: 2 });
 
     const result = await store.findOne({ tier: 'hard' });
     expect(result).not.toBeNull();
@@ -502,7 +511,7 @@ describe('DbStore.findOne', () => {
 
   test('returns null when no match', async () => {
     const store = makeStore();
-    await store.insert({ tier: 'easy' } as DbRecord);
+    await store.insert({ tier: 'easy' });
 
     expect(await store.findOne({ tier: 'hard' })).toBeNull();
   });
@@ -511,17 +520,17 @@ describe('DbStore.findOne', () => {
 describe('DbStore.count', () => {
   test('counts all records when filter undefined', async () => {
     const store = makeStore();
-    await store.insert({ x: 1 } as DbRecord);
-    await store.insert({ x: 2 } as DbRecord);
+    await store.insert({ x: 1 });
+    await store.insert({ x: 2 });
 
     expect(await store.count()).toBe(2);
   });
 
   test('counts filtered records', async () => {
     const store = makeStore();
-    await store.insert({ tier: 'hard' } as DbRecord);
-    await store.insert({ tier: 'easy' } as DbRecord);
-    await store.insert({ tier: 'easy' } as DbRecord);
+    await store.insert({ tier: 'hard' });
+    await store.insert({ tier: 'easy' });
+    await store.insert({ tier: 'easy' });
 
     expect(await store.count({ tier: 'easy' })).toBe(2);
   });
@@ -532,9 +541,9 @@ describe('DbStore.count', () => {
 describe('DbStore.update', () => {
   test('updates matching records and returns count', async () => {
     const store = makeStore();
-    await store.insert({ tier: 'hard', note: 'a' } as DbRecord);
-    await store.insert({ tier: 'hard', note: 'b' } as DbRecord);
-    await store.insert({ tier: 'easy', note: 'c' } as DbRecord);
+    await store.insert({ tier: 'hard', note: 'a' });
+    await store.insert({ tier: 'hard', note: 'b' });
+    await store.insert({ tier: 'easy', note: 'c' });
 
     const count = await store.update({ tier: 'hard' }, { note: 'updated' });
     expect(count).toBe(2);
@@ -545,11 +554,11 @@ describe('DbStore.update', () => {
 
   test('bumps updatedAt on match, preserves createdAt', async () => {
     const store = makeStore();
-    const inserted = await store.insert({ x: 1 } as DbRecord);
+    const inserted = await store.insert({ x: 1 });
     // Force time to advance so we can detect the bump.
     await new Promise<void>(r => setTimeout(r, 2));
 
-    await store.update({ x: 1 }, { x: 2 } as DbRecord);
+    await store.update({ x: 1 }, { x: 2 });
 
     const [record] = await store.find();
     expect(record!.createdAt).toBe(inserted.createdAt);
@@ -559,7 +568,7 @@ describe('DbStore.update', () => {
 
   test('silently strips id / createdAt / updatedAt from the patch', async () => {
     const store = makeStore();
-    const inserted = await store.insert({ x: 1 } as DbRecord);
+    const inserted = await store.insert({ x: 1 });
 
     await store.update({ x: 1 }, {
       id: 'attacker-owned',
@@ -577,10 +586,10 @@ describe('DbStore.update', () => {
 
   test('returns 0 and does not persist when no match', async () => {
     const store = makeStore();
-    await store.insert({ x: 1 } as DbRecord);
+    await store.insert({ x: 1 });
     storage.setJsonCalls = [];
 
-    const count = await store.update({ x: 999 }, { x: 2 } as DbRecord);
+    const count = await store.update({ x: 999 }, { x: 2 });
     expect(count).toBe(0);
     expect(storage.setJsonCalls).toHaveLength(0);
   });
@@ -591,9 +600,9 @@ describe('DbStore.update', () => {
 describe('DbStore.delete', () => {
   test('deletes matching records and returns count', async () => {
     const store = makeStore();
-    await store.insert({ tier: 'hard' } as DbRecord);
-    await store.insert({ tier: 'hard' } as DbRecord);
-    await store.insert({ tier: 'easy' } as DbRecord);
+    await store.insert({ tier: 'hard' });
+    await store.insert({ tier: 'hard' });
+    await store.insert({ tier: 'easy' });
 
     const count = await store.delete({ tier: 'hard' });
     expect(count).toBe(2);
@@ -605,7 +614,7 @@ describe('DbStore.delete', () => {
 
   test('returns 0 and does not persist when no match', async () => {
     const store = makeStore();
-    await store.insert({ x: 1 } as DbRecord);
+    await store.insert({ x: 1 });
     storage.setJsonCalls = [];
 
     const count = await store.delete({ x: 999 });
@@ -619,8 +628,8 @@ describe('DbStore.delete', () => {
 describe('DbStore.clear', () => {
   test('empties the collection and persists an empty array', async () => {
     const store = makeStore();
-    await store.insert({ x: 1 } as DbRecord);
-    await store.insert({ x: 2 } as DbRecord);
+    await store.insert({ x: 1 });
+    await store.insert({ x: 2 });
 
     await store.clear();
 
@@ -636,9 +645,9 @@ describe('DbStore.clear', () => {
 describe('DbStore.query', () => {
   test('propagates jsonquery results', async () => {
     const store = makeStore();
-    await store.insert({ tier: 'hard', margin: 3 } as DbRecord);
-    await store.insert({ tier: 'easy', margin: 10 } as DbRecord);
-    await store.insert({ tier: 'easy', margin: -2 } as DbRecord);
+    await store.insert({ tier: 'hard', margin: 3 });
+    await store.insert({ tier: 'easy', margin: 10 });
+    await store.insert({ tier: 'easy', margin: -2 });
 
     const count = await store.query<number>('filter(.margin > 0) | size()');
     expect(count).toBe(2);
@@ -646,7 +655,7 @@ describe('DbStore.query', () => {
 
   test('propagates SyntaxError on malformed queries', async () => {
     const store = makeStore();
-    await store.insert({ x: 1 } as DbRecord);
+    await store.insert({ x: 1 });
 
     await expect(store.query('|||invalid|||')).rejects.toThrow();
   });
@@ -661,7 +670,7 @@ describe('DbStore size governance', () => {
 
     // Craft a record whose stringified form will push the collection over 10 MB.
     const big = 'x'.repeat(DB_SIZE_WARN_BYTES + 1000);
-    await store.insert({ blob: big } as DbRecord);
+    await store.insert({ blob: big });
 
     expect(onSizeWarn).toHaveBeenCalledTimes(1);
     const call = onSizeWarn.mock.calls[0]!;
@@ -671,20 +680,20 @@ describe('DbStore size governance', () => {
   test('does NOT fire size-warn below the threshold', async () => {
     const onSizeWarn = mock<SizeWarnCallback>(() => {});
     const store = makeStore(undefined, onSizeWarn);
-    await store.insert({ x: 1 } as DbRecord);
+    await store.insert({ x: 1 });
 
     expect(onSizeWarn).toHaveBeenCalledTimes(0);
   });
 
   test('throws DbSizeExceededError above 50 MB and does not persist', async () => {
     const store = makeStore();
-    await store.insert({ x: 1 } as DbRecord);
+    await store.insert({ x: 1 });
     storage.setJsonCalls = [];
 
     // One record just over the 50 MB hard limit.
     const huge = 'x'.repeat(60 * 1024 * 1024);
 
-    await expect(store.insert({ blob: huge } as DbRecord))
+    await expect(store.insert({ blob: huge }))
       .rejects.toThrow(DbSizeExceededError);
 
     // Crucially, setJson was NOT called — the mutation was rolled back.
@@ -699,7 +708,7 @@ describe('DbStore size governance', () => {
     const big = 'x'.repeat(DB_SIZE_WARN_BYTES + 1000);
 
     // Should not throw — the listener's error is swallowed.
-    const record = await store.insert({ blob: big } as DbRecord);
+    const record = await store.insert({ blob: big });
     expect(record.id).toBeDefined();
 
     const found = await store.find();
@@ -735,7 +744,12 @@ describe('DbStore schema validation', () => {
       parse(data: unknown): DbRecord {
         const d = data as Record<string, unknown>;
         if (typeof d.name !== 'string') throw new Error('name: expected string');
-        return { ...d, name: d.name.trim() } as DbRecord;
+        // `as unknown as DbRecord`: the schema-parser path is downstream
+        // of where reserved fields (id / createdAt / updatedAt) get
+        // injected, so the synthesized return value here legitimately
+        // doesn't carry them. The double-cast acknowledges the deliberate
+        // type-broadening rather than papering over a bug.
+        return { ...d, name: d.name.trim() } as unknown as DbRecord;
       },
     };
   }
@@ -768,14 +782,14 @@ describe('DbStore schema validation', () => {
 
   test('insert passes valid records through unchanged', async () => {
     const store = makeSchemaStore(stringNumberSchema());
-    const result = await store.insert({ name: 'alice', count: 3 } as DbRecord);
+    const result = await store.insert({ name: 'alice', count: 3 });
     expect(result.name).toBe('alice');
     expect(result.count).toBe(3);
   });
 
   test('insert honors schema-transformed values (return-value swap)', async () => {
     const store = makeSchemaStore(trimmingSchema());
-    const result = await store.insert({ name: '  alice  ' } as DbRecord);
+    const result = await store.insert({ name: '  alice  ' });
     expect(result.name).toBe('alice'); // trimmed
   });
 
@@ -785,10 +799,10 @@ describe('DbStore schema validation', () => {
     const store = makeSchemaStore(stringNumberSchema());
     storage.setJsonCalls = [];
     await expect(store.insertMany([
-      { name: 'ok', count: 1 } as DbRecord,
-      { name: 'also-ok', count: 2 } as DbRecord,
+      { name: 'ok', count: 1 },
+      { name: 'also-ok', count: 2 },
       { name: 42, count: 3 } as unknown as DbRecord,   // bad
-      { name: 'never-reached', count: 4 } as DbRecord,
+      { name: 'never-reached', count: 4 },
     ])).rejects.toThrow(/api\.db: schema validation failed on insertMany\[2\]: name: expected string/);
 
     // Atomicity: no persist, no records land
@@ -799,8 +813,8 @@ describe('DbStore schema validation', () => {
   test('insertMany with all-valid batch persists and returns transformed records', async () => {
     const store = makeSchemaStore(trimmingSchema());
     const result = await store.insertMany([
-      { name: '  alice  ' } as DbRecord,
-      { name: 'bob' } as DbRecord,
+      { name: '  alice  ' },
+      { name: 'bob' },
     ]);
     expect(result.map(r => r.name)).toEqual(['alice', 'bob']);
   });
@@ -810,7 +824,7 @@ describe('DbStore schema validation', () => {
   test('update validates the MERGED record, not just the patch', async () => {
     // Pre-seed with a valid record
     const store = makeSchemaStore(stringNumberSchema());
-    await store.insert({ name: 'alice', count: 3 } as DbRecord);
+    await store.insert({ name: 'alice', count: 3 });
 
     // Patch that's invalid in isolation ({ count: 'seven' }) AND invalid
     // when merged ({ name: 'alice', count: 'seven', ... }). Merged-record
@@ -821,8 +835,8 @@ describe('DbStore schema validation', () => {
 
   test('update is atomic — no records change on validation failure', async () => {
     const store = makeSchemaStore(stringNumberSchema());
-    const a = await store.insert({ name: 'alice', count: 1 } as DbRecord);
-    const b = await store.insert({ name: 'bob', count: 2 } as DbRecord);
+    const a = await store.insert({ name: 'alice', count: 1 });
+    const b = await store.insert({ name: 'bob', count: 2 });
 
     storage.setJsonCalls = [];
     await expect(store.update({}, { count: 'bad' } as unknown as Partial<DbRecord>))
@@ -837,14 +851,14 @@ describe('DbStore schema validation', () => {
 
   test('update error identifies the failing record by id', async () => {
     const store = makeSchemaStore(stringNumberSchema());
-    const a = await store.insert({ name: 'alice', count: 1 } as DbRecord);
+    const a = await store.insert({ name: 'alice', count: 1 });
     await expect(store.update({ id: a.id }, { count: 'bad' } as unknown as Partial<DbRecord>))
       .rejects.toThrow(new RegExp(`id=${a.id}`));
   });
 
   test('update passes when the merged result is valid', async () => {
     const store = makeSchemaStore(stringNumberSchema());
-    const a = await store.insert({ name: 'alice', count: 1 } as DbRecord);
+    const a = await store.insert({ name: 'alice', count: 1 });
     const n = await store.update({ id: a.id }, { count: 99 } as Partial<DbRecord>);
     expect(n).toBe(1);
     const [r] = await store.find();
@@ -856,8 +870,8 @@ describe('DbStore schema validation', () => {
   test('without schema, all existing invariants hold (no validation)', async () => {
     const store = makeSchemaStore(); // no schema
     // Random-shaped records pass freely
-    await store.insert({ whatever: 'goes', in_shape: true } as DbRecord);
-    await store.insertMany([{ x: 1 } as DbRecord, { y: 2 } as DbRecord]);
+    await store.insert({ whatever: 'goes', in_shape: true });
+    await store.insertMany([{ x: 1 }, { y: 2 }]);
     await store.update({}, { z: 3 } as Partial<DbRecord>);
 
     const all = await store.find();
@@ -875,14 +889,16 @@ describe('DbStore schema validation', () => {
         const d = data as Record<string, unknown>;
         if (typeof d.name !== 'string') throw new Error('name: expected string');
         // Strip all unknown keys — mimics Zod's default strict object.
-        return { name: d.name } as DbRecord;
+        // See the matching parser above for the `as unknown as DbRecord`
+        // double-cast rationale.
+        return { name: d.name } as unknown as DbRecord;
       },
     };
   }
 
   test('insert preserves reserved fields when schema strips unknown keys', async () => {
     const store = makeSchemaStore(strippingSchema());
-    const result = await store.insert({ name: 'alice', extra: 'stuff' } as DbRecord);
+    const result = await store.insert({ name: 'alice', extra: 'stuff' });
 
     expect(typeof result.id).toBe('string');
     expect(result.id.length).toBeGreaterThan(0);
@@ -896,8 +912,8 @@ describe('DbStore schema validation', () => {
   test('insertMany preserves reserved fields when schema strips unknown keys', async () => {
     const store = makeSchemaStore(strippingSchema());
     const results = await store.insertMany([
-      { name: 'alice', extra: 1 } as DbRecord,
-      { name: 'bob',   extra: 2 } as DbRecord,
+      { name: 'alice', extra: 1 },
+      { name: 'bob',   extra: 2 },
     ]);
 
     for (const r of results) {
@@ -910,7 +926,7 @@ describe('DbStore schema validation', () => {
 
   test('update preserves reserved fields (id + createdAt) when schema strips them', async () => {
     const store = makeSchemaStore(strippingSchema());
-    const before = await store.insert({ name: 'alice' } as DbRecord);
+    const before = await store.insert({ name: 'alice' });
     await new Promise(r => setTimeout(r, 2)); // force clock advance
 
     await store.update({ id: before.id }, { name: 'renamed' } as Partial<DbRecord>);
@@ -927,8 +943,8 @@ describe('DbStore schema validation', () => {
   test('attaching a schema does not validate pre-existing records at construction', async () => {
     // First: write garbage records with NO schema
     const lax = makeSchemaStore();
-    await lax.insert({ garbage: 1 } as DbRecord);
-    await lax.insert({ nonsense: 2 } as DbRecord);
+    await lax.insert({ garbage: 1 });
+    await lax.insert({ nonsense: 2 });
 
     // Now construct a strict store over the same file — no error.
     const strict = makeSchemaStore(stringNumberSchema());

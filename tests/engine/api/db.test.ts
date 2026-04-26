@@ -101,7 +101,7 @@ describe('api.db.collection — CRUD round-trips', () => {
     const { api } = buildApi();
     const col = await api.collection('rolls');
 
-    const inserted = await col.insert({ total: 18 } as DbRecord);
+    const inserted = await col.insert({ total: 18 });
     expect(inserted.id).toBeDefined();
     expect(inserted.createdAt).toBeDefined();
     expect(inserted.updatedAt).toBe(inserted.createdAt);
@@ -115,9 +115,9 @@ describe('api.db.collection — CRUD round-trips', () => {
   test('update matched records and bump updatedAt', async () => {
     const { api } = buildApi();
     const col = await api.collection('rolls');
-    const { id } = await col.insert({ tier: 'easy' } as DbRecord);
+    const { id } = await col.insert({ tier: 'easy' });
 
-    const count = await col.update({ tier: 'easy' }, { tier: 'moderate' } as DbRecord);
+    const count = await col.update({ tier: 'easy' }, { tier: 'moderate' });
     expect(count).toBe(1);
     const found = await col.findOne({ id });
     expect(found!.tier).toBe('moderate');
@@ -126,9 +126,9 @@ describe('api.db.collection — CRUD round-trips', () => {
   test('delete matched records', async () => {
     const { api } = buildApi();
     const col = await api.collection('rolls');
-    await col.insert({ tier: 'hard' } as DbRecord);
-    await col.insert({ tier: 'hard' } as DbRecord);
-    await col.insert({ tier: 'easy' } as DbRecord);
+    await col.insert({ tier: 'hard' });
+    await col.insert({ tier: 'hard' });
+    await col.insert({ tier: 'easy' });
 
     const count = await col.delete({ tier: 'hard' });
     expect(count).toBe(2);
@@ -138,8 +138,8 @@ describe('api.db.collection — CRUD round-trips', () => {
   test('clear empties the collection', async () => {
     const { api } = buildApi();
     const col = await api.collection('rolls');
-    await col.insert({ x: 1 } as DbRecord);
-    await col.insert({ x: 2 } as DbRecord);
+    await col.insert({ x: 1 });
+    await col.insert({ x: 2 });
 
     await col.clear();
     expect(await col.find()).toEqual([]);
@@ -148,9 +148,9 @@ describe('api.db.collection — CRUD round-trips', () => {
   test('query runs a jsonquery against the collection', async () => {
     const { api } = buildApi();
     const col = await api.collection('rolls');
-    await col.insert({ margin: 3 } as DbRecord);
-    await col.insert({ margin: -1 } as DbRecord);
-    await col.insert({ margin: 5 } as DbRecord);
+    await col.insert({ margin: 3 });
+    await col.insert({ margin: -1 });
+    await col.insert({ margin: 5 });
 
     const positives = await col.query<number>('filter(.margin > 0) | size()');
     expect(positives).toBe(2);
@@ -166,7 +166,7 @@ describe('api.db — broadcast events', () => {
     const events: any[] = [];
     busOn('ls:collection:inserted', p => events.push(p), 'listener');
 
-    const inserted = await col.insert({ x: 1 } as DbRecord);
+    const inserted = await col.insert({ x: 1 });
     expect(events).toHaveLength(1);
     expect(events[0].name).toBe('rolls');
     expect(events[0].scope).toBe('script');
@@ -178,12 +178,12 @@ describe('api.db — broadcast events', () => {
   test('update fires ls:collection:updated with filterKind="object" when matched', async () => {
     const { api } = buildApi();
     const col = await api.collection('rolls');
-    await col.insert({ tier: 'hard' } as DbRecord);
+    await col.insert({ tier: 'hard' });
 
     const events: any[] = [];
     busOn('ls:collection:updated', p => events.push(p), 'listener');
 
-    await col.update({ tier: 'hard' }, { tier: 'moderate' } as DbRecord);
+    await col.update({ tier: 'hard' }, { tier: 'moderate' });
     expect(events).toHaveLength(1);
     expect(events[0].count).toBe(1);
     expect(events[0].filterKind).toBe('object');
@@ -192,19 +192,19 @@ describe('api.db — broadcast events', () => {
   test('update does NOT fire ls:collection:updated when no match', async () => {
     const { api } = buildApi();
     const col = await api.collection('rolls');
-    await col.insert({ tier: 'hard' } as DbRecord);
+    await col.insert({ tier: 'hard' });
 
     const events: unknown[] = [];
     busOn('ls:collection:updated', p => events.push(p), 'listener');
 
-    await col.update({ tier: 'nonexistent' }, { tier: 'moderate' } as DbRecord);
+    await col.update({ tier: 'nonexistent' }, { tier: 'moderate' });
     expect(events).toHaveLength(0);
   });
 
   test('delete fires ls:collection:deleted with filterKind="fn" for function filters', async () => {
     const { api } = buildApi();
     const col = await api.collection('rolls');
-    await col.insert({ x: 5 } as DbRecord);
+    await col.insert({ x: 5 });
 
     const events: any[] = [];
     busOn('ls:collection:deleted', p => events.push(p), 'listener');
@@ -217,7 +217,7 @@ describe('api.db — broadcast events', () => {
   test('clear fires ls:collection:deleted with count=-1 and filterKind="all"', async () => {
     const { api } = buildApi();
     const col = await api.collection('rolls');
-    await col.insert({ x: 1 } as DbRecord);
+    await col.insert({ x: 1 });
 
     const events: any[] = [];
     busOn('ls:collection:deleted', p => events.push(p), 'listener');
@@ -231,7 +231,7 @@ describe('api.db — broadcast events', () => {
   test('filterKind is "object" / "fn" / "all" — never leaks the filter itself', async () => {
     const { api } = buildApi();
     const col = await api.collection('rolls');
-    await col.insert({ secret: 'hunter2' } as DbRecord);
+    await col.insert({ secret: 'hunter2' });
 
     const events: any[] = [];
     busOn('ls:collection:deleted', p => events.push(p), 'listener');
@@ -249,7 +249,7 @@ describe('api.db — broadcast events', () => {
 describe('api.db — cross-script ownership', () => {
   test('script B cannot see script A\'s script-scoped collection via list()', async () => {
     const { api: apiA } = buildApi({ script: { id: 'script-A' } });
-    await (await apiA.collection('rolls')).insert({ x: 1 } as DbRecord);
+    await (await apiA.collection('rolls')).insert({ x: 1 });
 
     const { api: apiB } = buildApi({ script: { id: 'script-B' } });
     expect(await apiB.list()).toEqual([]);
@@ -257,8 +257,8 @@ describe('api.db — cross-script ownership', () => {
 
   test('each script sees its own script-scoped collections via list()', async () => {
     const { api: apiA } = buildApi({ script: { id: 'script-A' } });
-    await (await apiA.collection('rolls')).insert({ x: 1 } as DbRecord);
-    await (await apiA.collection('counters')).insert({ n: 0 } as DbRecord);
+    await (await apiA.collection('rolls')).insert({ x: 1 });
+    await (await apiA.collection('counters')).insert({ n: 0 });
 
     expect((await apiA.list()).sort()).toEqual(['counters', 'rolls']);
   });
@@ -268,8 +268,8 @@ describe('api.db — cross-script ownership', () => {
     const { api: apiA } = buildApi({ script: { id: 'script-A' }, activeContext: ctx });
     const { api: apiB } = buildApi({ script: { id: 'script-B' }, activeContext: ctx });
 
-    await (await apiA.collection('data', { scope: 'character' })).insert({ tag: 'A' } as DbRecord);
-    await (await apiB.collection('data', { scope: 'character' })).insert({ tag: 'B' } as DbRecord);
+    await (await apiA.collection('data', { scope: 'character' })).insert({ tag: 'A' });
+    await (await apiB.collection('data', { scope: 'character' })).insert({ tag: 'B' });
 
     const fromA = await (await apiA.collection('data', { scope: 'character' })).find();
     const fromB = await (await apiB.collection('data', { scope: 'character' })).find();
@@ -282,7 +282,7 @@ describe('api.db — cross-script ownership', () => {
 
   test('script B\'s drop() targeting A\'s path does nothing (different resolved path)', async () => {
     const { api: apiA } = buildApi({ script: { id: 'script-A' } });
-    await (await apiA.collection('rolls')).insert({ x: 1 } as DbRecord);
+    await (await apiA.collection('rolls')).insert({ x: 1 });
 
     const { api: apiB } = buildApi({ script: { id: 'script-B' } });
     await apiB.drop('rolls');  // no-op — B has no 'rolls' collection
@@ -301,8 +301,8 @@ describe('api.db — concurrency', () => {
     const col = await api.collection('rolls');
 
     await Promise.all([
-      col.insert({ label: 'A' } as DbRecord),
-      col.insert({ label: 'B' } as DbRecord),
+      col.insert({ label: 'A' }),
+      col.insert({ label: 'B' }),
     ]);
 
     const all = await col.find();
@@ -317,8 +317,8 @@ describe('api.db — concurrency', () => {
     const b = await api.collection('b');
 
     await Promise.all([
-      a.insert({ x: 1 } as DbRecord),
-      b.insert({ x: 2 } as DbRecord),
+      a.insert({ x: 1 }),
+      b.insert({ x: 2 }),
     ]);
 
     expect(await a.count()).toBe(1);
@@ -331,7 +331,7 @@ describe('api.db — concurrency', () => {
 describe('api.db.drop', () => {
   test('removes the collection file', async () => {
     const { api } = buildApi();
-    await (await api.collection('rolls')).insert({ x: 1 } as DbRecord);
+    await (await api.collection('rolls')).insert({ x: 1 });
 
     await api.drop('rolls');
 
@@ -342,8 +342,8 @@ describe('api.db.drop', () => {
   test('fires ls:collection:dropped with deletedCount', async () => {
     const { api } = buildApi();
     const col = await api.collection('rolls');
-    await col.insert({ x: 1 } as DbRecord);
-    await col.insert({ x: 2 } as DbRecord);
+    await col.insert({ x: 1 });
+    await col.insert({ x: 2 });
 
     const events: any[] = [];
     busOn('ls:collection:dropped', p => events.push(p), 'listener');
@@ -375,8 +375,8 @@ describe('api.db.list', () => {
 
   test('defaults to script scope', async () => {
     const { api } = buildApi();
-    await (await api.collection('a')).insert({ x: 1 } as DbRecord);
-    await (await api.collection('b', { scope: 'character' })).insert({ x: 2 } as DbRecord);
+    await (await api.collection('a')).insert({ x: 1 });
+    await (await api.collection('b', { scope: 'character' })).insert({ x: 2 });
 
     // Default script scope sees only 'a', not 'b' (which is character-scoped).
     expect(await api.list()).toEqual(['a']);
@@ -384,8 +384,8 @@ describe('api.db.list', () => {
 
   test('character scope lists only character-scoped collections for the active character', async () => {
     const { api } = buildApi();
-    await (await api.collection('rolls', { scope: 'character' })).insert({ x: 1 } as DbRecord);
-    await (await api.collection('snapshot', { scope: 'character' })).insert({ x: 2 } as DbRecord);
+    await (await api.collection('rolls', { scope: 'character' })).insert({ x: 1 });
+    await (await api.collection('snapshot', { scope: 'character' })).insert({ x: 2 });
 
     expect((await api.list('character')).sort()).toEqual(['rolls', 'snapshot']);
   });
@@ -403,9 +403,9 @@ describe('api.db.collection.insertMany', () => {
     const before = setJson.mock.calls.length;
 
     await c.insertMany([
-      { label: 'A' } as DbRecord,
-      { label: 'B' } as DbRecord,
-      { label: 'C' } as DbRecord,
+      { label: 'A' },
+      { label: 'B' },
+      { label: 'C' },
     ]);
 
     const after = setJson.mock.calls.length;
@@ -421,9 +421,9 @@ describe('api.db.collection.insertMany', () => {
     busOn('ls:collection:inserted', p => events.push(p), 'listener');
 
     const inserted = await c.insertMany([
-      { label: 'A' } as DbRecord,
-      { label: 'B' } as DbRecord,
-      { label: 'C' } as DbRecord,
+      { label: 'A' },
+      { label: 'B' },
+      { label: 'C' },
     ]);
 
     expect(events).toHaveLength(3);
@@ -468,9 +468,9 @@ describe('api.db.collection.insertMany', () => {
     const c = await api.collection('t');
 
     await Promise.all([
-      c.insertMany([{ batch: 1 } as DbRecord, { batch: 1 } as DbRecord]),
-      c.insert({ single: true } as DbRecord),
-      c.insertMany([{ batch: 2 } as DbRecord]),
+      c.insertMany([{ batch: 1 }, { batch: 1 }]),
+      c.insert({ single: true }),
+      c.insertMany([{ batch: 2 }]),
     ]);
 
     expect(await c.count()).toBe(4);
@@ -482,7 +482,7 @@ describe('api.db.collection.insertMany', () => {
 describe('api.db.exists', () => {
   test('returns true after a collection has records', async () => {
     const { api } = buildApi();
-    await (await api.collection('rolls')).insert({ x: 1 } as DbRecord);
+    await (await api.collection('rolls')).insert({ x: 1 });
 
     expect(await api.exists('rolls')).toBe(true);
   });
@@ -494,7 +494,7 @@ describe('api.db.exists', () => {
 
   test('returns false after drop', async () => {
     const { api } = buildApi();
-    await (await api.collection('rolls')).insert({ x: 1 } as DbRecord);
+    await (await api.collection('rolls')).insert({ x: 1 });
     expect(await api.exists('rolls')).toBe(true);
 
     await api.drop('rolls');
@@ -503,7 +503,7 @@ describe('api.db.exists', () => {
 
   test('defaults to script scope when scope omitted', async () => {
     const { api } = buildApi();
-    await (await api.collection('rolls', { scope: 'character' })).insert({ x: 1 } as DbRecord);
+    await (await api.collection('rolls', { scope: 'character' })).insert({ x: 1 });
 
     // rolls exists in CHARACTER scope, not script scope
     expect(await api.exists('rolls')).toBe(false);
@@ -523,7 +523,7 @@ describe('api.db.exists', () => {
 
   test('ownership: script A cannot see script B\'s collection', async () => {
     const { api: apiA } = buildApi({ script: { id: 'script-A' } });
-    await (await apiA.collection('rolls')).insert({ x: 1 } as DbRecord);
+    await (await apiA.collection('rolls')).insert({ x: 1 });
 
     const { api: apiB } = buildApi({ script: { id: 'script-B' } });
     expect(await apiB.exists('rolls')).toBe(false);

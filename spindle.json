@@ -1,5 +1,5 @@
 {
-  "version": "0.23.4",
+  "version": "0.24.0",
   "name": "LumiScript",
   "identifier": "lumiscript",
   "author": "mindbound",
@@ -12,6 +12,7 @@
     "characters",
     "generation",
     "interceptor",
+    "macro_interceptor",
     "cors_proxy",
     "ui_panels",
     "ephemeral_storage",

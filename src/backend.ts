@@ -15,6 +15,18 @@ import { readFile } from 'fs/promises';
 import { listByMode, listAll, clearEphemeral, clearByScriptId, type InjectionEntry } from './engine/injection-store.js';
 import { applyLumiScriptInjections } from './engine/interceptor-pipeline.js';
 import {
+  dispatch as dispatchMacroInterceptor,
+  clearByScriptId as clearMacroInterceptorsByScriptId,
+  listIdsByScriptId as macroInterceptorIdsByScript,
+  diffAndCleanStale as diffAndCleanStaleMacroInterceptors,
+} from './engine/macro-interceptor-registry.js';
+import {
+  dispatch as dispatchMessageContentProcessor,
+  clearByScriptId as clearMessageContentProcessorsByScriptId,
+  listIdsByScriptId as contentProcessorIdsByScript,
+  diffAndCleanStale as diffAndCleanStaleContentProcessors,
+} from './engine/message-content-processor-registry.js';
+import {
   clearByScriptId as clearToolsByScriptId,
   listAll as listAllTools,
   removeByName as removeToolByName,
@@ -333,6 +345,73 @@ spindle.registerInterceptor(async (messages, context) => {
     ? { messages: result, breakdown }
     : result;
 }, 50);
+
+// ─── Macro interceptor (LS-house multiplexer) ────────────────────────────────
+//
+// One extension-level registration with the host that fans out to all LS
+// scripts' `api.macros.registerInterceptor` handlers via the per-script
+// registry's `dispatch()`. The host calls our LS-house handler once per
+// `MacroEvaluator.evaluate()` iteration, giving us up to 10 wall-clock
+// seconds across ALL of our scripts' handlers — `dispatch()` enforces a
+// per-handler 2s soft timeout to keep us comfortably under the cap.
+//
+// Returns a transformed template `string` when at least one of our
+// per-script handlers returned a string; `undefined` for full pass-through
+// (the host's chain semantics mean `void`/`undefined` skips our extension
+// without rebuilding the template).
+//
+// Forward-compat guard: older Lumiverse builds without
+// `spindle.registerMacroInterceptor` simply skip the registration. The
+// script-side `api.macros.registerInterceptor` call still throws
+// `PERMISSION_DENIED:macro_interceptor` on those builds (the permission
+// won't be granted), so behaviour gracefully degrades to "feature absent"
+// without crashing the worker at startup.
+//
+// Replay across frontend refresh: NOT NEEDED. This is a pure worker↔host
+// hook with no frontend reflection. The Bun worker (and the registry)
+// survive refresh; the host's single registration also persists across
+// our extension's runtime lifetime.
+if (typeof spindle.registerMacroInterceptor === 'function') {
+  spindle.registerMacroInterceptor(async (ctx) => {
+    return await dispatchMacroInterceptor(ctx);
+  }, 100);
+} else {
+  spindle.log.warn(
+    '[LumiScript] host does not support spindle.registerMacroInterceptor — ' +
+    'api.macros.registerInterceptor will be unavailable to scripts on this build.',
+  );
+}
+
+// ─── Message content processor (LS-house multiplexer) ────────────────────────
+//
+// Mirrors the macro-interceptor wiring above. One extension-level
+// registration; per-script handlers fan out via the per-script registry's
+// `dispatch()`. Permission rides on the existing `chat_mutation` gate
+// (no new permission machinery required).
+//
+// `dispatch()` returns a `MessageContentProcessorResultDTO` patch when at
+// least one handler returned a content / extra modification, or
+// `undefined` for full pass-through. `extra` is returned as a DELTA only —
+// the host shallow-merges it onto the row's existing extra, so we don't
+// round-trip pristine `initial.extra` keys (avoids re-stamping unchanged
+// keys on every write).
+//
+// Loop safety: the host does NOT invoke this hook for `spindle.chat.*`
+// mutations (sendMessage / editMessage / etc.) — those bypass the
+// processor chain to avoid an extension's own writes triggering its own
+// handler. Documented in `developer-docs/docs/backend-api/message-content-processor.md`.
+//
+// Forward-compat: same guard pattern as macro interceptor.
+if (typeof spindle.registerMessageContentProcessor === 'function') {
+  spindle.registerMessageContentProcessor(async (ctx) => {
+    return await dispatchMessageContentProcessor(ctx);
+  }, 100);
+} else {
+  spindle.log.warn(
+    '[LumiScript] host does not support spindle.registerMessageContentProcessor — ' +
+    'api.chat.registerContentProcessor will be unavailable to scripts on this build.',
+  );
+}
 
 // ─── Tool invocation dispatch ─────────────────────────────────────────────────
 //
@@ -694,6 +773,13 @@ spindle.onFrontendMessage(async (raw, userId) => {
           for (const name of clearedMacros) {
             try { spindle.unregisterMacro(name); } catch { /* swallow */ }
           }
+          // Macro interceptor + message content processor entries owned by
+          // this script. No host-side `unregister` per-entry — LumiScript's
+          // single LS-house registration with the host stays live; dropping
+          // entries from our registry means the next dispatch pass simply
+          // skips them. Idempotent on already-disabled scripts.
+          clearMacroInterceptorsByScriptId(msg.id);
+          clearMessageContentProcessorsByScriptId(msg.id);
           logCleanup('tool',  'disabled', disabledName, clearedTools);
           logCleanup('macro', 'disabled', disabledName, clearedMacros);
           // Dismiss any advanced modals this script still has open. Marking
@@ -759,6 +845,10 @@ spindle.onFrontendMessage(async (raw, userId) => {
         for (const name of clearedMacros) {
           try { spindle.unregisterMacro(name); } catch { /* swallow */ }
         }
+        // Drop interceptor + processor entries — see matching block in
+        // `update_script` for the no-host-unregister-needed reasoning.
+        clearMacroInterceptorsByScriptId(msg.id);
+        clearMessageContentProcessorsByScriptId(msg.id);
         logCleanup('tool',  'deleted', deletedName, clearedTools);
         logCleanup('macro', 'deleted', deletedName, clearedMacros);
         // Dismiss any advanced modals this script still has open. See the
@@ -975,14 +1065,21 @@ spindle.onFrontendMessage(async (raw, userId) => {
           process.exit(1);
         }, timeoutMs + 5_000);
 
-        // Snapshot tool + macro names owned by this script BEFORE execution
-        // so we can diff afterwards and auto-unregister anything the new
-        // code no longer creates (e.g. user renamed `roll_dice` → `roll_d20`,
-        // or removed an `api.macros.register(...)` call).
-        const preRunToolNames  = toolNamesByScript(script.id);
-        const preRunMacroNames = macroNamesByScript(script.id);
-        const toolsRegisteredThisRun  = new Set<string>();
-        const macrosRegisteredThisRun = new Set<string>();
+        // Snapshot tool + macro names AND interceptor / processor entry ids
+        // owned by this script BEFORE execution so we can diff afterwards
+        // and auto-clean anything the new code no longer creates (e.g.
+        // user renamed `roll_dice` → `roll_d20`, removed an
+        // `api.macros.register(...)` call, or stopped calling
+        // `api.macros.registerInterceptor` from a code path that previously
+        // ran on every trigger event).
+        const preRunToolNames                    = toolNamesByScript(script.id);
+        const preRunMacroNames                   = macroNamesByScript(script.id);
+        const preRunMacroInterceptorIds          = macroInterceptorIdsByScript(script.id);
+        const preRunContentProcessorIds          = contentProcessorIdsByScript(script.id);
+        const toolsRegisteredThisRun             = new Set<string>();
+        const macrosRegisteredThisRun            = new Set<string>();
+        const macroInterceptorsRegisteredThisRun = new Set<string>();
+        const contentProcessorsRegisteredThisRun = new Set<string>();
 
         // No `activeContext` option — `buildScriptAPI` substitutes a
         // live-reading view so any handlers the script registers (tools,
@@ -1001,12 +1098,18 @@ spindle.onFrontendMessage(async (raw, userId) => {
           timeoutMs,
           toolsRegisteredThisRun,
           macrosRegisteredThisRun,
+          macroInterceptorsRegisteredThisRun,
+          contentProcessorsRegisteredThisRun,
         });
         clearTimeout(syncWatchdog);
 
-        // ── Auto-cleanup stale tools + macros ─────────────────────────────
+        // ── Auto-cleanup stale registrations ──────────────────────────────
         // Anything the script owned before this run but did NOT re-register
-        // during this execution is stale. Remove from the store + Spindle.
+        // during this execution is stale. Tools + macros need a host-side
+        // unregister; interceptor + processor entries are LS-side only
+        // (one extension-level registration with the host stays live), so
+        // dropping registry entries is sufficient — the next dispatch pass
+        // simply skips them.
         const staleTools = diffAndCleanStaleTools(script.id, preRunToolNames, toolsRegisteredThisRun);
         for (const name of staleTools) {
           try { spindle.unregisterTool(name); } catch { /* swallow */ }
@@ -1015,6 +1118,18 @@ spindle.onFrontendMessage(async (raw, userId) => {
         for (const name of staleMacros) {
           try { spindle.unregisterMacro(name); } catch { /* swallow */ }
         }
+        // Stale-cleanup for the LS-side-only registries — no host call,
+        // no log noise (the cleanup-log helper is `tool`/`macro`-shaped
+        // and extending it is deferred). The drop count is observable
+        // via `api.macros.listInterceptors()` / `api.chat.listContentProcessors()`
+        // for diagnostics; if a usage pattern emerges where logging
+        // surfaces real value, a follow-up can extend `CleanupKind`.
+        diffAndCleanStaleMacroInterceptors(
+          script.id, preRunMacroInterceptorIds, macroInterceptorsRegisteredThisRun,
+        );
+        diffAndCleanStaleContentProcessors(
+          script.id, preRunContentProcessorIds, contentProcessorsRegisteredThisRun,
+        );
         logCleanup('tool',  'stale after re-run', script.name, staleTools);
         logCleanup('macro', 'stale after re-run', script.name, staleMacros);
 

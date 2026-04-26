@@ -32,6 +32,14 @@ import { clearByScriptId as clearBroadcastByScriptId } from './broadcast-bus.js'
 import { clearCommandHandlerByScriptId } from './api/commands.js';
 import { listNamesByScriptId as toolNamesByScript, diffAndCleanStaleTools } from './tool-store.js';
 import { listNamesByScriptId as macroNamesByScript, diffAndCleanStaleMacros } from './macro-store.js';
+import {
+  listIdsByScriptId as macroInterceptorIdsByScript,
+  diffAndCleanStale as diffAndCleanStaleMacroInterceptors,
+} from './macro-interceptor-registry.js';
+import {
+  listIdsByScriptId as contentProcessorIdsByScript,
+  diffAndCleanStale as diffAndCleanStaleContentProcessors,
+} from './message-content-processor-registry.js';
 import { logCleanup } from './cleanup-log.js';
 
 // ─── Dependency factory ───────────────────────────────────────────────────────
@@ -216,11 +224,16 @@ export class TriggerRegistry {
         clearCommandHandlerByScriptId(scriptId);
 
         // ── Execute the current script body ────────────────────────────────
-        // Snapshot tool + macro names before execution for the auto-cleanup diff.
-        const preRunToolNames  = toolNamesByScript(scriptId);
-        const preRunMacroNames = macroNamesByScript(scriptId);
-        const toolsRegisteredThisRun  = new Set<string>();
-        const macrosRegisteredThisRun = new Set<string>();
+        // Snapshot tool + macro names AND interceptor / processor entry ids
+        // before execution for the auto-cleanup diff.
+        const preRunToolNames                    = toolNamesByScript(scriptId);
+        const preRunMacroNames                   = macroNamesByScript(scriptId);
+        const preRunMacroInterceptorIds          = macroInterceptorIdsByScript(scriptId);
+        const preRunContentProcessorIds          = contentProcessorIdsByScript(scriptId);
+        const toolsRegisteredThisRun             = new Set<string>();
+        const macrosRegisteredThisRun            = new Set<string>();
+        const macroInterceptorsRegisteredThisRun = new Set<string>();
+        const contentProcessorsRegisteredThisRun = new Set<string>();
 
         const opts: ExecutorOptions = {
           grantedPermissions,
@@ -233,6 +246,8 @@ export class TriggerRegistry {
           timeoutMs: scriptTimeoutMs,
           toolsRegisteredThisRun,
           macrosRegisteredThisRun,
+          macroInterceptorsRegisteredThisRun,
+          contentProcessorsRegisteredThisRun,
         };
 
         // Sync-loop watchdog: process.exit(1) is the only escape when the
@@ -248,7 +263,10 @@ export class TriggerRegistry {
         const result = await executeScript(currentScript, opts);
         clearTimeout(syncWatchdog);
 
-        // ── Auto-cleanup stale tools + macros ─────────────────────────────
+        // ── Auto-cleanup stale registrations ──────────────────────────────
+        // Tools + macros: host-side unregister + audit log.
+        // Interceptors + processors: LS-side only (one extension-level
+        // registration with the host stays live), drop-only, no log.
         const staleTools = diffAndCleanStaleTools(scriptId, preRunToolNames, toolsRegisteredThisRun);
         for (const name of staleTools) {
           try { spindle.unregisterTool(name); } catch { /* swallow */ }
@@ -257,6 +275,12 @@ export class TriggerRegistry {
         for (const name of staleMacros) {
           try { spindle.unregisterMacro(name); } catch { /* swallow */ }
         }
+        diffAndCleanStaleMacroInterceptors(
+          scriptId, preRunMacroInterceptorIds, macroInterceptorsRegisteredThisRun,
+        );
+        diffAndCleanStaleContentProcessors(
+          scriptId, preRunContentProcessorIds, contentProcessorsRegisteredThisRun,
+        );
         logCleanup('tool',  'stale after re-run', currentScript.name, staleTools);
         logCleanup('macro', 'stale after re-run', currentScript.name, staleMacros);
 
@@ -436,10 +460,14 @@ export class TriggerRegistry {
     clearBroadcastByScriptId(script.id);
     clearCommandHandlerByScriptId(script.id);
 
-    const preRunToolNames  = toolNamesByScript(script.id);
-    const preRunMacroNames = macroNamesByScript(script.id);
-    const toolsRegisteredThisRun  = new Set<string>();
-    const macrosRegisteredThisRun = new Set<string>();
+    const preRunToolNames                    = toolNamesByScript(script.id);
+    const preRunMacroNames                   = macroNamesByScript(script.id);
+    const preRunMacroInterceptorIds          = macroInterceptorIdsByScript(script.id);
+    const preRunContentProcessorIds          = contentProcessorIdsByScript(script.id);
+    const toolsRegisteredThisRun             = new Set<string>();
+    const macrosRegisteredThisRun            = new Set<string>();
+    const macroInterceptorsRegisteredThisRun = new Set<string>();
+    const contentProcessorsRegisteredThisRun = new Set<string>();
 
     const opts: ExecutorOptions = {
       grantedPermissions,
@@ -452,6 +480,8 @@ export class TriggerRegistry {
       timeoutMs: scriptTimeoutMs,
       toolsRegisteredThisRun,
       macrosRegisteredThisRun,
+      macroInterceptorsRegisteredThisRun,
+      contentProcessorsRegisteredThisRun,
     };
 
     const syncWatchdogMs = (scriptTimeoutMs ?? HARD_LIMIT_MS) + 5_000;
@@ -473,6 +503,12 @@ export class TriggerRegistry {
     for (const name of staleMacros) {
       try { spindle.unregisterMacro(name); } catch { /* swallow */ }
     }
+    diffAndCleanStaleMacroInterceptors(
+      script.id, preRunMacroInterceptorIds, macroInterceptorsRegisteredThisRun,
+    );
+    diffAndCleanStaleContentProcessors(
+      script.id, preRunContentProcessorIds, contentProcessorsRegisteredThisRun,
+    );
     logCleanup('tool',  'stale after re-run', script.name, staleTools);
     logCleanup('macro', 'stale after re-run', script.name, staleMacros);
 
@@ -553,9 +589,10 @@ export class TriggerRegistry {
         this.sendToFrontend({ type: 'console_entry', scriptId: script.id, runId, entry }),
       onToolsChanged,
       timeoutMs: scriptTimeoutMs,
-      // Intentionally no toolsRegisteredThisRun / macrosRegisteredThisRun —
-      // stale-diff cleanup after a teardown run makes no sense; the whole
-      // script is about to be unregistered anyway.
+      // Intentionally no *RegisteredThisRun trackers — stale-diff cleanup
+      // after a teardown run makes no sense; the whole script is about
+      // to be unregistered anyway. (Applies to tools, macros, macro
+      // interceptors, and content processors equally.)
     };
 
     // Race the executor against the hard timeout. If the handler exceeds

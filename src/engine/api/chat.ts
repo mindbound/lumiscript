@@ -20,7 +20,15 @@
 
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
 
-import type { LumiScriptAPI, InjectionInfo, MessagePatch } from '../../types/script.js';
+import type {
+  LumiScriptAPI,
+  InjectionInfo,
+  MessagePatch,
+  MessageContentProcessorHandler,
+  MessageContentProcessorOptions,
+  MessageContentProcessorHandle,
+  RegisteredMessageContentProcessorInfo,
+} from '../../types/script.js';
 import { type APIBuildDeps, assertPerm, assertDangerous, requireChatId, shielded } from './shared.js';
 import {
   addInjection,
@@ -29,6 +37,15 @@ import {
   clearAll,
   listAll,
 } from '../injection-store.js';
+// Aliased to avoid collision with the injection-store imports above. The
+// content-processor registry mirrors injection-store's per-script lifecycle
+// shape (addEntry / removeEntry / clearByScriptId), but they're distinct
+// stores serving different host hooks.
+import {
+  addEntry as addProcessorEntry,
+  removeEntry as removeProcessorEntry,
+  listAll as listProcessors,
+} from '../message-content-processor-registry.js';
 
 /**
  * Per-chat serialization queue for setMetadata.
@@ -67,7 +84,13 @@ function toUpstreamPatch(patch: MessagePatch): {
 }
 
 export function buildChatAPI(deps: APIBuildDeps): LumiScriptAPI['chat'] {
-  const { script, hasPerm, activeContext, userId } = deps;
+  const {
+    script,
+    hasPerm,
+    activeContext,
+    userId,
+    contentProcessorsRegisteredThisRun,
+  } = deps;
   const uid = userId ?? undefined;
 
   return {
@@ -227,6 +250,47 @@ export function buildChatAPI(deps: APIBuildDeps): LumiScriptAPI['chat'] {
       assertPerm('chat_mutation', hasPerm, script.name);
       const id = requireChatId(activeContext);
       return shielded(spindle.chat.isMessageHidden(id, msgId));
+    },
+
+    // ── Message content processor (per-script handler registration) ────────
+    //
+    // Multiplexed at LS backend startup behind one
+    // `spindle.registerMessageContentProcessor` registration (Phase 3 wiring
+    // in backend.ts). Per-script handler entries are stored in
+    // `message-content-processor-registry`; the LS-house handler in
+    // backend.ts walks them all in priority order, threading content +
+    // shallow-merging extra deltas, and returns the final patch to the host.
+    //
+    // Permission: rides on the existing `chat_mutation` gate. No new
+    // permission machinery required (see CLAUDE.md "Spindle Permissions").
+
+    registerContentProcessor(
+      handler: MessageContentProcessorHandler,
+      options?: MessageContentProcessorOptions,
+    ): MessageContentProcessorHandle {
+      assertPerm('chat_mutation', hasPerm, script.name);
+      // `addEntry` validates handler shape, priority, timeoutMs and throws
+      // on bad input. Returns the resolved id (auto-generated when omitted)
+      // so we can hand it back through the handle for later remove() calls.
+      const id = addProcessorEntry(script.id, script.name, handler, options);
+      // Track for post-execution stale-diff — see the matching call in
+      // `api.macros.registerInterceptor` for the rationale.
+      contentProcessorsRegisteredThisRun?.add(id);
+      return {
+        id,
+        // Idempotent: removeProcessorEntry is ownership-scoped + returns
+        // false if the entry is already gone, so calling remove() twice
+        // (or after a teardown sweep) is a silent no-op.
+        remove: () => {
+          removeProcessorEntry(script.id, id);
+        },
+      };
+    },
+
+    listContentProcessors(): RegisteredMessageContentProcessorInfo[] {
+      // Diagnostic surface — un-gated, mirrors `api.macros.list()`. Returns a
+      // snapshot across all scripts (handlers themselves are excluded).
+      return listProcessors();
     },
   };
 }

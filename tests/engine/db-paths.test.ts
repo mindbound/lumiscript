@@ -35,11 +35,11 @@ describe('assertValidName', () => {
   });
 
   test('rejects non-string input', () => {
-    // @ts-expect-error — intentional type violation
+    // `assertValidName`'s signature widened to accept `unknown` (so this
+    // test can pass non-string values without TS suppression directives —
+    // the runtime check is what matters here, not the type-level rejection).
     expect(() => assertValidName(42)).toThrow(DbNameError);
-    // @ts-expect-error — intentional type violation
     expect(() => assertValidName(null)).toThrow(DbNameError);
-    // @ts-expect-error — intentional type violation
     expect(() => assertValidName(undefined)).toThrow(DbNameError);
   });
 

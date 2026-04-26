@@ -602,7 +602,9 @@ describe('deleteRecord', () => {
 
     // Both ran; the final value must be one of the two patches (not
     // a mix or pre-mutation state). Last-writer wins through the queue.
-    const final = (await inspectCollection(path)).records[0]!.hp;
+    // `records[0]!.hp` is typed `unknown` because DbRecord uses an open
+    // `[key: string]: unknown` index signature — narrow at the assertion.
+    const final = (await inspectCollection(path)).records[0]!.hp as number;
     expect([20, 30]).toContain(final);
   });
 });

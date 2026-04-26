@@ -16,6 +16,8 @@ import { resetContext } from '../../src/engine/binding.js';
 import { executionStatusStore } from '../../src/engine/execution-status.js';
 import { clearAllCommandHandlers } from '../../src/engine/api/commands.js';
 import { __reset as resetDOMRegistry } from '../../src/engine/dom-registry.js';
+import { __reset as resetMacroInterceptorRegistry } from '../../src/engine/macro-interceptor-registry.js';
+import { __reset as resetMessageContentProcessorRegistry } from '../../src/engine/message-content-processor-registry.js';
 
 beforeEach(() => {
   // Install fresh spindle mock on globalThis so `declare const spindle` resolves
@@ -29,4 +31,6 @@ beforeEach(() => {
   executionStatusStore.clear();
   clearAllCommandHandlers();
   resetDOMRegistry();
+  resetMacroInterceptorRegistry();
+  resetMessageContentProcessorRegistry();
 });

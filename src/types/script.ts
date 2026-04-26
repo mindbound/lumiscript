@@ -357,6 +357,101 @@ export interface InjectionInfo {
   scriptId: string;
 }
 
+// ─── Message content processor (api.chat.registerContentProcessor) ──────────
+
+/**
+ * Origin tag identifying which user-initiated message-write path triggered
+ * a content-processor invocation. `'create'` covers both ordinary
+ * `POST .../messages` writes and auto-inserted greeting rows.
+ */
+export type MessageContentProcessorOrigin =
+  | 'create'
+  | 'update'
+  | 'swipe_add'
+  | 'swipe_update';
+
+/**
+ * Context passed to a message content processor before a user-initiated
+ * message write reaches SQLite. Handlers can inspect this and return a
+ * patch (new `content` / merged `extra`) to transform what gets stored
+ * and what WebSocket subscribers observe on first paint.
+ */
+export interface MessageContentProcessorCtx {
+  readonly chatId: string;
+  /** Undefined for `'create'` origins (the row doesn't exist yet). */
+  readonly messageId?: string;
+  readonly content: string;
+  readonly extra?: Record<string, unknown>;
+  readonly origin: MessageContentProcessorOrigin;
+  /** Set for `'swipe_update'` only — zero-based index of the swipe being rewritten. */
+  readonly swipeIndex?: number;
+  readonly userId: string;
+}
+
+/**
+ * Return value for a message content processor handler. Return `undefined`
+ * / `void` to pass through, or a partial patch to modify the write:
+ *  - `content` (if present) replaces the content for downstream processors
+ *    and the DB write.
+ *  - `extra` (if present) shallow-merges into the existing `extra` — keys
+ *    you omit are preserved. Ignored on swipe origins (swipes share the
+ *    parent message's `extra`).
+ */
+export interface MessageContentProcessorResult {
+  content?: string;
+  extra?: Record<string, unknown>;
+}
+
+/**
+ * User-supplied message content processor handler. Sync or async. Returns
+ * either a `MessageContentProcessorResult` patch or `void`/`undefined`
+ * to pass through.
+ */
+export type MessageContentProcessorHandler = (
+  ctx: MessageContentProcessorCtx,
+) =>
+  | MessageContentProcessorResult
+  | void
+  | Promise<MessageContentProcessorResult | void>;
+
+/** Registration options for `api.chat.registerContentProcessor`. */
+export interface MessageContentProcessorOptions {
+  /** Stable identifier. Re-registration with the same `id` from the same script replaces. */
+  id?: string;
+  /** Lower runs first within a single LS multiplexer pass. Default `100`. */
+  priority?: number;
+  /**
+   * Restrict the handler to specific origins. Default: all four origins.
+   * Pre-filtered before invocation — non-matching contexts skip without
+   * calling the handler at all. Common shape: `origin: 'create'` for
+   * handlers that only care about new messages.
+   */
+  origin?: MessageContentProcessorOrigin | MessageContentProcessorOrigin[];
+  /**
+   * Per-invocation soft timeout in milliseconds. Default `2000`. The host's
+   * outer 10-second budget is shared across all LumiScript handlers; on
+   * timeout the handler is skipped and the chain forwards the prior content.
+   */
+  timeoutMs?: number;
+}
+
+/** Handle returned by `registerContentProcessor`. Calling `remove()` deregisters. */
+export interface MessageContentProcessorHandle {
+  readonly id: string;
+  remove(): void;
+}
+
+/** Snapshot of a registered processor. Returned from `listContentProcessors()`. */
+export interface RegisteredMessageContentProcessorInfo {
+  scriptId: string;
+  scriptName: string;
+  id: string;
+  priority: number;
+  /** `null` when no origin filter was supplied. */
+  origins: MessageContentProcessorOrigin[] | null;
+  timeoutMs: number;
+}
+
 export interface ChatAPI {
   /** Get all messages in the current chat. Requires chat_mutation permission. */
   getMessages(options?: GetMessagesOptions): Promise<ChatMessage[]>;
@@ -433,6 +528,57 @@ export interface ChatAPI {
    * never had the flag set. Requires chat_mutation permission.
    */
   isMessageHidden(id: string): Promise<boolean>;
+
+  /**
+   * Register a message content processor — a handler that fires before a
+   * user-initiated message write reaches SQLite (create, update, swipe_add,
+   * swipe_update, and auto-inserted greetings). Handlers can transform
+   * `content` and / or shallow-merge `extra`. Returned `extra` is ignored
+   * on swipe origins (swipes share the parent message's `extra`).
+   * Requires `chat_mutation` permission.
+   *
+   * Use this when the transform belongs on the stored message itself —
+   * not just on the in-flight LLM call. Common patterns:
+   *  - Pre-resolve macros at write time so stored rows are already-resolved.
+   *  - Strip state markers (e.g. `<state>...</state>` blocks) out of the
+   *    visible content into `extra` before commit.
+   *  - Sanitize / normalize content uniformly.
+   *
+   * **Critical perf note** — handler runs synchronously inside the message
+   * write path. Every millisecond of handler work is visible latency on
+   * send/edit/swipe. Each handler runs inside a 2-second soft timeout
+   * (configurable). Do NOT call `api.llm.*`, `api.utils.http.*`, or any
+   * other potentially-slow API from a handler.
+   *
+   * **Loop safety**: The host does NOT invoke this hook for `api.chat.*`
+   * mutations (sendMessage / editMessage / etc.) — those bypass the
+   * processor chain to avoid an extension's own writes triggering its
+   * own handler.
+   *
+   * @returns A handle whose `remove()` deregisters the handler.
+   *
+   * @example
+   * const handle = api.chat.registerContentProcessor((ctx) => {
+   *   const m = ctx.content.match(/<state>([\s\S]*?)<\/state>/);
+   *   if (!m) return;
+   *   return {
+   *     content: ctx.content.replace(m[0], '').trim(),
+   *     extra: { tracker: { state: m[1] } },
+   *   };
+   * }, { origin: 'create' });
+   *
+   * // Later: handle.remove();
+   */
+  registerContentProcessor(
+    handler: MessageContentProcessorHandler,
+    options?: MessageContentProcessorOptions,
+  ): MessageContentProcessorHandle;
+
+  /**
+   * List all currently registered message content processors (across all
+   * scripts). Use for diagnostics. Excludes the live handler reference.
+   */
+  listContentProcessors(): RegisteredMessageContentProcessorInfo[];
 }
 
 // ─── LLM API ─────────────────────────────────────────────────────────────────
@@ -2896,6 +3042,175 @@ export interface MacrosAPI {
    * diagnostics, dashboards, or debugging.
    */
   list(): RegisteredMacroInfo[];
+
+  /**
+   * Register a macro interceptor — a handler that receives the RAW template
+   * before Lumiverse parses it, and returns either a transformed template or
+   * `void` to pass through. Requires the `macro_interceptor` permission
+   * (declared by LumiScript at the extension level — no per-script gate).
+   *
+   * Use this when per-macro RPC cost dominates iteration-heavy templates
+   * like `{{#each LARGE_LIST}}…{{my_macro}}…{{/each}}`. One interceptor call
+   * resolves all hits in-worker instead of paying N RPCs across the worker
+   * boundary. For single non-iterated macros, prefer `register()`.
+   *
+   * **Critical perf note** — handlers run on a hot path (every prompt-
+   * assembly evaluate pass, plus display/response/other phases). The host
+   * gives all extensions a 10-second budget per evaluation; LumiScript
+   * shares this across every script's handlers. Each handler runs inside a
+   * 2-second soft timeout (configurable). Do NOT call `api.llm.*`,
+   * `api.utils.http.*`, or any other potentially-slow API from a handler.
+   *
+   * Recommended pattern: a trigger handler precomputes state and writes it
+   * to `api.db.*`; the interceptor handler reads the cached value and
+   * substitutes it into the template — fast, idempotent, side-effect-free.
+   *
+   * @returns A handle whose `remove()` deregisters the handler.
+   *
+   * @example
+   * const handle = api.macros.registerInterceptor((ctx) => {
+   *   const intensity = api.db.collection({ scope: 'chat' })
+   *     .get('tracker:state')?.intensity ?? 0;
+   *   return ctx.template.replaceAll('{{tracker.intensity}}', String(intensity));
+   * }, { matchTemplate: '{{tracker.', priority: 100 });
+   *
+   * // Later: handle.remove();
+   */
+  registerInterceptor(
+    handler: MacroInterceptorHandler,
+    options?: MacroInterceptorOptions,
+  ): MacroInterceptorHandle;
+
+  /**
+   * List all currently registered macro interceptors (across all scripts).
+   * Use for diagnostics. Excludes the live handler reference.
+   */
+  listInterceptors(): RegisteredMacroInterceptorInfo[];
+}
+
+/**
+ * Phase tag passed to a macro interceptor. Lets handlers gate their work to
+ * specific call sites — e.g. `phase === 'prompt'` for prompt-assembly only.
+ *
+ * - `'prompt'`: macro evaluation during prompt assembly (the most common
+ *   and most performance-sensitive site).
+ * - `'display'`: evaluation for chat-display rendering.
+ * - `'response'`: evaluation on LLM-returned content during post-processing.
+ * - `'other'`: any other call site that doesn't match the above.
+ */
+export type MacroInterceptorPhase = 'prompt' | 'display' | 'response' | 'other';
+
+/**
+ * Read-only snapshot of the macro evaluation environment, passed to a
+ * macro interceptor handler. Mutating these values has NO effect on the
+ * real environment — they're a structured-clone snapshot. Persist state
+ * via `api.variables.*`, `api.db.*`, or `api.macros.updateValue()`.
+ */
+export interface MacroInterceptorEnv {
+  readonly commit: boolean;
+  readonly names: Record<string, string>;
+  readonly character: Record<string, unknown>;
+  readonly chat: Record<string, unknown>;
+  readonly system: Record<string, unknown>;
+  readonly variables: {
+    readonly local: Record<string, string>;
+    readonly global: Record<string, string>;
+    readonly chat: Record<string, string>;
+  };
+  readonly extra: Record<string, unknown>;
+}
+
+/**
+ * Context passed to a macro interceptor handler. The handler receives the
+ * current raw template (already transformed by any earlier interceptors
+ * in the chain) and returns either a transformed template string or
+ * `void` to pass through.
+ */
+export interface MacroInterceptorCtx {
+  readonly template: string;
+  readonly env: MacroInterceptorEnv;
+  readonly commit: boolean;
+  readonly phase: MacroInterceptorPhase;
+  readonly sourceHint?: string;
+  /**
+   * User ID that initiated the macro resolution (when available). Relevant
+   * for operator-scoped extensions that need to route work through other
+   * APIs on that user's behalf.
+   */
+  readonly userId?: string;
+}
+
+/**
+ * User-supplied macro interceptor handler. Sync or async. Returns either:
+ *  - a transformed template `string` to replace the input for downstream
+ *    handlers + the host's parser.
+ *  - `void` / `undefined` to pass through unchanged.
+ */
+export type MacroInterceptorHandler = (
+  ctx: MacroInterceptorCtx,
+) => string | void | Promise<string | void>;
+
+/** Registration options for `api.macros.registerInterceptor`. */
+export interface MacroInterceptorOptions {
+  /**
+   * Stable identifier for this handler. Re-registration with the same
+   * `id` from the same script replaces the prior entry. Auto-generated
+   * if omitted — auto-generated entries can only be removed via the
+   * returned handle or the script's lifecycle teardown.
+   */
+  id?: string;
+  /** Lower values run first within a single LS multiplexer pass. Default `100`. */
+  priority?: number;
+  /**
+   * Restrict the handler to specific evaluation phases. Default: all
+   * phases. Pre-filtered before the handler runs — non-matching contexts
+   * skip without invoking the handler at all.
+   */
+  phase?: MacroInterceptorPhase | MacroInterceptorPhase[];
+  /**
+   * Pre-filter on template content. Skip the handler unless the template
+   * contains the marker(s).
+   *  - `string`: simple `includes` check.
+   *  - `string[]`: any-of (skip unless at least one element is present).
+   *  - `RegExp`: skip unless the regex matches.
+   *
+   * Most common use: gating on a macro family namespace like
+   * `'{{tracker.'` so handlers don't write the same `if (!ctx.template
+   * .includes(...)) return` boilerplate.
+   */
+  matchTemplate?: string | string[] | RegExp;
+  /**
+   * Per-invocation soft timeout in milliseconds. Default `2000`. The host's
+   * outer 10-second budget is shared across all LumiScript handlers, so
+   * each individual handler should stay well under the cap. On timeout the
+   * handler is skipped and the chain forwards the prior template.
+   */
+  timeoutMs?: number;
+}
+
+/** Handle returned by `registerInterceptor`. Calling `remove()` deregisters. */
+export interface MacroInterceptorHandle {
+  /** The handler's id (auto-generated when not supplied via options). */
+  readonly id: string;
+  /** Deregister this handler. Idempotent — safe to call repeatedly. */
+  remove(): void;
+}
+
+/** Snapshot of a registered macro interceptor. Returned from `listInterceptors()`. */
+export interface RegisteredMacroInterceptorInfo {
+  scriptId: string;
+  scriptName: string;
+  id: string;
+  priority: number;
+  /** `null` when no phase filter was supplied (handler runs for all phases). */
+  phases: MacroInterceptorPhase[] | null;
+  /**
+   * Stringified template-marker filter, or `null` when no filter was supplied.
+   * RegExps are stringified via `String(regexp)`; string-array filters are
+   * preserved as arrays.
+   */
+  matchTemplate: string[] | string | null;
+  timeoutMs: number;
 }
 
 // ─── DB API ──────────────────────────────────────────────────────────────────

@@ -32,9 +32,13 @@ import type {
   MacroContext,
   MacroDefinition,
   MacroHandler,
+  MacroInterceptorHandler,
+  MacroInterceptorOptions,
+  MacroInterceptorHandle,
   RegisteredMacroInfo,
+  RegisteredMacroInterceptorInfo,
 } from '../../types/script.js';
-import type { APIBuildDeps } from './shared.js';
+import { type APIBuildDeps, assertPerm } from './shared.js';
 import {
   addMacro,
   removeMacro,
@@ -43,11 +47,26 @@ import {
   getMacro,
 } from '../macro-store.js';
 import { emit as busEmit } from '../broadcast-bus.js';
+// Macro interceptor registry — multiplexed at LS backend startup behind one
+// `spindle.registerMacroInterceptor` registration (Phase 3 wiring in
+// backend.ts). Imports are aliased so the existing macro-store readers /
+// writers retain their unprefixed names.
+import {
+  addEntry as addInterceptorEntry,
+  removeEntry as removeInterceptorEntry,
+  listAll as listInterceptorEntries,
+} from '../macro-interceptor-registry.js';
 
 const DEFAULT_CATEGORY = 'extension:lumiscript:user';
 
 export function buildMacrosAPI(deps: APIBuildDeps): import('../../types/script.js').MacrosAPI {
-  const { script, onMacrosChanged, macrosRegisteredThisRun } = deps;
+  const {
+    script,
+    hasPerm,
+    onMacrosChanged,
+    macrosRegisteredThisRun,
+    macroInterceptorsRegisteredThisRun,
+  } = deps;
 
   return {
     register(name: string, def: MacroDefinition, handler?: MacroHandler): void {
@@ -133,6 +152,45 @@ export function buildMacrosAPI(deps: APIBuildDeps): import('../../types/script.j
         scriptId:    e.scriptId,
         scriptName:  e.scriptName,
       }));
+    },
+
+    // ── Macro interceptor (per-script handler registration) ───────────────
+    //
+    // Permission: `macro_interceptor` — declared by LumiScript at the
+    // extension level (no per-script gate). The host's
+    // `spindle.registerMacroInterceptor` call is gated on this same
+    // permission, so denial surfaces here at the API call (assertPerm
+    // throws) rather than silently at host-registration time.
+
+    registerInterceptor(
+      handler: MacroInterceptorHandler,
+      options?: MacroInterceptorOptions,
+    ): MacroInterceptorHandle {
+      assertPerm('macro_interceptor', hasPerm, script.name);
+      // `addEntry` validates handler shape, priority, timeoutMs and throws
+      // on bad input; auto-generates id when omitted.
+      const id = addInterceptorEntry(script.id, script.name, handler, options);
+      // Track for the post-execution stale-diff. Parallel to how `register`
+      // (above) tracks via `macrosRegisteredThisRun`. Without this, a
+      // trigger script that re-registers an interceptor on every event
+      // would accumulate auto-id'd entries across runs; with it, the
+      // post-run `diffAndCleanStale` pass drops anything the new run
+      // didn't re-create (matching tools / macros semantics).
+      macroInterceptorsRegisteredThisRun?.add(id);
+      return {
+        id,
+        // Idempotent: removeInterceptorEntry is ownership-scoped + returns
+        // false if the entry is already gone. Safe to call repeatedly or
+        // after a teardown sweep.
+        remove: () => {
+          removeInterceptorEntry(script.id, id);
+        },
+      };
+    },
+
+    listInterceptors(): RegisteredMacroInterceptorInfo[] {
+      // Diagnostic surface — un-gated, mirrors `list()` above.
+      return listInterceptorEntries();
     },
   };
 }

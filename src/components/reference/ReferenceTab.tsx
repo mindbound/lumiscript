@@ -145,6 +145,8 @@ export const PERM_GROUPS: PermGroup[] = [
       { method: 'api.chat.setMessageHidden', perms: ['chat_mutation'] },
       { method: 'api.chat.setMessagesHidden', perms: ['chat_mutation'] },
       { method: 'api.chat.isMessageHidden', perms: ['chat_mutation'] },
+      { method: 'api.chat.registerContentProcessor', perms: ['chat_mutation'] },
+      { method: 'api.chat.listContentProcessors', perms: [] },
     ],
   },
   {
@@ -205,7 +207,9 @@ export const PERM_GROUPS: PermGroup[] = [
     group: 'Tools & Broadcast',
     rows: [
       { method: 'api.tools.*', perms: ['tools'] },
-      { method: 'api.macros.*', perms: [] },
+      { method: 'api.macros.register / updateValue / unregister / list', perms: [] },
+      { method: 'api.macros.registerInterceptor', perms: ['macro_interceptor'] },
+      { method: 'api.macros.listInterceptors', perms: [] },
       { method: 'api.broadcast.*', perms: [] },
       { method: 'api.commands.*', perms: [] },
       { method: 'api.events.*', perms: ['event_tracking'] },
@@ -492,7 +496,7 @@ export const KEY_TYPES: TypeDoc[] = [
   },
   {
     name: 'SendMessageOptions',
-    note: 'Passed to api.chat.sendMessage(content, options?).',
+    note: "Passed to api.chat.sendMessage(content, options?). HTML rendering note: a block-level element (<div>, <section>, <article>, etc.) whose content includes a <style> tag OR three or more inline style=\"...\" attributes is auto-extracted into a Shadow DOM \"island\" by the host renderer. This isolates card-style rules from the chat UI and prevents markdown from corrupting interactive markup. To opt out (e.g. you need document-level click delegation, CSS cascade into surrounding DOM, or MutationObserver access from the message subtree), add data-no-island to the outer block element's opening tag. Opting out disables both style isolation AND the markdown-safety wrapper — scope your selectors with a unique class prefix and ensure markdown won't misinterpret your content. Standalone <style> blocks not inside a wrapper element are extracted together with subsequent sibling HTML; wrap them in <div data-no-island> if you need them inline.",
     fields: [
       { field: 'role?',     type: "'user' | 'assistant' | 'system'", optional: true, desc: "Sender role. Default 'user'." },
       { field: 'metadata?', type: 'Record<string, unknown>',         optional: true, desc: 'Arbitrary metadata to attach.' },
@@ -531,6 +535,62 @@ export const KEY_TYPES: TypeDoc[] = [
       { field: 'depth',     type: 'number',                          optional: false, desc: 'Position from end of assembled array (intercept mode).' },
       { field: 'ephemeral', type: 'boolean',                         optional: false, desc: 'Whether the injection auto-removes after generation.' },
       { field: 'scriptId',  type: 'string',                          optional: false, desc: 'ID of the script that created this injection.' },
+    ],
+  },
+  // ─── Message content processor ──────────────────────────────────────────────
+  {
+    name: 'MessageContentProcessorOptions',
+    note: 'Passed to api.chat.registerContentProcessor(handler, options?).',
+    fields: [
+      { field: 'id?',         type: 'string',                                                         optional: true, desc: 'Stable identifier. Re-registration with the same id from the same script replaces the prior entry. Auto-generated if omitted.' },
+      { field: 'priority?',   type: 'number',                                                         optional: true, desc: 'Lower runs first within the LumiScript multiplexer pass. Default 100.' },
+      { field: 'origin?',     type: "MessageContentProcessorOrigin | MessageContentProcessorOrigin[]", optional: true, desc: 'Restrict to specific origins. Default: all four. Pre-filtered before invocation.' },
+      { field: 'timeoutMs?',  type: 'number',                                                         optional: true, desc: 'Per-invocation soft timeout. Default 2000. The host\'s outer 10-second budget is shared across all LumiScript handlers.' },
+    ],
+  },
+  {
+    name: 'MessageContentProcessorCtx',
+    note: "Passed to a registerContentProcessor handler. All fields readonly. The host's chat_mutation permission gates this surface, but does NOT route api.chat.* mutations through the chain (loop safety).",
+    fields: [
+      { field: 'chatId',      type: 'string',                          optional: false, desc: 'Active chat id.' },
+      { field: 'messageId?',  type: 'string',                          optional: true,  desc: "Undefined for 'create' origins (the row doesn't exist yet)." },
+      { field: 'content',     type: 'string',                          optional: false, desc: 'Current content (already transformed by any earlier processors in the chain).' },
+      { field: 'extra?',      type: 'Record<string, unknown>',         optional: true,  desc: 'Current extra map (initial.extra + delta-so-far from prior processors). Threaded through the chain even on swipe origins.' },
+      { field: 'origin',      type: "'create' | 'update' | 'swipe_add' | 'swipe_update'", optional: false, desc: 'Which write path triggered this invocation. \'create\' includes auto-greetings.' },
+      { field: 'swipeIndex?', type: 'number',                          optional: true,  desc: "Set for 'swipe_update' only — zero-based index of the swipe being rewritten." },
+      { field: 'userId',      type: 'string',                          optional: false, desc: 'Owning user id for the write.' },
+    ],
+  },
+  {
+    name: 'MessageContentProcessorResult',
+    note: "Return value of a registerContentProcessor handler. Return undefined / void to pass through, or a partial patch. content replaces the stored content. extra shallow-merges into existing — keys you omit are PRESERVED. extra is IGNORED on swipe origins (swipes share the parent message's extra). Return ONLY keys you mutated; pristine initial.extra keys are NOT round-tripped to avoid re-stamping unchanged keys on every write.",
+    fields: [
+      { field: 'content?', type: 'string',                  optional: true, desc: 'Replaces the stored content for downstream processors and the DB write.' },
+      { field: 'extra?',   type: 'Record<string, unknown>', optional: true, desc: 'Delta keys to shallow-merge. Ignored on swipe origins.' },
+    ],
+  },
+  // ─── Macro interceptor ──────────────────────────────────────────────────────
+  {
+    name: 'MacroInterceptorOptions',
+    note: 'Passed to api.macros.registerInterceptor(handler, options?). Pre-filters short-circuit before the handler runs.',
+    fields: [
+      { field: 'id?',              type: 'string',                                                  optional: true, desc: 'Stable identifier. Re-registration with the same id from the same script replaces the prior entry. Auto-generated if omitted.' },
+      { field: 'priority?',        type: 'number',                                                  optional: true, desc: 'Lower runs first. Default 100.' },
+      { field: 'phase?',           type: "MacroInterceptorPhase | MacroInterceptorPhase[]",         optional: true, desc: "Restrict to specific evaluation phases. Default: all of 'prompt', 'display', 'response', 'other'." },
+      { field: 'matchTemplate?',   type: 'string | string[] | RegExp',                              optional: true, desc: "Pre-filter on template content. string = simple includes() check; string[] = any-of; RegExp = test. Most common: gating on a macro family namespace like '{{tracker.'." },
+      { field: 'timeoutMs?',       type: 'number',                                                  optional: true, desc: 'Per-invocation soft timeout. Default 2000. The host\'s outer 10-second budget is shared across all LumiScript handlers.' },
+    ],
+  },
+  {
+    name: 'MacroInterceptorCtx',
+    note: 'Passed to a registerInterceptor handler. All fields readonly. The handler receives the CURRENT raw template (already transformed by any earlier interceptors in the chain) and returns either a transformed template string or void to pass through.',
+    fields: [
+      { field: 'template',     type: 'string',                  optional: false, desc: 'Current raw template (post earlier-handler transforms).' },
+      { field: 'env',          type: 'MacroInterceptorEnv',     optional: false, desc: 'Read-only structured-clone snapshot of the macro evaluation environment (names, character, chat, system, variables, extra). Mutating has NO effect on the real environment — persist state via api.variables.* / api.db.* instead.' },
+      { field: 'commit',       type: 'boolean',                 optional: false, desc: "Whether the host is in commit mode for this evaluation." },
+      { field: 'phase',        type: "'prompt' | 'display' | 'response' | 'other'", optional: false, desc: 'Which call site triggered this evaluation.' },
+      { field: 'sourceHint?',  type: 'string',                  optional: true,  desc: 'Optional source hint when the host can attribute the eval (preset block name, etc.).' },
+      { field: 'userId?',      type: 'string',                  optional: true,  desc: 'User ID that initiated the macro resolution (when available).' },
     ],
   },
   // ─── UI ──────────────────────────────────────────────────────────────────────
@@ -1424,6 +1484,8 @@ export const API_GROUPS: FnGroup[] = [
       { name: 'getInjections',     args: '—',                     desc: 'List all active injections across all scripts.' },
       { name: 'clearInjections',   args: '—',                     desc: "Remove all injections from this script." },
       { name: 'clearAllInjections', args: '—',                   desc: 'Remove ALL injections across all scripts.' },
+      { name: 'registerContentProcessor', args: 'handler, options?', desc: 'Register a handler that fires before a user-initiated message write hits SQLite. Returns a patch { content?, extra? } to transform what gets stored. Options: id, priority (default 100), origin filter, timeoutMs (default 2000). NOT invoked for api.chat.* mutations (loop safety). Returns handle { id, remove }. Requires chat_mutation.' },
+      { name: 'listContentProcessors', args: '—',                  desc: 'List all currently registered message content processors across all scripts.' },
     ],
   },
   {
@@ -1619,6 +1681,8 @@ export const API_GROUPS: FnGroup[] = [
       { name: 'updateValue', args: 'name, value',         desc: 'Push a new value for a push-mode macro. Throws if the macro was registered with a handler.' },
       { name: 'unregister',  args: 'name',                desc: 'Unregister a macro owned by this script. No-op if not found or not owned.' },
       { name: 'list',        args: '—',                   desc: 'List all currently registered macros across all scripts.' },
+      { name: 'registerInterceptor', args: 'handler, options?', desc: 'Register a handler that receives the RAW template before Lumiverse parses it; return a transformed template or void to pass through. Use for iteration-heavy templates ({{#each LARGE_LIST}}…{{my_macro}}…{{/each}}) where per-macro RPC cost dominates. Options: id, priority (default 100), phase filter (prompt/display/response/other), matchTemplate (string | string[] | RegExp), timeoutMs (default 2000). Returns handle { id, remove }. Requires macro_interceptor permission.' },
+      { name: 'listInterceptors',    args: '—',                desc: 'List all currently registered macro interceptors across all scripts.' },
     ],
   },
   {

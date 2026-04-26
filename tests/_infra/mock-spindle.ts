@@ -25,6 +25,8 @@ export function createMockSpindle() {
     // ─── Interceptor / Context Handler ─────────────────────────────────
     registerInterceptor: mock(() => {}),
     registerContextHandler: mock(() => {}),
+    registerMacroInterceptor: mock(() => {}),
+    registerMessageContentProcessor: mock(() => {}),
 
     // ─── Tools ─────────────────────────────────────────────────────────
     registerTool: mock(() => {}),

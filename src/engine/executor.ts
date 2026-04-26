@@ -129,6 +129,20 @@ export interface ExecutorOptions {
    * updated script body no longer creates. See `toolsRegisteredThisRun`.
    */
   macrosRegisteredThisRun?: Set<string>;
+  /**
+   * Per-execution tracker for `api.macros.registerInterceptor(...)` calls.
+   * Adds the resolved entry id (auto-generated or user-provided) on every
+   * successful registration. Consumed by `macro-interceptor-registry`'s
+   * `diffAndCleanStale` post-execution to drop stale entries — same shape
+   * and intent as `toolsRegisteredThisRun` / `macrosRegisteredThisRun`.
+   */
+  macroInterceptorsRegisteredThisRun?: Set<string>;
+  /**
+   * Per-execution tracker for `api.chat.registerContentProcessor(...)` calls.
+   * Mirror of `macroInterceptorsRegisteredThisRun` for the message-content-
+   * processor surface.
+   */
+  contentProcessorsRegisteredThisRun?: Set<string>;
 }
 
 // ─── Cross-script console context ────────────────────────────────────────────
@@ -275,6 +289,8 @@ export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiSc
     onToolsChanged,
     toolsRegisteredThisRun,
     macrosRegisteredThisRun,
+    macroInterceptorsRegisteredThisRun,
+    contentProcessorsRegisteredThisRun,
   } = options;
   const hasPerm = (p: string) => grantedPermissions.has(p);
 
@@ -312,6 +328,8 @@ export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiSc
     // "Active Macros" list yet. The seam exists on APIBuildDeps so the UI
     // can be wired in later without touching this file or api/macros.ts.
     macrosRegisteredThisRun,
+    macroInterceptorsRegisteredThisRun,
+    contentProcessorsRegisteredThisRun,
   };
 
   // api is captured in a variable so that buildToolsAPI can receive a lazy

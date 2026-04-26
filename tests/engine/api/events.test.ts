@@ -97,8 +97,12 @@ describe('track', () => {
 
 describe('query', () => {
   test('delegates to spindle.events.query with filter', async () => {
+    // `level: 'info' as const` so the literal type narrows from `string`
+    // to the `'info'` branch of EventLevel — without it, mockResults's
+    // inferred type doesn't satisfy `EventRecord[]` for the deep-equal
+    // comparison below.
     const mockResults = [
-      { id: '1', ts: '2026-04-11T00:00:00Z', eventName: 'test', level: 'info' },
+      { id: '1', ts: '2026-04-11T00:00:00Z', eventName: 'test', level: 'info' as const },
     ];
     mockSpindle.events.query.mockReturnValueOnce(Promise.resolve(mockResults));
 
