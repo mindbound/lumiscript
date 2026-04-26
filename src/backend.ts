@@ -1064,19 +1064,36 @@ spindle.onFrontendMessage(async (raw, userId) => {
 // ─── Lumiverse event listeners ────────────────────────────────────────────────
 
 /**
- * Synchronously update context from SETTINGS_UPDATED so that binding checks
- * on trigger scripts subscribed to this event see the CURRENT context, not the
- * stale previous one.
+ * Update active context on chat-open / chat-close.
  *
- * Problem: Lumiverse fires SETTINGS_UPDATED { key: 'activeChatId', value: id }
- * before CHAT_CHANGED. The CHAT_CHANGED handler calls setActiveContext() inside
- * an async spindle.chats.get() callback, so context.chatId is still the OLD
- * chat when SETTINGS_UPDATED trigger handlers run their binding check.
+ * **Two-phase update on chat-open** (the field-bug-shaping detail):
+ *   1. SYNC: chatId is set immediately so concurrent SETTINGS_UPDATED
+ *      trigger handlers see the current chatId during their binding-gate
+ *      evaluation. backend.ts registers this handler at module-load time
+ *      (before triggers are registered on the first frontend message),
+ *      which guarantees we run first.
+ *   2. ASYNC follow-up: characterId is resolved via `spindle.chats.get`
+ *      → `spindle.characters.get` and written to binding.ts within
+ *      ~10-15ms. This phase fixes the v0.23.2-discovered bug where
+ *      tool handlers + character-bound scripts saw a NULL or STALE
+ *      characterId after a chat-open event:
+ *        - Cold-start manifestation: characterId stays null from boot
+ *          until something explicitly refreshes context, breaking
+ *          `api.db.collection({scope:'character'})` in tool dispatches.
+ *        - Chat-switch manifestation: characterId stays at the PREVIOUS
+ *          chat's character across the switch, silently writing
+ *          per-character data to the wrong character's collection.
+ *      In real usage, the ~10-15ms async window is dwarfed by LLM
+ *      latency on any tool-invocation flow (Council deliberation alone
+ *      is hundreds of ms minimum), so the race against tool dispatch
+ *      doesn't fire in practice. `tool-invocation.ts` carries a
+ *      sanity-check log that surfaces any case where the window DOES
+ *      get hit.
  *
- * Fix: backend.ts registers before trigger scripts (module-level code runs at
- * startup; trigger scripts are registered on the first frontend message). This
- * handler therefore always executes before any trigger script's SETTINGS_UPDATED
- * handler, giving the binding gate a current chatId and characterId.
+ * **Chat-close**: leave context unchanged. Scripts bound to the chat /
+ * character being closed should still see their bindings as satisfied
+ * (their teardown handlers, etc., depend on this). The next chat-open
+ * overwrites both fields atomically via the two-phase update above.
  */
 spindle.on('SETTINGS_UPDATED', (payload: unknown) => {
   const p = payload as { key?: string; value?: unknown } | null;
@@ -1086,13 +1103,7 @@ spindle.on('SETTINGS_UPDATED', (payload: unknown) => {
     const newChatId = typeof p.value === 'string' ? p.value : null;
 
     if (newChatId) {
-      // Opening a new chat: eagerly update chatId so binding checks on concurrent
-      // SETTINGS_UPDATED trigger handlers see the new chatId, not the stale one.
-      //
-      // characterId/characterName are intentionally left unchanged: the new chat's
-      // character is only known after CHAT_CHANGED's async spindle.chats.get() call.
-      // Leaving the previous character in place preserves character binding checks
-      // for scripts bound to the same character across multiple chats.
+      // Phase 1: sync chatId update for binding-gate semantics.
       setActiveContext({ chatId: newChatId });
       const ctx = getActiveContext();
       send({ type: 'active_context', characterId: ctx.characterId, characterName: ctx.characterName, chatId: ctx.chatId });
@@ -1100,10 +1111,43 @@ spindle.on('SETTINGS_UPDATED', (payload: unknown) => {
       // (e.g. character-bound scripts that couldn't fire at boot because no chat
       // was open). Now that a chat is active, their bindings may be satisfied.
       void triggerRegistry.retryPendingStartups();
+
+      // Phase 2: async character resolution. Settles binding.ts state
+      // for everyone reading via the live-getter view (api.db, api.chat,
+      // api.variables.local|character, all tool/handler closures).
+      //
+      // Fire-and-forget: callers down the synchronous chain don't need
+      // to wait for this — they already have the chatId they need. The
+      // characterId fill happens in the background and is observable
+      // by the time any LLM-mediated tool flow can dispatch.
+      void (async () => {
+        try {
+          const chat = await spindle.chats.get(newChatId, activeUserId ?? undefined);
+          if (!chat) return;
+          const char = await spindle.characters.get(chat.character_id, activeUserId ?? undefined).catch(() => null);
+          setActiveContext({
+            characterId:   chat.character_id,
+            characterName: char?.name ?? null,
+          });
+          publishActiveCharId();
+          // Re-broadcast the now-complete context to the frontend so
+          // the panel's display name updates without an explicit refresh.
+          const updated = getActiveContext();
+          send({ type: 'active_context', characterId: updated.characterId, characterName: updated.characterName, chatId: updated.chatId });
+        } catch (err) {
+          // Non-fatal — manifests as the original bug shape (null /
+          // stale characterId), which the tool-invocation.ts sanity
+          // check surfaces via warn. Logging here too so the failure
+          // is attributable to the chat-open path rather than ambient
+          // staleness.
+          spindle.log.warn(
+            `[LumiScript] SETTINGS_UPDATED: failed to resolve character for chat ${newChatId} — ` +
+            `${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      })();
     }
-    // Closing (null): leave context unchanged so scripts bound to the chat or
-    // character being closed can still fire their handlers. CHAT_CHANGED will
-    // clear context shortly after.
+    // Closing (null): leave context unchanged. See comment block above.
   }
 });
 

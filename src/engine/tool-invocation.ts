@@ -29,6 +29,7 @@ import { getTool } from './tool-store.js';
 import { emit as broadcastEmit } from './broadcast-bus.js';
 import { executionStatusStore } from './execution-status.js';
 import { generateUUID } from '../utils/uuid.js';
+import { getActiveChatId, getActiveCharacterId } from './binding.js';
 
 /**
  * Dispatch a TOOL_INVOCATION event to the tool's registered handler and
@@ -59,6 +60,43 @@ export async function dispatchToolInvocation(event: unknown): Promise<string> {
   if (!entry) {
     spindle.log.warn(`[LumiScript] TOOL_INVOCATION: no handler for tool '${bareName}'`);
     return '';
+  }
+
+  // Stale-context sanity check (v0.23.3+).
+  //
+  // Detects the post-v0.23.2 manifestation 1 + 2 bug class: chatId is
+  // populated (e.g. user is in a chat) but characterId is null. Tool
+  // handlers using `api.db.collection({scope:'character'})` will throw
+  // "requires an active character" via the live-getter view; handlers
+  // using api.variables.character will silent-no-op writes; api.chat.*
+  // works fine because it only checks chatId.
+  //
+  // The chat-open async resolver in backend.ts SETTINGS_UPDATED should
+  // populate characterId within ~10-15ms of chat-open. If we observe
+  // this stale state at tool dispatch (which lands hundreds of ms /
+  // seconds after chat-open in any LLM-mediated flow), the resolver
+  // failed — either the host RPCs threw, the chat had no character
+  // resolved, or some other path left state inconsistent.
+  //
+  // Deliberately NOT calling refreshActiveContext here — that would
+  // mask the underlying chat-open-resolver bug behind a per-dispatch
+  // refresh, eating the observability we need to investigate. Just log
+  // a warn with enough context to correlate against tester reports +
+  // chat-open-resolver warns. In normal operation post-v0.23.3 this
+  // should never fire; if it does, the dump analysis will surface it.
+  const liveChatId      = getActiveChatId();
+  const liveCharacterId = getActiveCharacterId();
+  if (liveChatId !== null && liveCharacterId === null) {
+    spindle.log.warn(
+      `[LumiScript] TOOL_INVOCATION stale-context warning: ` +
+      `tool="${bareName}" scriptId="${entry.scriptId}" ` +
+      `chatId=${liveChatId} characterId=null. ` +
+      `Tools using api.db.collection({scope:'character'}) will throw; ` +
+      `api.variables.character writes will silently no-op. ` +
+      `If this fires, the SETTINGS_UPDATED chat-open async resolver ` +
+      `failed to populate characterId — check for an earlier "failed ` +
+      `to resolve character for chat" warn in this session.`,
+    );
   }
 
   // Build the invocation context object that the user's ToolHandler receives

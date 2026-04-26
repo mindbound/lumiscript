@@ -6,11 +6,12 @@
  * silently produce empty deliberation blocks.
  */
 
-import { describe, test, expect, mock } from 'bun:test';
+import { describe, test, expect, mock, beforeEach } from 'bun:test';
 import { dispatchToolInvocation } from '../../src/engine/tool-invocation.js';
 import { addTool, type ToolEntry } from '../../src/engine/tool-store.js';
 import { on as busOn } from '../../src/engine/broadcast-bus.js';
 import { executionStatusStore } from '../../src/engine/execution-status.js';
+import { setActiveContext, resetContext } from '../../src/engine/binding.js';
 
 /**
  * Seed the tool-store with a registration whose handler the caller controls.
@@ -362,5 +363,113 @@ describe('dispatchToolInvocation — handler errors', () => {
     // Successful invocations must not touch the status (defaults to 'idle').
     expect(status.status).not.toBe('error');
     expect(toastError.mock.calls.length).toBe(beforeErrorToastCount);
+  });
+});
+
+// ─── Stale-context sanity check (v0.23.3+) ───────────────────────────────────
+//
+// Detects the post-v0.23.2 bug shape: chatId is set (user is in a chat)
+// but characterId is null. Tool handlers using
+// `api.db.collection({scope:'character'})` will throw via the live-getter
+// view. This warn is the diagnostic surface — it should never fire post
+// the v0.23.3 chat-open async resolver, and if it does we know that
+// resolver failed.
+
+describe('dispatchToolInvocation — stale-context sanity check', () => {
+  beforeEach(() => {
+    resetContext();
+  });
+
+  test('warns when chatId is set but characterId is null at dispatch time', async () => {
+    const warn = (globalThis as any).spindle.log.warn as any;
+    const beforeWarnCount = warn.mock.calls.length;
+
+    // Simulate the bug state: post-SETTINGS_UPDATED sync chatId update,
+    // pre-async character resolution. binding.ts has chatId but null
+    // characterId.
+    setActiveContext({ chatId: 'chat-X', characterId: null });
+
+    seedTool({ scriptId: 'script-A', handler: () => 'ok' });
+    await dispatchToolInvocation({ toolName: 'roll_dice', args: {} });
+
+    expect(warn.mock.calls.length).toBeGreaterThan(beforeWarnCount);
+    // Find our warn — there may be others ahead of it (other tests'
+    // residual warns leak across the shared mock); identify by the
+    // "stale-context warning" sentinel.
+    const stale = (warn.mock.calls as Array<[string]>).find(c =>
+      typeof c[0] === 'string' && c[0].includes('stale-context warning'));
+    expect(stale).toBeDefined();
+    expect(stale![0]).toContain('tool="roll_dice"');
+    expect(stale![0]).toContain('scriptId="script-A"');
+    expect(stale![0]).toContain('chatId=chat-X');
+    expect(stale![0]).toContain('characterId=null');
+  });
+
+  test('does NOT warn when characterId is populated', async () => {
+    const warn = (globalThis as any).spindle.log.warn as any;
+    const beforeWarnCount = warn.mock.calls.length;
+
+    // Healthy state: both chatId and characterId set.
+    setActiveContext({ chatId: 'chat-X', characterId: 'char-Y' });
+
+    seedTool({ scriptId: 'script-B', handler: () => 'ok' });
+    await dispatchToolInvocation({ toolName: 'roll_dice', args: {} });
+
+    // Filter for the stale-context sentinel specifically — other warns
+    // (from prior tests, etc.) shouldn't pollute this check.
+    const stale = (warn.mock.calls as Array<[string]>).slice(beforeWarnCount).find(c =>
+      typeof c[0] === 'string' && c[0].includes('stale-context warning'));
+    expect(stale).toBeUndefined();
+  });
+
+  test('does NOT warn when both chatId and characterId are null (no-chat state)', async () => {
+    const warn = (globalThis as any).spindle.log.warn as any;
+    const beforeWarnCount = warn.mock.calls.length;
+
+    // Cold-start / no-chat state. Tools that need character context
+    // throw with a clear error from api.db / api.chat / etc; the
+    // stale-context warn would be misleading because it implies the
+    // chat-open path failed (it didn't run at all).
+    setActiveContext({ chatId: null, characterId: null });
+
+    seedTool({ scriptId: 'script-C', handler: () => 'ok' });
+    await dispatchToolInvocation({ toolName: 'roll_dice', args: {} });
+
+    const stale = (warn.mock.calls as Array<[string]>).slice(beforeWarnCount).find(c =>
+      typeof c[0] === 'string' && c[0].includes('stale-context warning'));
+    expect(stale).toBeUndefined();
+  });
+
+  test('warn fires per dispatch, not once per session', async () => {
+    // The warn is intentionally per-invocation: if the chat-open
+    // resolver failed silently, multiple tool dispatches in the same
+    // chat will each surface the staleness. Useful for reporting
+    // "this fired N times before the user closed the chat" in dump
+    // analysis.
+    const warn = (globalThis as any).spindle.log.warn as any;
+    const beforeWarnCount = warn.mock.calls.length;
+
+    setActiveContext({ chatId: 'chat-X', characterId: null });
+    seedTool({ scriptId: 'script-D', handler: () => 'ok' });
+
+    await dispatchToolInvocation({ toolName: 'roll_dice', args: {} });
+    await dispatchToolInvocation({ toolName: 'roll_dice', args: {} });
+    await dispatchToolInvocation({ toolName: 'roll_dice', args: {} });
+
+    const staleCount = (warn.mock.calls as Array<[string]>).slice(beforeWarnCount).filter(c =>
+      typeof c[0] === 'string' && c[0].includes('stale-context warning')).length;
+    expect(staleCount).toBe(3);
+  });
+
+  test('warn does not abort the tool — handler still runs and returns its result', async () => {
+    // Critical: the warn is OBSERVABILITY, not enforcement. A stale
+    // context shouldn't block the tool from running — the script may
+    // have catch-and-degrade logic (Roll Dice does: catches the api.db
+    // error and returns a "couldn't append history" message).
+    setActiveContext({ chatId: 'chat-X', characterId: null });
+    seedTool({ scriptId: 'script-E', handler: () => 'returned anyway' });
+
+    const result = await dispatchToolInvocation({ toolName: 'roll_dice', args: {} });
+    expect(result).toBe('returned anyway');
   });
 });
