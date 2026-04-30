@@ -87,10 +87,10 @@ export async function checkMinimumHostVersion(): Promise<void> {
 
   const msg =
     `LumiScript v${spindle.manifest.version} requires Lumiverse ${minimum} or newer. ` +
-    `Current host is ${hostVersion}. Recent features (Council member context, ` +
-    `structured chat-context delivery for tools, swipe-edit triggers, rich ` +
-    `message patches) may be missing or broken on this version. Update ` +
-    `Lumiverse to resolve.`;
+    `Current host is ${hostVersion}. Recent features (CHAT_SWITCHED event for ` +
+    `chat-open / chat-close handling, Council member context, structured ` +
+    `chat-context delivery for tools, swipe-edit triggers, rich message patches) ` +
+    `may be missing or broken on this version. Update Lumiverse to resolve.`;
   spindle.log.warn(`[LumiScript] ${msg}`);
   spindle.toast.warning(msg, {
     title: 'LumiScript — Update Lumiverse',

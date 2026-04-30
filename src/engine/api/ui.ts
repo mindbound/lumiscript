@@ -201,7 +201,13 @@ export function buildUIAPI(deps: APIBuildDeps): Omit<LumiScriptAPI['ui'], 'dom'>
       items: ModalItem[],
       options: ShowModalOptions,
     ): ModalHandle {
-      const openRequestId = crypto.randomUUID();
+      // `options.openRequestId` is the @internal opt-in for the script-
+      // runner child runtime (Phase 9d.4.b). When omitted (typical user-
+      // code path), we generate a fresh UUID. When present, we honor it
+      // so the proxy-side sync ModalHandle's `.openRequestId` matches
+      // the parent-side stored handle for later `awaitResult` / `close`
+      // lookup. Behaviourally identical from user-script perspective.
+      const openRequestId = options.openRequestId ?? crypto.randomUUID();
 
       const result: Promise<ModalResult> = shielded(
         spindle.modal.open({
@@ -248,8 +254,15 @@ export function buildUIAPI(deps: APIBuildDeps): Omit<LumiScriptAPI['ui'], 'dom'>
       // `rootElementId` is what the frontend binds to the modal body so
       // the existing `dom_*` pipeline can manipulate content via the
       // DOMHandle returned as `.root`.
-      const modalId       = crypto.randomUUID();
-      const rootElementId = nextDOMId('mr');
+      //
+      // Phase 9d.4.d — `options._modalId` / `options._rootElementId` are
+      // @internal opt-ins for the script-runner child runtime. When the
+      // child supplies them, we honor them so the proxy-side sync handle
+      // carries ids matching parent-side state for later setTitle /
+      // dismiss / DOMHandle dispatch lookups. Behaviourally identical
+      // when omitted (typical user-code path).
+      const modalId       = options._modalId       ?? crypto.randomUUID();
+      const rootElementId = options._rootElementId ?? nextDOMId('mr');
 
       // Register in both registries BEFORE sending the open message so
       // any follow-up DOM op that the script fires synchronously after
@@ -476,8 +489,14 @@ export function buildUIAPI(deps: APIBuildDeps): Omit<LumiScriptAPI['ui'], 'dom'>
       }
 
       // ── Allocate IDs ───────────────────────────────────────────────────
-      const widgetId      = crypto.randomUUID();
-      const rootElementId = nextDOMId('fw');
+      // Phase 9d.4.e-2-a — `options._widgetId` / `options._rootElementId`
+      // are @internal opt-ins for the script-runner child runtime. When the
+      // child supplies them, we honor them so the proxy-side sync handle
+      // carries ids matching parent-side state for later moveTo / setVisible
+      // / destroy / DOMHandle root dispatch lookups. Behaviourally identical
+      // when omitted (typical user-code path).
+      const widgetId      = options._widgetId      ?? crypto.randomUUID();
+      const rootElementId = options._rootElementId ?? nextDOMId('fw');
 
       // Register in both registries BEFORE sending the create message so
       // any follow-up DOM op fired synchronously after this call resolves
@@ -606,8 +625,13 @@ export function buildUIAPI(deps: APIBuildDeps): Omit<LumiScriptAPI['ui'], 'dom'>
       }
 
       // ── Allocate IDs ─────────────────────────────────────────────────
+      // Phase 9d.4.e-3-a — `options._rootElementId` is an @internal opt-in
+      // for the script-runner child runtime. When the child supplies it,
+      // we honor it as the rootElementId so the proxy-side sync
+      // DOMHandle's id matches parent-side state for `ui._dom.*`
+      // dispatch lookups. Behaviourally identical when omitted.
       const tabId         = options.id;
-      const rootElementId = nextDOMId('dt');
+      const rootElementId = options._rootElementId ?? nextDOMId('dt');
 
       // Register both entries BEFORE sending the create message so any
       // synchronous follow-up DOM op on `.root` finds the elementId.

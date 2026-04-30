@@ -71,7 +71,7 @@ export async function dispatchToolInvocation(event: unknown): Promise<string> {
   // using api.variables.character will silent-no-op writes; api.chat.*
   // works fine because it only checks chatId.
   //
-  // The chat-open async resolver in backend.ts SETTINGS_UPDATED should
+  // The chat-open async resolver in backend.ts CHAT_SWITCHED should
   // populate characterId within ~10-15ms of chat-open. If we observe
   // this stale state at tool dispatch (which lands hundreds of ms /
   // seconds after chat-open in any LLM-mediated flow), the resolver
@@ -93,7 +93,7 @@ export async function dispatchToolInvocation(event: unknown): Promise<string> {
       `chatId=${liveChatId} characterId=null. ` +
       `Tools using api.db.collection({scope:'character'}) will throw; ` +
       `api.variables.character writes will silently no-op. ` +
-      `If this fires, the SETTINGS_UPDATED chat-open async resolver ` +
+      `If this fires, the CHAT_SWITCHED chat-open async resolver ` +
       `failed to populate characterId — check for an earlier "failed ` +
       `to resolve character for chat" warn in this session.`,
     );

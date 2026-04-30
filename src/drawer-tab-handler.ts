@@ -132,6 +132,19 @@ export function installDrawerTabHandler(
             tabId:    msg.tabId,
           });
         });
+
+        // Phase 9d.4.e-3-a "Option B" — confirm to the backend that the
+        // tab is fully mounted: handle stored in `tabs` map, root element
+        // bound into the DOM map, activation echo wired. The backend's
+        // `handleRegisterDrawerTabRequest` is awaiting this echo before
+        // resolving the open IPC's api-response, gating the script-runner
+        // child's setTitle / setShortName / setBadge / activate / destroy /
+        // root.* dispatches against the FE race window.
+        sendToBackend({
+          type: 'ls_drawer_tab_registered',
+          scriptId: msg.scriptId,
+          tabId:    msg.tabId,
+        });
         break;
       }
 

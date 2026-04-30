@@ -122,6 +122,18 @@ export function installModalHandler(
           modals.delete(modalId);
           sendToBackend({ type: 'ls_modal_dismissed', modalId });
         });
+
+        // Phase 9d.4.d "Option B" — confirm to the backend that the modal
+        // is fully mounted: `modals` Map populated, DOM element bound,
+        // dismissal echo wired. The backend's `handleShowAdvancedModalRequest`
+        // is awaiting this echo before resolving the open IPC's api-response,
+        // which gates the script-runner child's `setTitle`/`dismiss`/`root.*`
+        // dispatches against the frontend race window.
+        //
+        // Sent AFTER `modals.set` and `handle.onDismiss` registration so any
+        // backend-side dispatch that fires the moment we resolve the awaiter
+        // sees a fully-wired modal on the frontend side.
+        sendToBackend({ type: 'ls_modal_opened', modalId });
         break;
       }
 

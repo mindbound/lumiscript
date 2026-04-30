@@ -18,6 +18,13 @@ import { clearAllCommandHandlers } from '../../src/engine/api/commands.js';
 import { __reset as resetDOMRegistry } from '../../src/engine/dom-registry.js';
 import { __reset as resetMacroInterceptorRegistry } from '../../src/engine/macro-interceptor-registry.js';
 import { __reset as resetMessageContentProcessorRegistry } from '../../src/engine/message-content-processor-registry.js';
+// Phase 11.A — script-runner module-state resets so dispatcher / api-proxy
+// tests don't leak between cases. Importing these here pulls the modules
+// into the test runtime even for tests that don't exercise the script-runner
+// directly; the cost is one-time-per-process and the modules have no
+// init-time side effects (only function bodies touch spindle.*).
+import { __resetForTests as resetHostDispatcher } from '../../src/script-runner/host-dispatcher.js';
+import { __resetForTests as resetApiProxy }       from '../../src/script-runner/api-proxy.js';
 
 beforeEach(() => {
   // Install fresh spindle mock on globalThis so `declare const spindle` resolves
@@ -33,4 +40,7 @@ beforeEach(() => {
   resetDOMRegistry();
   resetMacroInterceptorRegistry();
   resetMessageContentProcessorRegistry();
+  // Script-runner subsystem — Phase 11.A
+  resetHostDispatcher();
+  resetApiProxy();
 });

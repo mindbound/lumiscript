@@ -7,11 +7,13 @@ import { ScriptStorage } from './storage/script-storage.js';
 import { SettingsStore } from './storage/settings-store.js';
 import { executionStatusStore } from './engine/execution-status.js';
 import { setActiveContext, getActiveContext } from './engine/binding.js';
-import { executeScript } from './engine/executor.js';
+// All script execution flows through `runScriptViaChild` (trigger-registry
+// + manual-run path). `executeScript` from `engine/executor.ts` is kept
+// for the `inProcessRunner` test fixture only — it's not on any production
+// path. See `engine/executor.ts`'s file-level JSDoc for status.
 import { registerLumiScriptMacros, updateLumiScriptActiveMacro } from './macros.js';
-import { TriggerRegistry } from './engine/trigger-registry.js';
+import { TriggerRegistry, runScriptViaChild } from './engine/trigger-registry.js';
 import { generateUUID } from './utils/uuid.js';
-import { readFile } from 'fs/promises';
 import { listByMode, listAll, clearEphemeral, clearByScriptId, type InjectionEntry } from './engine/injection-store.js';
 import { applyLumiScriptInjections } from './engine/interceptor-pipeline.js';
 import {
@@ -76,6 +78,18 @@ import {
 } from './engine/db-admin.js';
 import { on as busOn } from './engine/broadcast-bus.js';
 import { buildReplayMessages } from './engine/replay.js';
+import {
+  spawnScriptRunner,
+  notifyAdvancedModalOpened,
+  notifyAdvancedModalOpenFailed,
+  notifyInputBarActionRegistered,
+  notifyFloatWidgetCreated,
+  sendFloatWidgetPositionNotice,
+  notifyDrawerTabRegistered,
+  setScriptResolver,
+  unregisterScriptFromChild,
+  // shutdownScriptRunner — Phase 10 will wire this into teardown
+} from './script-runner/host-dispatcher.js';
 
 // ─── Active user + permission tracking ───────────────────────────────────────
 
@@ -127,6 +141,21 @@ function publishActiveCharId(): void {
 const getUserId = () => activeUserId ?? undefined;
 
 const scriptStorage = new ScriptStorage(spindle.userStorage, getUserId);
+
+// Phase 9e — wire the script-runner host-dispatcher's user-library
+// resolver. This lets the child runtime's `script.require()` proxy
+// fetch user-library script code via the `'script.fetchLibrary'` IPC.
+// The resolver mirrors the canonical executor's lookup order:
+// `getScript(id)` first (UUID match), then `getByName(name)` fallback.
+//
+// Wired at module-init time. Calls to `scriptResolver(...)` before
+// `scriptStorage.load()` finishes return null (storage's lazy-load path
+// — empty scripts list until populated); user code calling
+// `script.require()` that early would see a "not found" error, which
+// is the correct surface (storage genuinely has nothing yet).
+setScriptResolver((nameOrId) =>
+  scriptStorage.getScript(nameOrId) ?? scriptStorage.getByName(nameOrId) ?? null,
+);
 
 const settingsStore = new SettingsStore<LumiScriptSettings>(
   'settings.json',
@@ -508,6 +537,30 @@ spindle.onFrontendMessage(async (raw, userId) => {
     // so the toast reaches a live frontend (we know it is — this block
     // only runs on first frontend message).
     void checkMinimumHostVersion();
+
+    // ─── Spawn script-runner child ─────────────────────────────────────
+    // Spawns the supervised subprocess that user scripts execute inside.
+    // Hooked here (not in the module-load init IIFE) because
+    // `spindle.backendProcesses.spawn` requires a userId even for user-
+    // scoped extensions, and `activeUserId` is only populated on the
+    // first frontend message arrival.
+    //
+    // Failure is non-fatal — `spawnScriptRunner` rejection is logged and
+    // dropped here. Subsequent script runs that try to dispatch through
+    // an absent child will surface clean errors at dispatch time. This
+    // is rare in practice; the spawn itself is well-tested on cold start.
+    if (activeUserId) {
+      void spawnScriptRunner(activeUserId).catch((err) => {
+        spindle.log.warn(
+          `[script-runner] cold-start spawn failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+    } else {
+      spindle.log.warn(
+        '[script-runner] skipped cold-start spawn — no activeUserId on first frontend message; ' +
+        'this is unexpected and warrants investigation',
+      );
+    }
   }
 
   const msg = raw as FrontendToBackend;
@@ -819,6 +872,12 @@ spindle.onFrontendMessage(async (raw, userId) => {
           clearTabsByScript(msg.id);
           cleanupDOMScript(msg.id);
           send({ type: 'dom_cleanup_script', scriptId: msg.id });
+          // Phase 9f-1 — fully unregister the script from the script-runner
+          // child. Sends `script-unregister` IPC + clears parent-side
+          // per-script tables in host-dispatcher. Mirrors the canonical
+          // teardown that the surrounding clearByScriptId / clearXxxByScript
+          // calls perform for the rest of the registries.
+          unregisterScriptFromChild(msg.id);
         }
         break;
       }
@@ -876,6 +935,11 @@ spindle.onFrontendMessage(async (raw, userId) => {
         clearTabsByScript(msg.id);
         cleanupDOMScript(msg.id);
         send({ type: 'dom_cleanup_script', scriptId: msg.id });
+        // Phase 9f-1 — same script-runner teardown as the disable path
+        // in `update_script`. Done BEFORE `scriptStorage.deleteScript`
+        // so any in-flight runs of this script see the unregister IPC
+        // before the storage record disappears.
+        unregisterScriptFromChild(msg.id);
         await scriptStorage.deleteScript(msg.id);
         pushScripts();
         void syncTriggers();
@@ -965,6 +1029,16 @@ spindle.onFrontendMessage(async (raw, userId) => {
       // in response to a backend `ls_modal_dismiss`). The registry tracks
       // whether the backend initiated the dismissal (via markPendingDismissal)
       // and reports the correct reason to subscribed handlers.
+      // ── Advanced modal open confirmation ──────────────────────────────
+      // Phase 9d.4.d "Option B" — frontend echo confirming the modal is
+      // mounted + DOM-bound + dismissal-handler wired. Routes to the
+      // script-runner host-dispatcher's awaiter table, which resolves the
+      // pending open-IPC's api-response. See `notifyAdvancedModalOpened` JSDoc.
+      case 'ls_modal_opened': {
+        notifyAdvancedModalOpened(msg.modalId);
+        break;
+      }
+
       case 'ls_modal_dismissed': {
         const result = markModalDismissed(msg.modalId);
         if (result) {
@@ -978,6 +1052,16 @@ spindle.onFrontendMessage(async (raw, userId) => {
           }
           dropAdvancedModalEntry(msg.modalId);
         }
+        // Phase 9d.4.d "Option B" — if the modal was dismissed BEFORE its
+        // open echo arrived (e.g. `ctx.ui.showModal` threw on the frontend
+        // and the catch path immediately echoed dismissed), reject any
+        // pending open-IPC awaiter so the proxy's openAck cleanly rejects.
+        // Idempotent on missing entry: notifyAdvancedModalOpenFailed
+        // silently no-ops if the awaiter has already resolved/rejected.
+        notifyAdvancedModalOpenFailed(
+          msg.modalId,
+          'modal dismissed before open confirmation arrived',
+        );
         break;
       }
 
@@ -1000,11 +1084,47 @@ spindle.onFrontendMessage(async (raw, userId) => {
         break;
       }
 
+      // ── Input bar action register confirmation ─────────────────────────
+      // Phase 9d.4.e-1-a "Option B" — frontend echo confirming the action
+      // is mounted + click-echo wired. Routes to the script-runner host-
+      // dispatcher's awaiter table so `handleRegisterInputBarActionRequest`
+      // can resolve its open IPC's api-response. See `notifyInputBarActionRegistered` JSDoc.
+      case 'ls_input_bar_action_registered': {
+        notifyInputBarActionRegistered(msg.scriptId, msg.actionId);
+        break;
+      }
+
+      // ── Float widget create confirmation ───────────────────────────────
+      // Phase 9d.4.e-2-a "Option B" — frontend echo confirming the widget
+      // is mounted, root element DOM-bound, drag-end echo wired. Routes
+      // to the script-runner host-dispatcher's awaiter table.
+      case 'ls_float_widget_created': {
+        notifyFloatWidgetCreated(msg.widgetId);
+        break;
+      }
+
+      // ── Drawer tab register confirmation ───────────────────────────────
+      // Phase 9d.4.e-3-a "Option B" — frontend echo confirming the tab is
+      // mounted, root element DOM-bound, activation echo wired.
+      case 'ls_drawer_tab_registered': {
+        notifyDrawerTabRegistered(msg.scriptId, msg.tabId);
+        break;
+      }
+
       // ── Float widget drag end ──────────────────────────────────────────
       // Authoritative position update from the frontend after the user
       // completes a drag. Registry updates the position cache + fans out
       // to any `onDragEnd` handlers the script registered.
+      //
+      // Phase 9d.4.e-2-b — also send a position notice to the script-
+      // runner child BEFORE dispatchWidgetDragEnd, so the proxy's
+      // positionCache is up-to-date when the user's onDragEnd handler
+      // fires (handler arrives via RunHandlerRequest, queued behind the
+      // notice on the same FIFO IPC channel). FE-driven position updates
+      // therefore reach `handle.getPosition()` correctly inside the
+      // user's drag-end callback.
       case 'ls_float_widget_drag_end': {
+        sendFloatWidgetPositionNotice(msg.widgetId, msg.x, msg.y);
         dispatchWidgetDragEnd(msg.widgetId, msg.x, msg.y);
         break;
       }
@@ -1053,17 +1173,19 @@ spindle.onFrontendMessage(async (raw, userId) => {
           runId,
         });
 
-        // Sync-loop watchdog: process.exit(1) is the only escape when the
-        // worker event loop is blocked by a synchronous infinite loop.
-        // The async Promise.race timeout inside executeScript fires first for
-        // async loops and clears this watchdog through the normal return path.
-        const timeoutMs = settingsStore.get().scriptTimeoutMs;
-        const syncWatchdog = setTimeout(() => {
-          spindle.log.error(
-            `[LumiScript] Script "${script.name}" blocked the worker with a synchronous infinite loop — terminating`,
-          );
-          process.exit(1);
-        }, timeoutMs + 5_000);
+        // Sync-loop recovery: Phase 9c moved trigger fires into the
+        // script-runner child (host SIGKILL on heartbeat timeout); this
+        // manual-run path is now also routed through the child via
+        // `runScriptViaChild` (Phase 9d.3.b cutover-of-9c-gap, the same
+        // strategy `trigger-registry.ts` uses for event/startup/teardown
+        // fires). A `while(true){}` user script invoked via Run Now no
+        // longer hangs the LumiScript subprocess — the host kills the
+        // child after `heartbeatTimeoutMs` and the dispatcher reports a
+        // failed result.
+        //
+        // The async Promise.race timeout INSIDE the child still catches
+        // async infinite loops (`while(true) await …`) cleanly within
+        // `scriptTimeoutMs`. Both layers compose.
 
         // Snapshot tool + macro names AND interceptor / processor entry ids
         // owned by this script BEFORE execution so we can diff afterwards
@@ -1081,27 +1203,36 @@ spindle.onFrontendMessage(async (raw, userId) => {
         const macroInterceptorsRegisteredThisRun = new Set<string>();
         const contentProcessorsRegisteredThisRun = new Set<string>();
 
-        // No `activeContext` option — `buildScriptAPI` substitutes a
-        // live-reading view so any handlers the script registers (tools,
-        // input-bar actions, drawer tabs, modal dismiss callbacks, …)
-        // see the CURRENT context when they fire later, not the snapshot
-        // from this run-time. Static refresh of `ctx` already happened
-        // above via `refreshActiveContext`; binding.ts is the source of
-        // truth from here on out.
-        const result = await executeScript(script, {
-          grantedPermissions,
-          userId: activeUserId,
-          onConsole: (entry) => {
-            send({ type: 'console_entry', scriptId: script.id, runId, entry });
+        // Manual-run path goes through the same dispatcher as trigger
+        // fires (Phase 9c + 9d.3.b unification). `activeContext` is NOT
+        // passed in opts — `buildScriptAPI` substitutes a live-reading
+        // view backed by `binding.ts` so any handlers the script
+        // registers see the CURRENT context at fire time. Static refresh
+        // of `ctx` already happened above via `refreshActiveContext`.
+        //
+        // `void scriptStorage` — unused on this path (user-library
+        // `script.require()` IPC routing lands in Phase 9e).
+        void scriptStorage;
+        const timeoutMs = settingsStore.get().scriptTimeoutMs;
+        const result = await runScriptViaChild(
+          script,
+          {
+            data:               {},
+            timeoutMs,
+            grantedPermissions,
+            userId:             activeUserId,
           },
-          scriptStorage,
-          timeoutMs,
-          toolsRegisteredThisRun,
-          macrosRegisteredThisRun,
-          macroInterceptorsRegisteredThisRun,
-          contentProcessorsRegisteredThisRun,
-        });
-        clearTimeout(syncWatchdog);
+          {
+            onConsole: (entry) => {
+              send({ type: 'console_entry', scriptId: script.id, runId, entry });
+            },
+            onToolsChanged:                     pushTools,
+            toolsRegisteredThisRun,
+            macrosRegisteredThisRun,
+            macroInterceptorsRegisteredThisRun,
+            contentProcessorsRegisteredThisRun,
+          },
+        );
 
         // ── Auto-cleanup stale registrations ──────────────────────────────
         // Anything the script owned before this run but did NOT re-register
@@ -1146,7 +1277,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
         send({
           type: 'execution_ended',
           scriptId: script.id,
-          runId: result.runId,
+          runId,                          // local runId — runViaChild's adapter doesn't expose the dispatcher's wire runId
           success: result.success,
           duration: result.duration,
           error: result.error?.message,
@@ -1181,8 +1312,15 @@ spindle.onFrontendMessage(async (raw, userId) => {
 /**
  * Update active context on chat-open / chat-close.
  *
+ * Subscribes to `CHAT_SWITCHED` (Lumiverse host >= 0.9.5). Earlier hosts
+ * fired `SETTINGS_UPDATED { key: 'activeChatId', value }` for the same
+ * signal; the host commit at 5127cce moved chat-switch messaging onto
+ * a dedicated event with a cleaner `{ chatId: string | null }` payload.
+ * `SETTINGS_UPDATED` no longer carries chat-navigation information for
+ * us to consume.
+ *
  * **Two-phase update on chat-open** (the field-bug-shaping detail):
- *   1. SYNC: chatId is set immediately so concurrent SETTINGS_UPDATED
+ *   1. SYNC: chatId is set immediately so concurrent `CHAT_SWITCHED`
  *      trigger handlers see the current chatId during their binding-gate
  *      evaluation. backend.ts registers this handler at module-load time
  *      (before triggers are registered on the first frontend message),
@@ -1205,65 +1343,61 @@ spindle.onFrontendMessage(async (raw, userId) => {
  *      sanity-check log that surfaces any case where the window DOES
  *      get hit.
  *
- * **Chat-close**: leave context unchanged. Scripts bound to the chat /
- * character being closed should still see their bindings as satisfied
- * (their teardown handlers, etc., depend on this). The next chat-open
- * overwrites both fields atomically via the two-phase update above.
+ * **Chat-close** (`payload.chatId === null`): leave context unchanged.
+ * Scripts bound to the chat / character being closed should still see
+ * their bindings as satisfied (their teardown handlers, etc., depend on
+ * this). The next chat-open overwrites both fields atomically via the
+ * two-phase update above.
  */
-spindle.on('SETTINGS_UPDATED', (payload: unknown) => {
-  const p = payload as { key?: string; value?: unknown } | null;
+spindle.on('CHAT_SWITCHED', (payload: unknown) => {
+  const p = payload as { chatId?: unknown } | null;
   if (!p) return;
+  const newChatId = typeof p.chatId === 'string' ? p.chatId : null;
+  if (!newChatId) return;   // chat-close — leave context unchanged
 
-  if (p.key === 'activeChatId') {
-    const newChatId = typeof p.value === 'string' ? p.value : null;
+  // Phase 1: sync chatId update for binding-gate semantics.
+  setActiveContext({ chatId: newChatId });
+  const ctx = getActiveContext();
+  send({ type: 'active_context', characterId: ctx.characterId, characterName: ctx.characterName, chatId: ctx.chatId });
+  // Retry any ls:startup scripts whose bindings were previously unsatisfied
+  // (e.g. character-bound scripts that couldn't fire at boot because no chat
+  // was open). Now that a chat is active, their bindings may be satisfied.
+  void triggerRegistry.retryPendingStartups();
 
-    if (newChatId) {
-      // Phase 1: sync chatId update for binding-gate semantics.
-      setActiveContext({ chatId: newChatId });
-      const ctx = getActiveContext();
-      send({ type: 'active_context', characterId: ctx.characterId, characterName: ctx.characterName, chatId: ctx.chatId });
-      // Retry any ls:startup scripts whose bindings were previously unsatisfied
-      // (e.g. character-bound scripts that couldn't fire at boot because no chat
-      // was open). Now that a chat is active, their bindings may be satisfied.
-      void triggerRegistry.retryPendingStartups();
-
-      // Phase 2: async character resolution. Settles binding.ts state
-      // for everyone reading via the live-getter view (api.db, api.chat,
-      // api.variables.local|character, all tool/handler closures).
-      //
-      // Fire-and-forget: callers down the synchronous chain don't need
-      // to wait for this — they already have the chatId they need. The
-      // characterId fill happens in the background and is observable
-      // by the time any LLM-mediated tool flow can dispatch.
-      void (async () => {
-        try {
-          const chat = await spindle.chats.get(newChatId, activeUserId ?? undefined);
-          if (!chat) return;
-          const char = await spindle.characters.get(chat.character_id, activeUserId ?? undefined).catch(() => null);
-          setActiveContext({
-            characterId:   chat.character_id,
-            characterName: char?.name ?? null,
-          });
-          publishActiveCharId();
-          // Re-broadcast the now-complete context to the frontend so
-          // the panel's display name updates without an explicit refresh.
-          const updated = getActiveContext();
-          send({ type: 'active_context', characterId: updated.characterId, characterName: updated.characterName, chatId: updated.chatId });
-        } catch (err) {
-          // Non-fatal — manifests as the original bug shape (null /
-          // stale characterId), which the tool-invocation.ts sanity
-          // check surfaces via warn. Logging here too so the failure
-          // is attributable to the chat-open path rather than ambient
-          // staleness.
-          spindle.log.warn(
-            `[LumiScript] SETTINGS_UPDATED: failed to resolve character for chat ${newChatId} — ` +
-            `${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-      })();
+  // Phase 2: async character resolution. Settles binding.ts state
+  // for everyone reading via the live-getter view (api.db, api.chat,
+  // api.variables.local|character, all tool/handler closures).
+  //
+  // Fire-and-forget: callers down the synchronous chain don't need
+  // to wait for this — they already have the chatId they need. The
+  // characterId fill happens in the background and is observable
+  // by the time any LLM-mediated tool flow can dispatch.
+  void (async () => {
+    try {
+      const chat = await spindle.chats.get(newChatId, activeUserId ?? undefined);
+      if (!chat) return;
+      const char = await spindle.characters.get(chat.character_id, activeUserId ?? undefined).catch(() => null);
+      setActiveContext({
+        characterId:   chat.character_id,
+        characterName: char?.name ?? null,
+      });
+      publishActiveCharId();
+      // Re-broadcast the now-complete context to the frontend so
+      // the panel's display name updates without an explicit refresh.
+      const updated = getActiveContext();
+      send({ type: 'active_context', characterId: updated.characterId, characterName: updated.characterName, chatId: updated.chatId });
+    } catch (err) {
+      // Non-fatal — manifests as the original bug shape (null /
+      // stale characterId), which the tool-invocation.ts sanity
+      // check surfaces via warn. Logging here too so the failure
+      // is attributable to the chat-open path rather than ambient
+      // staleness.
+      spindle.log.warn(
+        `[LumiScript] CHAT_SWITCHED: failed to resolve character for chat ${newChatId} — ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+      );
     }
-    // Closing (null): leave context unchanged. See comment block above.
-  }
+  })();
 });
 
 spindle.on('CHARACTER_EDITED', (payload: unknown) => {
@@ -1311,75 +1445,56 @@ spindle.on('PERSONA_CHANGED', (payload: unknown) => {
 //
 // Fires once, lazily, when the frontend first calls get_settings (which means
 // the user has the panel open and will actually see the toast). Checks if the
-// installed extension is behind its remote branch on GitHub. Fails silently on
-// any error (no .git dir, no network, non-GitHub repo, API rate limit, etc.).
+// installed extension's `version` differs from the remote `version` in the
+// repo's spindle.json. Fails silently on any error (no network, non-GitHub
+// repo, missing/unparseable remote spindle.json, etc.).
+//
+// Implementation note: prior to the Lumiverse 519565 security patch (Apr 2026)
+// this function read .git/HEAD + .git/refs/heads/* + spindle.json off disk
+// via `fs/promises` to compare branch SHAs. The patch blocks fs imports in
+// extension bundles, so we now source local manifest data from `spindle.manifest`
+// (host-exposed at runtime) and fetch the remote spindle.json directly via
+// raw.githubusercontent.com. Branch comparison is dropped — semver comparison
+// is more robust and was always the user-visible signal anyway.
+// See notes/security-patch-519565-migration.md for the full migration record.
 
 let _updateCheckDone = false;
 
 async function checkForUpdates(): Promise<void> {
   try {
-    // Derive extension root from this file's URL.
-    // import.meta.url = "file:///abs/path/to/dist/backend.js"
-    // Strip filename → dist dir, strip dist dir → extension root.
-    const fileUrl = import.meta.url;
-    const distUrl = fileUrl.slice(0, fileUrl.lastIndexOf('/'));
-    const rootUrl = distUrl.slice(0, distUrl.lastIndexOf('/'));
-    // Convert file:// URL to a filesystem path (Bun uses forward slashes on all platforms)
-    const gitRoot = rootUrl.replace(/^file:\/\/\/?/, match => (match === 'file:///' ? '/' : ''));
+    const localVersion = spindle.manifest.version;
+    const githubUrl    = spindle.manifest.github;
+    if (!localVersion || !githubUrl) return;
 
-    // Read .git/HEAD to identify the current branch.
-    // Normal checkout: "ref: refs/heads/staging\n"
-    // Detached HEAD: a raw SHA — skip check.
-    const headText = (await readFile(gitRoot + '/.git/HEAD', 'utf-8')).trim();
-    const refMatch = headText.match(/^ref: refs\/heads\/(.+)$/);
-    if (!refMatch) return; // detached HEAD or unexpected format
-    const branch = refMatch[1];
-    if (!branch) return; // noUncheckedIndexedAccess guard
-
-    // Read local commit SHA from the individual ref file.
-    // Fall back to .git/packed-refs if the file has been packed by git gc.
-    let localSHA: string | null = null;
-    try {
-      localSHA = (await readFile(gitRoot + '/.git/refs/heads/' + branch, 'utf-8')).trim();
-    } catch {
-      const packed = await readFile(gitRoot + '/.git/packed-refs', 'utf-8').catch(() => '');
-      for (const line of packed.split('\n')) {
-        if (line.endsWith(' refs/heads/' + branch)) {
-          localSHA = line.split(' ')[0] ?? null;
-          break;
-        }
-      }
-    }
-    if (!localSHA) return;
-
-    // Parse owner/repo from the "github" field in spindle.json.
-    const manifest = JSON.parse(
-      await readFile(gitRoot + '/spindle.json', 'utf-8'),
-    ) as { github?: string };
-    if (!manifest.github) return;
-    const urlMatch = manifest.github.match(/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/);
-    const owner = urlMatch?.[1];
-    const repo   = urlMatch?.[2];
+    // Parse owner/repo from "https://github.com/owner/repo[.git][/]"
+    const urlMatch = githubUrl.match(/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/);
+    const owner    = urlMatch?.[1];
+    const repo     = urlMatch?.[2];
     if (!owner || !repo) return;
 
-    // Ask GitHub API for the latest commit on this branch.
+    // Fetch the remote spindle.json from the default branch (`main`).
+    // raw.githubusercontent.com is unauthenticated and CDN-cached, so there's
+    // no API rate-limiting concern for casual users. Non-`main` defaults will
+    // 404 and we'll skip silently — matching the original on-detached-HEAD
+    // behaviour.
     const res = await fetch(
-      `https://api.github.com/repos/${owner}/${repo}/commits/${encodeURIComponent(branch)}`,
+      `https://raw.githubusercontent.com/${owner}/${repo}/main/spindle.json`,
       { headers: { 'User-Agent': 'LumiScript/1.0 update-check' } },
     );
     if (!res.ok) return;
-    const data = await res.json() as { sha?: string };
-    if (!data.sha || data.sha === localSHA) return; // up to date
+    const remote = await res.json() as { version?: string };
+    const remoteVersion = remote.version;
+    if (!remoteVersion || remoteVersion === localVersion) return; // up to date
 
     spindle.log.info(
-      `[LumiScript] Update available: local=${localSHA.slice(0, 7)} remote=${data.sha.slice(0, 7)} (${branch})`,
+      `[LumiScript] Update available: local=${localVersion} remote=${remoteVersion}`,
     );
     spindle.toast.info(
-      `A newer version is available on the "${branch}" branch. Update via the Extensions panel.`,
+      `LumiScript ${remoteVersion} is available (you have ${localVersion}). Update via the Extensions panel.`,
       { title: 'LumiScript update available', duration: 12000 },
     );
   } catch {
-    // Skip silently: no .git dir (ZIP install), no network, API error, etc.
+    // Skip silently: no network, parse error, missing manifest field, etc.
   }
 }
 
@@ -1424,6 +1539,13 @@ spindle.permissions.onDenied(({ permission, operation }) => {
   })();
 
   spindle.log.info('LumiScript backend ready');
+
+  // The script-runner child is spawned LAZILY on the first frontend message
+  // arrival (where `activeUserId` is known). LumiScript is an operator-scoped
+  // extension, so `backendProcesses.spawn` requires a `userId` to scope the
+  // subprocess to a specific user — at module-load time here in the init
+  // IIFE, no user has handshaked yet. See the cold-start block in the
+  // frontend message handler (search for "Phase 2 smoke").
 })();
 
 export {};

@@ -1769,6 +1769,17 @@ export interface ShowModalOptions {
    * Default: `false`.
    */
   persistent?: boolean;
+  /**
+   * @internal — used by the script-runner child runtime to thread a
+   * child-generated openRequestId through the canonical impl so the
+   * sync-shaped `ModalHandle` returned to user code carries an id that
+   * matches the parent-side stored handle. Do not set this from user code.
+   *
+   * When omitted (the typical user-code case), the canonical impl
+   * generates an id via `crypto.randomUUID()`. Behaviour is identical
+   * either way; the field exists purely for the child-runtime IPC bridge.
+   */
+  openRequestId?: string;
 }
 
 /** Result returned when `api.ui.showModal()` resolves. */
@@ -1820,6 +1831,18 @@ export interface AdvancedModalOptions {
    * user must use the close button, or the script must call `dismiss()`.
    */
   persistent?: boolean;
+  /**
+   * @internal — used by the script-runner child runtime (Phase 9d.4.d)
+   * to thread child-generated ids through the canonical impl so the
+   * sync-shaped `AdvancedModalHandle` returned to user code carries
+   * stable ids that match parent-side state. Don't set from user code.
+   *
+   * When omitted (the typical user-code case), the canonical generates
+   * via `crypto.randomUUID()` (modalId) / `nextDOMId('mr')` (rootElementId).
+   */
+  _modalId?: string;
+  /** @internal — see `_modalId`. */
+  _rootElementId?: string;
 }
 
 /**
@@ -1987,6 +2010,18 @@ export interface FloatWidgetOptions {
    * `handle.root` content + `api.ui.dom.addStyle`. Default: `false`.
    */
   chromeless?: boolean;
+  /**
+   * @internal — used by the script-runner child runtime (Phase 9d.4.e-2-a)
+   * to thread child-generated ids through the canonical impl so the
+   * sync-shaped `FloatWidgetHandle` returned to user code carries
+   * stable ids that match parent-side state. Don't set from user code.
+   *
+   * When omitted (the typical user-code case), the canonical generates
+   * via `crypto.randomUUID()` (widgetId) / `nextDOMId('fw')` (rootElementId).
+   */
+  _widgetId?: string;
+  /** @internal — see `_widgetId`. */
+  _rootElementId?: string;
 }
 
 /**
@@ -2074,6 +2109,17 @@ export interface DrawerTabOptions {
   iconSvg?: string;
   /** URL to an icon image. Mutually exclusive with `iconSvg`. */
   iconUrl?: string;
+  /**
+   * @internal — used by the script-runner child runtime (Phase 9d.4.e-3-a)
+   * to thread the child-generated rootElementId through the canonical
+   * impl so the proxy-side `.root` DOMHandle's id matches parent state.
+   * The tabId is user-supplied (`options.id`) so no threading is needed
+   * for that.
+   *
+   * When omitted (the typical user-code case), the canonical generates
+   * via `nextDOMId('dt')`.
+   */
+  _rootElementId?: string;
 }
 
 /**
@@ -2387,6 +2433,22 @@ export interface DOMInjectOptions {
    * Essential for trigger scripts that fire repeatedly.
    */
   id?: string;
+  /**
+   * @internal — used by the script-runner child runtime (Phase 9d.4.c-1
+   * sync-return repair) to thread the child-generated elementId through
+   * the canonical impl so the sync-shaped DOMHandle returned to user code
+   * carries an id matching parent-side state. Don't set from user code.
+   *
+   * When omitted (the typical user-code case), the canonical generates
+   * via `nextDOMId('de')`. When set, the canonical uses it directly for
+   * the new element's elementId. The canonical's stable-id idempotency
+   * lookup (`resolveStableId`) still runs first when `options.id` is set
+   * and finds a matching prior element — in that case the canonical
+   * returns the existing handle (with its existing elementId) and our
+   * threaded `_elementId` is ignored. The proxy's per-script
+   * stableId→elementId cache prevents that mismatch in steady state.
+   */
+  _elementId?: string;
 }
 
 /** Options for `api.ui.dom.injectAtMessage()`. */
@@ -2402,6 +2464,11 @@ export interface DOMMessageInjectOptions {
    * injected by this script, its content is updated instead of creating a duplicate.
    */
   id?: string;
+  /**
+   * @internal — see `DOMInjectOptions._elementId`. Same threading pattern
+   * for `injectAtMessage`.
+   */
+  _elementId?: string;
 }
 
 /** Serialized subset of a DOM event, safe to transfer across the message channel. */

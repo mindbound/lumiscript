@@ -20,6 +20,7 @@ import type { BackendToFrontend } from '../../src/types/messages.js';
 import { ScriptStorage } from '../../src/storage/script-storage.js';
 import { InMemoryStorageAdapter } from '../_infra/mock-storage-adapter.js';
 import { setActiveContext } from '../../src/engine/binding.js';
+import { inProcessRunner } from '../_infra/in-process-runner.js';
 
 function makeScript(code: string, overrides?: Partial<Script>): Script {
   return {
@@ -58,7 +59,11 @@ async function setupRegistry(scriptCode: string, overrides?: Partial<Script>) {
   };
 
   const sendToFrontend = mock((_msg: BackendToFrontend) => {});
-  const registry = new TriggerRegistry(() => deps, sendToFrontend);
+  // Phase 9c: inject in-process runner so tests don't need to mock the
+  // full `spindle.backendProcesses` surface. Validates trigger-registry's
+  // orchestration logic (batch aggregation, lifecycle messages, cleanup)
+  // independently of where the script body actually runs.
+  const registry = new TriggerRegistry(() => deps, sendToFrontend, inProcessRunner);
 
   setActiveContext({ chatId: 'test-chat', characterId: 'test-char' });
 
@@ -225,7 +230,11 @@ async function setupForTeardown(
   };
 
   const sendToFrontend = mock((_msg: BackendToFrontend) => {});
-  const registry = new TriggerRegistry(() => deps, sendToFrontend);
+  // Phase 9c: inject in-process runner so tests don't need to mock the
+  // full `spindle.backendProcesses` surface. Validates trigger-registry's
+  // orchestration logic (batch aggregation, lifecycle messages, cleanup)
+  // independently of where the script body actually runs.
+  const registry = new TriggerRegistry(() => deps, sendToFrontend, inProcessRunner);
 
   setActiveContext({ chatId: 'test-chat', characterId: 'test-char' });
 

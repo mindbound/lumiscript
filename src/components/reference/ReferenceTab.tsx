@@ -74,6 +74,7 @@ export const EVENTS: EventRow[] = [
   { group: 'Generation', name: 'GENERATION_STOPPED',         payload: '{ generationId, chatId, content }' },
   { group: 'Generation', name: 'STREAM_TOKEN_RECEIVED',      payload: '{ generationId, chatId, token }' },
   { group: 'Entities',   name: 'CHAT_CHANGED',               payload: '{ chatId }' },
+  { group: 'Entities',   name: 'CHAT_SWITCHED',              payload: '{ chatId: string | null }  // null on return-to-home' },
   { group: 'Entities',   name: 'CHARACTER_EDITED',           payload: '{ id, character }' },
   { group: 'Entities',   name: 'CHARACTER_DELETED',          payload: '{ id }' },
   { group: 'Entities',   name: 'CHARACTER_DUPLICATED',       payload: '{ id, newId }' },

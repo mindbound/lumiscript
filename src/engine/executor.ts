@@ -1,10 +1,40 @@
 /**
  * ============================================================================
- * LUMISCRIPT — SCRIPT EXECUTOR
+ * LUMISCRIPT — SCRIPT EXECUTOR (post-Step-2 status)
  * ============================================================================
- * Runs user scripts in an AsyncFunction sandbox with a clean api.* object.
+ * In-process AsyncFunction sandbox + helper factories for the api.* object.
  *
- * Security model:
+ * As of Step 2 (Lumiverse 519565 child-subprocess migration), the production
+ * trigger-registry path runs scripts via `script-runner/host-dispatcher.ts:
+ * dispatchRunScript()` — which spawns the user-script body in an isolated
+ * subprocess that the host can SIGKILL on missed heartbeat. The in-process
+ * `executeScript()` here is **no longer on the production hot path**.
+ *
+ * What's still live in this file:
+ *   - `buildScriptAPI(script, options)`  — REUSED parent-side by
+ *                                          `host-dispatcher.dispatchRunScript`
+ *                                          to build the per-run api object
+ *                                          that the api-proxy IPC dispatches
+ *                                          target. Production-critical.
+ *   - `executeScript(script, options)`   — TEST-INFRA ONLY. Used by
+ *                                          `tests/_infra/in-process-runner.ts`
+ *                                          to run scripts in-process for
+ *                                          trigger-registry orchestration
+ *                                          tests (mocking a real subprocess
+ *                                          would require reimplementing most
+ *                                          of the child runtime).
+ *   - `buildScriptNamespace`              — used by `executeScript` for
+ *                                          test-infra's `script.require`.
+ *   - `buildCapturedConsole` / `buildSafeFetch` / `AsyncFunctionCtor`
+ *                                       — helpers used by `executeScript`
+ *                                          (test infra). Mirror code-shapes
+ *                                          live in `script-runner/api-proxy.ts`
+ *                                          and `script-runner/child-entry.ts`
+ *                                          for the production-critical
+ *                                          subprocess path.
+ *
+ * Security model (applies to the test-infra path; the production path
+ * inherits the same model implemented child-side in `script-runner/`):
  * - Scripts run in `new AsyncFunction` (not eval). No direct DOM access.
  * - `Bun` and `process` globals are shadowed to `undefined` — always blocked.
  * - `fetch` is shadowed: allowed only when allowDangerous is set on the script.
@@ -16,12 +46,6 @@
  *   single-user deployments, higher risk for multi-user operator mode).
  *
  * API modules live in src/engine/api/. This file is the thin orchestrator.
- *
- * Exports used by TriggerRegistry:
- *   AsyncFunctionCtor   — shared AsyncFunction constructor
- *   buildScriptAPI      — build the api.* object for a script
- *   buildScriptNamespace — build the script.* namespace (require only)
- *   buildCapturedConsole — build console capture
  *
  * Trigger scripts receive two additional top-level variables:
  *   data  — event payload merged with { __event: 'EVENT_NAME' }
@@ -67,6 +91,7 @@ import { buildTokensAPI   } from './api/tokens.js';
 import { buildDbAPI       } from './api/db.js';
 import { resolveBuiltin, isBuiltinName } from './builtin-library-registry.js';
 import { getActiveChatId, getActiveCharacterId } from './binding.js';
+import { serializeConsoleArg } from './console-format.js';
 
 // ─── Executor options ─────────────────────────────────────────────────────────
 
@@ -200,12 +225,12 @@ function buildSafeFetch(script: Script): typeof globalThis.fetch {
 export const SCRIPT_TIMEOUT_MS = 60_000;
 
 /**
- * Default hard limit for the synchronous-loop watchdog set by `backend.ts`
- * and `trigger-registry.ts` around every `executeScript` call.  If the worker
- * event loop is blocked for this long (synchronous `while(true) {}`) the
- * caller invokes `process.exit(1)` — the only reliable escape from a sync
- * loop.  Always derived as the effective async timeout + 5 s buffer so the
- * async timeout always fires first for async loops.
+ * Hard-limit reference value (script timeout + 5s grace). Mirrored
+ * production-side as `script-runner/host-dispatcher.ts:HEARTBEAT_TIMEOUT_MS_DEFAULT`
+ * — the watchdog window after which the host SIGKILLs the script-runner
+ * child if heartbeats stop arriving. Kept exported here for symmetry
+ * with `SCRIPT_TIMEOUT_MS` and for any future test-infra use; the
+ * production hot path reads its own copy from the host-dispatcher.
  */
 export const HARD_LIMIT_MS = SCRIPT_TIMEOUT_MS + 5_000;
 
@@ -244,9 +269,13 @@ export async function executeScript(
     // (e.g. `while(true) { await api.llm.generate(); }`) are caught and
     // reported as a clean execution_ended { success: false } message.
     //
-    // Synchronous loops cannot be interrupted here because they block the
-    // event loop entirely.  The process.exit(1) watchdog set by callers in
-    // backend.ts / trigger-registry.ts handles that case.
+    // This `executeScript` is test-infra-only — synchronous-loop recovery
+    // (which this race CAN'T provide, since a sync infinite loop blocks
+    // the event loop entirely) is the production trigger-registry's
+    // concern, handled by the script-runner child subprocess + host's
+    // heartbeat-based SIGKILL on missed heartbeat. Tests that exercise
+    // the in-process runner accept that a `while(true){}` would hang
+    // the test process — they don't deliberately construct that case.
     const effectiveTimeoutMs = options.timeoutMs ?? SCRIPT_TIMEOUT_MS;
     const timeoutPromise = new Promise<never>((_, reject) =>
       setTimeout(
@@ -473,32 +502,6 @@ export function buildCapturedConsole(
   };
 }
 
-/**
- * Serialize a single console.log argument to a human-readable string.
- * Handles Promises, Errors, Maps/Sets and other built-ins that JSON.stringify
- * would silently reduce to "{}" or "[]".
- */
-function serializeConsoleArg(a: unknown): string {
-  if (a === undefined)         return 'undefined';
-  if (a === null)              return 'null';
-  if (typeof a === 'function') return `[Function: ${(a as { name?: string }).name ?? '(anonymous)'}]`;
-  if (a instanceof Promise)    return '[Promise (pending)]';
-  if (a instanceof Error)      return `${a.name}: ${a.message}`;
-  if (a instanceof Map) {
-    try {
-      return `Map(${a.size}) { ${[...a.entries()].map(([k, v]) => `${JSON.stringify(k)} => ${serializeConsoleArg(v)}`).join(', ')} }`;
-    } catch { return `[Map(${a.size})]`; }
-  }
-  if (a instanceof Set) {
-    try {
-      return `Set(${a.size}) { ${[...a].map(serializeConsoleArg).join(', ')} }`;
-    } catch { return `[Set(${a.size})]`; }
-  }
-  if (typeof a === 'object') {
-    const tag = Object.prototype.toString.call(a);
-    if (tag !== '[object Object]' && tag !== '[object Array]') return tag;
-    try { return JSON.stringify(a, null, 2); }
-    catch { return String(a); }
-  }
-  return String(a);
-}
+// `serializeConsoleArg` lives in `./console-format.ts` so the script-runner
+// child can share the same formatter without dragging in this module's
+// (parent-only) dependency graph.

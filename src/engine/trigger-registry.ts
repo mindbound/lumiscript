@@ -22,8 +22,13 @@ declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
 
 import type { Script } from '../types/script.js';
 import type { BackendToFrontend } from '../types/messages.js';
-import type { ExecutorOptions } from './executor.js';
-import { executeScript, HARD_LIMIT_MS } from './executor.js';
+import { SCRIPT_TIMEOUT_MS } from './executor.js';
+import {
+  spawnScriptRunner,
+  dispatchRunScript,
+  type DispatchRunScriptOpts,
+  type DispatchRunScriptRequest,
+} from '../script-runner/host-dispatcher.js';
 import { isAnyBindingSatisfied } from './binding.js';
 import { executionStatusStore } from './execution-status.js';
 import { generateUUID } from '../utils/uuid.js';
@@ -56,6 +61,76 @@ export interface TriggerDeps {
    */
   scriptTimeoutMs?: number;
 }
+
+// ─── Script-runner strategy (Phase 9c) ────────────────────────────────────────
+
+/**
+ * Phase 9c — pluggable script-execution strategy. Production injects
+ * `runScriptViaChild` (dispatch through `spindle.backendProcesses` to the
+ * supervised child subprocess); tests inject an in-process runner that
+ * calls `executeScript` directly so they don't have to mock the entire
+ * `spindle.backendProcesses` surface to validate trigger-registry's
+ * batch-aggregation / lifecycle / cleanup orchestration.
+ *
+ * The strategy is the only place that knows about child vs. in-process —
+ * everything around it (subscriptions, batch state, frontend messaging,
+ * stale-handle diff cleanup) is identical regardless of where the script
+ * actually runs.
+ */
+export type ScriptRunner = (
+  script:  Script,
+  request: Omit<DispatchRunScriptRequest, 'userId'> & { userId: string | null },
+  opts:    DispatchRunScriptOpts,
+) => Promise<{ success: boolean; duration: number; error?: { message: string } }>;
+
+/**
+ * Default `ScriptRunner` — dispatches through the script-runner child.
+ *
+ * Lifecycle:
+ *   - `userId === null`: frontend handshake hasn't populated `activeUserId`
+ *     yet. The host requires `userId` for spawning operator-scoped
+ *     subprocesses, so we surface a clean failure rather than spawning
+ *     blind. In practice this only fires if a Lumiverse event arrives
+ *     between trigger registration and the first frontend message —
+ *     a very narrow window where the user can't realistically be
+ *     interacting yet.
+ *   - `spawnScriptRunner` is idempotent (returns the existing handle if
+ *     the child is already running), so calling it on every dispatch is
+ *     cheap. First call per session pays the spawn latency (~100ms);
+ *     subsequent calls are O(1).
+ *   - Any error (spawn failure, channel write fail, unhandled rejection)
+ *     becomes a clean `{success:false}` shaped result; the trigger fire
+ *     path never throws to its `spindle.on` subscriber.
+ */
+export const runScriptViaChild: ScriptRunner = async (script, request, opts) => {
+  const { userId } = request;
+  if (userId === null) {
+    return {
+      success:  false,
+      duration: 0,
+      error:    { message: 'script-runner: userId not yet known (frontend handshake pending) — script run deferred' },
+    };
+  }
+  try {
+    await spawnScriptRunner(userId);
+    const r = await dispatchRunScript(
+      script,
+      { ...request, userId },
+      opts,
+    );
+    return {
+      success:  r.ok,
+      duration: r.durationMs,
+      ...(r.error ? { error: { message: r.error.message } } : {}),
+    };
+  } catch (err) {
+    return {
+      success:  false,
+      duration: 0,
+      error:    { message: err instanceof Error ? err.message : String(err) },
+    };
+  }
+};
 
 // ─── TriggerRegistry class ────────────────────────────────────────────────────
 
@@ -106,9 +181,10 @@ export class TriggerRegistry {
   /**
    * Per-script count of currently-running concurrent invocations.
    * Used to suppress premature execution_ended messages: when multiple events
-   * fire for the same script simultaneously (e.g., SETTINGS_UPDATED fires more
-   * than once on chat open), a fast early-return from a guard check must not
-   * mark the script as "done" while a slower invocation is still running.
+   * fire for the same script in the same tick (e.g., a CHAT_SWITCHED arrives
+   * alongside a SETTINGS_UPDATED for an unrelated key), a fast early-return
+   * from a guard check must not mark the script as "done" while a slower
+   * invocation is still running.
    */
   private runningCounts = new Map<string, number>();
 
@@ -136,6 +212,14 @@ export class TriggerRegistry {
   constructor(
     private readonly getDeps: () => TriggerDeps,
     private readonly sendToFrontend: (msg: BackendToFrontend) => void,
+    /**
+     * Phase 9c — script-execution strategy. Defaults to the production
+     * dispatch-through-child runner; tests inject an in-process runner
+     * (see `tests/_infra/in-process-runner.ts`) so they can validate
+     * trigger-registry's batch / cleanup / messaging logic without
+     * having to mock the full `spindle.backendProcesses` surface.
+     */
+    private readonly runScript: ScriptRunner = runScriptViaChild,
   ) {}
 
   /**
@@ -235,33 +319,36 @@ export class TriggerRegistry {
         const macroInterceptorsRegisteredThisRun = new Set<string>();
         const contentProcessorsRegisteredThisRun = new Set<string>();
 
-        const opts: ExecutorOptions = {
-          grantedPermissions,
-          userId,
-          scriptStorage,
-              eventData,
-          onConsole: (entry) =>
-            this.sendToFrontend({ type: 'console_entry', scriptId: currentScript.id, runId, entry }),
-          onToolsChanged,
-          timeoutMs: scriptTimeoutMs,
-          toolsRegisteredThisRun,
-          macrosRegisteredThisRun,
-          macroInterceptorsRegisteredThisRun,
-          contentProcessorsRegisteredThisRun,
-        };
-
-        // Sync-loop watchdog: process.exit(1) is the only escape when the
-        // worker event loop is blocked by a synchronous infinite loop.
-        const syncWatchdogMs = (scriptTimeoutMs ?? HARD_LIMIT_MS) + 5_000;
-        const syncWatchdog = setTimeout(() => {
-          spindle.log.error(
-            `[LumiScript] Trigger script "${currentScript.name}" blocked the worker with a synchronous infinite loop — terminating`,
-          );
-          process.exit(1);
-        }, syncWatchdogMs);
-
-        const result = await executeScript(currentScript, opts);
-        clearTimeout(syncWatchdog);
+        // Phase 9c: dispatch through `spindle.backendProcesses` child instead
+        // of in-process `executeScript`. Sync-loop recovery now works — the
+        // host SIGKILLs a hung child via heartbeat watchdog without taking
+        // down LumiScript itself. Async timeout continues to live inside
+        // the child's `Promise.race` (same algorithmic behaviour, just
+        // executed in the supervised subprocess).
+        //
+        // `scriptStorage` is intentionally NOT threaded into opts —
+        // user-library `script.require()` IPC routing is Phase 9d; until
+        // then non-`ls:*` requires throw with a clear message.
+        // `scriptStorage` reference is unused on this path now.
+        void scriptStorage;
+        const result = await this.runScript(
+          currentScript,
+          {
+            data:               eventData,
+            timeoutMs:          scriptTimeoutMs ?? SCRIPT_TIMEOUT_MS,
+            grantedPermissions,
+            userId,
+          },
+          {
+            onConsole: (entry) =>
+              this.sendToFrontend({ type: 'console_entry', scriptId: currentScript.id, runId, entry }),
+            onToolsChanged,
+            toolsRegisteredThisRun,
+            macrosRegisteredThisRun,
+            macroInterceptorsRegisteredThisRun,
+            contentProcessorsRegisteredThisRun,
+          },
+        );
 
         // ── Auto-cleanup stale registrations ──────────────────────────────
         // Tools + macros: host-side unregister + audit log.
@@ -290,7 +377,10 @@ export class TriggerRegistry {
         if (!result.success && !this.batchFirstError.has(currentScript.id)) {
           this.batchFirstError.set(currentScript.id, {
             message: result.error?.message ?? 'Unknown error',
-            runId: result.runId,
+            // Use the trigger-registry-side `runId` (used for execution_started /
+            // console_entry messages) — the dispatcher's wire-side runId is an
+            // internal IPC correlation key and isn't exposed to the frontend.
+            runId,
           });
         }
 
@@ -323,7 +413,7 @@ export class TriggerRegistry {
             // Report the failing invocation's runId when the batch failed so
             // the console entry that gets appended ties back to the run that
             // actually produced the error. Otherwise use the closing run.
-            runId: batchError?.runId ?? result.runId,
+            runId: batchError?.runId ?? runId,
             success: batchSuccess,
             duration: batchDuration,
             error: batchError?.message,
@@ -469,31 +559,28 @@ export class TriggerRegistry {
     const macroInterceptorsRegisteredThisRun = new Set<string>();
     const contentProcessorsRegisteredThisRun = new Set<string>();
 
-    const opts: ExecutorOptions = {
-      grantedPermissions,
-      userId,
-      scriptStorage,
-      eventData: { __event: LS_STARTUP },
-      onConsole: (entry) =>
-        this.sendToFrontend({ type: 'console_entry', scriptId: script.id, runId, entry }),
-      onToolsChanged,
-      timeoutMs: scriptTimeoutMs,
-      toolsRegisteredThisRun,
-      macrosRegisteredThisRun,
-      macroInterceptorsRegisteredThisRun,
-      contentProcessorsRegisteredThisRun,
-    };
-
-    const syncWatchdogMs = (scriptTimeoutMs ?? HARD_LIMIT_MS) + 5_000;
-    const syncWatchdog = setTimeout(() => {
-      spindle.log.error(
-        `[LumiScript] Startup script "${script.name}" blocked the worker — terminating`,
-      );
-      process.exit(1);
-    }, syncWatchdogMs);
-
-    const result = await executeScript(script, opts);
-    clearTimeout(syncWatchdog);
+    // Phase 9c: dispatch through the script-runner child. `scriptStorage`
+    // is unused on this path until 9d wires user-library `script.require()`
+    // through IPC.
+    void scriptStorage;
+    const result = await this.runScript(
+      script,
+      {
+        data:               { __event: LS_STARTUP },
+        timeoutMs:          scriptTimeoutMs ?? SCRIPT_TIMEOUT_MS,
+        grantedPermissions,
+        userId,
+      },
+      {
+        onConsole: (entry) =>
+          this.sendToFrontend({ type: 'console_entry', scriptId: script.id, runId, entry }),
+        onToolsChanged,
+        toolsRegisteredThisRun,
+        macrosRegisteredThisRun,
+        macroInterceptorsRegisteredThisRun,
+        contentProcessorsRegisteredThisRun,
+      },
+    );
 
     const staleTools = diffAndCleanStaleTools(script.id, preRunToolNames, toolsRegisteredThisRun);
     for (const name of staleTools) {
@@ -521,7 +608,7 @@ export class TriggerRegistry {
     this.sendToFrontend({
       type: 'execution_ended',
       scriptId: script.id,
-      runId: result.runId,
+      runId,                          // local runId — see comment in event-handler path
       success: result.success,
       duration: result.duration,
       error: result.error?.message,
@@ -580,25 +667,16 @@ export class TriggerRegistry {
       runId,
     });
 
-    const opts: ExecutorOptions = {
-      grantedPermissions,
-      userId,
-      scriptStorage,
-      eventData: { __event: LS_TEARDOWN, reason, scriptId: script.id, scriptName: script.name },
-      onConsole: (entry) =>
-        this.sendToFrontend({ type: 'console_entry', scriptId: script.id, runId, entry }),
-      onToolsChanged,
-      timeoutMs: scriptTimeoutMs,
-      // Intentionally no *RegisteredThisRun trackers — stale-diff cleanup
-      // after a teardown run makes no sense; the whole script is about
-      // to be unregistered anyway. (Applies to tools, macros, macro
-      // interceptors, and content processors equally.)
-    };
+    // Phase 9c: dispatch through the script-runner child. `scriptStorage`
+    // unused here until 9d wires user-library `script.require()` IPC.
+    void scriptStorage;
 
-    // Race the executor against the hard timeout. If the handler exceeds
-    // the budget, we abandon waiting and log a warning — the handler
-    // itself keeps running in the background until the script sandbox
-    // is torn down by the subsequent cleanup path.
+    // Race the dispatch against the hard teardown budget. If the handler
+    // exceeds the budget, we abandon waiting and log a warning — the
+    // dispatch promise keeps resolving in the background, but cleanup
+    // proceeds immediately. The child's own async-timeout race fires
+    // separately at `scriptTimeoutMs` and will emit a normal failure
+    // result if the handler hangs on a stalled await.
     let timedOut = false;
     const timeoutPromise = new Promise<null>((resolve) => {
       setTimeout(() => {
@@ -607,7 +685,24 @@ export class TriggerRegistry {
       }, LS_TEARDOWN_TIMEOUT_MS);
     });
 
-    const execPromise = executeScript(script, opts);
+    const execPromise = this.runScript(
+      script,
+      {
+        data:               { __event: LS_TEARDOWN, reason, scriptId: script.id, scriptName: script.name },
+        timeoutMs:          scriptTimeoutMs ?? SCRIPT_TIMEOUT_MS,
+        grantedPermissions,
+        userId,
+      },
+      {
+        onConsole: (entry) =>
+          this.sendToFrontend({ type: 'console_entry', scriptId: script.id, runId, entry }),
+        onToolsChanged,
+        // Intentionally no *RegisteredThisRun trackers — stale-diff cleanup
+        // after a teardown run makes no sense; the whole script is about
+        // to be unregistered anyway. (Applies to tools, macros, macro
+        // interceptors, and content processors equally.)
+      },
+    );
     const result = await Promise.race([execPromise, timeoutPromise]);
 
     if (timedOut || result === null) {
@@ -648,7 +743,7 @@ export class TriggerRegistry {
     this.sendToFrontend({
       type: 'execution_ended',
       scriptId: script.id,
-      runId: result.runId,
+      runId,                          // local runId — see comment in event-handler path
       success: result.success,
       duration: result.duration,
       error: result.error?.message,

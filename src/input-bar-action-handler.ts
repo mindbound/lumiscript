@@ -110,6 +110,19 @@ export function installInputBarActionHandler(
             actionId: msg.actionId,
           });
         });
+
+        // Phase 9d.4.e-1-a "Option B" — confirm to the backend that the
+        // action is fully mounted: handle stored in `actions` map, click
+        // echo wired. The backend's `handleRegisterInputBarActionRequest`
+        // is awaiting this echo before resolving the open IPC's
+        // api-response, gating the script-runner child's setLabel /
+        // setSubtitle / setEnabled / destroy dispatches against the FE
+        // race window (same kind that bit `showAdvancedModal` pre-9d.4.d).
+        sendToBackend({
+          type: 'ls_input_bar_action_registered',
+          scriptId: msg.scriptId,
+          actionId: msg.actionId,
+        });
         break;
       }
 

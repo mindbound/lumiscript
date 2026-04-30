@@ -7,6 +7,28 @@
  */
 
 import { mock } from 'bun:test';
+import type {
+  BackendProcessHandle,
+  BackendProcessInfoDTO,
+  BackendProcessLifecycleEventDTO,
+  BackendProcessSpawnOptionsDTO,
+} from 'lumiverse-spindle-types';
+
+/**
+ * Permissive shape for the mock's `backendProcesses` slot. Accepts both
+ * the default no-op stub form (Mock-typed function refs) and the real-
+ * routing form installed by `installScriptRunnerMockIpc()` (plain
+ * function refs that close over the IPC pair's state). The loose typing
+ * lets tests swap implementations without TS narrowing pain.
+ */
+export interface MockBackendProcesses {
+  spawn:       (opts: BackendProcessSpawnOptionsDTO)              => Promise<BackendProcessHandle>;
+  list:        ()                                                 => Promise<BackendProcessInfoDTO[]>;
+  get:         (processId: string)                                => Promise<BackendProcessInfoDTO | null>;
+  stop:        (processId: string)                                => Promise<void>;
+  onLifecycle: (handler: (event: BackendProcessLifecycleEventDTO) => void) => () => void;
+  onMessage:   (handler: (event: { processId: string; payload: unknown; userId: string }) => void) => () => void;
+}
 
 /**
  * Create a fresh SpindleAPI-shaped mock. Call this in beforeEach to get
@@ -304,6 +326,30 @@ export function createMockSpindle() {
       author: 'mindbound',
       permissions: [],
     },
+
+    // ─── Backend Processes ─────────────────────────────────────────────
+    // Default stub: spawn rejects with a clear error so any accidental
+    // use during an unconfigured test surfaces immediately. Tests that
+    // exercise the script-runner subsystem call
+    // `installScriptRunnerMockIpc(spindle)` from
+    // `tests/_infra/script-runner-mock-ipc.ts` to swap these in for real-
+    // routing implementations connected to a child-side mock controller.
+    //
+    // Field is explicitly typed to `MockBackendProcesses` so the test-side
+    // installer can replace it with a plain-function shape without
+    // TS-narrowing into the default mock's structural shape.
+    backendProcesses: {
+      spawn: () => Promise.reject(new Error(
+        'spindle.backendProcesses.spawn called on the default mock — ' +
+        'tests that exercise the script-runner subsystem should call ' +
+        'installScriptRunnerMockIpc(spindle) before triggering a spawn.',
+      )),
+      list:        () => Promise.resolve([]),
+      get:         () => Promise.resolve(null),
+      stop:        () => Promise.resolve(),
+      onLifecycle: () => () => {},
+      onMessage:   () => () => {},
+    } satisfies MockBackendProcesses as MockBackendProcesses,
   };
 }
 

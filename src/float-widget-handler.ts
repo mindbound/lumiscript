@@ -129,6 +129,18 @@ export function installFloatWidgetHandler(
             y: pos.y,
           });
         });
+
+        // Phase 9d.4.e-2-a "Option B" — confirm to the backend that the
+        // widget is fully mounted: handle stored in `widgets` map, root
+        // element bound into the DOM map, drag-end echo wired. The backend's
+        // `handleCreateFloatWidgetRequest` is awaiting this echo before
+        // resolving the open IPC's api-response, gating the script-runner
+        // child's moveTo / setVisible / destroy / root.* dispatches against
+        // the FE race window.
+        sendToBackend({
+          type: 'ls_float_widget_created',
+          widgetId,
+        });
         break;
       }
 

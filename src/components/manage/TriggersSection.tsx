@@ -40,7 +40,8 @@ export const TRIGGER_EVENT_GROUPS: EventGroup[] = [
   {
     label: 'Entities',
     events: [
-      { name: 'CHAT_CHANGED',         description: 'A chat was updated (rename, metadata, or message reattribution). Does NOT fire on navigation — use SETTINGS_UPDATED (key=activeChatId) for open/close.' },
+      { name: 'CHAT_CHANGED',         description: 'A chat was updated (rename, metadata, or message reattribution). Does NOT fire on navigation — use CHAT_SWITCHED for open/close.' },
+      { name: 'CHAT_SWITCHED',        description: 'The user opened a chat or returned to the home screen. data.chatId is the new chatId, or null on return-to-home.' },
       { name: 'CHARACTER_EDITED',     description: 'A character card was saved' },
       { name: 'CHARACTER_DELETED',    description: 'A character was deleted' },
       { name: 'CHARACTER_DUPLICATED', description: 'A character was duplicated' },
@@ -50,7 +51,7 @@ export const TRIGGER_EVENT_GROUPS: EventGroup[] = [
   {
     label: 'Settings',
     events: [
-      { name: 'SETTINGS_UPDATED',          description: 'A setting was updated. Chat navigation: data.key=="activeChatId", data.value=chatId (opened) or null (closed).' },
+      { name: 'SETTINGS_UPDATED',          description: 'A setting was updated. data.key + data.value identify the change. (Chat navigation moved to its own CHAT_SWITCHED event in host 0.9.5+.)' },
       { name: 'PRESET_CHANGED',            description: 'Active prompt preset changed' },
       { name: 'CONNECTION_PROFILE_LOADED', description: 'A connection profile was activated' },
       { name: 'WORLD_INFO_ACTIVATED',      description: 'World Info entries were activated' },

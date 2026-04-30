@@ -164,7 +164,10 @@ export function createDOMHandle(elementId: string, deps: APIBuildDeps): DOMHandl
       // Works even when the parent is orphaned (drawer tab not yet clicked,
       // modal/widget body pre-mount) — the element-map holds the ref
       // regardless of live-tree membership.
-      const childId = nextDOMId('de');
+      //
+      // Phase 9d.4.c-1 sync-return repair — same `_elementId` threading
+      // as `inject` above. Honor proxy-supplied id when present.
+      const childId = options._elementId ?? nextDOMId('de');
       registerElement(childId, scriptId, stableId, {
         kind: 'selector',
         target,
@@ -223,7 +226,12 @@ export function buildDOMAPI(deps: APIBuildDeps): LumiScriptAPI['ui']['dom'] {
       }
 
       // ── New injection ────────────────────────────────────────────────
-      const elementId = nextId('de');
+      // Phase 9d.4.c-1 sync-return repair — `options._elementId` is an
+      // @internal opt-in for the script-runner child runtime. When the
+      // child supplies it, we honor it as the elementId so the proxy-
+      // side sync-shaped DOMHandle carries an id matching parent state.
+      // Behaviourally identical when omitted (typical user-code path).
+      const elementId = options._elementId ?? nextId('de');
       registerElement(elementId, scriptId, stableId, {
         kind: 'selector',
         target,
@@ -265,7 +273,9 @@ export function buildDOMAPI(deps: APIBuildDeps): LumiScriptAPI['ui']['dom'] {
       }
 
       // ── New injection ────────────────────────────────────────────────
-      const elementId = nextId('de');
+      // Phase 9d.4.c-1 sync-return repair — same `_elementId` threading
+      // as `inject` above.
+      const elementId = options._elementId ?? nextId('de');
       registerElement(elementId, scriptId, stableId, {
         kind: 'message',
         messageId,

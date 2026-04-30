@@ -152,6 +152,29 @@ export type FrontendToBackend =
   // ─── Advanced modal lifecycle (frontend → backend) ─────────────────
   | {
       /**
+       * Fired by the frontend AFTER an advanced modal has been mounted and
+       * its rootElementId is bound into the shared DOM element map. Lets
+       * the backend (specifically the script-runner host-dispatcher's
+       * `handleShowAdvancedModalRequest`) wait for genuine open-confirmation
+       * before resolving the open IPC's api-response — closing the race
+       * where a script-runner child fires `setTitle`/`dismiss`/`root.update`
+       * IPCs that the backend forwards to the frontend before the frontend's
+       * `modals` Map and DOM-handle binding are populated.
+       *
+       * Phase 9d.4.d "Option B" architecture. Same shape applies to
+       * floatWidget + drawerTab in Phase 9d.4.e (`ls_float_widget_created`,
+       * `ls_drawer_tab_registered` echoes).
+       *
+       * On open failure — `ctx.ui.showModal` throwing on the frontend — the
+       * frontend sends `ls_modal_dismissed` directly without an `_opened`
+       * echo. The backend's awaiter table is reaped via the dismiss path
+       * (rejecting the awaiter) so the proxy's open-ack rejects cleanly.
+       */
+      type: 'ls_modal_opened';
+      modalId: string;
+    }
+  | {
+      /**
        * Fired by the frontend when an advanced modal has been dismissed —
        * either by user action (close button, backdrop click, Escape) or in
        * response to a backend-initiated `ls_modal_dismiss` message.
@@ -185,6 +208,28 @@ export type FrontendToBackend =
       scriptId: string;
       actionId: string;
     }
+  | {
+      /**
+       * Fired by the frontend AFTER a registered input-bar action has been
+       * mounted: `ctx.ui.registerInputBarAction` succeeded, the handle is
+       * stored in the per-frontend `actions` Map, and the click-echo wiring
+       * is in place.
+       *
+       * Same role as `ls_modal_opened`: lets the script-runner's host-
+       * dispatcher gate the open IPC's api-response on real frontend
+       * confirmation, closing the race where a script-runner child fires
+       * `setLabel`/`setEnabled`/`destroy` before the frontend has finished
+       * mounting the action. Phase 9d.4.e-1-a "Option B" architecture.
+       *
+       * Open-failure path: `ctx.ui.registerInputBarAction` throwing on the
+       * frontend logs a console.warn but does NOT echo back. The backend's
+       * awaiter timeout (matching the modal-open timeout) catches that and
+       * rejects the proxy's openAck.
+       */
+      type: 'ls_input_bar_action_registered';
+      scriptId: string;
+      actionId: string;
+    }
   // ─── Float widget drag end (frontend → backend) ────────────────────
   | {
       /**
@@ -197,6 +242,23 @@ export type FrontendToBackend =
       x: number;
       y: number;
     }
+  | {
+      /**
+       * Fired by the frontend AFTER a created float widget has been
+       * mounted: `ctx.ui.createFloatWidget` succeeded, the handle's
+       * rootElement was bound into the shared DOM map, and the drag-end
+       * echo wiring is in place.
+       *
+       * Same role as `ls_modal_opened` and `ls_input_bar_action_registered`:
+       * lets the script-runner host-dispatcher gate the create IPC's
+       * api-response on real frontend confirmation, closing the race where
+       * a script-runner child fires `moveTo`/`setVisible`/`destroy` (or
+       * `root.update`) before the FE has finished mounting the widget.
+       * Phase 9d.4.e-2-a "Option B" architecture.
+       */
+      type: 'ls_float_widget_created';
+      widgetId: string;
+    }
   // ─── Drawer tab activation (frontend → backend) ────────────────────
   | {
       /**
@@ -206,6 +268,25 @@ export type FrontendToBackend =
        * registered via `handle.onActivate(fn)`.
        */
       type: 'ls_drawer_tab_activated';
+      scriptId: string;
+      tabId: string;
+    }
+  | {
+      /**
+       * Fired by the frontend AFTER a registered drawer tab has been
+       * mounted: `ctx.ui.registerDrawerTab` succeeded, the tab body
+       * rootElement was bound into the shared DOM map, and the activate
+       * echo wiring is in place.
+       *
+       * Same role as the other `ls_*_registered`/`ls_*_created`/
+       * `ls_modal_opened` echoes: lets the script-runner host-dispatcher
+       * gate the open IPC's api-response on real frontend confirmation,
+       * closing the race where a script-runner child fires
+       * `setTitle`/`setBadge`/`activate`/`destroy` (or `root.update`)
+       * before the FE has finished mounting the tab. Phase 9d.4.e-3-a
+       * "Option B" architecture.
+       */
+      type: 'ls_drawer_tab_registered';
       scriptId: string;
       tabId: string;
     }
