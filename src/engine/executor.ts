@@ -78,6 +78,7 @@ import { buildUIAPI         } from './api/ui.js';
 import { buildCharactersAPI } from './api/characters.js';
 import { buildChatsAPI      } from './api/chats-session.js';
 import { buildWorldInfoAPI  } from './api/world-info.js';
+import { buildDatabanksAPI } from './api/databanks.js';
 import { buildPersonasAPI  } from './api/personas.js';
 import { buildCouncilAPI   } from './api/council.js';
 import { buildToolsAPI     } from './api/tools.js';
@@ -377,6 +378,7 @@ export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiSc
     characters: buildCharactersAPI(deps),
     chats:      buildChatsAPI(deps),
     worldInfo:  buildWorldInfoAPI(deps),
+    databanks:  buildDatabanksAPI(deps),
     personas:   buildPersonasAPI(deps),
     council:    buildCouncilAPI(deps),
     tools:      buildToolsAPI(deps, () => api),

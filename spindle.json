@@ -1,5 +1,5 @@
 {
-  "version": "0.25.1",
+  "version": "0.25.2",
   "name": "LumiScript",
   "identifier": "lumiscript",
   "author": "mindbound",
@@ -17,6 +17,7 @@
     "ui_panels",
     "ephemeral_storage",
     "world_books",
+    "databanks",
     "personas",
     "context_handler",
     "tools",

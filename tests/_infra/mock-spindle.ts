@@ -213,6 +213,24 @@ export function createMockSpindle() {
       getWorldBook: mock(() => Promise.resolve(null)),
     },
 
+    // ─── Databanks ─────────────────────────────────────────────────────
+    databanks: {
+      list:   mock(() => Promise.resolve({ data: [], total: 0 })),
+      get:    mock(() => Promise.resolve(null)),
+      create: mock(() => Promise.resolve({ id: 'mock-databank-id' })),
+      update: mock(() => Promise.resolve({ id: 'mock-databank-id' })),
+      delete: mock(() => Promise.resolve(true)),
+      documents: {
+        list:        mock(() => Promise.resolve({ data: [], total: 0 })),
+        get:         mock(() => Promise.resolve(null)),
+        create:      mock(() => Promise.resolve({ id: 'mock-document-id' })),
+        update:      mock(() => Promise.resolve({ id: 'mock-document-id' })),
+        delete:      mock(() => Promise.resolve(true)),
+        getContent:  mock(() => Promise.resolve(null)),
+        reprocess:   mock(() => Promise.resolve({ success: true, status: 'processing' })),
+      },
+    },
+
     // ─── Variables ─────────────────────────────────────────────────────
     variables: {
       local: {

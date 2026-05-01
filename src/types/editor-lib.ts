@@ -1573,6 +1573,99 @@ interface PersonasAPI {
   getWorldBook(personaId: string): Promise<WorldInfo | null>;
 }
 
+// ─── Databanks API ────────────────────────────────────────────────────────────
+
+/** Activation scope for a databank. */
+type DatabankScope = 'global' | 'character' | 'chat';
+
+/** Lifecycle status of an uploaded document. */
+type DatabankDocumentStatus = 'pending' | 'processing' | 'ready' | 'error';
+
+interface DatabankInfo {
+  id: string; name: string; description: string;
+  scope: DatabankScope; scopeId: string | null;
+  enabled: boolean; metadata: Record<string, unknown>;
+  /** May be omitted on bulk list responses. */
+  documentCount?: number;
+  createdAt: number; updatedAt: number;
+}
+
+interface DatabankDocumentInfo {
+  id: string; databankId: string;
+  name: string; slug: string;
+  mimeType: string; fileSize: number; contentHash: string;
+  totalChunks: number; status: DatabankDocumentStatus;
+  errorMessage: string | null; metadata: Record<string, unknown>;
+  createdAt: number; updatedAt: number;
+}
+
+interface DatabankCreateInput {
+  name: string; description?: string;
+  scope: DatabankScope;
+  /** Required for 'character' and 'chat' scopes; omit for 'global'. */
+  scopeId?: string | null;
+}
+
+/** Scope cannot be changed after creation. */
+interface DatabankUpdateInput {
+  name?: string; description?: string; enabled?: boolean;
+}
+
+interface DatabankDocumentCreateInput {
+  /**
+   * Document content. \`string\` values are UTF-8 encoded internally; pass a
+   * \`Uint8Array\` directly when the source is already binary.
+   *
+   * Supported extensions: .txt, .md, .markdown, .csv, .tsv, .json, .xml,
+   * .html, .htm, .yaml, .yml, .log, .rst, .rtf. Max size: 10 MB.
+   */
+  data: string | Uint8Array;
+  /** Original filename, including extension. */
+  filename: string;
+  /** Optional MIME type recorded on the document. */
+  mimeType?: string;
+  /** Display name override. Defaults to \`filename\` minus the extension. */
+  name?: string;
+}
+
+interface DatabankDocumentUpdateInput {
+  /** New display name (the URL-safe slug is regenerated automatically). */
+  name: string;
+}
+
+interface DatabankWaitUntilReadyOptions {
+  /** Max wait, in ms. Default: 60_000. Throws on timeout. */
+  timeoutMs?: number;
+  /** Poll interval, in ms. Default: 500. */
+  pollIntervalMs?: number;
+}
+
+interface DatabanksAPI {
+  list(options?: { limit?: number; offset?: number; scope?: DatabankScope; scopeId?: string | null }): Promise<{ data: DatabankInfo[]; total: number }>;
+  get(databankId: string): Promise<DatabankInfo | null>;
+  /** Find a databank by display name within an optional scope. Returns the first match or null. */
+  findByName(name: string, scope?: DatabankScope): Promise<DatabankInfo | null>;
+  create(input: DatabankCreateInput): Promise<DatabankInfo>;
+  update(databankId: string, input: DatabankUpdateInput): Promise<DatabankInfo>;
+  delete(databankId: string): Promise<boolean>;
+  documents: {
+    list(databankId: string, options?: { limit?: number; offset?: number }): Promise<{ data: DatabankDocumentInfo[]; total: number }>;
+    get(documentId: string): Promise<DatabankDocumentInfo | null>;
+    /** Find a document by display name inside a databank. Returns the first match or null. */
+    findByName(databankId: string, name: string): Promise<DatabankDocumentInfo | null>;
+    /** Upload returns immediately with status='pending'. Use waitUntilReady() or poll get(). */
+    create(databankId: string, input: DatabankDocumentCreateInput): Promise<DatabankDocumentInfo>;
+    update(documentId: string, input: DatabankDocumentUpdateInput): Promise<DatabankDocumentInfo>;
+    delete(documentId: string): Promise<boolean>;
+    /** Returns null if the document doesn't exist OR has not finished processing. */
+    getContent(documentId: string): Promise<{ content: string } | null>;
+    /** Resets status to 'pending', drops vectors, queues for full reingestion. */
+    reprocess(documentId: string): Promise<{ success: true; status: 'processing' }>;
+    /** Polls until status === 'ready'. Throws on error/timeout/deletion. */
+    waitUntilReady(documentId: string, options?: DatabankWaitUntilReadyOptions): Promise<DatabankDocumentInfo>;
+  };
+}
+
 // ─── Council API (read-only, free tier) ──────────────────────────────────────
 
 /** A single Council member assignment (member id + Lumia binding + role/chance). */
@@ -2366,6 +2459,8 @@ interface LumiScriptAPI {
   chats: ChatsAPI;
   /** World Info / Lorebook CRUD. Requires world_books permission. */
   worldInfo: WorldInfoAPI;
+  /** Databank (vectorised document collection) CRUD + per-document upload, fetch, and reprocess. Requires databanks permission. */
+  databanks: DatabanksAPI;
   /** Persona CRUD + active persona switching. Requires personas permission. */
   personas: PersonasAPI;
   /** Read-only access to the user's Council configuration: settings, members, and the available Lumia-item pool. No permission required. */

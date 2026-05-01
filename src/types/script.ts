@@ -211,6 +211,8 @@ export interface LumiScriptAPI {
   chats: ChatsAPI;
   /** World Info / Lorebook CRUD. Requires world_books permission. */
   worldInfo: WorldInfoAPI;
+  /** Databank (vectorised document collection) CRUD + per-document upload, fetch, and reprocess. Requires databanks permission. */
+  databanks: DatabanksAPI;
   /** Persona (identity profile) CRUD + active persona switching. Requires personas permission. */
   personas: PersonasAPI;
   /** Read-only access to the user's Council configuration: settings, members, and the available Lumia-item pool. No permission required. */
@@ -1641,6 +1643,207 @@ export interface PersonasAPI {
    * Only requires personas permission (not world_books).
    */
   getWorldBook(personaId: string): Promise<WorldInfo | null>;
+}
+
+// ─── Databanks API ───────────────────────────────────────────────────────────
+
+/**
+ * Activation scope for a databank — controls when Lumiverse treats it as
+ * available during retrieval.
+ *
+ * - `'global'`     — available everywhere for the active user.
+ * - `'character'`  — active when the matching character is in context.
+ * - `'chat'`       — active when the matching chat is in context.
+ */
+export type DatabankScope = 'global' | 'character' | 'chat';
+
+/**
+ * Lifecycle status of an uploaded document. Documents move through
+ * `pending` → `processing` → `ready` (or `error` on failure). Use
+ * `documents.waitUntilReady()` rather than polling manually.
+ */
+export type DatabankDocumentStatus = 'pending' | 'processing' | 'ready' | 'error';
+
+/** A databank — a vectorised collection of documents. Maps to DatabankDTO. */
+export interface DatabankInfo {
+  id: string;
+  name: string;
+  description: string;
+  /** Activation scope: 'global', 'character', or 'chat'. */
+  scope: DatabankScope;
+  /** Required for `character` and `chat` scopes; null for `global`. */
+  scopeId: string | null;
+  enabled: boolean;
+  metadata: Record<string, unknown>;
+  /** Number of documents in the bank. May be omitted on bulk list responses. */
+  documentCount?: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** A single document inside a databank. Maps to DatabankDocumentDTO. */
+export interface DatabankDocumentInfo {
+  id: string;
+  databankId: string;
+  name: string;
+  /** URL-safe form of the display name (auto-derived). */
+  slug: string;
+  mimeType: string;
+  fileSize: number;
+  contentHash: string;
+  totalChunks: number;
+  status: DatabankDocumentStatus;
+  /** Populated when `status === 'error'`; null otherwise. */
+  errorMessage: string | null;
+  metadata: Record<string, unknown>;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface DatabankCreateInput {
+  name: string;
+  description?: string;
+  scope: DatabankScope;
+  /** Required for `character` and `chat` scopes; omit for `global`. */
+  scopeId?: string | null;
+}
+
+/** All fields optional. `scope` cannot be changed after creation. */
+export interface DatabankUpdateInput {
+  name?: string;
+  description?: string;
+  enabled?: boolean;
+}
+
+export interface DatabankDocumentCreateInput {
+  /**
+   * Document content. `string` values are UTF-8 encoded internally; use
+   * `Uint8Array` directly when the source is already binary.
+   *
+   * Lumiverse only accepts text-oriented uploads: .txt, .md, .markdown,
+   * .csv, .tsv, .json, .xml, .html, .htm, .yaml, .yml, .log, .rst, .rtf.
+   * Maximum size: 10 MB.
+   */
+  data: string | Uint8Array;
+  /** Original filename, including extension. */
+  filename: string;
+  /** Optional MIME type recorded on the document. */
+  mimeType?: string;
+  /** Display name override. Defaults to `filename` minus the extension. */
+  name?: string;
+}
+
+export interface DatabankDocumentUpdateInput {
+  /** New display name (the URL-safe slug is regenerated automatically). */
+  name: string;
+}
+
+/**
+ * Options for `documents.waitUntilReady()` — a polling helper that
+ * resolves once a document reaches `'ready'` status.
+ */
+export interface DatabankWaitUntilReadyOptions {
+  /**
+   * Maximum total time to wait, in milliseconds. Default: 60_000 (60s).
+   * Throws on timeout.
+   */
+  timeoutMs?: number;
+  /**
+   * Interval between status polls, in milliseconds. Default: 500ms.
+   */
+  pollIntervalMs?: number;
+}
+
+export interface DatabanksAPI {
+  /** List databanks, optionally filtered by scope. Requires databanks permission. */
+  list(options?: {
+    limit?: number;
+    offset?: number;
+    /** Filter by scope. */
+    scope?: DatabankScope;
+    /** Required when filtering by `'character'` or `'chat'` scope. */
+    scopeId?: string | null;
+  }): Promise<{ data: DatabankInfo[]; total: number }>;
+
+  /** Get a databank by ID. Returns null if not found. Requires databanks permission. */
+  get(databankId: string): Promise<DatabankInfo | null>;
+
+  /**
+   * Find a databank by display name. Returns the first match within the
+   * given scope (or the first match across ALL banks if scope is omitted).
+   * Returns null if not found. Convenience wrapper over `list()` —
+   * O(banks) on the user's databank count. Requires databanks permission.
+   */
+  findByName(name: string, scope?: DatabankScope): Promise<DatabankInfo | null>;
+
+  /**
+   * Create a databank. `name` and `scope` are required; `scopeId` is
+   * required for `'character'` and `'chat'` scopes.
+   * Requires databanks permission.
+   */
+  create(input: DatabankCreateInput): Promise<DatabankInfo>;
+
+  /** Update a databank. Scope cannot be changed. Requires databanks permission. */
+  update(databankId: string, input: DatabankUpdateInput): Promise<DatabankInfo>;
+
+  /**
+   * Delete a databank and all of its documents and vectors.
+   * Returns true if deleted. Requires databanks permission.
+   */
+  delete(databankId: string): Promise<boolean>;
+
+  documents: {
+    /** List documents in a databank. Requires databanks permission. */
+    list(databankId: string, options?: { limit?: number; offset?: number }): Promise<{ data: DatabankDocumentInfo[]; total: number }>;
+
+    /** Get a document by ID. Returns null if not found. Requires databanks permission. */
+    get(documentId: string): Promise<DatabankDocumentInfo | null>;
+
+    /**
+     * Find a document by display name within a databank. Returns the
+     * first match. Returns null if not found. Convenience wrapper over
+     * `list()` — O(documents-in-bank). Requires databanks permission.
+     */
+    findByName(databankId: string, name: string): Promise<DatabankDocumentInfo | null>;
+
+    /**
+     * Upload a document. Returns immediately with a `'pending'`-status
+     * record; processing happens asynchronously. Use `waitUntilReady()` or
+     * poll `get()` to detect completion. Requires databanks permission.
+     */
+    create(databankId: string, input: DatabankDocumentCreateInput): Promise<DatabankDocumentInfo>;
+
+    /** Rename a document (also regenerates the slug). Requires databanks permission. */
+    update(documentId: string, input: DatabankDocumentUpdateInput): Promise<DatabankDocumentInfo>;
+
+    /** Delete a document, its parsed chunks, and its vectors. Returns true if deleted. Requires databanks permission. */
+    delete(documentId: string): Promise<boolean>;
+
+    /**
+     * Get the parsed plain-text content of a document. Returns null when
+     * the document doesn't exist OR its status is not yet `'ready'` (still
+     * pending/processing or it failed before chunks were created).
+     * Requires databanks permission.
+     */
+    getContent(documentId: string): Promise<{ content: string } | null>;
+
+    /**
+     * Reset a document to `'pending'`, drop its existing vectors, and
+     * queue it for full reingestion. Useful after embedding changes or
+     * recovering from a prior ingestion failure. Requires databanks permission.
+     */
+    reprocess(documentId: string): Promise<{ success: true; status: 'processing' }>;
+
+    /**
+     * Poll a document until its status is `'ready'`. Resolves with the
+     * up-to-date `DatabankDocumentInfo`. Throws if the document reaches
+     * `'error'` status, the timeout elapses, or the document is deleted
+     * mid-poll. Requires databanks permission.
+     *
+     * Defaults: timeoutMs 60_000, pollIntervalMs 500.
+     */
+    waitUntilReady(documentId: string, options?: DatabankWaitUntilReadyOptions): Promise<DatabankDocumentInfo>;
+  };
 }
 
 /**

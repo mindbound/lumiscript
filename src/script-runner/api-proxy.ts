@@ -57,6 +57,7 @@ import type {
   ChatsAPI,
   CharactersAPI,
   WorldInfoAPI,
+  DatabanksAPI,
   PersonasAPI,
   CouncilAPI,
   FilesAPI,
@@ -523,6 +524,7 @@ export interface ProxyHandle {
     | 'chats'
     | 'characters'
     | 'worldInfo'
+    | 'databanks'
     | 'personas'
     | 'council'
     | 'files'
@@ -2509,6 +2511,34 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
     },
   };
 
+  // ── databanks (vectorised document collections + their documents) ────────
+  //
+  // All methods proxy 1:1 to the parent's `api.databanks.*` surface via the
+  // generic dotted-path dispatcher in `script-runner-host.ts:resolveMethodPath`.
+  // The Uint8Array body of `documents.create({ data, … })` rides Bun's IPC
+  // structured-clone serialiser intact (binary types are cloneable, unlike
+  // functions). Strings are accepted at the parent boundary too — the parent
+  // builder UTF-8 encodes them before forwarding to Spindle.
+  const databanks: DatabanksAPI = {
+    list:        mkAsync<DatabanksAPI['list']>(dispatch,        'databanks.list'),
+    get:         mkAsync<DatabanksAPI['get']>(dispatch,         'databanks.get'),
+    findByName:  mkAsync<DatabanksAPI['findByName']>(dispatch,  'databanks.findByName'),
+    create:      mkAsync<DatabanksAPI['create']>(dispatch,      'databanks.create'),
+    update:      mkAsync<DatabanksAPI['update']>(dispatch,      'databanks.update'),
+    delete:      mkAsync<DatabanksAPI['delete']>(dispatch,      'databanks.delete'),
+    documents: {
+      list:            mkAsync<DatabanksAPI['documents']['list']>(dispatch,            'databanks.documents.list'),
+      get:             mkAsync<DatabanksAPI['documents']['get']>(dispatch,             'databanks.documents.get'),
+      findByName:      mkAsync<DatabanksAPI['documents']['findByName']>(dispatch,      'databanks.documents.findByName'),
+      create:          mkAsync<DatabanksAPI['documents']['create']>(dispatch,          'databanks.documents.create'),
+      update:          mkAsync<DatabanksAPI['documents']['update']>(dispatch,          'databanks.documents.update'),
+      delete:          mkAsync<DatabanksAPI['documents']['delete']>(dispatch,          'databanks.documents.delete'),
+      getContent:      mkAsync<DatabanksAPI['documents']['getContent']>(dispatch,      'databanks.documents.getContent'),
+      reprocess:       mkAsync<DatabanksAPI['documents']['reprocess']>(dispatch,       'databanks.documents.reprocess'),
+      waitUntilReady:  mkAsync<DatabanksAPI['documents']['waitUntilReady']>(dispatch,  'databanks.documents.waitUntilReady'),
+    },
+  };
+
   // ── personas ──────────────────────────────────────────────────────────────
   const personas: PersonasAPI = {
     list:           mkAsync<PersonasAPI['list']>(dispatch,           'personas.list'),
@@ -3001,7 +3031,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
   // libraries that touch unimplemented namespaces will throw clearly.
   const apiForLibraries = {
     utils, broadcast, variables, db, ui, llm,
-    chat, chats, characters, worldInfo, personas, council,
+    chat, chats, characters, worldInfo, databanks, personas, council,
     files, enclave, tokens, events, commands, tools, macros,
     json,
   } as unknown as LumiScriptAPI;
@@ -3146,7 +3176,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
   return {
     api: {
       utils, broadcast, variables, db, ui, llm,
-      chat, chats, characters, worldInfo, personas, council,
+      chat, chats, characters, worldInfo, databanks, personas, council,
       files, enclave, tokens, events, commands, tools, macros,
       json,
     },
