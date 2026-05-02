@@ -71,6 +71,7 @@ import type {
   FloatWidgetOptions,
   DrawerTabHandle,
   DrawerTabOptions,
+  RpcRequestContext,
 } from '../types/script.js';
 import type {
   AdvancedModalDismissedNotice,
@@ -1858,6 +1859,14 @@ async function handleApiRequest(req: ApiProxyRequest): Promise<void> {
       // (bundled via `builtin-library-registry`); only non-ls:* names
       // come through this path.
       response = await handleFetchLibraryRequest(req);
+    } else if (req.method === 'rpc.handle') {
+      // v0.26.0 — `api.rpc.handle()` registers an on-demand handler whose
+      // closure lives child-side. Build a wrapper that fires the user's
+      // closure via `RunHandlerRequest` whenever a foreign extension reads
+      // the endpoint, then call canonical `api.rpc.handle()` to register
+      // the wrapper with `spindle.rpcPool` and surface the resolved
+      // fully-qualified endpoint name back through the api-response.
+      response = await handleRpcHandleRequest(req, active);
     } else {
       response = await dispatchApiCall(req, active.api, helpers);
     }
@@ -3027,6 +3036,90 @@ async function handleFetchLibraryRequest(
   }
 }
 
+/**
+ * v0.26.0 — special-case `'rpc.handle'` so the user's handler closure
+ * (which lives in the child) gets fired via `RunHandlerRequest` whenever
+ * a foreign extension reads our endpoint.
+ *
+ * Args shape: `[channel: string, handlerId: string, options?: { as? }]`.
+ * The proxy generates the handlerId, stashes the user's closure under it
+ * in the child registry, then sends THIS request. We build a parent-side
+ * wrapper that, when invoked by `spindle.rpcPool` (via the canonical
+ * `api.rpc.handle`), dispatches `sendRunHandlerRequest` back to the child
+ * with `kind: 'rpc'` and `args: [ctx]`. The result.value (whatever the
+ * user's handler returned) becomes the read response.
+ *
+ * We delegate to the canonical `active.api.rpc.handle` rather than
+ * touching `spindle.rpcPool` directly so the executor's slug derivation,
+ * channel validation, and ownership-tracking (rpc-store + this-run set)
+ * all run exactly as for the in-process / test path.
+ */
+async function handleRpcHandleRequest(
+  req:    ApiProxyRequest,
+  active: ActiveRun,
+): Promise<ApiProxyResponse> {
+  const requestId = req.requestId;
+  try {
+    const channel   = req.args[0];
+    const handlerId = req.args[1];
+    const options   = req.args[2] as { as?: string } | undefined;
+    if (typeof channel !== 'string' || channel.length === 0) {
+      return {
+        type:      'api-response',
+        requestId,
+        ok:        false,
+        error: { name: 'TypeError', message: 'rpc.handle: channel must be a non-empty string' },
+      };
+    }
+    if (typeof handlerId !== 'string' || handlerId.length === 0) {
+      return {
+        type:      'api-response',
+        requestId,
+        ok:        false,
+        error: {
+          name:    'InternalError',
+          message: 'rpc.handle: proxy did not supply handlerId — child/parent contract violated',
+        },
+      };
+    }
+    // Wrapper fired by `spindle.rpcPool` whenever a foreign extension
+    // reads our endpoint. Match canonical handler timeout: 60s, the same
+    // as macros / tools wrappers (mirrors `sendRunHandlerRequest`'s usage
+    // pattern in `handleRegisterHandler`).
+    const wrapper = async (rpcCtx: RpcRequestContext): Promise<unknown> => {
+      const result = await sendRunHandlerRequest(
+        active.scriptId,
+        handlerId,
+        'rpc',
+        [rpcCtx],
+        60_000,
+      );
+      if (!result.ok) {
+        throw new Error(result.error?.message ?? 'rpc handler failed');
+      }
+      return result.value;
+    };
+    const fullEndpoint = await active.api.rpc.handle(channel, wrapper, options);
+    return {
+      type:      'api-response',
+      requestId,
+      ok:        true,
+      value:     fullEndpoint,
+    };
+  } catch (err) {
+    return {
+      type:      'api-response',
+      requestId,
+      ok:        false,
+      error: {
+        name:    err instanceof Error ? (err.name || 'Error') : 'Error',
+        message: err instanceof Error ? err.message : String(err),
+        ...(err instanceof Error && err.stack ? { stack: err.stack } : {}),
+      },
+    };
+  }
+}
+
 async function handleInternalAdvancedModalRequest(
   req:    ApiProxyRequest,
   active: ActiveRun,
@@ -3403,6 +3496,13 @@ export interface DispatchRunScriptOpts {
   macrosRegisteredThisRun?:            Set<string>;
   macroInterceptorsRegisteredThisRun?: Set<string>;
   contentProcessorsRegisteredThisRun?: Set<string>;
+  /**
+   * v0.26.0 — per-run tracking of fully-qualified rpc-endpoint names
+   * registered via `api.rpc.sync` / `api.rpc.handle`. The trigger-registry
+   * uses this against a pre-run snapshot to auto-unregister endpoints whose
+   * declarations disappeared from the script body on re-run.
+   */
+  rpcEndpointsRegisteredThisRun?:      Set<string>;
 }
 
 /**
@@ -3472,6 +3572,7 @@ export function dispatchRunScript(
     macrosRegisteredThisRun:            opts.macrosRegisteredThisRun,
     macroInterceptorsRegisteredThisRun: opts.macroInterceptorsRegisteredThisRun,
     contentProcessorsRegisteredThisRun: opts.contentProcessorsRegisteredThisRun,
+    rpcEndpointsRegisteredThisRun:      opts.rpcEndpointsRegisteredThisRun,
     // `activeContext` is intentionally omitted → buildScriptAPI substitutes
     // a live-getter view backed by `binding.ts`. Long-lived handlers
     // (registered tools, modal callbacks, etc.) read the CURRENT chat /

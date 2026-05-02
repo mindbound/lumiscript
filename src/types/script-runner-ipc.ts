@@ -251,7 +251,8 @@ export type HandlerKind =
   | 'domEventListener'     // 9d.4.c-2 — DOMHandle.on() event handler
   | 'inputBarActionClick'  // 9d.4.e-1-b — InputBarActionHandle.onClick() click handler
   | 'floatWidgetDragEnd'   // 9d.4.e-2-b — FloatWidgetHandle.onDragEnd() drag-end handler
-  | 'drawerTabActivate';   // 9d.4.e-3-b — DrawerTabHandle.onActivate() activation handler
+  | 'drawerTabActivate'    // 9d.4.e-3-b — DrawerTabHandle.onActivate() activation handler
+  | 'rpc';                 // v0.26.0 — api.rpc.handle() on-demand handler (cross-extension RPC pool)
 
 /**
  * Phase 9d.3 — parent firing a registered handler. The child looks up

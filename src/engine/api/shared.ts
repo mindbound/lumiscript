@@ -66,6 +66,15 @@ export interface APIBuildDeps {
    * `api.chat.registerContentProcessor` surface.
    */
   contentProcessorsRegisteredThisRun?: Set<string>;
+  /**
+   * Per-execution rpc-endpoint-registration tracker. When present,
+   * `buildRpcAPI` adds the fully-qualified endpoint name (e.g.
+   * `lumiscript.tracker.state`) to this set on every successful
+   * `sync()` / `handle()` call. Consumed by `rpc-store.diffAndCleanStaleEndpoints`
+   * at post-execution to drop endpoints the updated script body no longer
+   * creates. Same shape and intent as `macrosRegisteredThisRun`.
+   */
+  rpcEndpointsRegisteredThisRun?: Set<string>;
 }
 
 // ─── Shared utility functions ─────────────────────────────────────────────────

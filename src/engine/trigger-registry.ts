@@ -45,6 +45,10 @@ import {
   listIdsByScriptId as contentProcessorIdsByScript,
   diffAndCleanStale as diffAndCleanStaleContentProcessors,
 } from './message-content-processor-registry.js';
+import {
+  listEndpointsByScriptId as rpcEndpointsByScript,
+  diffAndCleanStaleEndpoints,
+} from './rpc-store.js';
 import { logCleanup } from './cleanup-log.js';
 
 // ─── Dependency factory ───────────────────────────────────────────────────────
@@ -314,10 +318,12 @@ export class TriggerRegistry {
         const preRunMacroNames                   = macroNamesByScript(scriptId);
         const preRunMacroInterceptorIds          = macroInterceptorIdsByScript(scriptId);
         const preRunContentProcessorIds          = contentProcessorIdsByScript(scriptId);
+        const preRunRpcEndpoints                 = rpcEndpointsByScript(scriptId);
         const toolsRegisteredThisRun             = new Set<string>();
         const macrosRegisteredThisRun            = new Set<string>();
         const macroInterceptorsRegisteredThisRun = new Set<string>();
         const contentProcessorsRegisteredThisRun = new Set<string>();
+        const rpcEndpointsRegisteredThisRun      = new Set<string>();
 
         // Phase 9c: dispatch through `spindle.backendProcesses` child instead
         // of in-process `executeScript`. Sync-loop recovery now works — the
@@ -347,6 +353,7 @@ export class TriggerRegistry {
             macrosRegisteredThisRun,
             macroInterceptorsRegisteredThisRun,
             contentProcessorsRegisteredThisRun,
+            rpcEndpointsRegisteredThisRun,
           },
         );
 
@@ -354,6 +361,8 @@ export class TriggerRegistry {
         // Tools + macros: host-side unregister + audit log.
         // Interceptors + processors: LS-side only (one extension-level
         // registration with the host stays live), drop-only, no log.
+        // RPC endpoints: spindle-side unregister + audit log (cross-
+        // extension visibility makes orphans observable, hence the log).
         const staleTools = diffAndCleanStaleTools(scriptId, preRunToolNames, toolsRegisteredThisRun);
         for (const name of staleTools) {
           try { spindle.unregisterTool(name); } catch { /* swallow */ }
@@ -368,8 +377,15 @@ export class TriggerRegistry {
         diffAndCleanStaleContentProcessors(
           scriptId, preRunContentProcessorIds, contentProcessorsRegisteredThisRun,
         );
+        const staleRpcEndpoints = diffAndCleanStaleEndpoints(
+          scriptId, preRunRpcEndpoints, rpcEndpointsRegisteredThisRun,
+        );
+        for (const endpoint of staleRpcEndpoints) {
+          try { spindle.rpcPool.unregister(endpoint); } catch { /* swallow */ }
+        }
         logCleanup('tool',  'stale after re-run', currentScript.name, staleTools);
         logCleanup('macro', 'stale after re-run', currentScript.name, staleMacros);
+        logCleanup('rpc',   'stale after re-run', currentScript.name, staleRpcEndpoints);
 
         // ── Fold this invocation's result into the batch aggregates ───────
         const prevMax = this.batchMaxDuration.get(currentScript.id) ?? 0;
@@ -554,10 +570,12 @@ export class TriggerRegistry {
     const preRunMacroNames                   = macroNamesByScript(script.id);
     const preRunMacroInterceptorIds          = macroInterceptorIdsByScript(script.id);
     const preRunContentProcessorIds          = contentProcessorIdsByScript(script.id);
+    const preRunRpcEndpoints                 = rpcEndpointsByScript(script.id);
     const toolsRegisteredThisRun             = new Set<string>();
     const macrosRegisteredThisRun            = new Set<string>();
     const macroInterceptorsRegisteredThisRun = new Set<string>();
     const contentProcessorsRegisteredThisRun = new Set<string>();
+    const rpcEndpointsRegisteredThisRun      = new Set<string>();
 
     // Phase 9c: dispatch through the script-runner child. `scriptStorage`
     // is unused on this path until 9d wires user-library `script.require()`
@@ -579,6 +597,7 @@ export class TriggerRegistry {
         macrosRegisteredThisRun,
         macroInterceptorsRegisteredThisRun,
         contentProcessorsRegisteredThisRun,
+        rpcEndpointsRegisteredThisRun,
       },
     );
 
@@ -596,8 +615,15 @@ export class TriggerRegistry {
     diffAndCleanStaleContentProcessors(
       script.id, preRunContentProcessorIds, contentProcessorsRegisteredThisRun,
     );
+    const staleRpcEndpoints = diffAndCleanStaleEndpoints(
+      script.id, preRunRpcEndpoints, rpcEndpointsRegisteredThisRun,
+    );
+    for (const endpoint of staleRpcEndpoints) {
+      try { spindle.rpcPool.unregister(endpoint); } catch { /* swallow */ }
+    }
     logCleanup('tool',  'stale after re-run', script.name, staleTools);
     logCleanup('macro', 'stale after re-run', script.name, staleMacros);
+    logCleanup('rpc',   'stale after re-run', script.name, staleRpcEndpoints);
 
     if (result.success) {
       executionStatusStore.markSuccess(script.id, result.duration);

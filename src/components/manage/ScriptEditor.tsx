@@ -218,7 +218,7 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
 
         {script.type !== 'library' && (
           <button className={`ls-btn${isRunning ? '' : ' ls-accent'}`} onClick={handleRun} disabled={isRunning}>
-            {isRunning ? <Loader2 size={15} style={{ animation: 'spin 1s linear infinite' }} /> : <Play size={15} />}
+            {isRunning ? <Loader2 size={15} style={{ animation: 'ls-spin 1s linear infinite' }} /> : <Play size={15} />}
             {isRunning ? 'Running…' : 'Run'}
           </button>
         )}

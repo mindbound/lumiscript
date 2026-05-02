@@ -86,6 +86,13 @@
   0%, 100% { opacity: 1; }
   50% { opacity: 0.35; }
 }
+/* Used by the row's inline Run button while a manual run is in flight.
+   Local rather than a generic `spin` name so we don't depend on / collide
+   with host-app or third-party CSS. */
+@keyframes ls-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
 .ls-item-body { flex: 1; min-width: 0; }
 .ls-item-name {
   font-weight: 500;

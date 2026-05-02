@@ -1926,6 +1926,36 @@ interface BroadcastAPI {
   on(event: string, handler: (payload: unknown) => void): () => void;
 }
 
+// ─── RPC pool (cross-extension) ────────────────────────────────────────────────
+
+interface RpcRequestContext {
+  endpoint: string;
+  requesterExtensionId: string;
+}
+
+/**
+ * Cross-extension shared RPC pool — wraps Spindle's \`spindle.rpcPool\`.
+ * Two-tier namespacing: every endpoint is fully-qualified as
+ * \`lumiscript.<scriptSlug>.<channel>\` where scriptSlug auto-derives from
+ * the calling script's name, overridable via \`options.as\`. Free tier (no
+ * permission). Endpoints auto-unregister on script disable / delete /
+ * stale-after-re-run.
+ */
+interface RpcAPI {
+  /** Publish the latest value on a channel. Returns the fully-qualified endpoint. */
+  sync<T = unknown>(channel: string, value: T, options?: { as?: string }): Promise<string>;
+  /** Register an on-demand handler. Returns the fully-qualified endpoint. */
+  handle<T = unknown>(
+    channel: string,
+    handler: (ctx: RpcRequestContext) => T | Promise<T>,
+    options?: { as?: string },
+  ): Promise<string>;
+  /** Read a value from another extension's published endpoint (\`<extensionId>.<channel>\`). */
+  read<T = unknown>(endpoint: string): Promise<T>;
+  /** Remove a channel previously published by the calling script. Idempotent. */
+  unregister(channel: string, options?: { as?: string }): Promise<void>;
+}
+
 // ─── Commands API ──────────────────────────────────────────────────────────────
 
 type CommandScope = 'global' | 'chat' | 'chat-idle' | 'landing' | 'character';
@@ -2473,6 +2503,8 @@ interface LumiScriptAPI {
   tools: ToolsAPI;
   /** Real-time script-to-script pub/sub. No permission required. */
   broadcast: BroadcastAPI;
+  /** Cross-extension shared RPC pool. Publish state, register on-demand handlers, or read another extension's endpoints. Free tier — no permission required. */
+  rpc: RpcAPI;
   /** Register commands in the Lumiverse command palette (Cmd/Ctrl+K). No permission required. */
   commands: CommandsAPI;
   /** Persistent event tracking (track, query, replay). Requires event_tracking permission. */

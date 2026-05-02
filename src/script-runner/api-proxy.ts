@@ -68,6 +68,8 @@ import type {
   ToolsAPI,
   MacrosAPI,
   JSONAPI,
+  RpcAPI,
+  RpcRequestContext,
   MacrosResolveOptions,
   MacrosResolveResult,
   AdvancedModalHandle,
@@ -536,6 +538,8 @@ export interface ProxyHandle {
     | 'macros'
     // ── Phase 9d.2 additions ───────────────────────────────────────────────
     | 'json'
+    // ── v0.26.0 additions ───────────────────────────────────────────────────
+    | 'rpc'
   >;
   /**
    * Phase 7 — `script.*` namespace injected as a separate top-level
@@ -2608,6 +2612,84 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
   // child (this proxy); behaviour is bit-identical.
   const json: JSONAPI = buildJSONAPI();
 
+  // ── rpc (v0.26.0 — cross-extension shared RPC pool) ──────────────────────
+  //
+  // `sync` / `read` / `unregister` are plain async dispatch — the canonical
+  // parent-side `api.rpc.*` does the slug derivation + ownership tracking.
+  //
+  // `handle()` mirrors the macro/tool register-via-handler-IPC pattern but
+  // routes through `api-request` (not `register-handler`) because the user
+  // expects the resolved fully-qualified endpoint string back. Flow:
+  //   1. Generate per-script handlerId
+  //   2. Stash a wrapper around the user's closure in the child registry.
+  //      Wrapper unpacks IPC args (`[ctx]`) and forwards to user fn.
+  //   3. Dispatch `'rpc.handle'` with `[channel, handlerId, options]`.
+  //      Parent's host-dispatcher special-cases this method, builds a
+  //      parent-side wrapper that fires `RunHandlerRequest` per
+  //      foreign-extension read, calls canonical `api.rpc.handle`, and
+  //      returns the resolved endpoint string.
+  //
+  // Local channel→handlerId tracking lets `unregister(channel)` drop the
+  // matching child-side closure (and `handle()` replacing an existing
+  // channel drops the old one). Without this the closure would persist
+  // until script-unregister and slowly accumulate across long sessions.
+  const localRpcHandlers = new Map<string, string>();
+  const rpcLocalKey = (channel: string, asOverride: string | undefined): string =>
+    `${asOverride ?? ''}::${channel}`;
+
+  const rpc: RpcAPI = {
+    sync: async (channel, value, options) => {
+      // sync() replaces any prior handle() registration on the same channel —
+      // mirror that child-side by dropping any tracked handlerId.
+      const key = rpcLocalKey(channel, options?.as);
+      const priorHandlerId = localRpcHandlers.get(key);
+      if (priorHandlerId !== undefined) {
+        ctx.unregisterHandlerClosure(priorHandlerId);
+        localRpcHandlers.delete(key);
+      }
+      return dispatch('rpc.sync', [channel, value, options]) as Promise<string>;
+    },
+
+    handle: async (channel, handler, options) => {
+      const key = rpcLocalKey(channel, options?.as);
+      // Drop any previously-stashed closure for this channel before
+      // installing the new one (replace-by-channel semantics).
+      const priorHandlerId = localRpcHandlers.get(key);
+      if (priorHandlerId !== undefined) {
+        ctx.unregisterHandlerClosure(priorHandlerId);
+        localRpcHandlers.delete(key);
+      }
+      const handlerId = generateHandlerId('rpc');
+      ctx.registerHandlerClosure(handlerId, async (...args: unknown[]) => {
+        // IPC args shape: [ctx: RpcRequestContext]
+        return handler(args[0] as RpcRequestContext);
+      });
+      try {
+        const fullEndpoint = await dispatch('rpc.handle', [channel, handlerId, options]) as string;
+        localRpcHandlers.set(key, handlerId);
+        return fullEndpoint;
+      } catch (err) {
+        // Parent rejected (invalid channel, slug derivation failed,
+        // cross-script ownership conflict). Drop the closure we stashed
+        // so it doesn't leak.
+        ctx.unregisterHandlerClosure(handlerId);
+        throw err instanceof Error ? err : new Error(String(err));
+      }
+    },
+
+    read: mkAsync<RpcAPI['read']>(dispatch, 'rpc.read'),
+
+    unregister: async (channel, options) => {
+      const key = rpcLocalKey(channel, options?.as);
+      const priorHandlerId = localRpcHandlers.get(key);
+      if (priorHandlerId !== undefined) {
+        ctx.unregisterHandlerClosure(priorHandlerId);
+        localRpcHandlers.delete(key);
+      }
+      await dispatch('rpc.unregister', [channel, options]);
+    },
+  };
+
   // ── events (track / query / replay; on lands in 9d.3) ────────────────────
   const events: EventsAPI = {
     track:           mkAsync<EventsAPI['track']>(dispatch,           'events.track'),
@@ -3179,6 +3261,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
       chat, chats, characters, worldInfo, databanks, personas, council,
       files, enclave, tokens, events, commands, tools, macros,
       json,
+      rpc,
     },
     script,
     handleResponse,

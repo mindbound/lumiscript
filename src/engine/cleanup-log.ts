@@ -21,7 +21,7 @@
 
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
 
-export type CleanupKind = 'tool' | 'macro';
+export type CleanupKind = 'tool' | 'macro' | 'rpc';
 
 /**
  * Reason tags for cleanup operations. Keeping the set small + string-typed
@@ -39,7 +39,8 @@ export function logCleanup(
   names: readonly string[],
 ): void {
   if (names.length === 0) return;
-  const noun = names.length === 1 ? kind : `${kind}s`;
+  const singular = kind === 'rpc' ? 'rpc endpoint' : kind;
+  const noun = names.length === 1 ? singular : `${singular}s`;
   spindle.log.info(
     `[LumiScript] Unregistered ${names.length} ${noun} from "${scriptName}" (${reason}): ${names.join(', ')}`,
   );

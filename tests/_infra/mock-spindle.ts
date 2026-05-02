@@ -336,6 +336,20 @@ export function createMockSpindle() {
       onInvoked: mock(() => mock(() => {})),
     },
 
+    // ─── RPC Pool (cross-extension shared) ─────────────────────────────
+    // Tests for the canonical `api.rpc.*` surface override `rpcPool.sync` /
+    // `rpcPool.handle` to capture the wire format LumiScript dispatches and
+    // typically return the fully-qualified endpoint name (`<extId>.<channel>`)
+    // for assertion. Default behaviour mirrors Spindle: prefix the channel
+    // path with the manifest identifier on `sync`/`handle`, return undefined
+    // on `read` (no-one published), no-op on `unregister`.
+    rpcPool: {
+      sync:       mock((channelPath: string) => `lumiscript.${channelPath}`),
+      handle:     mock((channelPath: string) => `lumiscript.${channelPath}`),
+      read:       mock(() => Promise.resolve(undefined)),
+      unregister: mock(() => {}),
+    },
+
     // ─── Manifest ──────────────────────────────────────────────────────
     manifest: {
       version: '0.10.1',

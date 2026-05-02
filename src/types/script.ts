@@ -227,6 +227,8 @@ export interface LumiScriptAPI {
   macros: MacrosAPI;
   /** Real-time script-to-script pub/sub broadcast bus. No permission required. */
   broadcast: BroadcastAPI;
+  /** Cross-extension shared RPC pool (Spindle's `spindle.rpcPool` surface). Publish lightweight state for other extensions to read, register on-demand handlers, or read another extension's published values. Free tier — no permission required. */
+  rpc: RpcAPI;
   /** Command palette registration. No permission required. */
   commands: CommandsAPI;
   /** Persistent event tracking (track, query, replay). Requires event_tracking permission. */
@@ -3894,6 +3896,120 @@ export interface BroadcastAPI {
    * });
    */
   on(event: string, handler: (payload: unknown) => void): () => void;
+}
+
+// ─── RPC pool (cross-extension) ───────────────────────────────────────────────
+
+/**
+ * Context delivered to an `api.rpc.handle()` callback when another extension
+ * reads its endpoint. Mirrors Spindle's `SharedRpcRequestContextDTO`.
+ */
+export interface RpcRequestContext {
+  /** Fully-qualified endpoint being read (e.g. `lumiscript.tracker.state`). */
+  endpoint: string;
+  /** Identifier of the extension performing the read. */
+  requesterExtensionId: string;
+}
+
+/**
+ * Cross-extension shared RPC pool.
+ *
+ * Wraps Spindle's `spindle.rpcPool` surface. Publish lightweight state on a
+ * channel name; readers in other extensions call `read()` to retrieve it. The
+ * underlying value lives in the host registry, not in any single worker, so
+ * extensions can share state across the worker isolation boundary without
+ * touching shared memory.
+ *
+ * **Two-tier namespacing.** Every endpoint is fully-qualified as
+ * `lumiscript.<scriptSlug>.<channel>`. The `<scriptSlug>` segment is derived
+ * automatically from the calling script's name (slugified to
+ * `[a-z0-9_-]+`), so two scripts publishing the same channel name don't
+ * collide. Override the slug via `options.as` when the auto-derived form is
+ * unsuitable.
+ *
+ * **No permission required.** This is a free-tier API. LumiScript logs every
+ * registration to the backend console (server-side) so that cross-extension
+ * exposure is observable; user-script consoles aren't spammed.
+ *
+ * **Lifecycle.** Endpoints registered by a script are auto-unregistered when
+ * the script is disabled, deleted, replaced, or fails to re-register on a
+ * subsequent run (same diff-and-clean-stale pass that applies to macros and
+ * tools). The extension as a whole also tears down all owned endpoints when
+ * Lumiverse unloads it (Spindle-side guarantee).
+ */
+export interface RpcAPI {
+  /**
+   * Publish the latest value on a channel. Replaces any prior `sync()` value
+   * or `handle()` registration on the same channel by the same script.
+   *
+   * Returns the fully-qualified endpoint string (e.g.
+   * `lumiscript.tracker.state`) so callers can log or pass it onward without
+   * recomputing the prefix.
+   *
+   * @example
+   * await api.rpc.sync('state', currentState);
+   * // → 'lumiscript.tracker.state'
+   *
+   * await api.rpc.sync('state', currentState, { as: 'world' });
+   * // → 'lumiscript.world.state' (override script-slug)
+   */
+  sync<T = unknown>(
+    channel: string,
+    value: T,
+    options?: { as?: string },
+  ): Promise<string>;
+
+  /**
+   * Register an on-demand handler. Invoked by Spindle when another extension
+   * calls `read()` against this endpoint. The handler receives the
+   * fully-qualified endpoint and the requester's extension identifier so it
+   * can tailor responses (rate-limit per caller, audit-log, etc.).
+   *
+   * Replaces any prior `sync()` value or `handle()` registration on the same
+   * channel by the same script. Returns the fully-qualified endpoint string.
+   *
+   * Handler exceptions surface to the calling extension as a rejected
+   * `read()` promise.
+   *
+   * @example
+   * await api.rpc.handle('history', async ({ requesterExtensionId }) => {
+   *   const events = await loadRecentEvents();
+   *   return { caller: requesterExtensionId, events };
+   * });
+   */
+  handle<T = unknown>(
+    channel: string,
+    handler: (ctx: RpcRequestContext) => T | Promise<T>,
+    options?: { as?: string },
+  ): Promise<string>;
+
+  /**
+   * Read a value from another extension's published endpoint. Endpoint must
+   * be fully-qualified — use the form `<extensionId>.<channel>` (or, for
+   * reading a LumiScript-published endpoint, `lumiscript.<scriptSlug>.<channel>`).
+   *
+   * Rejects on:
+   *   - invalid endpoint name
+   *   - target endpoint not registered (or producer disabled / unloaded)
+   *   - target handler throwing
+   *   - target handler timing out (Spindle-side default)
+   *
+   * @example
+   * const weather = await api.rpc.read<WeatherSnapshot>('weather_ext.current');
+   */
+  read<T = unknown>(endpoint: string): Promise<T>;
+
+  /**
+   * Remove a channel previously published by the calling script. Idempotent
+   * — no-op if the channel was never registered.
+   *
+   * Use the same `as` value (if any) as the original `sync()` / `handle()`
+   * call.
+   */
+  unregister(
+    channel: string,
+    options?: { as?: string },
+  ): Promise<void>;
 }
 
 // ─── Script namespace ─────────────────────────────────────────────────────────

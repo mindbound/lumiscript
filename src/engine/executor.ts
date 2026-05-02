@@ -79,6 +79,7 @@ import { buildCharactersAPI } from './api/characters.js';
 import { buildChatsAPI      } from './api/chats-session.js';
 import { buildWorldInfoAPI  } from './api/world-info.js';
 import { buildDatabanksAPI } from './api/databanks.js';
+import { buildRpcAPI       } from './api/rpc.js';
 import { buildPersonasAPI  } from './api/personas.js';
 import { buildCouncilAPI   } from './api/council.js';
 import { buildToolsAPI     } from './api/tools.js';
@@ -170,6 +171,14 @@ export interface ExecutorOptions {
    * processor surface.
    */
   contentProcessorsRegisteredThisRun?: Set<string>;
+  /**
+   * Per-execution tracker for `api.rpc.sync(...)` / `api.rpc.handle(...)`
+   * calls — adds the fully-qualified endpoint name (e.g.
+   * `lumiscript.tracker.state`) on every successful registration. Consumed
+   * by `rpc-store.diffAndCleanStaleEndpoints` post-execution to drop
+   * endpoints whose declarations disappeared from the script body on re-run.
+   */
+  rpcEndpointsRegisteredThisRun?: Set<string>;
 }
 
 // ─── Cross-script console context ────────────────────────────────────────────
@@ -322,6 +331,7 @@ export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiSc
     macrosRegisteredThisRun,
     macroInterceptorsRegisteredThisRun,
     contentProcessorsRegisteredThisRun,
+    rpcEndpointsRegisteredThisRun,
   } = options;
   const hasPerm = (p: string) => grantedPermissions.has(p);
 
@@ -361,6 +371,7 @@ export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiSc
     macrosRegisteredThisRun,
     macroInterceptorsRegisteredThisRun,
     contentProcessorsRegisteredThisRun,
+    rpcEndpointsRegisteredThisRun,
   };
 
   // api is captured in a variable so that buildToolsAPI can receive a lazy
@@ -380,6 +391,7 @@ export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiSc
     worldInfo:  buildWorldInfoAPI(deps),
     databanks:  buildDatabanksAPI(deps),
     personas:   buildPersonasAPI(deps),
+    rpc:        buildRpcAPI(deps),
     council:    buildCouncilAPI(deps),
     tools:      buildToolsAPI(deps, () => api),
     macros:     buildMacrosAPI(deps),

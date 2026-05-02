@@ -1,5 +1,5 @@
 import { FC } from 'react';
-import { Copy, Trash2, ToggleLeft, ToggleRight, UserRound, MessageSquare, Pencil } from 'lucide-react';
+import { Copy, Trash2, ToggleLeft, ToggleRight, UserRound, MessageSquare, Pencil, Play, Loader2 } from 'lucide-react';
 import type { Script } from '../../types/script.js';
 import type { FrontendToBackend } from '../../types/messages.js';
 
@@ -52,6 +52,14 @@ export const ScriptListItem: FC<ScriptListItemProps> = ({
     onEdit();
   };
 
+  const isRunning = dot === 'running';
+
+  const handleRun = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (isRunning || !script.enabled) return;
+    sendToBackend({ type: 'run_script', id: script.id });
+  };
+
   const bindingCount = script.bindings?.length ?? 0;
 
   return (
@@ -99,6 +107,28 @@ export const ScriptListItem: FC<ScriptListItemProps> = ({
         <button className="ls-icon-btn" onClick={handleEdit} title="Edit script">
           <Pencil size={13} />
         </button>
+
+        {/* Run button — manual trigger, mirrors the editor's Run affordance.
+            Hidden for library scripts (which are loaded via script.require()
+            rather than executed directly); disabled when the script is
+            disabled (the toggle gates manual runs alongside trigger fires)
+            or while a run is already in flight. */}
+        {script.type !== 'library' && (
+          <button
+            className="ls-icon-btn"
+            onClick={handleRun}
+            disabled={!script.enabled || isRunning}
+            title={
+              !script.enabled ? 'Enable to run'
+              : isRunning ? 'Running…'
+              : 'Run script'
+            }
+          >
+            {isRunning
+              ? <Loader2 size={13} style={{ animation: 'ls-spin 1s linear infinite' }} />
+              : <Play size={13} />}
+          </button>
+        )}
 
         {script.type !== 'library' && (
           <button className="ls-icon-btn" onClick={handleToggle}

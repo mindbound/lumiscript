@@ -40,6 +40,11 @@ import {
   listNamesByScriptId as macroNamesByScript,
   diffAndCleanStaleMacros,
 } from './engine/macro-store.js';
+import {
+  clearByScriptId as clearRpcEndpointsByScriptId,
+  listEndpointsByScriptId as rpcEndpointsByScript,
+  diffAndCleanStaleEndpoints,
+} from './engine/rpc-store.js';
 import { logCleanup } from './engine/cleanup-log.js';
 import { dispatchToolInvocation } from './engine/tool-invocation.js';
 import { dispatchEvent as dispatchDOMEvent, cleanupScript as cleanupDOMScript } from './engine/dom-registry.js';
@@ -833,8 +838,18 @@ spindle.onFrontendMessage(async (raw, userId) => {
           // skips them. Idempotent on already-disabled scripts.
           clearMacroInterceptorsByScriptId(msg.id);
           clearMessageContentProcessorsByScriptId(msg.id);
+          // RPC endpoints registered via `api.rpc.sync` / `api.rpc.handle`.
+          // Spindle's auto-cleanup on extension unload tears down every
+          // LumiScript-owned endpoint regardless of which script owns it,
+          // so per-script granularity here lets us preserve other scripts'
+          // endpoints when disabling just one. v0.26.0.
+          const clearedRpcEndpoints = clearRpcEndpointsByScriptId(msg.id);
+          for (const endpoint of clearedRpcEndpoints) {
+            try { spindle.rpcPool.unregister(endpoint); } catch { /* swallow */ }
+          }
           logCleanup('tool',  'disabled', disabledName, clearedTools);
           logCleanup('macro', 'disabled', disabledName, clearedMacros);
+          logCleanup('rpc',   'disabled', disabledName, clearedRpcEndpoints);
           // Dismiss any advanced modals this script still has open. Marking
           // a pending reason of 'teardown' means the frontend's dismissal
           // echo (ls_modal_dismissed) will fire the script's onDismiss
@@ -908,8 +923,14 @@ spindle.onFrontendMessage(async (raw, userId) => {
         // `update_script` for the no-host-unregister-needed reasoning.
         clearMacroInterceptorsByScriptId(msg.id);
         clearMessageContentProcessorsByScriptId(msg.id);
+        // RPC endpoints — see matching block in `update_script` for context.
+        const clearedRpcEndpoints = clearRpcEndpointsByScriptId(msg.id);
+        for (const endpoint of clearedRpcEndpoints) {
+          try { spindle.rpcPool.unregister(endpoint); } catch { /* swallow */ }
+        }
         logCleanup('tool',  'deleted', deletedName, clearedTools);
         logCleanup('macro', 'deleted', deletedName, clearedMacros);
+        logCleanup('rpc',   'deleted', deletedName, clearedRpcEndpoints);
         // Dismiss any advanced modals this script still has open. See the
         // matching block in `update_script` for the teardown-reason story.
         for (const modalId of advancedModalsByScript(msg.id)) {
@@ -1198,10 +1219,12 @@ spindle.onFrontendMessage(async (raw, userId) => {
         const preRunMacroNames                   = macroNamesByScript(script.id);
         const preRunMacroInterceptorIds          = macroInterceptorIdsByScript(script.id);
         const preRunContentProcessorIds          = contentProcessorIdsByScript(script.id);
+        const preRunRpcEndpoints                 = rpcEndpointsByScript(script.id);
         const toolsRegisteredThisRun             = new Set<string>();
         const macrosRegisteredThisRun            = new Set<string>();
         const macroInterceptorsRegisteredThisRun = new Set<string>();
         const contentProcessorsRegisteredThisRun = new Set<string>();
+        const rpcEndpointsRegisteredThisRun      = new Set<string>();
 
         // Manual-run path goes through the same dispatcher as trigger
         // fires (Phase 9c + 9d.3.b unification). `activeContext` is NOT
@@ -1231,16 +1254,17 @@ spindle.onFrontendMessage(async (raw, userId) => {
             macrosRegisteredThisRun,
             macroInterceptorsRegisteredThisRun,
             contentProcessorsRegisteredThisRun,
+            rpcEndpointsRegisteredThisRun,
           },
         );
 
         // ── Auto-cleanup stale registrations ──────────────────────────────
         // Anything the script owned before this run but did NOT re-register
-        // during this execution is stale. Tools + macros need a host-side
-        // unregister; interceptor + processor entries are LS-side only
-        // (one extension-level registration with the host stays live), so
-        // dropping registry entries is sufficient — the next dispatch pass
-        // simply skips them.
+        // during this execution is stale. Tools + macros + rpc endpoints
+        // need a host-side unregister; interceptor + processor entries are
+        // LS-side only (one extension-level registration with the host
+        // stays live), so dropping registry entries is sufficient — the
+        // next dispatch pass simply skips them.
         const staleTools = diffAndCleanStaleTools(script.id, preRunToolNames, toolsRegisteredThisRun);
         for (const name of staleTools) {
           try { spindle.unregisterTool(name); } catch { /* swallow */ }
@@ -1261,8 +1285,15 @@ spindle.onFrontendMessage(async (raw, userId) => {
         diffAndCleanStaleContentProcessors(
           script.id, preRunContentProcessorIds, contentProcessorsRegisteredThisRun,
         );
+        const staleRpcEndpoints = diffAndCleanStaleEndpoints(
+          script.id, preRunRpcEndpoints, rpcEndpointsRegisteredThisRun,
+        );
+        for (const endpoint of staleRpcEndpoints) {
+          try { spindle.rpcPool.unregister(endpoint); } catch { /* swallow */ }
+        }
         logCleanup('tool',  'stale after re-run', script.name, staleTools);
         logCleanup('macro', 'stale after re-run', script.name, staleMacros);
+        logCleanup('rpc',   'stale after re-run', script.name, staleRpcEndpoints);
 
         if (result.success) {
           executionStatusStore.markSuccess(script.id, result.duration);
