@@ -1094,6 +1094,43 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
       }
     }
 
+    /**
+     * v0.26.x — function-predicate guard.
+     *
+     * `DbFilter` accepts `undefined | Partial<T> | ((record: T) => boolean)`.
+     * Function predicates are valid in the canonical (in-process) but cannot
+     * cross the script-runner subprocess IPC boundary — `structuredClone`
+     * rejects function references with `DataCloneError: The object can not
+     * be cloned`. Without this guard, calls like `collection.delete(() => true)`
+     * surface that opaque error from deep inside the IPC marshalling layer.
+     *
+     * Throw a clear, actionable error pointing at the simpler API surfaces
+     * that don't have this constraint:
+     *   - `clear()`              for "remove all records"
+     *   - object filter shape    for narrow updates / deletes
+     *     (e.g. `{ deleted: false }`)
+     *   - `query(jsonQueryStr)`  for complex filtering — jsonquery strings
+     *                            cross IPC cleanly
+     *
+     * Workaround for find/findOne with predicate logic: fetch all records
+     * (`find()` with no filter), filter locally in user code.
+     *
+     * Same architectural constraint as the Zod schema strip in `db.collection`
+     * (Fix 1 in v0.26.1 post-mortem) — non-cloneable JS values cannot cross IPC.
+     */
+    function rejectFunctionFilter(method: string, filter: unknown): void {
+      if (typeof filter === 'function') {
+        throw new Error(
+          `api.db.${method}: function predicates can't cross the script-runner ` +
+          `IPC boundary. Alternatives: use \`clear()\` for "delete all", ` +
+          `an object filter (e.g. \`{ field: value }\`) for narrow matches, ` +
+          `or \`query(jsonQueryString)\` for complex filtering. For ` +
+          `\`find\`/\`findOne\`, fetch with \`find()\` (no filter) and ` +
+          `apply your predicate locally in script code.`,
+        );
+      }
+    }
+
     return {
       insert: (record) => {
         validateOnInsert(record, 'insert');
@@ -1107,13 +1144,18 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
         return dispatchOnHandle(handleRef, 'insertMany', [records]) as Promise<T[]>;
       },
 
-      find: (filter?: DbFilter<T>) =>
-        dispatchOnHandle(handleRef, 'find', filter !== undefined ? [filter] : []) as Promise<T[]>,
+      find: (filter?: DbFilter<T>) => {
+        rejectFunctionFilter('find', filter);
+        return dispatchOnHandle(handleRef, 'find', filter !== undefined ? [filter] : []) as Promise<T[]>;
+      },
 
-      findOne: (filter: DbFilter<T>) =>
-        dispatchOnHandle(handleRef, 'findOne', [filter]) as Promise<T | null>,
+      findOne: (filter: DbFilter<T>) => {
+        rejectFunctionFilter('findOne', filter);
+        return dispatchOnHandle(handleRef, 'findOne', [filter]) as Promise<T | null>;
+      },
 
       update: (filter: DbFilter<T>, patch: Partial<T>) => {
+        rejectFunctionFilter('update', filter);
         // Best-effort patch validation: schema.partial() for ZodObject;
         // skip otherwise. See the function-level JSDoc above for the
         // weaker-than-canonical caveat.
@@ -1127,11 +1169,15 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
         return dispatchOnHandle(handleRef, 'update', [filter, patch]) as Promise<number>;
       },
 
-      delete: (filter: DbFilter<T>) =>
-        dispatchOnHandle(handleRef, 'delete', [filter]) as Promise<number>,
+      delete: (filter: DbFilter<T>) => {
+        rejectFunctionFilter('delete', filter);
+        return dispatchOnHandle(handleRef, 'delete', [filter]) as Promise<number>;
+      },
 
-      count: (filter?: DbFilter<T>) =>
-        dispatchOnHandle(handleRef, 'count', filter !== undefined ? [filter] : []) as Promise<number>,
+      count: (filter?: DbFilter<T>) => {
+        rejectFunctionFilter('count', filter);
+        return dispatchOnHandle(handleRef, 'count', filter !== undefined ? [filter] : []) as Promise<number>;
+      },
 
       clear: () =>
         dispatchOnHandle(handleRef, 'clear', []) as Promise<void>,
@@ -1162,8 +1208,14 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
      * calls addStyle once in a setup() block and remove() much later,
      * so the resolution race is irrelevant in practice.
      */
-    addStyle: (css) => {
-      const handlePromise = dispatch('ui.dom.addStyle', [css]) as Promise<HandleRef>;
+    addStyle: (css, opts) => {
+      // v0.26.x — `opts.id` enables replace-by-id semantics on the host:
+      // repeated calls with the same `(scriptId, id)` remove the prior
+      // stylesheet before injecting the new one. Plain JSON object — no
+      // structured-clone trap. See `engine/api/dom.ts:addStyle` for the
+      // host-side implementation.
+      const args: unknown[] = opts !== undefined ? [css, opts] : [css];
+      const handlePromise = dispatch('ui.dom.addStyle', args) as Promise<HandleRef>;
       // Cache the handle once it arrives so subsequent .remove() calls
       // don't re-await; first .remove() always pays the resolution cost.
       let cachedHandle: HandleRef | null = null;

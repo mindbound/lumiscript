@@ -16,7 +16,7 @@
 
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
 
-import type { LumiScriptAPI, DOMEventData, DOMHandle, DOMInjectOptions, DOMListenOptions, DOMMessageInjectOptions } from '../../types/script.js';
+import type { LumiScriptAPI, DOMAddStyleOptions, DOMEventData, DOMHandle, DOMInjectOptions, DOMListenOptions, DOMMessageInjectOptions } from '../../types/script.js';
 import type { BackendToFrontend } from '../../types/messages.js';
 import type { APIBuildDeps } from './shared.js';
 import { assertPerm } from './shared.js';
@@ -26,6 +26,7 @@ import {
   unregisterElement,
   registerStyle,
   unregisterStyle,
+  lookupStyleByUserId,
   addListener,
   removeListener,
   clearListeners,
@@ -294,10 +295,32 @@ export function buildDOMAPI(deps: APIBuildDeps): LumiScriptAPI['ui']['dom'] {
       return createHandle(elementId);
     },
 
-    addStyle(css: string): { remove(): void } {
+    addStyle(css: string, opts?: DOMAddStyleOptions): { remove(): void } {
       gate();
+
+      // v0.26.x — replace-by-id semantics. When `opts.id` is supplied, a
+      // subsequent `addStyle` call with the same `id` (within this script)
+      // removes the prior stylesheet first, then injects the new one.
+      // Without `id`, every call adds a fresh stylesheet (the original
+      // accumulating behaviour — useful for situations where multiple
+      // cumulative stylesheets are intentional).
+      //
+      // The motivating use case is dev iteration: an inject-once stylesheet
+      // gated on a `globalThis` flag silently fails to refresh when the
+      // user edits the CSS, because the flag is already set and the prior
+      // stylesheet is still in the host DOM. With `id`, the script just
+      // calls `addStyle(css, { id: 'foo' })` on every fire and trusts the
+      // platform to handle replacement transparently.
+      if (opts?.id !== undefined) {
+        const priorStyleId = lookupStyleByUserId(scriptId, opts.id);
+        if (priorStyleId) {
+          unregisterStyle(priorStyleId);
+          send({ type: 'dom_remove_style', styleId: priorStyleId });
+        }
+      }
+
       const styleId = nextId('ds');
-      registerStyle(styleId, scriptId, css);
+      registerStyle(styleId, scriptId, css, opts?.id);
       send({ type: 'dom_add_style', scriptId, styleId, css });
 
       return {

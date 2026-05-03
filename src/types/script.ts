@@ -2676,6 +2676,30 @@ export interface DOMMessageInjectOptions {
   _elementId?: string;
 }
 
+/** Options for `api.ui.dom.addStyle()`. */
+export interface DOMAddStyleOptions {
+  /**
+   * Optional script-scoped identifier for this stylesheet. When provided,
+   * a subsequent `addStyle` call with the same `id` (within this script)
+   * removes the prior stylesheet before injecting the new one. Without
+   * `id`, every call adds a fresh stylesheet — the original accumulating
+   * behaviour, useful for situations where multiple cumulative
+   * stylesheets are intentional.
+   *
+   * Common pattern (dev iteration): give your "primary" stylesheet a
+   * stable id and call `addStyle(css, { id: 'main' })` on every script
+   * fire. Repeated calls trivially replace the prior — no `globalThis`
+   * flag bookkeeping, no version constants, no extension toggle when
+   * you edit the CSS and save.
+   *
+   * Ids are scoped per scriptId — different scripts can use the same
+   * `id` value without colliding. The id namespace is independent of
+   * `DOMInjectOptions.id` and `DOMMessageInjectOptions.id` (those scope
+   * element injections, this scopes stylesheets).
+   */
+  id?: string;
+}
+
 /** Serialized subset of a DOM event, safe to transfer across the message channel. */
 export interface DOMEventData {
   /** Event type (e.g. 'click', 'input', 'change'). */
@@ -2805,8 +2829,13 @@ export interface DOMAPI {
   /**
    * Add a `<style>` element scoped to this script via `@scope`.
    * Returns an object with a `remove()` method to remove the style.
+   *
+   * When `opts.id` is provided, repeated `addStyle` calls with the same
+   * id (within this script) replace the prior stylesheet rather than
+   * accumulating. Without `id`, every call injects a new stylesheet.
+   * See `DOMAddStyleOptions.id` for the use-case rationale.
    */
-  addStyle(css: string): { remove(): void };
+  addStyle(css: string, opts?: DOMAddStyleOptions): { remove(): void };
 
   /** Remove all DOM injections and styles created by this script. */
   cleanup(): void;

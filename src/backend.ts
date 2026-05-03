@@ -790,7 +790,29 @@ spindle.onFrontendMessage(async (raw, userId) => {
       }
 
       case 'update_script': {
-        const updated = await scriptStorage.updateScript(msg.id, msg.patch);
+        // v0.26.x diagnostic — log every received update_script with the patch
+        // shape + (for code patches) the code length. Helps confirm whether
+        // the frontend's saveCode IPC is reaching the backend at all.
+        const patchKeys = Object.keys(msg.patch ?? {}).join(',');
+        const codeLen = (msg.patch as { code?: string })?.code?.length ?? -1;
+        spindle.log.info(
+          `[LumiScript] update_script: id=${msg.id}, keys=[${patchKeys}]` +
+          (codeLen >= 0 ? `, codeLen=${codeLen}` : ''),
+        );
+        let updated;
+        try {
+          updated = await scriptStorage.updateScript(msg.id, msg.patch);
+        } catch (err) {
+          spindle.log.error(
+            `[LumiScript] update_script: persist FAILED for id=${msg.id}: ` +
+            `${err instanceof Error ? err.message : String(err)}`,
+          );
+          throw err;
+        }
+        spindle.log.info(
+          `[LumiScript] update_script: persisted id=${msg.id}, ` +
+          `updated.codeLen=${updated?.code?.length ?? -1}`,
+        );
         // Code-only autosave: send a single-script delta instead of broadcasting
         // all scripts' code on every keystroke after the debounce period.
         const isCodeOnly = 'code' in msg.patch && Object.keys(msg.patch).length === 1;

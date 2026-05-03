@@ -46,6 +46,18 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
   const saveTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const editorRef = useRef<any>(null);
+  // v0.26.x diagnostic — last value the user typed/pasted that hasn't been
+  // confirmed-saved (cleared in saveCode after the IPC fires). Used by the
+  // unmount-flush effect so closing the modal before the autosave debounce
+  // fires still persists the latest content.
+  const pendingValueRef = useRef<string | null>(null);
+  // Stable refs for the unmount cleanup — captures the *latest* script.id
+  // and sendToBackend even if the prop changes during the editor's lifetime
+  // (e.g. user switches scripts via the sidebar without unmounting the editor).
+  const scriptIdRef = useRef(script.id);
+  const sendToBackendRef = useRef(sendToBackend);
+  useEffect(() => { scriptIdRef.current = script.id; }, [script.id]);
+  useEffect(() => { sendToBackendRef.current = sendToBackend; }, [sendToBackend]);
 
   // Sync local code when script changes; also dismiss any pending dangerous confirm.
   useEffect(() => {
@@ -54,6 +66,36 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
     setRenameValue(script.name);
     setConfirmDangerous(false);
   }, [script.id, script.code, script.name]);
+
+  // v0.26.x diagnostic + safety net — on unmount, flush any pending autosave.
+  // Without this, closing the modal within `autosaveDebounceMs` of the last
+  // edit would lose the change (the timer fires after unmount, but its
+  // closure references the now-stale saveCode). The pendingValueRef path
+  // sends the IPC directly using the latest scriptIdRef + sendToBackendRef.
+  useEffect(() => {
+    return () => {
+      if (saveTimeout.current) {
+        clearTimeout(saveTimeout.current);
+        saveTimeout.current = null;
+      }
+      const pending = pendingValueRef.current;
+      if (pending !== null) {
+        // eslint-disable-next-line no-console
+        console.log(`[LumiScript] ScriptEditor unmount: flushing pending save (script=${scriptIdRef.current}, len=${pending.length})`);
+        try {
+          sendToBackendRef.current({
+            type: 'update_script',
+            id: scriptIdRef.current,
+            patch: { code: pending },
+          });
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.error('[LumiScript] ScriptEditor unmount-flush failed:', err);
+        }
+        pendingValueRef.current = null;
+      }
+    };
+  }, []);  // mount/unmount only — refs hold the latest values
 
   // Immediately refresh context when a different script is opened.
   useEffect(() => {
@@ -71,7 +113,10 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
   }, [sendToBackend]);
 
   const saveCode = useCallback((code: string) => {
+    // eslint-disable-next-line no-console
+    console.log(`[LumiScript] saveCode: script=${script.id}, len=${code.length}, head="${code.slice(0, 40).replace(/\n/g, '\\n')}"`);
     sendToBackend({ type: 'update_script', id: script.id, patch: { code } });
+    pendingValueRef.current = null;
     setUnsaved(false);
   }, [script.id, sendToBackend]);
 
@@ -79,6 +124,7 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
     if (value === undefined) return;
     setLocalCode(value);
     setUnsaved(value !== script.code);
+    pendingValueRef.current = value;  // remember latest for unmount-flush
     if (saveTimeout.current) clearTimeout(saveTimeout.current);
     saveTimeout.current = setTimeout(() => saveCode(value), autosaveDebounceMs);
   };

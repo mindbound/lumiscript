@@ -262,3 +262,77 @@ describe('api.db.collection: schemaless collection (no validation)', () => {
     await insertPromise;
   });
 });
+
+// ─── function-predicate guard ───────────────────────────────────────────────
+//
+// Same architectural class as the Zod-schema strip: function references can't
+// cross the script-runner subprocess IPC boundary (structured-clone rejects
+// them). We could let the cryptic "DataCloneError: The object can not be
+// cloned" surface — but that's the kind of error that takes a full debug
+// session through the IPC stack to diagnose. Instead, the proxy detects
+// function filters at call time and throws a clear, actionable error
+// pointing at the alternative API surfaces. These tests pin that behaviour.
+
+describe('api.db.collection: function-predicate guard', () => {
+  async function makeCollection() {
+    const h = makeHarness();
+    const collectionPromise = h.proxy.api.db.collection('items', { scope: 'chat' });
+    h.respond(h.apiRequests('db.collection')[0]!.requestId, fakeCollectionRef());
+    const collection = await collectionPromise;
+    return { h, collection };
+  }
+
+  test('delete rejects function predicate with actionable message', async () => {
+    const { h, collection } = await makeCollection();
+    expect(() => collection.delete(() => true)).toThrow('api.db.delete: function predicates can\'t cross');
+    expect(() => collection.delete(() => true)).toThrow('clear()');
+    expect(h.apiRequests('delete').length).toBe(0);
+  });
+
+  test('update rejects function predicate with actionable message', async () => {
+    const { h, collection } = await makeCollection();
+    expect(() => collection.update(() => true, { x: 1 })).toThrow('api.db.update: function predicates can\'t cross');
+    expect(h.apiRequests('update').length).toBe(0);
+  });
+
+  test('find rejects function predicate with actionable message', async () => {
+    const { h, collection } = await makeCollection();
+    expect(() => collection.find((r) => Boolean(r))).toThrow('api.db.find: function predicates can\'t cross');
+    expect(() => collection.find((r) => Boolean(r))).toThrow('apply your predicate locally');
+    expect(h.apiRequests('find').length).toBe(0);
+  });
+
+  test('findOne rejects function predicate with actionable message', async () => {
+    const { h, collection } = await makeCollection();
+    expect(() => collection.findOne((r) => Boolean(r))).toThrow('api.db.findOne: function predicates can\'t cross');
+    expect(h.apiRequests('findOne').length).toBe(0);
+  });
+
+  test('count rejects function predicate with actionable message', async () => {
+    const { h, collection } = await makeCollection();
+    expect(() => collection.count(() => true)).toThrow('api.db.count: function predicates can\'t cross');
+    expect(h.apiRequests('count').length).toBe(0);
+  });
+
+  test('clear() — the recommended replacement — dispatches normally', async () => {
+    const { h, collection } = await makeCollection();
+    void collection.clear();
+    expect(h.apiRequests('clear').length).toBe(1);
+  });
+
+  test('object filter dispatches normally', async () => {
+    const { h, collection } = await makeCollection();
+    void collection.delete({ deleted: true });
+    expect(h.apiRequests('delete').length).toBe(1);
+    const req = h.apiRequests('delete')[0]!;
+    expect((req.args as unknown[])[0]).toEqual({ deleted: true });
+  });
+
+  test('undefined filter (find/count) dispatches normally', async () => {
+    const { h, collection } = await makeCollection();
+    void collection.find();
+    void collection.count();
+    expect(h.apiRequests('find').length).toBe(1);
+    expect(h.apiRequests('count').length).toBe(1);
+  });
+});

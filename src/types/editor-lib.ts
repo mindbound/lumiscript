@@ -930,8 +930,13 @@ interface UIAPI {
      * Add a style element scoped to this script via CSS at-scope.
      * Returns an object with remove() to remove the style.
      * Use --lumiverse-* CSS variables for theming.
+     *
+     * When \`opts.id\` is provided, repeated calls with the same id
+     * replace the prior stylesheet rather than accumulating — useful
+     * for dev iteration loops where you edit the CSS and re-run
+     * without manual cleanup.
      */
-    addStyle(css: string): { remove(): void };
+    addStyle(css: string, opts?: DOMAddStyleOptions): { remove(): void };
 
     /** Remove all DOM injections and styles created by this script. */
     cleanup(): void;
@@ -955,6 +960,18 @@ interface DOMMessageInjectOptions {
   /** Semantic position: 'footer' (default, end of bubble) or 'header' (start of bubble). */
   position?: 'header' | 'footer';
   /** Stable ID for idempotent injection. */
+  id?: string;
+}
+
+/** Options for api.ui.dom.addStyle(css, opts?). */
+interface DOMAddStyleOptions {
+  /**
+   * Optional script-scoped identifier. Repeated \`addStyle\` calls with
+   * the same id (within this script) replace the prior stylesheet rather
+   * than accumulating. Useful for dev iteration: \`addStyle(css, { id: 'main' })\`
+   * on every fire trivially reflects edits without globalThis-flag
+   * bookkeeping or extension toggles. Ids are scoped per scriptId.
+   */
   id?: string;
 }
 

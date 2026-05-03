@@ -272,6 +272,101 @@ describe('addStyle', () => {
     const msgs = messagesOfType('dom_remove_style');
     expect(msgs).toHaveLength(1);
   });
+
+  // v0.26.x — replace-by-id. Repeated `addStyle(css, { id })` calls with
+  // the same id (within a script) auto-remove the prior stylesheet before
+  // injecting the new one. Lets user scripts edit-and-rerun styles
+  // without manual `globalThis` flag bookkeeping or extension toggles.
+  describe('opts.id replace-by-id semantics', () => {
+    test('first call with id behaves like a normal addStyle', () => {
+      const dom = buildDOMAPI(createTestDeps());
+      dom.addStyle('.foo { color: red; }', { id: 'main' });
+
+      const adds    = messagesOfType('dom_add_style');
+      const removes = messagesOfType('dom_remove_style');
+      expect(adds).toHaveLength(1);
+      expect(adds[0].css).toBe('.foo { color: red; }');
+      expect(removes).toHaveLength(0);
+    });
+
+    test('second call with same id removes the first then adds the second', () => {
+      const dom = buildDOMAPI(createTestDeps());
+      dom.addStyle('.foo { color: red; }',  { id: 'main' });
+      dom.addStyle('.foo { color: blue; }', { id: 'main' });
+
+      const adds    = messagesOfType('dom_add_style');
+      const removes = messagesOfType('dom_remove_style');
+      expect(adds).toHaveLength(2);
+      expect(adds[0].css).toBe('.foo { color: red; }');
+      expect(adds[1].css).toBe('.foo { color: blue; }');
+      expect(removes).toHaveLength(1);
+      // The remove targets the first style's id.
+      expect(removes[0].styleId).toBe(adds[0].styleId);
+    });
+
+    test('different ids coexist independently', () => {
+      const dom = buildDOMAPI(createTestDeps());
+      dom.addStyle('.a {}', { id: 'main' });
+      dom.addStyle('.b {}', { id: 'overlay' });
+      dom.addStyle('.c {}', { id: 'main' });    // replaces .a only
+      dom.addStyle('.d {}', { id: 'overlay' }); // replaces .b only
+
+      const adds    = messagesOfType('dom_add_style');
+      const removes = messagesOfType('dom_remove_style');
+      expect(adds).toHaveLength(4);
+      expect(adds.map((m) => m.css)).toEqual(['.a {}', '.b {}', '.c {}', '.d {}']);
+      // Two removes — one for .a (when .c arrives), one for .b (when .d arrives).
+      expect(removes).toHaveLength(2);
+      expect(removes[0].styleId).toBe(adds[0].styleId);  // .a
+      expect(removes[1].styleId).toBe(adds[1].styleId);  // .b
+    });
+
+    test('addStyle without id continues to accumulate (unchanged behaviour)', () => {
+      const dom = buildDOMAPI(createTestDeps());
+      dom.addStyle('.a {}');
+      dom.addStyle('.b {}');
+      dom.addStyle('.c {}');
+
+      const adds    = messagesOfType('dom_add_style');
+      const removes = messagesOfType('dom_remove_style');
+      expect(adds).toHaveLength(3);
+      expect(removes).toHaveLength(0);
+    });
+
+    test('handle.remove() on an id-tracked style still works', () => {
+      const dom = buildDOMAPI(createTestDeps());
+      const handle = dom.addStyle('.foo {}', { id: 'main' });
+      handle.remove();
+
+      const removes = messagesOfType('dom_remove_style');
+      expect(removes).toHaveLength(1);
+
+      // After explicit remove, the next addStyle({id:'main'}) has no prior to remove.
+      dom.addStyle('.bar {}', { id: 'main' });
+      const removesAfter = messagesOfType('dom_remove_style');
+      expect(removesAfter).toHaveLength(1);  // unchanged — no second remove fired
+    });
+
+    test('id is scoped per scriptId — two scripts with same id do not collide', () => {
+      const domA = buildDOMAPI(createTestDeps({ script: { id: 'script-A' } }));
+      const domB = buildDOMAPI(createTestDeps({ script: { id: 'script-B' } }));
+
+      domA.addStyle('.a {}', { id: 'shared' });
+      domB.addStyle('.b {}', { id: 'shared' });
+      // Each script has its own .shared registration; no cross-script removal.
+      const removes = messagesOfType('dom_remove_style');
+      expect(removes).toHaveLength(0);
+
+      // Now re-add in script A — should remove A's prior, not B's.
+      domA.addStyle('.a2 {}', { id: 'shared' });
+      const adds         = messagesOfType('dom_add_style');
+      const removesAfter = messagesOfType('dom_remove_style');
+      expect(adds).toHaveLength(3);
+      expect(removesAfter).toHaveLength(1);
+      // The remove targets script-A's first style.
+      expect(removesAfter[0].styleId).toBe(adds[0].styleId);
+    });
+  });
 });
 
 // ─── cleanup ────────────────────────────────────────────────────────────────

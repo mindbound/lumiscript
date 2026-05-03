@@ -127,12 +127,17 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
 
       switch (msg.type) {
         case 'scripts_updated':
+          // eslint-disable-next-line no-console
+          console.log(`[LumiScript] scripts_updated: ${msg.scripts.length} script(s)`);
           setScripts(msg.scripts);
           break;
 
-        case 'script_patched':
+        case 'script_patched': {
+          // eslint-disable-next-line no-console
+          console.log(`[LumiScript] script_patched: id=${msg.script.id}, codeLen=${msg.script.code?.length ?? -1}`);
           setScripts(prev => prev.map(s => s.id === msg.script.id ? msg.script : s));
           break;
+        }
 
         case 'settings_updated':
           setSettings(msg.settings);

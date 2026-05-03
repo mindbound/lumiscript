@@ -86,6 +86,14 @@ export interface DOMStyleEntry {
    * `dom_add_style` with the cached CSS when the frontend reconnects.
    */
   css?: string;
+  /**
+   * Optional user-supplied id from `addStyle(css, { id })`. Scoped per
+   * scriptId — different scripts can use the same `userId` without
+   * colliding. When set, repeated `addStyle` calls with the same
+   * `(scriptId, userId)` replace the prior stylesheet rather than
+   * accumulating. Lookup is via `lookupStyleByUserId(scriptId, userId)`.
+   */
+  userId?: string;
 }
 
 /**
@@ -309,16 +317,50 @@ export function dispatchEvent(listenerId: string, data: DOMEventData): void {
 // ─── Style operations ────────────────────────────────────────────────────────
 
 /**
- * Register a `<style>` injection. Pass `css` to enable replay on frontend
- * reconnect — without it the style cannot be reconstructed after refresh.
- * The param is optional for backward-compat with earlier call sites.
+ * Register a `<style>` injection.
+ *
+ * @param styleId   Internal style id (host-allocated; opaque to user code).
+ * @param scriptId  Owning script. Cleanup is per-script via `cleanupScript`.
+ * @param css       The CSS string. Pass to enable replay on frontend reconnect
+ *                  — without it the style cannot be reconstructed after refresh.
+ *                  Optional for backward-compat with earlier call sites.
+ * @param userId    Optional user-supplied id from `addStyle(css, { id })`.
+ *                  Scoped per scriptId. When set, the caller is expected to
+ *                  have already removed any prior style with the same
+ *                  `(scriptId, userId)` via `lookupStyleByUserId` +
+ *                  `unregisterStyle` — `registerStyle` does not enforce
+ *                  uniqueness on its own.
  */
-export function registerStyle(styleId: string, scriptId: string, css?: string): void {
-  styles.set(styleId, { styleId, scriptId, css });
+export function registerStyle(
+  styleId:  string,
+  scriptId: string,
+  css?:     string,
+  userId?:  string,
+): void {
+  styles.set(styleId, { styleId, scriptId, css, userId });
 }
 
 export function unregisterStyle(styleId: string): void {
   styles.delete(styleId);
+}
+
+/**
+ * Find the styleId for a `(scriptId, userId)` pair. Returns null when no
+ * such style is registered. Used by `api.ui.dom.addStyle` to implement
+ * replace-by-id semantics: if the caller supplies an `id`, look up the
+ * prior styleId, unregister it, then register the new one.
+ *
+ * Linear scan over `styles` — fine for the expected scale (a single
+ * script rarely registers more than a handful of stylesheets). Promote
+ * to a dedicated index if it ever becomes a hot path.
+ */
+export function lookupStyleByUserId(scriptId: string, userId: string): string | null {
+  for (const entry of styles.values()) {
+    if (entry.scriptId === scriptId && entry.userId === userId) {
+      return entry.styleId;
+    }
+  }
+  return null;
 }
 
 // ─── Per-script cleanup ──────────────────────────────────────────────────────
