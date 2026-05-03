@@ -424,6 +424,28 @@ export interface ApiProxyRequest {
   targetHandle?: HandleRef;
   /** True if `opts.signal` was supplied; child may emit AbortRequest later. */
   hasSignal?:    boolean;
+  /**
+   * v0.26.1 — diagnostic-only. Records which of the proxy's three-tier
+   * runId-resolution fallbacks produced `runId` at dispatch time:
+   *
+   *   - `'context'`  — `runIdContext.getStore()` (AsyncLocalStorage). Dispatch
+   *     was issued inside a handler-fire (`runIdContext.run(handler-…, …)`)
+   *     OR inside the script body wrapped by AsyncLocalStorage propagation.
+   *   - `'latest'`   — `latestRunIdByScript.get(scriptId)`. Dispatch was
+   *     issued OUTSIDE any runIdContext.run, falling through to the per-
+   *     script latest-run map. Typical for cross-run handle method calls
+   *     and detached IIFEs from broadcast handlers.
+   *   - `'ctx'`      — the originating proxy's `ctx.runId`. Reached only
+   *     when no runIdContext is active AND latestRunIdByScript hasn't
+   *     been populated (essentially defensive — should be very rare).
+   *
+   * Surfaced in the parent's `RunCompletedError` message when a late
+   * dispatch arrives, so post-mortem analysis can pin the leak class
+   * without re-instrumenting the proxy. Optional — older parents that
+   * don't read this field are forward-compatible (the parent treats
+   * `undefined` as "unknown source").
+   */
+  _runIdSource?: 'context' | 'latest' | 'ctx';
 }
 
 /**

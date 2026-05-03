@@ -45,6 +45,9 @@ import {
   listEndpointsByScriptId as rpcEndpointsByScript,
   diffAndCleanStaleEndpoints,
 } from './engine/rpc-store.js';
+import {
+  clearByScriptId as clearCollectionHandleCacheByScriptId,
+} from './engine/collection-handle-cache.js';
 import { logCleanup } from './engine/cleanup-log.js';
 import { dispatchToolInvocation } from './engine/tool-invocation.js';
 import { dispatchEvent as dispatchDOMEvent, cleanupScript as cleanupDOMScript } from './engine/dom-registry.js';
@@ -847,6 +850,10 @@ spindle.onFrontendMessage(async (raw, userId) => {
           for (const endpoint of clearedRpcEndpoints) {
             try { spindle.rpcPool.unregister(endpoint); } catch { /* swallow */ }
           }
+          // v0.26.1 — drop the per-script Collection dedup cache. The
+          // wrappers themselves are then GC-able once the dispatcher's
+          // persistentHandles + persistentObjToHandleId entries clear.
+          clearCollectionHandleCacheByScriptId(msg.id);
           logCleanup('tool',  'disabled', disabledName, clearedTools);
           logCleanup('macro', 'disabled', disabledName, clearedMacros);
           logCleanup('rpc',   'disabled', disabledName, clearedRpcEndpoints);
@@ -928,6 +935,9 @@ spindle.onFrontendMessage(async (raw, userId) => {
         for (const endpoint of clearedRpcEndpoints) {
           try { spindle.rpcPool.unregister(endpoint); } catch { /* swallow */ }
         }
+        // v0.26.1 — drop the per-script Collection dedup cache (see matching
+        // block in `update_script` for context).
+        clearCollectionHandleCacheByScriptId(msg.id);
         logCleanup('tool',  'deleted', deletedName, clearedTools);
         logCleanup('macro', 'deleted', deletedName, clearedMacros);
         logCleanup('rpc',   'deleted', deletedName, clearedRpcEndpoints);

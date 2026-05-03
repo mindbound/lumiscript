@@ -94,14 +94,56 @@ export function buildMacrosAPI(deps: APIBuildDeps): import('../../types/script.j
       // in `src/macros.ts` already rely on this, proven in production. A
       // handler-less (push-mode) registration passes an empty string, which
       // is the documented push-mode shape.
-      spindle.registerMacro({
-        name,
-        category,
-        description: def.description,
-        returnType:  def.returnType,
-        args:        def.args,
-        handler:     (handler ?? '') as any,
-      });
+      //
+      // ─── v0.26.1 — non-committing-resolve race tolerance ────────────────
+      //
+      // Spindle blocks `registerMacro` with an error matching
+      // `'non-committing macro resolution'` when ANY caller (another
+      // LumiScript user-script, or Lumiverse's own prompt-assembly path)
+      // is concurrently running a `commit:false` macro resolve. The block
+      // is temporary — the prior registration stays active on Spindle's
+      // side, so the macro continues to fire correctly.
+      //
+      // Pre-fix: the throw propagated through this method, skipping
+      // `macrosRegisteredThisRun.add(name)`. The end-of-run stale-diff
+      // (`diffAndCleanStaleMacros` in trigger-registry) then saw the macro
+      // as "registered before the run, not re-registered during it"
+      // → DROPPED it from BOTH LumiScript's store AND Spindle's macro
+      // engine via `spindle.unregisterMacro`. Concrete repro: the tracker
+      // pattern where one script registers `{{tracker}}` and a co-script
+      // (tracker-ui) resolves it via `commit:false`. After every
+      // generation the macro got orphaned, leaving co-script resolves
+      // returning the literal `{{tracker}}` text.
+      //
+      // Resolution: catch the specific `'non-committing macro resolution'`
+      // signature, log at info-level (the server log audit trail still
+      // captures the race; warn-level would spam normal generation), and
+      // FALL THROUGH so `macrosRegisteredThisRun` sees the name. The
+      // prior Spindle-side registration is still in force — the macro
+      // continues to fire — and the stale-diff no longer drops it.
+      //
+      // Other thrown errors (reserved name, etc.) propagate normally.
+      try {
+        spindle.registerMacro({
+          name,
+          category,
+          description: def.description,
+          returnType:  def.returnType,
+          args:        def.args,
+          handler:     (handler ?? '') as any,
+        });
+      } catch (err) {
+        const msg = String((err as { message?: unknown })?.message ?? '');
+        if (msg.includes('non-committing macro resolution')) {
+          spindle.log.info(
+            `[LumiScript] api.macros.register("${name}"): spindle.registerMacro ` +
+            `temporarily blocked by concurrent commit:false resolve — prior ` +
+            `registration kept; this update will land on the next call.`,
+          );
+        } else {
+          throw err;
+        }
+      }
 
       // Track for the post-execution stale-diff (parallel to tools).
       macrosRegisteredThisRun?.add(name);

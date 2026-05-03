@@ -666,12 +666,30 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
    *      preamble — so this fallback is essentially defensive only).
    */
   function dispatch(method: string, args: unknown[]): Promise<unknown> {
-    const runId =
-      runIdContext.getStore() ??
-      latestRunIdByScript.get(ctx.scriptId) ??
-      ctx.runId;
+    // v0.26.1 — track which tier resolved the runId so the late-dispatch
+    // error can identify the leak class (handler-fire context vs. cross-run
+    // latest-run fallback vs. originating-proxy fallback). See
+    // `ApiProxyRequest._runIdSource` JSDoc.
+    const ctxRunId = runIdContext.getStore();
+    const latestRunId = latestRunIdByScript.get(ctx.scriptId);
+    const runIdSource: 'context' | 'latest' | 'ctx' =
+      ctxRunId !== undefined ? 'context'
+      : latestRunId !== undefined ? 'latest'
+      : 'ctx';
+    const runId = ctxRunId ?? latestRunId ?? ctx.runId;
     const requestId = generateRequestId(runId);
-    return new Promise<unknown>((resolve, reject) => {
+    // v0.26.1 — wrap in trackChain so unawaited dispatches still get drained
+    // by flush() before run-result fires. Pre-fix: only `mkSyncVoidFireForget`
+    // and the explicit `trackChain(dispatch(...).catch(...))` call sites were
+    // tracked. A user-script forgetting `await api.foo(...)` (or escaping the
+    // await chain via .forEach + bare promise return, etc.) would leak the
+    // dispatch past run-result, surfacing as `RunCompletedError` when a
+    // later dispatchRunScript dropped the activeRun. Auto-tracking every
+    // dispatch makes the script-body lifetime invariant strict: no IPC
+    // initiated under this proxy can outlive `flush()`. Awaited code is
+    // unaffected — the user's await and flush() wait on the same Promise,
+    // so total time = max(user-await, flush) = same as before.
+    const p = new Promise<unknown>((resolve, reject) => {
       pending.set(requestId, { resolve, reject });
       const msg: ApiProxyRequest = {
         type:     'api-request',
@@ -680,6 +698,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
         scriptId: ctx.scriptId,
         method,
         args,
+        _runIdSource: runIdSource,
       };
       try {
         ctx.send(msg);
@@ -688,6 +707,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
         reject(err instanceof Error ? err : new Error(String(err)));
       }
     });
+    return trackChain(p);
   }
 
   /**
@@ -717,12 +737,16 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
   ): Promise<unknown> {
     // Same three-tier runId resolution as `dispatch` — see the JSDoc
     // there for the cross-run-handle rationale.
-    const runId =
-      runIdContext.getStore() ??
-      latestRunIdByScript.get(ctx.scriptId) ??
-      ctx.runId;
+    const ctxRunId = runIdContext.getStore();
+    const latestRunId = latestRunIdByScript.get(ctx.scriptId);
+    const runIdSource: 'context' | 'latest' | 'ctx' =
+      ctxRunId !== undefined ? 'context'
+      : latestRunId !== undefined ? 'latest'
+      : 'ctx';
+    const runId = ctxRunId ?? latestRunId ?? ctx.runId;
     const requestId = generateRequestId(runId);
-    return new Promise<unknown>((resolve, reject) => {
+    // v0.26.1 — wrap in trackChain. See `dispatch` for the rationale.
+    const p = new Promise<unknown>((resolve, reject) => {
       pending.set(requestId, { resolve, reject });
       const msg: ApiProxyRequest = {
         type:     'api-request',
@@ -732,6 +756,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
         method,
         args,
         hasSignal: signal !== undefined,
+        _runIdSource: runIdSource,
       };
       try {
         ctx.send(msg);
@@ -757,6 +782,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
         signal.addEventListener('abort', sendAbort, { once: true });
       }
     });
+    return trackChain(p);
   }
 
   /**
@@ -1002,9 +1028,17 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
     method: string,
     args: unknown[],
   ): Promise<unknown> {
-    const runId = runIdContext.getStore() ?? ctx.runId;
+    // dispatchOnHandle uses two-tier resolution (no `latestRunIdByScript`
+    // middle tier — handles dispatch under their originating proxy's
+    // run by design). The diagnostic discriminant captures which tier
+    // resolved.
+    const ctxRunId = runIdContext.getStore();
+    const runIdSource: 'context' | 'ctx' =
+      ctxRunId !== undefined ? 'context' : 'ctx';
+    const runId = ctxRunId ?? ctx.runId;
     const requestId = generateRequestId(runId);
-    return new Promise<unknown>((resolve, reject) => {
+    // v0.26.1 — wrap in trackChain. See `dispatch` for the rationale.
+    const p = new Promise<unknown>((resolve, reject) => {
       pending.set(requestId, { resolve, reject });
       const msg: ApiProxyRequest = {
         type:     'api-request',
@@ -1014,6 +1048,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
         method,
         args,
         targetHandle,
+        _runIdSource: runIdSource,
       };
       try {
         ctx.send(msg);
@@ -1022,20 +1057,55 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
         reject(err instanceof Error ? err : new Error(String(err)));
       }
     });
+    return trackChain(p);
   }
 
   /**
    * Wrap a `HandleRef` returned by `api.db.collection` in a `Collection<T>`
    * shape. Each method dispatches via `dispatchOnHandle`. The user script
    * sees a normal Collection; IPC layer is invisible.
+   *
+   * Schema handling (script-runner / IPC path): Zod schemas can't survive
+   * Bun's structured-clone — class-instance methods are stripped, so the
+   * parent never receives a usable `schema.parse()`. We move validation
+   * child-side: the user's Zod schema is captured in this closure when
+   * `db.collection({ schema })` is called, and we validate at every
+   * insert/insertMany boundary BEFORE crossing IPC. The parent-side
+   * `DbStore` runs without a schema in this path; that's fine — validation
+   * already happened upstream and parent just persists.
+   *
+   * Update validation is best-effort: we use `schema.partial().parse(patch)`
+   * for `ZodObject` schemas (catches a bad value in any provided field),
+   * skip otherwise. Weaker than the in-process executor's "validate the
+   * merged record" but covers the common case. Patch shapes that pass
+   * `partial()` but produce an invalid merged record persist without
+   * detection; flag this in user-facing docs when the update path matters.
    */
-  function buildCollectionProxy<T extends DbRecord>(handleRef: HandleRef): Collection<T> {
-    return {
-      insert: (record) =>
-        dispatchOnHandle(handleRef, 'insert', [record]) as Promise<T>,
+  function buildCollectionProxy<T extends DbRecord>(
+    handleRef: HandleRef,
+    schema?:   z.ZodType<unknown>,
+  ): Collection<T> {
+    function validateOnInsert(record: unknown, context: string): void {
+      if (!schema) return;
+      try { schema.parse(record); }
+      catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new Error(`api.db: schema validation failed on ${context}: ${msg}`);
+      }
+    }
 
-      insertMany: (records) =>
-        dispatchOnHandle(handleRef, 'insertMany', [records]) as Promise<T[]>,
+    return {
+      insert: (record) => {
+        validateOnInsert(record, 'insert');
+        return dispatchOnHandle(handleRef, 'insert', [record]) as Promise<T>;
+      },
+
+      insertMany: (records) => {
+        if (Array.isArray(records)) {
+          records.forEach((r, i) => validateOnInsert(r, `insertMany[${i}]`));
+        }
+        return dispatchOnHandle(handleRef, 'insertMany', [records]) as Promise<T[]>;
+      },
 
       find: (filter?: DbFilter<T>) =>
         dispatchOnHandle(handleRef, 'find', filter !== undefined ? [filter] : []) as Promise<T[]>,
@@ -1043,8 +1113,19 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
       findOne: (filter: DbFilter<T>) =>
         dispatchOnHandle(handleRef, 'findOne', [filter]) as Promise<T | null>,
 
-      update: (filter: DbFilter<T>, patch: Partial<T>) =>
-        dispatchOnHandle(handleRef, 'update', [filter, patch]) as Promise<number>,
+      update: (filter: DbFilter<T>, patch: Partial<T>) => {
+        // Best-effort patch validation: schema.partial() for ZodObject;
+        // skip otherwise. See the function-level JSDoc above for the
+        // weaker-than-canonical caveat.
+        if (schema instanceof z.ZodObject) {
+          try { schema.partial().parse(patch); }
+          catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            throw new Error(`api.db: schema validation failed on update (patch): ${msg}`);
+          }
+        }
+        return dispatchOnHandle(handleRef, 'update', [filter, patch]) as Promise<number>;
+      },
 
       delete: (filter: DbFilter<T>) =>
         dispatchOnHandle(handleRef, 'delete', [filter]) as Promise<number>,
@@ -2158,14 +2239,28 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
       name: string,
       opts?: Parameters<DbAPI['collection']>[1],
     ): Promise<Collection<T>> => {
-      const ref = await dispatch('db.collection', [name, opts]);
+      // Detect + strip Zod schema before IPC. A Zod schema is a class
+      // instance with method properties (`.parse`, etc.), which Bun's
+      // structured-clone serialiser drops — historically surfacing as
+      // `DataCloneError: The object can not be cloned.` Capture it in
+      // this closure so `buildCollectionProxy` can validate child-side
+      // at insert/insertMany/update boundaries; the parent-side
+      // canonical receives schemaless opts and skips its own schema
+      // validation pass.
+      const userSchema = opts?.schema instanceof z.ZodType
+        ? (opts.schema as z.ZodType<unknown>)
+        : undefined;
+      const optsForIpc = userSchema
+        ? Object.fromEntries(Object.entries(opts!).filter(([k]) => k !== 'schema'))
+        : opts;
+      const ref = await dispatch('db.collection', [name, optsForIpc]);
       if (!isHandleRef(ref) || ref.kind !== 'Collection') {
         throw new Error(
           'api.db.collection: expected HandleRef of kind "Collection" from host, got: ' +
           JSON.stringify(ref).slice(0, 200),
         );
       }
-      return buildCollectionProxy<T>(ref);
+      return buildCollectionProxy<T>(ref, userSchema);
     },
 
     /* Value-returning methods — standard dispatch. */

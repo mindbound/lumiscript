@@ -49,6 +49,10 @@ import {
   type SizeWarnCallback,
 } from '../db-store.js';
 import { emit as busEmit } from '../broadcast-bus.js';
+import {
+  getCachedCollection,
+  setCachedCollection,
+} from '../collection-handle-cache.js';
 
 // ─── Storage adapter ─────────────────────────────────────────────────────────
 
@@ -219,6 +223,21 @@ export function buildDbAPI(deps: APIBuildDeps): DbAPI {
       // deep inside a later method.
       const path = resolvePath(scope, scopeContext(), name);
 
+      // v0.26.1 — dedup by (scope, path) per-script. Pre-fix, every call
+      // returned a fresh Collection wrapper, the dispatcher registered it
+      // as a fresh persistent handle, and the per-script `persistentHandles`
+      // table grew unbounded across long sessions. Now: same scope + path
+      // → same wrapper → same handle id (via `registerHandle`'s obj-reuse
+      // dedup). The schema from the FIRST call wins; subsequent calls with
+      // a different `opts.schema` ignore the new schema (documented as a
+      // user-side concern: inconsistent schemas across calls is a script
+      // bug, surfacing via "first wins" is more useful than silently
+      // diverging wrappers).
+      const cached = getCachedCollection(script.id, scope, path);
+      if (cached) {
+        return cached as Collection<T>;
+      }
+
       busEmit('ls:collection:created', {
         name,
         scope,
@@ -226,7 +245,9 @@ export function buildDbAPI(deps: APIBuildDeps): DbAPI {
         path,
       });
 
-      return makeCollection<T>(name, scope, path, opts?.schema);
+      const col = makeCollection<T>(name, scope, path, opts?.schema);
+      setCachedCollection(script.id, scope, path, col);
+      return col;
     },
 
     async list(scope?: DbScope): Promise<string[]> {

@@ -70,12 +70,37 @@ const HANDLE_RETURNING_METHODS: Readonly<Record<string, HandleKind>> = {
  * error.
  */
 export const HANDLE_KIND_LIFECYCLE: Readonly<Record<HandleKind, 'transient' | 'persistent'>> = {
-  // Transient — typical "open, use inline, drop" pattern
-  Collection:                 'transient',
-
   // Persistent — registered once, lives across multiple trigger runs of the
   // same script. Cleanup tied to script-unregister via clearByScriptId
   // (Phase 9 integrates these into the existing patterns).
+  //
+  // ─── v0.26.1 — Collection promoted from transient to persistent ────────
+  //
+  // Originally `Collection` was transient — tied to the activeRun that
+  // created it. That worked for the simple "open, use inline, drop" pattern
+  // BUT broke any usage where a handle outlives its originating run:
+  //
+  //   1. Cross-run handle storage on `globalThis` (a known dev pattern in
+  //      tracker-style scripts).
+  //   2. Stale-`latest` race: a `db.collection` create issued under a stale
+  //      runId resolved via `latestRunIdByScript` could land on the parent
+  //      AFTER `dispatchRunScript` for a follow-up run had dropped the
+  //      originating activeRun. Even with the `_runIdSource='latest'`
+  //      fallback in `handleApiRequest`, the resulting handle's id keeps
+  //      the stale runId prefix; subsequent `dispatchOnHandle` calls under
+  //      `_runIdSource='ctx'` (the proxy's originating-run fallback) then
+  //      can't be re-routed (handle scoping requires the originating run).
+  //
+  // Collection's underlying state is fully reconstructable from the path
+  // string — no per-run state to preserve. Promoting to persistent gives
+  // us the script-keyed handle id (`${scriptId}-h-N`), per-script
+  // persistent-table storage, and survival across run boundaries until
+  // script-unregister. Combined with the canonical's `(scope, path)`
+  // dedup (`buildDbAPI`) and the dispatcher's obj-reuse dedup
+  // (`registerHandle`), per-script handle accumulation is bounded by the
+  // number of unique collections the script touches.
+  Collection:                 'persistent',
+
   DOMHandle:                  'persistent',
   CollapsibleDOMHandle:       'persistent',
   ProgressBarHandle:          'persistent',

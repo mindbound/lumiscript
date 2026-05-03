@@ -20,6 +20,12 @@
  *     LumiScript reloads; in Phase 10 we add automatic respawn
  *
  * Architecture rationale: see `notes/step-2-design.md`.
+ *
+ * Timing-model invariants that contributors editing this file MUST internalize
+ * before adding a new register-handler kind, persistent-handle kind, or
+ * run-tracking-set surface: see `notes/step-2-timing-model.md`. The v0.26.1
+ * post-mortem (`notes/post-mortem-v0.26.1-late-ipc-bugs.md`) walks through
+ * what happens when each invariant is violated.
  */
 
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
@@ -271,6 +277,34 @@ function getOrCreatePersistentTable(scriptId: string): Map<string, HandleTableEn
     persistentHandles.set(scriptId, table);
   }
   return table;
+}
+
+// ─── v0.26.1 — per-script obj→handleId reverse map ──────────────────────────
+//
+// Persistent handles benefit from de-duplication: when the canonical
+// returns the SAME JS object for repeated `api.db.collection(...)` calls
+// (via `collection-handle-cache`), we should re-use the existing handle id
+// rather than minting a fresh one each time. Without this, the persistent
+// table accumulates many entries all pointing to the same object.
+//
+// The reverse map is keyed by scriptId (so cleanup is per-script) and
+// maps the canonical JS object to its existing handle id. Looked up at
+// the START of `registerHandle`; if hit, return the existing HandleRef.
+// Cleared on script-unregister alongside `persistentHandles`.
+//
+// Transient handles are NOT deduplicated here — each transient handle is
+// scoped to its originating run and shouldn't be shared across runs even
+// when the obj is the same. Only persistent handles enter this map.
+
+const persistentObjToHandleId = new Map<string, WeakMap<object, string>>();
+
+function getOrCreateObjReverseMap(scriptId: string): WeakMap<object, string> {
+  let map = persistentObjToHandleId.get(scriptId);
+  if (!map) {
+    map = new WeakMap<object, string>();
+    persistentObjToHandleId.set(scriptId, map);
+  }
+  return map;
 }
 
 // ─── Per-script broadcast forwarders (Phase 6) ──────────────────────────────
@@ -984,10 +1018,291 @@ const activeRuns  = new Map<string, ActiveRun>();
 // and shouldn't outlive the fire.
 const scriptBodyActiveRunByScript = new Map<string, string>();
 
+// ─── v0.26.1+ — per-run tracking-set registry ────────────────────────────────
+//
+// The trigger-registry passes per-run `Set<string>` instances for tools /
+// macros / interceptors / processors / rpc endpoints in
+// `DispatchRunScriptOpts.{tools,macros,...}RegisteredThisRun`. The canonical
+// `register` methods (e.g. `api.macros.register`) add to whichever Set was
+// installed in the api's deps — i.e., the run-specific Set captured by
+// `buildScriptAPI(script, opts)` at dispatch time.
+//
+// Stale-diff at run-end uses the same Set reference (held by trigger-
+// registry's local scope) to decide what to drop: `preRun \ registeredThisRun`.
+//
+// THE PROBLEM — late-arriving register-handler IPCs:
+//   When a register-handler IPC for run-N arrives at the parent AFTER
+//   run-N's `activeRuns` entry has been dropped (because a follow-up
+//   `dispatchRunScript` for the same script replaced it), the
+//   `activeOrLatestForScript` fallback routes the registration to run-(N+k)'s
+//   api. The canonical's register populates run-(N+k)'s tracking set —
+//   correct for that run. BUT run-N's tracking set stays empty.
+//   When run-N's stale-diff later runs (run-N's body completes, run-result
+//   arrives, executeTrigger resumes), it operates on its OWN local Set
+//   reference and sees no registration for the macro/tool/etc. that the
+//   user-script's body actually did register. Stale-diff drops it from
+//   the store and `spindle.unregisterMacro`s it.
+//
+// THE FIX:
+//   This map exposes per-runId tracking sets so the fallback path in
+//   `handleRegisterHandler` can update the originating run's sets in
+//   addition to the fallback target's. Result: run-N's stale-diff sees
+//   the macro as registered-this-run and skips it.
+//
+// LIFECYCLE:
+//   - Populated in `dispatchRunScript` when `opts.{X}RegisteredThisRun`
+//     are supplied.
+//   - Read by `handleRegisterHandler` cases on the fallback path (when
+//     `activeOrLatestForScript` returned a different run than `msg.runId`).
+//   - Cleaned up on `unregisterScriptFromChild` (entries owned by that
+//     scriptId), on lifecycle `failed` / `timed_out` (clear all), and via
+//     `__resetForTests`. Intentionally NOT cleaned up on next-dispatch
+//     for the same script — late register-handler IPCs may still arrive
+//     (the whole reason this map exists).
+//
+// MEMORY BOUND:
+//   Per-entry footprint is small (a Map entry, the runId string key, the
+//   PerRunTrackingSets struct of 5 Set references, and the scriptId string —
+//   ~few hundred bytes total). With normal trigger workloads (~5 dispatches
+//   per chat-turn × ~100 turns/session) the map stays well under a hundred
+//   entries; growth is negligible.
+//
+//   For pathological workloads (a high-frequency trigger like MESSAGE_EDITED
+//   firing on every keystroke, sustained for an extended session) the
+//   unbounded growth could matter. We apply a soft cap with FIFO eviction:
+//   when the map exceeds `TRACKING_SETS_SOFT_CAP` entries, the oldest entry
+//   is dropped on each new insertion. JS Maps preserve insertion order so
+//   `map.keys().next().value` gives the oldest key.
+//
+//   Cap is set high (10_000) so normal operation never trips it. If a real
+//   workload trips the cap, the eviction emits a one-shot info log so the
+//   operator can see it happened. After that, evictions are silent until
+//   the cap-trip resets via __resetForTests / lifecycle reset / 30-second
+//   re-warning window.
+//
+//   RISK: when an evicted entry is later looked up by the dual-update path
+//   (because a late register-handler IPC arrived for that runId), the
+//   `?.macros?.add` no-ops silently. The originating run's stale-diff would
+//   then drop the registration — the exact bug Fix 9 prevents. The cap is
+//   set high enough that this is extremely unlikely in practice; we accept
+//   it as a tradeoff against unbounded memory growth.
+
+interface PerRunTrackingSets {
+  scriptId:           string;
+  tools?:             Set<string>;
+  macros?:            Set<string>;
+  macroInterceptors?: Set<string>;
+  contentProcessors?: Set<string>;
+  rpcEndpoints?:      Set<string>;
+}
+
+const trackingSetsByRunId = new Map<string, PerRunTrackingSets>();
+
+const TRACKING_SETS_SOFT_CAP = 10_000;
+/** Window during which we suppress repeat eviction warnings (ms). */
+const TRACKING_SETS_EVICTION_WARN_WINDOW_MS = 30_000;
+let lastTrackingSetEvictionWarnAt = 0;
+/** Test-only override for the cap. Cleared by `__resetForTests`. */
+let trackingSetsCapOverride: number | null = null;
+
+/**
+ * Apply the soft FIFO eviction cap to `trackingSetsByRunId`. Called
+ * immediately after a new entry is inserted in `dispatchRunScript`. Logs
+ * once per `TRACKING_SETS_EVICTION_WARN_WINDOW_MS` to surface unusual
+ * workloads without spamming.
+ */
+function enforceTrackingSetsCap(): void {
+  const cap = trackingSetsCapOverride ?? TRACKING_SETS_SOFT_CAP;
+  while (trackingSetsByRunId.size > cap) {
+    const oldestKey = trackingSetsByRunId.keys().next().value;
+    if (oldestKey === undefined) return;
+    trackingSetsByRunId.delete(oldestKey);
+    const now = Date.now();
+    if (now - lastTrackingSetEvictionWarnAt > TRACKING_SETS_EVICTION_WARN_WINDOW_MS) {
+      lastTrackingSetEvictionWarnAt = now;
+      spindle.log.info(
+        `[script-runner] trackingSetsByRunId exceeded soft cap of ${cap} ` +
+        `entries; evicted oldest entry (runId=${oldestKey}). High-frequency-trigger workload? ` +
+        `Late register-handler IPCs for the evicted runs may no-op the dual-update — see ` +
+        `notes/post-mortem-v0.26.1-late-ipc-bugs.md for the bug class this prevents.`,
+      );
+    }
+  }
+}
+
 let nextRunSeq = 1;
 
 function generateRunId(): string {
   return `run-${Date.now()}-${nextRunSeq++}`;
+}
+
+/**
+ * v0.26.1 — unified runId-fallback resolver.
+ *
+ * Used by both `handleRegisterHandler` and `handleApiRequest` to find the
+ * activeRun for a dispatch whose originating runId's activeRun has been
+ * dropped (race window between `dispatchRunScript` dropping the previous
+ * run's activeRun and a still-in-flight IPC from the previous run landing
+ * at the parent). See `notes/step-2-timing-model.md` invariants I1, I2, I6
+ * for the full background.
+ *
+ * Two policies:
+ *
+ *   - `'register-handler'`: ALWAYS attempts fallback. Safe because:
+ *       - The wrapper closure built downstream captures `msg.scriptId` and
+ *         `msg.handlerId` only — not the dispatch-time runId.
+ *       - Child-side handler closures live in `handlerClosures[scriptId][handlerId]`,
+ *         populated BEFORE the IPC is sent — so the wrapper still finds its
+ *         closure when fired regardless of which run we register against.
+ *       - Routing to the current active run correctly populates that run's
+ *         `*RegisteredThisRun` tracking set (the originating run's set is
+ *         dual-updated separately via `trackingSetsByRunId` — see Fix 9).
+ *
+ *   - `'api-request'`: fallback ONLY when the dispatch's metadata indicates
+ *     re-routing is safe:
+ *       - `_runIdSource === 'latest'` (top-level dispatch via stale routing
+ *         key from the proxy's `latestRunIdByScript` map): always safe;
+ *         dispatch carries no per-run state.
+ *       - `_runIdSource === 'ctx'` AND `targetHandle.kind` is persistent:
+ *         the handle resolves via `persistentHandles` (per-script, not
+ *         per-run); we just need any active run for the api method's
+ *         execution context.
+ *       - `_runIdSource === 'ctx'` on a transient handle: the handle is
+ *         tied to its originating run; if that run is gone the handle is
+ *         too. NO fallback — return undefined so caller produces RunCompletedError.
+ *       - `_runIdSource === 'context'` (handler-fire AsyncLocalStorage):
+ *         handler-fires are per-call by design. NO fallback.
+ *
+ * Returns `undefined` if no fallback is permitted by policy OR no current
+ * active run exists. Caller decides what to do (log skip, return RunCompletedError).
+ *
+ * Logs at info-level when fallback engages — visible in the backend log
+ * whenever the timing race fires in production. Spamming this log is
+ * expected during high-frequency trigger sequences (tracker-style scripts);
+ * the audit trail is intentional.
+ */
+interface ResolveActiveRunCtx {
+  scriptId:       string;
+  runId:          string;
+  /** Only relevant for `'api-request'` policy. */
+  runIdSource?:   'context' | 'latest' | 'ctx' | undefined;
+  /** Only relevant for `'api-request'` policy with `runIdSource === 'ctx'`. */
+  targetHandle?:  HandleRef | undefined;
+}
+type ResolveActiveRunPolicy = 'register-handler' | 'api-request';
+
+function resolveActiveRun(
+  ctx:    ResolveActiveRunCtx,
+  policy: ResolveActiveRunPolicy,
+): ActiveRun | undefined {
+  // Direct lookup — most common path; succeeds when the originating run
+  // is still alive (not dropped by a follow-up dispatch).
+  const direct = activeRuns.get(ctx.runId);
+  if (direct) return direct;
+
+  // Decide whether the policy permits fallback for this dispatch shape.
+  let canFallback: boolean;
+  switch (policy) {
+    case 'register-handler':
+      canFallback = true;
+      break;
+    case 'api-request':
+      canFallback =
+        ctx.runIdSource === 'latest' ||
+        (ctx.runIdSource === 'ctx' &&
+         ctx.targetHandle !== undefined &&
+         HANDLE_KIND_LIFECYCLE[ctx.targetHandle.kind] === 'persistent');
+      break;
+  }
+  if (!canFallback) return undefined;
+
+  // Look up the script's current run.
+  const latestRunId = scriptBodyActiveRunByScript.get(ctx.scriptId);
+  if (latestRunId === undefined || latestRunId === ctx.runId) return undefined;
+  const fallback = activeRuns.get(latestRunId);
+  if (!fallback) return undefined;
+
+  // Audit-trail log. Includes policy + (when relevant) targetHandle/runIdSource
+  // so the operator can correlate with downstream warns.
+  const detail = policy === 'register-handler'
+    ? 'register-handler'
+    : `api dispatch (source=${ctx.runIdSource ?? 'unknown'}` +
+      (ctx.targetHandle ? `, handle=${ctx.targetHandle.kind}/${ctx.targetHandle.id})` : ')');
+  spindle.log.info(
+    `[script-runner] ${detail} fallback: runId ${ctx.runId} no longer active; ` +
+    `routing to script's current run ${latestRunId} (script ${ctx.scriptId})`,
+  );
+  return fallback;
+}
+
+/**
+ * Convenience wrapper: register-handler-policy fallback. Equivalent to
+ * `resolveActiveRun({scriptId, runId}, 'register-handler')`. Kept as its
+ * own name because the call sites in `handleRegisterHandler` are dense
+ * enough that the shorter form reads better.
+ */
+function activeOrLatestForScript(scriptId: string, runId: string): ActiveRun | undefined {
+  return resolveActiveRun({ scriptId, runId }, 'register-handler');
+}
+
+/**
+ * v0.26.1+ — diagnostic-rich warn for the register-handler "skipped" path.
+ *
+ * When `activeOrLatestForScript` returns undefined, even the fallback
+ * couldn't find a viable activeRun. The end-of-run stale-diff will then
+ * drop the macro/tool/etc. on the assumption that the user-script forgot
+ * to re-register it — which leads to follow-on symptoms (e.g. tracker-ui's
+ * `{{tracker}}` resolve returning the literal text and the footer not
+ * rendering).
+ *
+ * The diagnostic captures:
+ *   - whether the direct `activeRuns[runId]` lookup hit or missed
+ *   - what `scriptBodyActiveRunByScript[scriptId]` currently holds
+ *     (`'none'` if undefined)
+ *   - whether THAT runId has a live activeRuns entry
+ *   - the runIds of any other activeRuns owned by this script (capped at
+ *     5 to avoid log spam during pathological repro scenarios)
+ *   - the global activeRuns size
+ *
+ * Read together, these values pinpoint why the fallback failed:
+ *
+ *   - `directLookup=missing, scriptBodyLatest=none`: script never dispatched
+ *     OR `unregisterScriptFromChild` ran (full teardown).
+ *   - `directLookup=missing, scriptBodyLatest=<X>, latestExists=false`:
+ *     scriptBodyActiveRunByScript points at a dead runId — implies a
+ *     mid-state where activeRuns was cleared but scriptBodyActiveRunByScript
+ *     wasn't. Lifecycle race or test-only path.
+ *   - `directLookup=missing, scriptBodyLatest=<X>, latestExists=true,
+ *      activeForScript=[X]`: fallback returned undefined ONLY because
+ *     `latestRunId === runId` (the dead runId). Sequence of state changes
+ *     where scriptBodyActiveRunByScript wasn't updated.
+ *   - `directLookup=missing, scriptBodyLatest=<X>, latestExists=true,
+ *      activeForScript=[X, Y, Z]`: multiple alive runs for this script.
+ *     Indicates concurrent dispatchRunScript races or handler-fire
+ *     ephemeral runs left behind.
+ */
+function logLateRegisterSkip(msg: RegisterHandler): void {
+  const directExists = activeRuns.has(msg.runId);
+  const latestRunId  = scriptBodyActiveRunByScript.get(msg.scriptId);
+  const latestExists = latestRunId !== undefined && activeRuns.has(latestRunId);
+
+  const activeForScript: string[] = [];
+  for (const [activeRunId, entry] of activeRuns) {
+    if (entry.scriptId === msg.scriptId) {
+      activeForScript.push(activeRunId);
+      if (activeForScript.length >= 5) break;
+    }
+  }
+
+  spindle.log.warn(
+    `[script-runner] register-handler arrived after run ${msg.runId} ended; ` +
+    `registration skipped (script ${msg.scriptId}, kind ${msg.kind}, ` +
+    `directLookup=${directExists ? 'found' : 'missing'}, ` +
+    `scriptBodyLatest=${latestRunId ?? 'none'}, ` +
+    `latestExists=${latestExists}, ` +
+    `activeForScript=[${activeForScript.join(', ')}], ` +
+    `totalActiveRuns=${activeRuns.size})`,
+  );
 }
 
 // ─── Inbound message routing ────────────────────────────────────────────────
@@ -1088,11 +1403,15 @@ function handleChildMessage(payload: unknown): void {
  * `macrosRegisteredThisRun` tracking, `onMacrosChanged` Status-tab kick,
  * `ls:macro:registered` broadcast emit).
  *
- * If the run is gone (rare race — registration arrives after run-end),
- * fall back to a "snapshot" path that builds a fresh api just for the
- * registration. That path is correct but doesn't track via
- * `*RegisteredThisRun` (impossible — no current run). Acceptable —
- * stale-diff cleanup at NEXT run will handle it.
+ * If the run is gone (race: long-running body's first IPC arriving after
+ * a follow-up dispatchRunScript drops its activeRun), fall back to the
+ * script's CURRENT active run via `activeOrLatestForScript`. The wrapper
+ * closures captured here only depend on `msg.scriptId` and
+ * `msg.handlerId` (script-keyed, not run-keyed), and child-side handler
+ * closures are looked up by `(scriptId, handlerId)` independently of the
+ * dispatch-time runId — so routing the registration to the script's
+ * current run is correct AND populates that run's `*RegisteredThisRun`
+ * tracking set, preventing the stale-diff from dropping the registration.
  */
 function handleRegisterHandler(msg: RegisterHandler): void {
   switch (msg.kind) {
@@ -1118,22 +1437,33 @@ function handleRegisterHandler(msg: RegisterHandler): void {
           return String(result.value ?? '');
         });
 
-      const active = activeRuns.get(msg.runId);
+      // v0.26.1 — fallback to script's current active run if the
+      // originating runId's activeRun is gone. See `activeOrLatestForScript`
+      // for the late-register-handler race rationale.
+      const active = activeOrLatestForScript(msg.scriptId, msg.runId);
       if (active) {
         // Canonical path: call api.macros.register on the run's api.
         // Tracks in macrosRegisteredThisRun, fires onMacrosChanged, etc.
         try {
           active.api.macros.register(msg.name, msg.def, wrapper);
+          // v0.26.1 — dual-update on fallback. The canonical call above
+          // populated ACTIVE's run-set (the Set captured at buildScriptAPI
+          // time, owned by `active`'s run). When fallback engaged we
+          // ALSO need to populate the ORIGINATING run's set so its
+          // end-of-run stale-diff sees the registration as fresh.
+          // No-op on the direct-lookup path: if `msg.runId` is `active`'s
+          // own run, both reads point at the same Set and the canonical
+          // already added it. See `trackingSetsByRunId` JSDoc above.
+          if (!activeRuns.has(msg.runId)) {
+            trackingSetsByRunId.get(msg.runId)?.macros?.add(msg.name);
+          }
         } catch (err) {
           spindle.log.warn(
             `[script-runner] macros.register failed for "${msg.name}" (script ${msg.scriptId}): ${String(err)}`,
           );
         }
       } else {
-        spindle.log.warn(
-          `[script-runner] register-handler arrived after run ${msg.runId} ended; ` +
-          `registration skipped (script ${msg.scriptId})`,
-        );
+        logLateRegisterSkip(msg);
       }
       break;
     }
@@ -1176,20 +1506,24 @@ function handleRegisterHandler(msg: RegisterHandler): void {
           return String(result.value ?? '');
         });
 
-      const active = activeRuns.get(msg.runId);
+      // v0.26.1 — fallback to script's current active run if the
+      // originating runId's activeRun is gone. See `activeOrLatestForScript`
+      // for the late-register-handler race rationale.
+      const active = activeOrLatestForScript(msg.scriptId, msg.runId);
       if (active) {
         try {
           active.api.tools.register(msg.name, msg.def, wrapper);
+          // v0.26.1 — dual-update on fallback (see macro case above for rationale).
+          if (!activeRuns.has(msg.runId)) {
+            trackingSetsByRunId.get(msg.runId)?.tools?.add(msg.name);
+          }
         } catch (err) {
           spindle.log.warn(
             `[script-runner] tools.register failed for "${msg.name}" (script ${msg.scriptId}): ${String(err)}`,
           );
         }
       } else {
-        spindle.log.warn(
-          `[script-runner] register-handler arrived after run ${msg.runId} ended; ` +
-          `registration skipped (script ${msg.scriptId})`,
-        );
+        logLateRegisterSkip(msg);
       }
       break;
     }
@@ -1219,7 +1553,10 @@ function handleRegisterHandler(msg: RegisterHandler): void {
           // returns nothing meaningful).
         });
 
-      const active = activeRuns.get(msg.runId);
+      // v0.26.1 — fallback to script's current active run if the
+      // originating runId's activeRun is gone. See `activeOrLatestForScript`
+      // for the late-register-handler race rationale.
+      const active = activeOrLatestForScript(msg.scriptId, msg.runId);
       if (active) {
         try {
           // Canonical `commands.onInvoked(handler)` returns a sync unsub fn.
@@ -1233,10 +1570,7 @@ function handleRegisterHandler(msg: RegisterHandler): void {
           );
         }
       } else {
-        spindle.log.warn(
-          `[script-runner] register-handler arrived after run ${msg.runId} ended; ` +
-          `registration skipped (script ${msg.scriptId})`,
-        );
+        logLateRegisterSkip(msg);
       }
       break;
     }
@@ -1271,7 +1605,10 @@ function handleRegisterHandler(msg: RegisterHandler): void {
           return typeof result.value === 'string' ? result.value : undefined;
         });
 
-      const active = activeRuns.get(msg.runId);
+      // v0.26.1 — fallback to script's current active run if the
+      // originating runId's activeRun is gone. See `activeOrLatestForScript`
+      // for the late-register-handler race rationale.
+      const active = activeOrLatestForScript(msg.scriptId, msg.runId);
       if (active) {
         try {
           // Canonical `macros.registerInterceptor(handler, options)` returns
@@ -1280,16 +1617,19 @@ function handleRegisterHandler(msg: RegisterHandler): void {
           // handlerId, making `removeEntry(scriptId, handlerId)` valid.
           const canonicalHandle = active.api.macros.registerInterceptor(wrapper, msg.options);
           recordHandlerCleanup(msg.scriptId, msg.handlerId, () => canonicalHandle.remove());
+          // v0.26.1 — dual-update on fallback (see macro case above for rationale).
+          // Note: the canonical's tracking set adds the auto-generated/forwarded
+          // canonical id, not msg.handlerId. We mirror that — use canonicalHandle.id.
+          if (!activeRuns.has(msg.runId)) {
+            trackingSetsByRunId.get(msg.runId)?.macroInterceptors?.add(canonicalHandle.id);
+          }
         } catch (err) {
           spindle.log.warn(
             `[script-runner] macros.registerInterceptor failed (script ${msg.scriptId}): ${String(err)}`,
           );
         }
       } else {
-        spindle.log.warn(
-          `[script-runner] register-handler arrived after run ${msg.runId} ended; ` +
-          `registration skipped (script ${msg.scriptId})`,
-        );
+        logLateRegisterSkip(msg);
       }
       break;
     }
@@ -1325,21 +1665,26 @@ function handleRegisterHandler(msg: RegisterHandler): void {
           return undefined;
         });
 
-      const active = activeRuns.get(msg.runId);
+      // v0.26.1 — fallback to script's current active run if the
+      // originating runId's activeRun is gone. See `activeOrLatestForScript`
+      // for the late-register-handler race rationale.
+      const active = activeOrLatestForScript(msg.scriptId, msg.runId);
       if (active) {
         try {
           const canonicalHandle = active.api.chat.registerContentProcessor(wrapper, msg.options);
           recordHandlerCleanup(msg.scriptId, msg.handlerId, () => canonicalHandle.remove());
+          // v0.26.1 — dual-update on fallback (see macro case for rationale).
+          // Mirrors macroInterceptor: tracking-set key is the canonical id.
+          if (!activeRuns.has(msg.runId)) {
+            trackingSetsByRunId.get(msg.runId)?.contentProcessors?.add(canonicalHandle.id);
+          }
         } catch (err) {
           spindle.log.warn(
             `[script-runner] chat.registerContentProcessor failed (script ${msg.scriptId}): ${String(err)}`,
           );
         }
       } else {
-        spindle.log.warn(
-          `[script-runner] register-handler arrived after run ${msg.runId} ended; ` +
-          `registration skipped (script ${msg.scriptId})`,
-        );
+        logLateRegisterSkip(msg);
       }
       break;
     }
@@ -1711,18 +2056,56 @@ function sendBroadcastFireToChild(msg: BroadcastFireMessage): void {
  * the user-script's awaited promise with the corresponding `Error`.
  */
 async function handleApiRequest(req: ApiProxyRequest): Promise<void> {
-  const active = activeRuns.get(req.runId);
+  // v0.26.1 — unified runId resolution. Direct lookup, falling back to the
+  // script's current run when the dispatch's metadata indicates re-routing
+  // is safe. Three permitted fallback shapes:
+  //   - `_runIdSource === 'latest'`: top-level dispatch (db.collection,
+  //     broadcast.emit, etc.) — no per-run state, always safe.
+  //   - `_runIdSource === 'ctx'` AND persistent target handle: handle
+  //     lifecycle is per-script, not per-run.
+  //   - `_runIdSource === 'ctx'` on transient handle / `'context'` (handler
+  //     fire ALS): NO fallback — handle/run is genuinely gone.
+  // See `resolveActiveRun` JSDoc for the full rationale.
+  const active = resolveActiveRun(
+    {
+      scriptId:     req.scriptId,
+      runId:        req.runId,
+      runIdSource:  req._runIdSource,
+      targetHandle: req.targetHandle,
+    },
+    'api-request',
+  );
   if (!active) {
     // Late request — run already completed (its activeRuns entry was
     // dropped). Send back a clear error so the child's pending-map can
     // reject any still-awaiting promise.
+    //
+    // The error message names every diagnostic the operator needs to
+    // pinpoint the late dispatch in the script: the api method, the
+    // owning script, the runId, the request id (so the proxy log can
+    // be cross-referenced), the target handle (when the call was
+    // on a handle's method — disambiguates e.g. `db._collection.insert`
+    // dispatched on which Collection handle), AND the runId-resolution
+    // tier the proxy used to pick the runId (v0.26.1 — pinpoints the
+    // leak class: handler-fire context propagation, cross-run latest-run
+    // fallback, or originating-proxy fallback). Without these the operator
+    // sees "something fired late, somewhere" — useless for debugging
+    // races between fire-and-forget chains and the next dispatchRunScript.
+    const handleSuffix = req.targetHandle
+      ? `, targetHandle=${req.targetHandle.kind}/${req.targetHandle.id}`
+      : '';
+    const sourceSuffix = req._runIdSource
+      ? `, runIdSource=${req._runIdSource}`
+      : '';
     sendApiResponse(req.requestId, {
       type:      'api-response',
       requestId: req.requestId,
       ok:        false,
       error: {
         name:    'RunCompletedError',
-        message: `api-proxy host: run ${req.runId} no longer active (api call arrived after run completion)`,
+        message:
+          `api-proxy host: late api call "${req.method}" from script "${req.scriptId}" arrived ` +
+          `after run ${req.runId} ended (requestId=${req.requestId}${handleSuffix}${sourceSuffix})`,
       },
     });
     return;
@@ -1761,6 +2144,28 @@ async function handleApiRequest(req: ApiProxyRequest): Promise<void> {
         active.handles.set(id, { obj, kind });
         return { __handleRef: true, id, kind };
       } else {
+        // v0.26.1 — obj-reuse dedup for persistent handles. If this exact
+        // object reference has already been registered for this script, reuse
+        // its existing handle id. Caller-side dedup (e.g. the
+        // `collection-handle-cache` for `api.db.collection`) returns the
+        // SAME wrapper object for the same `(scope, path)`; without this,
+        // each call would register a fresh handle id pointing to the same
+        // wrapper, accumulating in `persistentHandles` indefinitely.
+        if (typeof obj === 'object' && obj !== null) {
+          const reverseMap = getOrCreateObjReverseMap(active.scriptId);
+          const existingId = reverseMap.get(obj);
+          if (existingId !== undefined) {
+            return { __handleRef: true, id: existingId, kind };
+          }
+          const id = generateHandleId(active.scriptId);
+          persistentTable.set(id, { obj, kind });
+          reverseMap.set(obj, id);
+          return { __handleRef: true, id, kind };
+        }
+        // Defensive: non-object handles can't go into a WeakMap. Fall
+        // through to plain registration without reverse-map dedup.
+        // (No production handle types fit this branch; included for type
+        // safety against future surface expansion.)
         const id = generateHandleId(active.scriptId);
         persistentTable.set(id, { obj, kind });
         return { __handleRef: true, id, kind };
@@ -3229,6 +3634,9 @@ function handleLifecycle(event: BackendProcessLifecycleEventDTO): void {
       // scripts to attempt `activeRuns.delete(staleRunId)` (harmless no-op,
       // but tidier to clear).
       scriptBodyActiveRunByScript.clear();
+      // v0.26.1 — same rationale: those runs' bodies are dead, no late
+      // register-handler IPCs from them will ever arrive.
+      trackingSetsByRunId.clear();
 
       // Phase 10 — also reject any in-flight handler fires. These are
       // handler invocations from the parent's macro/tool/etc. wrappers
@@ -3660,11 +4068,25 @@ export function dispatchRunScript(
       handles:    new Map(),  // transient handles for this run (dropped on script-body lifecycle drop)
       onConsole:  opts.onConsole,
     });
+    // v0.26.1 — record per-run tracking sets so the late-register-handler
+    // fallback in `handleRegisterHandler` can dual-update both the fallback
+    // target's run-set AND the originating run's run-set. See the
+    // `trackingSetsByRunId` declaration JSDoc above for the full lifecycle.
+    trackingSetsByRunId.set(runId, {
+      scriptId:           script.id,
+      ...(opts.toolsRegisteredThisRun             ? { tools:             opts.toolsRegisteredThisRun }             : {}),
+      ...(opts.macrosRegisteredThisRun            ? { macros:            opts.macrosRegisteredThisRun }            : {}),
+      ...(opts.macroInterceptorsRegisteredThisRun ? { macroInterceptors: opts.macroInterceptorsRegisteredThisRun } : {}),
+      ...(opts.contentProcessorsRegisteredThisRun ? { contentProcessors: opts.contentProcessorsRegisteredThisRun } : {}),
+      ...(opts.rpcEndpointsRegisteredThisRun      ? { rpcEndpoints:      opts.rpcEndpointsRegisteredThisRun }      : {}),
+    });
+    enforceTrackingSetsCap();
     try {
       childHandle!.send(fullRequest);
     } catch (err) {
       pendingRuns.delete(runId);
       activeRuns.delete(runId);
+      trackingSetsByRunId.delete(runId);  // run never started — entry was speculative
       // Roll back the per-script tracking entry too — the run never started.
       if (scriptBodyActiveRunByScript.get(script.id) === runId) {
         scriptBodyActiveRunByScript.delete(script.id);
@@ -3727,6 +4149,12 @@ export function unregisterScriptFromChild(scriptId: string): void {
   handlerCleanups.delete(scriptId);
   broadcastForwarders.delete(scriptId);
   persistentHandles.delete(scriptId);
+  // v0.26.1 — drop the obj→handleId reverse map alongside the persistent
+  // handle table. WeakMap entries would also be GC'd naturally as the
+  // canonical's handle objects become unreferenced, but explicit removal
+  // is cheaper than waiting for GC and matches the rest of this teardown
+  // sweep's "drop everything per-scriptId" shape.
+  persistentObjToHandleId.delete(scriptId);
   lastDispatchByScript.delete(scriptId);
 
   // Phase 9d.4.x — drop activeRuns owned by this script. With the script-body
@@ -3743,6 +4171,17 @@ export function unregisterScriptFromChild(scriptId: string): void {
     }
   }
   scriptBodyActiveRunByScript.delete(scriptId);
+
+  // v0.26.1 — drop per-run tracking-set records owned by this script.
+  // Mirrors the activeRuns walk above. Without this, the map would retain
+  // entries whose scripts have been disabled/deleted; not a correctness
+  // bug (late IPCs would no-op the optional-chain `.add`) but unbounded
+  // growth across long sessions with frequent script enable/disable cycles.
+  for (const [runId, entry] of trackingSetsByRunId) {
+    if (entry.scriptId === scriptId) {
+      trackingSetsByRunId.delete(runId);
+    }
+  }
 
   // Awaiter tables — keyed by `${scriptId}:${innerId}` for some, by
   // bare innerId for others. Reject + drop any awaiter that still has
@@ -4015,6 +4454,26 @@ export function __hasLastDispatchSnapshotForTests(scriptId: string): boolean {
   return lastDispatchByScript.has(scriptId);
 }
 
+/** @internal — inspector for trackingSetsByRunId (memory-bound testing). */
+export function __getTrackingSetsByRunIdSizeForTests(): number {
+  return trackingSetsByRunId.size;
+}
+
+/** @internal — inspector for trackingSetsByRunId (memory-bound testing). */
+export function __hasTrackingSetEntryForTests(runId: string): boolean {
+  return trackingSetsByRunId.has(runId);
+}
+
+/** @internal — production cap value for assertion tests. */
+export function __getProductionTrackingSetsCapForTests(): number {
+  return TRACKING_SETS_SOFT_CAP;
+}
+
+/** @internal — override cap for the next dispatches. Pass null to restore. */
+export function __setTrackingSetsCapForTests(cap: number | null): void {
+  trackingSetsCapOverride = cap;
+}
+
 // ─── Test-only reset (Phase 11.A) ───────────────────────────────────────────
 //
 // Resets every module-scope state container the dispatcher owns so successive
@@ -4045,6 +4504,8 @@ export function __resetForTests(): void {
   openAwaitTimeoutOverride   = null;
   restartBackoffOverride     = null;
   stabilityThresholdOverride = null;
+  lastTrackingSetEvictionWarnAt = 0;
+  trackingSetsCapOverride       = null;
 
   // Sequences (counter resets so test-generated IDs stay deterministic across runs)
   nextHandleSeq      = 1;
@@ -4055,9 +4516,11 @@ export function __resetForTests(): void {
   pendingRuns.clear();
   activeRuns.clear();
   scriptBodyActiveRunByScript.clear();
+  trackingSetsByRunId.clear();
   pendingHandlerCalls.clear();
   abortControllers.clear();
   persistentHandles.clear();
+  persistentObjToHandleId.clear();
   broadcastForwarders.clear();
   lastDispatchByScript.clear();
   handlerCleanups.clear();
