@@ -90,6 +90,7 @@ import {
   removeTool as toolStoreRemove,
 } from '../engine/tool-store.js';
 import { emit as busEmit } from '../engine/broadcast-bus.js';
+import { executionStatusStore } from '../engine/execution-status.js';
 import { buildScriptAPI } from '../engine/executor.js';
 import {
   dispatchApiCall,
@@ -126,6 +127,23 @@ let scriptResolver: ((nameOrId: string) => Script | null) | null = null;
  */
 export function setScriptResolver(resolver: (nameOrId: string) => Script | null): void {
   scriptResolver = resolver;
+}
+
+// v0.26.4 — wire the frontend-send function from backend.ts. Used by the
+// async broadcast-handler lifecycle dispatch to push `execution_started`
+// / `execution_ended` messages to the frontend so the sidebar status dot
+// reflects in-flight broadcast work. Optional: if backend.ts forgets to
+// call this, the frontend dot just doesn't update for broadcast-driven
+// async work (graceful degradation, not a crash).
+type SendToFrontend = (msg: unknown) => void;
+let sendToFrontend: SendToFrontend | null = null;
+
+/**
+ * Wire the frontend-send function. Called once during backend.ts cold-start
+ * init alongside `setScriptResolver`. Idempotent: re-calling replaces.
+ */
+export function setSendToFrontend(send: SendToFrontend): void {
+  sendToFrontend = send;
 }
 
 // ─── Configuration ──────────────────────────────────────────────────────────
@@ -1088,12 +1106,13 @@ const scriptBodyActiveRunByScript = new Map<string, string>();
 //   it as a tradeoff against unbounded memory growth.
 
 interface PerRunTrackingSets {
-  scriptId:           string;
-  tools?:             Set<string>;
-  macros?:            Set<string>;
-  macroInterceptors?: Set<string>;
-  contentProcessors?: Set<string>;
-  rpcEndpoints?:      Set<string>;
+  scriptId:               string;
+  tools?:                 Set<string>;
+  macros?:                Set<string>;
+  macroInterceptors?:     Set<string>;
+  contentProcessors?:     Set<string>;
+  worldInfoInterceptors?: Set<string>;
+  rpcEndpoints?:          Set<string>;
 }
 
 const trackingSetsByRunId = new Map<string, PerRunTrackingSets>();
@@ -1363,6 +1382,48 @@ function handleChildMessage(payload: unknown): void {
     case 'broadcast-unsubscribe':
       handleBroadcastUnsubscribe(msg);
       break;
+
+    case 'broadcast-handler-started': {
+      // Async broadcast handler started — flip the script's status
+      // indicator to 'running' for the duration of the awaited work.
+      // Paired with `broadcast-handler-finished` from the child.
+      //
+      // The frontend's status dot is driven by `execution_started` /
+      // `execution_ended` messages (see LumiScriptPanel.tsx), NOT by
+      // executionStatusStore directly. Both sides updated here so the
+      // host's in-memory state and the live UI stay in sync.
+      executionStatusStore.markRunning(msg.scriptId);
+      const script = scriptResolver?.(msg.scriptId);
+      sendToFrontend?.({
+        type:       'execution_started',
+        scriptId:   msg.scriptId,
+        scriptName: script?.name ?? '<unknown>',
+        // Synthesise a runId for this broadcast handler invocation. Frontend
+        // uses runId only for console-entry routing; broadcast handlers
+        // don't currently route console entries, so a synthetic id is fine.
+        runId:      `broadcast:${msg.scriptId}:${msg.subId}:${Date.now()}`,
+      });
+      break;
+    }
+
+    case 'broadcast-handler-finished': {
+      if (msg.ok) {
+        executionStatusStore.markSuccess(msg.scriptId, msg.durationMs);
+      } else {
+        executionStatusStore.markError(msg.scriptId, msg.durationMs, msg.error);
+      }
+      sendToFrontend?.({
+        type:     'execution_ended',
+        scriptId: msg.scriptId,
+        // Same synthetic runId shape as `started` — frontend doesn't
+        // pair them by runId, only uses scriptId for state lookup.
+        runId:    `broadcast:${msg.scriptId}:${msg.subId}`,
+        success:  msg.ok,
+        duration: msg.durationMs,
+        ...(msg.ok ? {} : { error: msg.error }),
+      });
+      break;
+    }
 
     case 'abort-request':
       handleAbortRequest(msg);
@@ -1689,6 +1750,57 @@ function handleRegisterHandler(msg: RegisterHandler): void {
       break;
     }
 
+    case 'worldInfoInterceptor': {
+      // v0.27.0 — handler signature: (ctx) => void | WorldInfoInterceptorResult | Promise<…>.
+      // Fires from the chain dispatcher when the host invokes our extension-
+      // level world-info interceptor. Same wrapper shape as macroInterceptor
+      // and contentProcessor: wrap a function that sends `run-handler` IPC
+      // back to the child + awaits the result.
+      const wrapper = (
+        interceptorCtx: import('../types/script.js').WorldInfoInterceptorCtx,
+      ): import('../types/script.js').WorldInfoInterceptorResult | void
+        | Promise<import('../types/script.js').WorldInfoInterceptorResult | void> =>
+        sendRunHandlerRequest(
+          msg.scriptId,
+          msg.handlerId,
+          'worldInfoInterceptor',
+          [interceptorCtx],
+          // Per-fire timeout matches the canonical default (2000ms).
+          (msg.options as { timeoutMs?: number } | undefined)?.timeoutMs ?? 2_000,
+        ).then((result) => {
+          if (!result.ok) {
+            spindle.log.warn(
+              `[script-runner] worldInfoInterceptor handler threw for ${msg.scriptId}: ${result.error?.message ?? 'unknown'}`,
+            );
+            return undefined;
+          }
+          // Canonical accepts void / undefined / WorldInfoInterceptorResult.
+          if (result.value === undefined || result.value === null) return undefined;
+          if (typeof result.value === 'object') {
+            return result.value as import('../types/script.js').WorldInfoInterceptorResult;
+          }
+          return undefined;
+        });
+
+      const active = activeOrLatestForScript(msg.scriptId, msg.runId);
+      if (active) {
+        try {
+          const canonicalHandle = active.api.worldInfo.registerInterceptor(wrapper, msg.options);
+          recordHandlerCleanup(msg.scriptId, msg.handlerId, () => canonicalHandle.remove());
+          if (!activeRuns.has(msg.runId)) {
+            trackingSetsByRunId.get(msg.runId)?.worldInfoInterceptors?.add(canonicalHandle.id);
+          }
+        } catch (err) {
+          spindle.log.warn(
+            `[script-runner] worldInfo.registerInterceptor failed (script ${msg.scriptId}): ${String(err)}`,
+          );
+        }
+      } else {
+        logLateRegisterSkip(msg);
+      }
+      break;
+    }
+
     case 'domEventListener': {
       // Phase 9d.4.c-2 — handler signature: (data: DOMEventData) => void.
       // Fires when the frontend dispatches a real DOM event matching this
@@ -1928,13 +2040,15 @@ function handleUnregisterHandler(msg: UnregisterHandler): void {
 
     case 'macroInterceptor':
     case 'contentProcessor':
+    case 'worldInfoInterceptor':
     case 'domEventListener':
     case 'inputBarActionClick':
     case 'floatWidgetDragEnd':
     case 'drawerTabActivate': {
       // Phase 9d.3.d / 9d.4.c-2 / 9d.4.e-1-b / 9d.4.e-2-b / 9d.4.e-3-b
-      // — same shape as commandsOnInvoked: handlerId-based, canonical's
-      // unsub fn (or `handle.remove()`) was stored under handlerId.
+      // + v0.27.0 (worldInfoInterceptor) — same shape as commandsOnInvoked:
+      // handlerId-based, canonical's unsub fn (or `handle.remove()`) was
+      // stored under handlerId.
       if (msg.handlerId === undefined) {
         spindle.log.warn(`[script-runner] unregister-handler kind=${msg.kind} missing handlerId`);
         return;
@@ -3900,10 +4014,12 @@ export interface DispatchRunScriptOpts {
    * disappeared from the script body. Same shape and intent as the
    * matching `ExecutorOptions` fields.
    */
-  toolsRegisteredThisRun?:             Set<string>;
-  macrosRegisteredThisRun?:            Set<string>;
-  macroInterceptorsRegisteredThisRun?: Set<string>;
-  contentProcessorsRegisteredThisRun?: Set<string>;
+  toolsRegisteredThisRun?:                 Set<string>;
+  macrosRegisteredThisRun?:                Set<string>;
+  macroInterceptorsRegisteredThisRun?:     Set<string>;
+  contentProcessorsRegisteredThisRun?:     Set<string>;
+  /** v0.27.0+ — per-run tracking for `api.worldInfo.registerInterceptor`. */
+  worldInfoInterceptorsRegisteredThisRun?: Set<string>;
   /**
    * v0.26.0 — per-run tracking of fully-qualified rpc-endpoint names
    * registered via `api.rpc.sync` / `api.rpc.handle`. The trigger-registry
@@ -3973,14 +4089,15 @@ export function dispatchRunScript(
   // this run; the snapshots cross IPC at dispatch time and live on the
   // child as mutable per-run state for `api.tools.list()` / etc.
   const api = buildScriptAPI(script, {
-    grantedPermissions:                 request.grantedPermissions,
-    userId:                             request.userId ?? null,
-    onToolsChanged:                     opts.onToolsChanged,
-    toolsRegisteredThisRun:             opts.toolsRegisteredThisRun,
-    macrosRegisteredThisRun:            opts.macrosRegisteredThisRun,
-    macroInterceptorsRegisteredThisRun: opts.macroInterceptorsRegisteredThisRun,
-    contentProcessorsRegisteredThisRun: opts.contentProcessorsRegisteredThisRun,
-    rpcEndpointsRegisteredThisRun:      opts.rpcEndpointsRegisteredThisRun,
+    grantedPermissions:                     request.grantedPermissions,
+    userId:                                 request.userId ?? null,
+    onToolsChanged:                         opts.onToolsChanged,
+    toolsRegisteredThisRun:                 opts.toolsRegisteredThisRun,
+    macrosRegisteredThisRun:                opts.macrosRegisteredThisRun,
+    macroInterceptorsRegisteredThisRun:     opts.macroInterceptorsRegisteredThisRun,
+    contentProcessorsRegisteredThisRun:     opts.contentProcessorsRegisteredThisRun,
+    worldInfoInterceptorsRegisteredThisRun: opts.worldInfoInterceptorsRegisteredThisRun,
+    rpcEndpointsRegisteredThisRun:          opts.rpcEndpointsRegisteredThisRun,
     // `activeContext` is intentionally omitted → buildScriptAPI substitutes
     // a live-getter view backed by `binding.ts`. Long-lived handlers
     // (registered tools, modal callbacks, etc.) read the CURRENT chat /
@@ -4018,6 +4135,7 @@ export function dispatchRunScript(
     macroInterceptorsSnapshot:     api.macros.listInterceptors(),
     chatInjectionsSnapshot:        api.chat.getInjections(),
     chatContentProcessorsSnapshot: api.chat.listContentProcessors(),
+    worldInfoInterceptorsSnapshot: api.worldInfo.listInterceptors(),
     ...(request.userId !== undefined ? { userId: request.userId } : {}),
   };
 
@@ -4073,12 +4191,13 @@ export function dispatchRunScript(
     // target's run-set AND the originating run's run-set. See the
     // `trackingSetsByRunId` declaration JSDoc above for the full lifecycle.
     trackingSetsByRunId.set(runId, {
-      scriptId:           script.id,
-      ...(opts.toolsRegisteredThisRun             ? { tools:             opts.toolsRegisteredThisRun }             : {}),
-      ...(opts.macrosRegisteredThisRun            ? { macros:            opts.macrosRegisteredThisRun }            : {}),
-      ...(opts.macroInterceptorsRegisteredThisRun ? { macroInterceptors: opts.macroInterceptorsRegisteredThisRun } : {}),
-      ...(opts.contentProcessorsRegisteredThisRun ? { contentProcessors: opts.contentProcessorsRegisteredThisRun } : {}),
-      ...(opts.rpcEndpointsRegisteredThisRun      ? { rpcEndpoints:      opts.rpcEndpointsRegisteredThisRun }      : {}),
+      scriptId:               script.id,
+      ...(opts.toolsRegisteredThisRun                 ? { tools:                 opts.toolsRegisteredThisRun }                 : {}),
+      ...(opts.macrosRegisteredThisRun                ? { macros:                opts.macrosRegisteredThisRun }                : {}),
+      ...(opts.macroInterceptorsRegisteredThisRun     ? { macroInterceptors:     opts.macroInterceptorsRegisteredThisRun }     : {}),
+      ...(opts.contentProcessorsRegisteredThisRun     ? { contentProcessors:     opts.contentProcessorsRegisteredThisRun }     : {}),
+      ...(opts.worldInfoInterceptorsRegisteredThisRun ? { worldInfoInterceptors: opts.worldInfoInterceptorsRegisteredThisRun } : {}),
+      ...(opts.rpcEndpointsRegisteredThisRun          ? { rpcEndpoints:          opts.rpcEndpointsRegisteredThisRun }          : {}),
     });
     enforceTrackingSetsCap();
     try {

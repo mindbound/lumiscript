@@ -41,6 +41,7 @@ import type {
   ToolDefinition,
   MacroInterceptorOptions,
   MessageContentProcessorOptions,
+  WorldInfoInterceptorOptions,
   DOMListenOptions,
   AdvancedModalDismissReason,
   RegisteredToolInfo,
@@ -48,6 +49,7 @@ import type {
   RegisteredMacroInterceptorInfo,
   InjectionInfo,
   RegisteredMessageContentProcessorInfo,
+  RegisteredWorldInfoInterceptorInfo,
 } from './script.js';
 
 // ─── Shared shapes ──────────────────────────────────────────────────────────
@@ -179,6 +181,8 @@ export interface RunScriptRequest {
   macroInterceptorsSnapshot?:     RegisteredMacroInterceptorInfo[];
   chatInjectionsSnapshot?:        InjectionInfo[];
   chatContentProcessorsSnapshot?: RegisteredMessageContentProcessorInfo[];
+  /** v0.27.0+ — pre-existing world-info interceptor entries owned by this script. */
+  worldInfoInterceptorsSnapshot?: RegisteredWorldInfoInterceptorInfo[];
 }
 
 /**
@@ -243,16 +247,17 @@ export interface ShutdownRequest {
  * arg-shape on the child when invoking the user's closure.
  */
 export type HandlerKind =
-  | 'macro'                // 9d.3.a — pull-mode MacroHandler
-  | 'tool'                 // 9d.3.b — ToolHandler
-  | 'commandsOnInvoked'    // 9d.3.c
-  | 'contentProcessor'     // 9d.3.d
-  | 'macroInterceptor'     // 9d.3.d
-  | 'domEventListener'     // 9d.4.c-2 — DOMHandle.on() event handler
-  | 'inputBarActionClick'  // 9d.4.e-1-b — InputBarActionHandle.onClick() click handler
-  | 'floatWidgetDragEnd'   // 9d.4.e-2-b — FloatWidgetHandle.onDragEnd() drag-end handler
-  | 'drawerTabActivate'    // 9d.4.e-3-b — DrawerTabHandle.onActivate() activation handler
-  | 'rpc';                 // v0.26.0 — api.rpc.handle() on-demand handler (cross-extension RPC pool)
+  | 'macro'                  // 9d.3.a — pull-mode MacroHandler
+  | 'tool'                   // 9d.3.b — ToolHandler
+  | 'commandsOnInvoked'      // 9d.3.c
+  | 'contentProcessor'       // 9d.3.d
+  | 'macroInterceptor'       // 9d.3.d
+  | 'worldInfoInterceptor'   // v0.27.0 — api.worldInfo.registerInterceptor() handler
+  | 'domEventListener'       // 9d.4.c-2 — DOMHandle.on() event handler
+  | 'inputBarActionClick'    // 9d.4.e-1-b — InputBarActionHandle.onClick() click handler
+  | 'floatWidgetDragEnd'     // 9d.4.e-2-b — FloatWidgetHandle.onDragEnd() drag-end handler
+  | 'drawerTabActivate'      // 9d.4.e-3-b — DrawerTabHandle.onActivate() activation handler
+  | 'rpc';                   // v0.26.0 — api.rpc.handle() on-demand handler (cross-extension RPC pool)
 
 /**
  * Phase 9d.3 — parent firing a registered handler. The child looks up
@@ -585,6 +590,20 @@ export type RegisterHandler =
       hasHandler: true;
     }
   | {
+      // v0.27.0 — api.worldInfo.registerInterceptor() handler. Same
+      // child-generates-handlerId pattern as macroInterceptor +
+      // contentProcessor: the parent forwards via `options.id = handlerId`
+      // to `addEntry` so the handle's `.id` returned synchronously to
+      // user code matches what's stored parent-side.
+      type:      'register-handler';
+      kind:      'worldInfoInterceptor';
+      runId:     string;
+      scriptId:  string;
+      handlerId: string;
+      options?:  WorldInfoInterceptorOptions;
+      hasHandler: true;
+    }
+  | {
       type:      'register-handler';
       kind:      'domEventListener';
       runId:     string;
@@ -670,6 +689,52 @@ export interface UnregisterHandler {
   name?:      string;
 }
 
+/**
+ * Child reporting the lifecycle of an async broadcast handler so the host
+ * can keep `executionStatusStore` in sync with what the user's script is
+ * actually doing.
+ *
+ * Sent by `handleBroadcastFire` in the child when the user-registered
+ * broadcast handler returns a thenable. The host updates the sidebar
+ * status indicator (markRunning → markSuccess / markError) for the
+ * owning script across the duration of the awaited work.
+ *
+ * Sync handlers (those that don't return a thenable) produce no messages
+ * — the indicator simply doesn't update for that handler. Same for
+ * sync-throwing handlers (caught locally, no Promise to track).
+ *
+ * Cross-talk with the trigger-registry's `runningCounts`: the host's
+ * status update from this notice is independent of trigger-registry's
+ * concurrent-invocation counter. If a trigger run AND a broadcast
+ * handler are both in flight for the same script, the dot may briefly
+ * flash green when the broadcast finishes before the trigger does.
+ * Tolerable for v1; a future refactor could share the counter if needed.
+ */
+export type BroadcastHandlerLifecycleNotice =
+  | {
+      type:      'broadcast-handler-started';
+      scriptId:  string;
+      subId:     string;
+      event:     string;
+    }
+  | {
+      type:      'broadcast-handler-finished';
+      scriptId:  string;
+      subId:     string;
+      event:     string;
+      durationMs: number;
+      ok:        true;
+    }
+  | {
+      type:       'broadcast-handler-finished';
+      scriptId:   string;
+      subId:      string;
+      event:      string;
+      durationMs: number;
+      ok:         false;
+      error:      string;
+    };
+
 export type ChildToParentMessage =
   | ScriptRunningNotice
   | RunScriptResult
@@ -677,6 +742,7 @@ export type ChildToParentMessage =
   | AbortRequest
   | BroadcastSubscribeMessage
   | BroadcastUnsubscribeMessage
+  | BroadcastHandlerLifecycleNotice
   | ConsoleEntryNotice
   | RegisterHandler
   | UnregisterHandler

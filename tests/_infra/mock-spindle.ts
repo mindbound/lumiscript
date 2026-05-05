@@ -213,6 +213,16 @@ export function createMockSpindle() {
       getWorldBook: mock(() => Promise.resolve(null)),
     },
 
+    // ─── Regex Scripts (v0.27.0+) ──────────────────────────────────────
+    regex_scripts: {
+      list:      mock(() => Promise.resolve({ data: [], total: 0 })),
+      get:       mock(() => Promise.resolve(null)),
+      getActive: mock(() => Promise.resolve([])),
+      create:    mock(() => Promise.resolve({ id: 'mock-regex-script-id' })),
+      update:    mock(() => Promise.resolve({ id: 'mock-regex-script-id' })),
+      delete:    mock(() => Promise.resolve(true)),
+    },
+
     // ─── Databanks ─────────────────────────────────────────────────────
     databanks: {
       list:   mock(() => Promise.resolve({ data: [], total: 0 })),

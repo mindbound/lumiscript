@@ -79,6 +79,10 @@ import type {
   RegisteredMacroInterceptorInfo,
   InjectionInfo,
   RegisteredMessageContentProcessorInfo,
+  RegisteredWorldInfoInterceptorInfo,
+  WorldInfoInterceptorHandler,
+  WorldInfoInterceptorOptions,
+  WorldInfoInterceptorHandle,
 } from '../types/script.js';
 // Phase 9d.2 — sync local utilities bundled into the child:
 //   - Handlebars: per-script-isolated template environment for utils.template.*
@@ -484,7 +488,7 @@ export interface ProxyContext {
    * subscription registration happens via the IPC `BroadcastSubscribeMessage`
    * the proxy emits in the same call.
    */
-  registerBroadcastHandler:   (subId: string, handler: (payload: unknown) => void) => void;
+  registerBroadcastHandler:   (subId: string, handler: (payload: unknown) => unknown) => void;
   /** Phase 6 — drop a broadcast handler from the child's registry. */
   unregisterBroadcastHandler: (subId: string) => void;
   /**
@@ -510,6 +514,8 @@ export interface ProxyContext {
   macroInterceptorsSnapshot:     RegisteredMacroInterceptorInfo[];
   chatInjectionsSnapshot:        InjectionInfo[];
   chatContentProcessorsSnapshot: RegisteredMessageContentProcessorInfo[];
+  /** v0.27.0+ — pre-existing world-info interceptor registrations from prior runs of this script. */
+  worldInfoInterceptorsSnapshot: RegisteredWorldInfoInterceptorInfo[];
 }
 
 export interface ProxyHandle {
@@ -641,6 +647,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
   const localMacroInterceptors:     RegisteredMacroInterceptorInfo[]           = [...ctx.macroInterceptorsSnapshot];
   const localChatInjections:        InjectionInfo[]                            = [...ctx.chatInjectionsSnapshot];
   const localChatContentProcessors: RegisteredMessageContentProcessorInfo[]    = [...ctx.chatContentProcessorsSnapshot];
+  const localWorldInfoInterceptors: RegisteredWorldInfoInterceptorInfo[]       = [...ctx.worldInfoInterceptorsSnapshot];
 
   /**
    * Generic IPC dispatcher. Sends an api-request, returns a Promise.
@@ -938,19 +945,28 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
      * (both child-side closure and parent-side bus subscription) on
      * demand — cleaner than waiting for the next clear.
      */
-    on: (event: string, handler: (payload: unknown) => void): (() => void) => {
+    on: (event: string, handler: (payload: unknown) => unknown): (() => void) => {
       const subId = generateSubId(ctx.scriptId);
 
       // Wrap the user's handler so a thrown error doesn't cascade. Mirrors
       // the in-process bus's "errors caught so one bad handler can't break
-      // the others" semantic. Async errors become unhandled rejections —
-      // same as the existing in-process behaviour.
-      const wrapped = (payload: unknown): void => {
+      // the others" semantic. Async errors are surfaced through the child-
+      // side `handleBroadcastFire` thenable-tracking path (v0.26.4+) when
+      // the user opts in by returning the Promise — see the doc-block in
+      // `engine/broadcast-bus.ts` and `child-entry.ts:handleBroadcastFire`.
+      //
+      // PRESERVE the user's return value (return-type widened from `void`
+      // to `unknown` in v0.26.4): if the user returns a thenable to opt
+      // into the sidebar status indicator, the child's broadcast-fire
+      // dispatcher needs to see it. Dropping the return here was the
+      // bug that made the initial v0.26.4 work appear to do nothing.
+      const wrapped = (payload: unknown): unknown => {
         try {
-          handler(payload);
+          return handler(payload);
         } catch {
           // Silent — Phase 9's console capture will surface these once
           // it ships; until then mirror the bus's existing swallow path.
+          return undefined;
         }
       };
 
@@ -2660,6 +2676,78 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
       delete:                     mkAsync<WorldInfoAPI['entries']['delete']>(dispatch,                     'worldInfo.entries.delete'),
       listByAutomationIdPrefix:   mkAsync<WorldInfoAPI['entries']['listByAutomationIdPrefix']>(dispatch,   'worldInfo.entries.listByAutomationIdPrefix'),
     },
+
+    // v0.27.0 — same shape as macros.registerInterceptor: child generates
+    // handlerId, registers a closure, sends register-handler IPC; parent
+    // wraps in a handler that fires run-handler IPC back when the
+    // chain dispatches. `localWorldInfoInterceptors` snapshot keeps
+    // listInterceptors() sync.
+    registerInterceptor: (
+      handler: WorldInfoInterceptorHandler,
+      options?: WorldInfoInterceptorOptions,
+    ): WorldInfoInterceptorHandle => {
+      const userSuppliedId = options?.id;
+      const handlerId = userSuppliedId ?? generateHandlerId('worldInfoInterceptor');
+
+      ctx.registerHandlerClosure(handlerId, async (...handlerArgs: unknown[]) => {
+        // IPC args shape: [ctx: WorldInfoInterceptorCtx]. Handler returns
+        // WorldInfoInterceptorResult | void | Promise<...>.
+        return handler(handlerArgs[0] as Parameters<typeof handler>[0]);
+      });
+
+      const msg: RegisterHandler = {
+        type:       'register-handler',
+        kind:       'worldInfoInterceptor',
+        runId:      runIdContext.getStore() ?? ctx.runId,
+        scriptId:   ctx.scriptId,
+        handlerId,
+        // Forward the full options bag; override `options.id` so the
+        // canonical entry uses our handlerId (matches the macroInterceptor
+        // pattern — see RegisterHandler comment).
+        options:    { ...options, id: handlerId },
+        hasHandler: true,
+      };
+      try {
+        ctx.send(msg);
+      } catch (err) {
+        ctx.unregisterHandlerClosure(handlerId);
+        throw err instanceof Error ? err : new Error(String(err));
+      }
+
+      // Update local snapshot for sync listInterceptors().
+      const interceptorEntry: RegisteredWorldInfoInterceptorInfo = {
+        scriptId:    ctx.scriptId,
+        scriptName:  ctx.scriptName,
+        id:          handlerId,
+        priority:    options?.priority ?? 100,
+        timeoutMs:   options?.timeoutMs ?? 2_000,
+      };
+      const existingIdx = localWorldInfoInterceptors.findIndex(
+        (i) => i.scriptId === ctx.scriptId && i.id === handlerId,
+      );
+      if (existingIdx >= 0) localWorldInfoInterceptors[existingIdx] = interceptorEntry;
+      else                  localWorldInfoInterceptors.push(interceptorEntry);
+
+      return {
+        id: handlerId,
+        remove: () => {
+          ctx.unregisterHandlerClosure(handlerId);
+          const unsubMsg: UnregisterHandler = {
+            type:       'unregister-handler',
+            kind:       'worldInfoInterceptor',
+            scriptId:   ctx.scriptId,
+            handlerId,
+          };
+          try { ctx.send(unsubMsg); } catch { /* sync void: no throw */ }
+          const idx = localWorldInfoInterceptors.findIndex(
+            (i) => i.scriptId === ctx.scriptId && i.id === handlerId,
+          );
+          if (idx >= 0) localWorldInfoInterceptors.splice(idx, 1);
+        },
+      };
+    },
+
+    listInterceptors: () => localWorldInfoInterceptors.map((i) => ({ ...i })),
   };
 
   // ── databanks (vectorised document collections + their documents) ────────

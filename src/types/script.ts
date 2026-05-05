@@ -215,6 +215,8 @@ export interface LumiScriptAPI {
   databanks: DatabanksAPI;
   /** Persona (identity profile) CRUD + active persona switching. Requires personas permission. */
   personas: PersonasAPI;
+  /** Regex find/replace script CRUD plus context-aware `getActive` resolver. Mirrors the resolution Lumiverse uses internally during prompt assembly + response baking + display rendering. Requires regex_scripts permission. */
+  regexScripts: RegexScriptsAPI;
   /** Read-only access to the user's Council configuration: settings, members, and the available Lumia-item pool. No permission required. */
   council: CouncilAPI;
   /** Requires allowDangerous */
@@ -1879,6 +1881,323 @@ export type ActivatedWorldInfoEntry = WorldInfoEntry & {
   score?: number;
 };
 
+// ─── Regex Scripts API ──────────────────────────────────────────────────────
+//
+// Full CRUD over the user's regex find/replace scripts plus a context-aware
+// `getActive` resolver. Maps onto Lumiverse's `spindle.regex_scripts.*`
+// surface (lumiverse-spindle-types ≥0.4.62 / Lumiverse ≥0.9.7). Requires
+// the `regex_scripts` permission.
+//
+// Targets and where they fire:
+//   - `'prompt'`   — runs during prompt assembly, against each message
+//     before it goes to the LLM. Does not modify stored content.
+//   - `'response'` — runs once after the LLM stream ends, against the
+//     full assistant message. The result is written back to chat storage.
+//   - `'display'`  — runs per render in the frontend. Does not modify
+//     stored content.
+
+/** Which message roles a regex rule applies to. */
+export type RegexPlacement = 'user_input' | 'ai_output' | 'world_info' | 'reasoning';
+
+/** Scope tier of a regex rule. */
+export type RegexScope = 'global' | 'character' | 'chat';
+
+/** Execution-target tier of a regex rule. */
+export type RegexTarget = 'prompt' | 'response' | 'display';
+
+/** How CBS / `{{...}}` macros inside a rule's pattern resolve. */
+export type RegexMacroMode = 'none' | 'raw' | 'escaped';
+
+/**
+ * Snapshot of a regex script. Returned by `list()`, `get()`, `findByName()`,
+ * `getActive()`, `create()`, and `update()`. Field names are camelCase
+ * translations of the underlying snake_case `RegexScriptDTO`.
+ */
+export interface RegexScriptInfo {
+  /** Unique row id. */
+  id: string;
+  /** Display name shown in the regex panel. */
+  name: string;
+  /**
+   * Stable, normalized identifier (lowercase + underscores) for cross-instance
+   * references. Distinct from `id`; `id` is generated at row creation, while
+   * `scriptId` is the user-controllable stable handle.
+   */
+  scriptId: string;
+  /** Pattern compiled with the JavaScript regex engine. */
+  findRegex: string;
+  /** Replacement template. Supports `$1` / `$&` / `$<name>` capture references. */
+  replaceString: string;
+  /** Any subset of `gimsu`. */
+  flags: string;
+  /** Which message roles the rule applies to. */
+  placement: RegexPlacement[];
+  /** Scope tier. Default `'global'`. */
+  scope: RegexScope;
+  /** Required when `scope` is non-global; null otherwise. */
+  scopeId: string | null;
+  /** When the rule fires. */
+  target: RegexTarget;
+  /** Lower bound on chat-history depth (0 = latest), or null for unbounded. */
+  minDepth: number | null;
+  /** Upper bound on chat-history depth, or null for unbounded. */
+  maxDepth: number | null;
+  /** Additional substrings stripped from output after the regex pass. */
+  trimStrings: string[];
+  /** Re-run the rule when a message is edited. */
+  runOnEdit: boolean;
+  /** How CBS / `{{...}}` macros inside the rule resolve. */
+  substituteMacros: RegexMacroMode;
+  /** When true, the rule is registered but not active. */
+  disabled: boolean;
+  /** Lower values run earlier within the same scope tier. */
+  sortOrder: number;
+  /** Free-form note. */
+  description: string;
+  /** Folder label shown in the regex panel. */
+  folder: string;
+  /** Arbitrary metadata namespaced to the creating extension. */
+  metadata: Record<string, unknown>;
+  /** Unix epoch seconds. */
+  createdAt: number;
+  /** Unix epoch seconds. */
+  updatedAt: number;
+}
+
+/** Filter options for `RegexScriptsAPI.list()`. */
+export interface RegexScriptListOptions {
+  /** Filter to a single scope. Omit to include all scopes. */
+  scope?: RegexScope;
+  /**
+   * Required when `scope` is `character` or `chat` to narrow to a single
+   * entity. Ignored otherwise.
+   */
+  scopeId?: string;
+  /** Filter by execution target. */
+  target?: RegexTarget;
+  /** Page size. Default 50, max 200. */
+  limit?: number;
+  /** Pagination offset. */
+  offset?: number;
+}
+
+/** Required + optional fields for `RegexScriptsAPI.getActive()`. */
+export interface RegexScriptActiveOptions {
+  /** **Required.** The execution target to resolve for. */
+  target: RegexTarget;
+  /** Include character-scoped rules attached to this character. */
+  characterId?: string;
+  /** Include chat-scoped rules attached to this chat. */
+  chatId?: string;
+}
+
+/**
+ * Fields accepted by `RegexScriptsAPI.create()`. `name` and `findRegex`
+ * are required; everything else gets host-side defaults if omitted.
+ */
+export interface RegexScriptCreateInput {
+  name: string;
+  findRegex: string;
+  replaceString?: string;
+  flags?: string;
+  placement?: RegexPlacement[];
+  scope?: RegexScope;
+  scopeId?: string | null;
+  target?: RegexTarget;
+  minDepth?: number | null;
+  maxDepth?: number | null;
+  trimStrings?: string[];
+  runOnEdit?: boolean;
+  substituteMacros?: RegexMacroMode;
+  disabled?: boolean;
+  sortOrder?: number;
+  description?: string;
+  folder?: string;
+  metadata?: Record<string, unknown>;
+  /** Stable identifier. Normalized to lowercase + underscores by the host. */
+  scriptId?: string;
+}
+
+/** All fields optional. Same shape as `RegexScriptCreateInput`. */
+export type RegexScriptUpdateInput = Partial<RegexScriptCreateInput>;
+
+/**
+ * `api.regexScripts.*` — full CRUD over the user's regex find/replace
+ * scripts. Requires the `regex_scripts` permission.
+ *
+ * Lifecycle events: scripts can subscribe to `REGEX_SCRIPT_CHANGED` and
+ * `REGEX_SCRIPT_DELETED` via the `@triggers` directive to keep
+ * extension-side caches in sync (e.g. invalidate a cached `getActive`
+ * result on either event).
+ */
+export interface RegexScriptsAPI {
+  /**
+   * List regex scripts with strict scope filtering. Default page size 50,
+   * max 200. Requires `regex_scripts` permission.
+   */
+  list(options?: RegexScriptListOptions): Promise<{ data: RegexScriptInfo[]; total: number }>;
+
+  /** Get a regex script by id. Returns null if not found. Requires `regex_scripts` permission. */
+  get(scriptId: string): Promise<RegexScriptInfo | null>;
+
+  /**
+   * Find a regex script by display name. Convenience wrapper over `list()`
+   * — pages through and applies the name filter locally. O(scripts) on
+   * worst-case account size. Requires `regex_scripts` permission.
+   */
+  findByName(name: string, scope?: RegexScope): Promise<RegexScriptInfo | null>;
+
+  /**
+   * Resolve the enabled scripts that would actually fire for the given
+   * target + character/chat context, merged across global + character +
+   * chat scopes and ordered by scope tier then `sortOrder`. Mirrors the
+   * resolution Lumiverse uses internally during a generation. Requires
+   * `regex_scripts` permission.
+   */
+  getActive(options: RegexScriptActiveOptions): Promise<RegexScriptInfo[]>;
+
+  /** Create a new regex script. `name` and `findRegex` are required. Requires `regex_scripts` permission. */
+  create(input: RegexScriptCreateInput): Promise<RegexScriptInfo>;
+
+  /** Update a regex script. All fields optional. Throws if the script is not found. Requires `regex_scripts` permission. */
+  update(scriptId: string, input: RegexScriptUpdateInput): Promise<RegexScriptInfo>;
+
+  /** Delete a regex script. Returns true if the row was deleted. Requires `regex_scripts` permission. */
+  delete(scriptId: string): Promise<boolean>;
+}
+
+// ─── World Info Interceptor (api.worldInfo.registerInterceptor) ────────────
+//
+// Runs BEFORE world info activation. Receives the candidate entries + chat
+// state, returns disable / enable / force / mutate decisions for those
+// entries. Use cases: turn-based gates ("activate this entry only after
+// turn 5"), sticky flags, external-state lookups, retrieval-driven content
+// rewrites — anything the stored-fields-only WI activation rules can't
+// express.
+//
+// Permission: rides on the existing `generation` gate (same as other
+// interceptor-family hooks).
+
+/**
+ * One world info entry exposed to a `registerInterceptor` handler. Subset
+ * of `WorldInfoEntry` covering the fields the interceptor needs to inspect
+ * for activation gating.
+ */
+export interface WorldInfoInterceptorEntry {
+  readonly id: string;
+  readonly worldBookId: string;
+  readonly comment: string;
+  readonly disabled: boolean;
+  readonly constant: boolean;
+  readonly extensions: Record<string, unknown>;
+  readonly key: readonly string[];
+  readonly keysecondary: readonly string[];
+  readonly position: number;
+  readonly depth: number;
+  readonly priority: number;
+  readonly probability: number;
+  readonly useProbability: boolean;
+  readonly content: string;
+}
+
+/** One chat message exposed to a `registerInterceptor` handler. */
+export interface WorldInfoInterceptorMessage {
+  readonly role: 'system' | 'user' | 'assistant';
+  readonly content: string;
+}
+
+/**
+ * Context passed to a `registerInterceptor` handler. Read-only. To
+ * persist cross-turn state, write to chat metadata via
+ * `api.chats.update(chatId, { metadata: ... })` rather than mutating
+ * `chatMetadata` here (it's a snapshot).
+ */
+export interface WorldInfoInterceptorCtx {
+  readonly chatId: string;
+  readonly characterId: string;
+  /** Owning user id. Pass to operator-scoped Spindle calls. */
+  readonly userId?: string;
+  readonly entries: readonly WorldInfoInterceptorEntry[];
+  readonly messages: readonly WorldInfoInterceptorMessage[];
+  readonly chatTurn: number;
+  readonly chatMetadata: Record<string, unknown>;
+}
+
+/** Per-entry content override emitted by a `registerInterceptor` handler. */
+export interface WorldInfoInterceptorMutation {
+  readonly id: string;
+  readonly content: string;
+}
+
+/**
+ * Return value of a `registerInterceptor` handler. All four lists are
+ * independent; return `void` (or omit all four arrays) to pass through.
+ *
+ * Vote-off precedence: once any handler in the chain votes `disabled`
+ * for an entry id, no later handler's `enabled` or `forced` vote can
+ * revive it. To force a stored-disabled entry, vote BOTH `enabled` AND
+ * `forced` from the same (or earlier) handler.
+ *
+ * `mutated` is last-write-wins per id (later handlers override earlier
+ * mutations of the same entry).
+ */
+export interface WorldInfoInterceptorResult {
+  readonly disabled?: readonly string[];
+  readonly enabled?: readonly string[];
+  readonly forced?: readonly string[];
+  readonly mutated?: readonly WorldInfoInterceptorMutation[];
+}
+
+/**
+ * User-supplied world-info interceptor handler. Sync or async. Returns
+ * a partial result patch or `void` to pass through.
+ */
+export type WorldInfoInterceptorHandler = (
+  ctx: WorldInfoInterceptorCtx,
+) =>
+  | WorldInfoInterceptorResult
+  | void
+  | Promise<WorldInfoInterceptorResult | void>;
+
+/** Registration options for `api.worldInfo.registerInterceptor`. */
+export interface WorldInfoInterceptorOptions {
+  /**
+   * Stable identifier. Re-registration with the same id replaces the
+   * prior entry rather than accumulating. When omitted, an auto-id is
+   * assigned (`auto-1`, `auto-2`, …).
+   */
+  id?: string;
+  /**
+   * Lower runs first. Default 100. Tie-broken by registration order.
+   * Each handler in the chain sees prior handlers' decisions applied
+   * to the entries list.
+   */
+  priority?: number;
+  /**
+   * Per-invocation soft timeout in ms. Default 2000. The host's outer
+   * 10s budget is shared across ALL extensions' interceptors, so each
+   * LS-side handler should stay well under it. Slow handlers add
+   * visible latency before the LLM call.
+   */
+  timeoutMs?: number;
+}
+
+/** Handle returned from `api.worldInfo.registerInterceptor`. */
+export interface WorldInfoInterceptorHandle {
+  readonly id: string;
+  /** Remove this interceptor. Idempotent on already-removed entries. */
+  remove(): void;
+}
+
+/** Snapshot for diagnostics surfaces — see `api.worldInfo.listInterceptors()`. */
+export interface RegisteredWorldInfoInterceptorInfo {
+  scriptId: string;
+  scriptName: string;
+  id: string;
+  priority: number;
+  timeoutMs: number;
+}
+
 export interface WorldInfoAPI {
   /** List world books. Requires world_books permission. */
   list(options?: { limit?: number; offset?: number }): Promise<{ data: WorldInfo[]; total: number }>;
@@ -1941,6 +2260,58 @@ export interface WorldInfoAPI {
    * Requires world_books permission.
    */
   getCapturedActive(chatId?: string): Promise<ActivatedWorldInfoEntry[]>;
+
+  /**
+   * Register a world-info interceptor — a handler that runs BEFORE world
+   * info activation, receives the candidate entries + chat state, and
+   * returns disable / enable / force / mutate decisions. Requires
+   * `generation` permission (same gate as `api.llm.*` and the macro/
+   * content-processor interceptors).
+   *
+   * Multiple handlers compose: each runs in priority order (lower first;
+   * tie-broken by registration order) and sees prior handlers' decisions
+   * applied to the entry list. Vote-off precedence on `disabled` —
+   * once any handler in the chain votes disabled for an id, no later
+   * `enabled` or `forced` vote can revive it.
+   *
+   * **Critical perf**: the chain fires before activation, which fires
+   * before prompt assembly, which fires before the LLM call. Slow
+   * handlers add visible latency before the first streamed token. Each
+   * invocation has a 2s soft timeout (configurable via `options.timeoutMs`).
+   * DO NOT call `api.llm.*` or `api.utils.http.*` from a handler — pre-
+   * compute via a trigger handler, store in `api.db.*`, read here.
+   *
+   * @example  turn-based gate
+   * api.worldInfo.registerInterceptor(async (ctx) => {
+   *   if (ctx.chatTurn < 5) {
+   *     // Suppress all "early-game-only" entries until turn 5
+   *     const disabled = ctx.entries
+   *       .filter(e => (e.extensions as any)?.gate === 'early-game-only')
+   *       .map(e => e.id);
+   *     return { disabled };
+   *   }
+   * });
+   *
+   * @example  content rewrite from extension state
+   * api.worldInfo.registerInterceptor(async (ctx) => {
+   *   const overrides = await api.db.collection('wi-overrides').find({});
+   *   return {
+   *     mutated: overrides.map(o => ({ id: o.entryId, content: o.content })),
+   *   };
+   * }, { priority: 50 });
+   */
+  registerInterceptor(
+    handler: WorldInfoInterceptorHandler,
+    options?: WorldInfoInterceptorOptions,
+  ): WorldInfoInterceptorHandle;
+
+  /**
+   * List all currently-registered world-info interceptors across all
+   * scripts. Diagnostic surface — useful for the Status panel and
+   * extension-author debugging. No permission required (read-only
+   * inspection of LS-side state).
+   */
+  listInterceptors(): RegisteredWorldInfoInterceptorInfo[];
 }
 
 // ─── Script namespace (inside script body) ────────────────────────────────────
@@ -3971,7 +4342,24 @@ export interface BroadcastAPI {
    * Subscriptions are also cleaned up automatically when the owning script
    * is disabled, deleted, or finishes a one-shot execution.
    *
-   * @example
+   * **Async-tracking opt-in (LumiScript ≥0.26.4):** if the handler returns
+   * a Promise / thenable, the sidebar status indicator (the green/amber
+   * dot in Manage and Status tabs) tracks the awaited work — flips to
+   * "running" while the Promise is pending, then "success" / "error" on
+   * settle. Sync handlers and fire-and-forget handlers (`void (...)()`)
+   * produce no status update.
+   *
+   * @example  fire-and-forget handler — no status tracking
+   * api.broadcast.on('tracker:state-changed', (payload) => {
+   *   void (async () => { await rerender(); })();
+   * });
+   *
+   * @example  RETURN the IIFE to opt into status tracking
+   * api.broadcast.on('tracker:request-rerun', (payload) =>
+   *   (async () => { await runRerun(payload); })()
+   * );
+   *
+   * @example  classic sync handler
    * const unsub = api.broadcast.on('ls:tool:invoked', (ev) => {
    *   console.log(ev.name, 'took', ev.callMs, 'ms');
    * });

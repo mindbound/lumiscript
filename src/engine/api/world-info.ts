@@ -35,6 +35,17 @@ import type {
   ActivatedWorldInfoEntry,
 } from '../../types/script.js';
 import type { APIBuildDeps } from './shared.js';
+import {
+  addEntry as addWorldInfoInterceptorEntry,
+  removeEntry as removeWorldInfoInterceptorEntry,
+  listAll as listWorldInfoInterceptorEntries,
+} from '../world-info-interceptor-registry.js';
+import type {
+  WorldInfoInterceptorHandler,
+  WorldInfoInterceptorOptions,
+  WorldInfoInterceptorHandle,
+  RegisteredWorldInfoInterceptorInfo,
+} from '../../types/script.js';
 import { assertPerm } from './shared.js';
 
 // ─── DTO → WorldInfo mapping ───────────────────────────────────────────────────
@@ -145,7 +156,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // ─── API builder ──────────────────────────────────────────────────────────────
 
 export function buildWorldInfoAPI(deps: APIBuildDeps): LumiScriptAPI['worldInfo'] {
-  const { script, hasPerm, userId, activeContext } = deps;
+  const { script, hasPerm, userId, activeContext, worldInfoInterceptorsRegisteredThisRun } = deps;
   const uid = userId ?? undefined;
 
   // Per-execution name→id cache to avoid redundant list() calls when the same
@@ -345,6 +356,35 @@ export function buildWorldInfoAPI(deps: APIBuildDeps): LumiScriptAPI['worldInfo'
 
       // Filter out any nulls (entries deleted between activation scan and fetch).
       return results.filter((e): e is ActivatedWorldInfoEntry => e !== null);
+    },
+
+    // ── World Info interceptor (v0.27.0+) ────────────────────────────────────
+    //
+    // Same registration / stale-clean lifecycle as macros' interceptor and
+    // chat's content processor: scripts call `registerInterceptor`, the
+    // resolved id is added to a per-execution tracking set, and the
+    // post-run `diffAndCleanStale` pass drops entries the new run no
+    // longer creates. Without that, a trigger script that re-registers on
+    // every event would accumulate auto-id'd entries across runs.
+
+    registerInterceptor(
+      handler: WorldInfoInterceptorHandler,
+      options?: WorldInfoInterceptorOptions,
+    ): WorldInfoInterceptorHandle {
+      assertPerm('generation', hasPerm, script.name);
+      const id = addWorldInfoInterceptorEntry(script.id, script.name, handler, options);
+      worldInfoInterceptorsRegisteredThisRun?.add(id);
+      return {
+        id,
+        remove: () => {
+          removeWorldInfoInterceptorEntry(script.id, id);
+        },
+      };
+    },
+
+    listInterceptors(): RegisteredWorldInfoInterceptorInfo[] {
+      // Diagnostic surface — un-gated, mirrors `listInterceptors` on macros.
+      return listWorldInfoInterceptorEntries();
     },
   };
 }

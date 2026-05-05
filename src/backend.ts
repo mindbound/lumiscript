@@ -29,6 +29,12 @@ import {
   diffAndCleanStale as diffAndCleanStaleContentProcessors,
 } from './engine/message-content-processor-registry.js';
 import {
+  dispatch as dispatchWorldInfoInterceptor,
+  clearByScriptId as clearWorldInfoInterceptorsByScriptId,
+  listIdsByScriptId as worldInfoInterceptorIdsByScript,
+  diffAndCleanStale as diffAndCleanStaleWorldInfoInterceptors,
+} from './engine/world-info-interceptor-registry.js';
+import {
   clearByScriptId as clearToolsByScriptId,
   listAll as listAllTools,
   removeByName as removeToolByName,
@@ -95,6 +101,7 @@ import {
   sendFloatWidgetPositionNotice,
   notifyDrawerTabRegistered,
   setScriptResolver,
+  setSendToFrontend,
   unregisterScriptFromChild,
   // shutdownScriptRunner — Phase 10 will wire this into teardown
 } from './script-runner/host-dispatcher.js';
@@ -185,6 +192,11 @@ registerLumiScriptMacros(() => settingsStore.get().enabled);
 function send(msg: import('./types/messages.js').BackendToFrontend): void {
   spindle.sendToFrontend(msg);
 }
+
+// Wire host-dispatcher's frontend-send hook so async broadcast handler
+// lifecycle messages reach the sidebar status indicator. Mirror of the
+// `setScriptResolver` wiring above.
+setSendToFrontend((msg) => send(msg as import('./types/messages.js').BackendToFrontend));
 
 function pushScripts(): void {
   send({ type: 'scripts_updated', scripts: scriptStorage.getScripts() });
@@ -447,6 +459,70 @@ if (typeof spindle.registerMessageContentProcessor === 'function') {
   spindle.log.warn(
     '[LumiScript] host does not support spindle.registerMessageContentProcessor — ' +
     'api.chat.registerContentProcessor will be unavailable to scripts on this build.',
+  );
+}
+
+// ─── World info interceptor (LS-house multiplexer, v0.27.0) ──────────────────
+//
+// Mirrors the macro-interceptor + content-processor wiring above. One
+// extension-level registration; per-script handlers fan out via the
+// per-script registry's `dispatch()`. Permission rides on the existing
+// `generation` gate — same as `api.llm.*` and the other interceptor
+// hooks. No new permission machinery required.
+//
+// DTO ↔ LS-type translation at this boundary:
+//   - Host hands us `WorldInfoInterceptorCtxDTO` (snake_case for
+//     world_book_id / use_probability / keysecondary).
+//   - We translate to `WorldInfoInterceptorCtx` (camelCase) before
+//     dispatching, so user handlers see consistent LumiScript-flavour
+//     types throughout `api.*`.
+//   - `WorldInfoInterceptorMutation` shape is identical between DTO and
+//     LS-type (id + content), so the result passes through unchanged.
+//
+// Forward-compat: same guard pattern as the other interceptor hooks.
+if (typeof spindle.registerWorldInfoInterceptor === 'function') {
+  spindle.registerWorldInfoInterceptor(async (dtoCtx) => {
+    // DTO → LS-type translation. The entries' snake_case fields need
+    // camelCase mapping; everything else is structurally identical.
+    const lsCtx: import('./types/script.js').WorldInfoInterceptorCtx = {
+      chatId:       dtoCtx.chatId,
+      characterId:  dtoCtx.characterId,
+      ...(dtoCtx.userId !== undefined ? { userId: dtoCtx.userId } : {}),
+      entries: dtoCtx.entries.map((e) => ({
+        id:             e.id,
+        worldBookId:    e.world_book_id,
+        comment:        e.comment,
+        disabled:       e.disabled,
+        constant:       e.constant,
+        extensions:     e.extensions,
+        key:            e.key,
+        keysecondary:   e.keysecondary,
+        position:       e.position,
+        depth:          e.depth,
+        priority:       e.priority,
+        probability:    e.probability,
+        useProbability: e.use_probability,
+        content:        e.content,
+      })),
+      messages:     dtoCtx.messages.map((m) => ({ role: m.role, content: m.content })),
+      chatTurn:     dtoCtx.chatTurn,
+      chatMetadata: dtoCtx.chatMetadata,
+    };
+    const result = await dispatchWorldInfoInterceptor(lsCtx);
+    if (!result) return undefined;
+    // LS-type → DTO. The arrays of strings + mutations carry through
+    // unchanged; just spread to satisfy the return type.
+    return {
+      ...(result.disabled ? { disabled: [...result.disabled] } : {}),
+      ...(result.enabled  ? { enabled:  [...result.enabled]  } : {}),
+      ...(result.forced   ? { forced:   [...result.forced]   } : {}),
+      ...(result.mutated  ? { mutated:  result.mutated.map((m) => ({ id: m.id, content: m.content })) } : {}),
+    };
+  }, 100);
+} else {
+  spindle.log.warn(
+    '[LumiScript] host does not support spindle.registerWorldInfoInterceptor — ' +
+    'api.worldInfo.registerInterceptor will be unavailable to scripts on this build.',
   );
 }
 
@@ -863,6 +939,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
           // skips them. Idempotent on already-disabled scripts.
           clearMacroInterceptorsByScriptId(msg.id);
           clearMessageContentProcessorsByScriptId(msg.id);
+          clearWorldInfoInterceptorsByScriptId(msg.id);
           // RPC endpoints registered via `api.rpc.sync` / `api.rpc.handle`.
           // Spindle's auto-cleanup on extension unload tears down every
           // LumiScript-owned endpoint regardless of which script owns it,
@@ -952,6 +1029,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
         // `update_script` for the no-host-unregister-needed reasoning.
         clearMacroInterceptorsByScriptId(msg.id);
         clearMessageContentProcessorsByScriptId(msg.id);
+        clearWorldInfoInterceptorsByScriptId(msg.id);
         // RPC endpoints — see matching block in `update_script` for context.
         const clearedRpcEndpoints = clearRpcEndpointsByScriptId(msg.id);
         for (const endpoint of clearedRpcEndpoints) {
@@ -1247,16 +1325,18 @@ spindle.onFrontendMessage(async (raw, userId) => {
         // `api.macros.register(...)` call, or stopped calling
         // `api.macros.registerInterceptor` from a code path that previously
         // ran on every trigger event).
-        const preRunToolNames                    = toolNamesByScript(script.id);
-        const preRunMacroNames                   = macroNamesByScript(script.id);
-        const preRunMacroInterceptorIds          = macroInterceptorIdsByScript(script.id);
-        const preRunContentProcessorIds          = contentProcessorIdsByScript(script.id);
-        const preRunRpcEndpoints                 = rpcEndpointsByScript(script.id);
-        const toolsRegisteredThisRun             = new Set<string>();
-        const macrosRegisteredThisRun            = new Set<string>();
-        const macroInterceptorsRegisteredThisRun = new Set<string>();
-        const contentProcessorsRegisteredThisRun = new Set<string>();
-        const rpcEndpointsRegisteredThisRun      = new Set<string>();
+        const preRunToolNames                        = toolNamesByScript(script.id);
+        const preRunMacroNames                       = macroNamesByScript(script.id);
+        const preRunMacroInterceptorIds              = macroInterceptorIdsByScript(script.id);
+        const preRunContentProcessorIds              = contentProcessorIdsByScript(script.id);
+        const preRunWorldInfoInterceptorIds          = worldInfoInterceptorIdsByScript(script.id);
+        const preRunRpcEndpoints                     = rpcEndpointsByScript(script.id);
+        const toolsRegisteredThisRun                 = new Set<string>();
+        const macrosRegisteredThisRun                = new Set<string>();
+        const macroInterceptorsRegisteredThisRun     = new Set<string>();
+        const contentProcessorsRegisteredThisRun     = new Set<string>();
+        const worldInfoInterceptorsRegisteredThisRun = new Set<string>();
+        const rpcEndpointsRegisteredThisRun          = new Set<string>();
 
         // Manual-run path goes through the same dispatcher as trigger
         // fires (Phase 9c + 9d.3.b unification). `activeContext` is NOT
@@ -1281,11 +1361,12 @@ spindle.onFrontendMessage(async (raw, userId) => {
             onConsole: (entry) => {
               send({ type: 'console_entry', scriptId: script.id, runId, entry });
             },
-            onToolsChanged:                     pushTools,
+            onToolsChanged:                         pushTools,
             toolsRegisteredThisRun,
             macrosRegisteredThisRun,
             macroInterceptorsRegisteredThisRun,
             contentProcessorsRegisteredThisRun,
+            worldInfoInterceptorsRegisteredThisRun,
             rpcEndpointsRegisteredThisRun,
           },
         );
@@ -1316,6 +1397,9 @@ spindle.onFrontendMessage(async (raw, userId) => {
         );
         diffAndCleanStaleContentProcessors(
           script.id, preRunContentProcessorIds, contentProcessorsRegisteredThisRun,
+        );
+        diffAndCleanStaleWorldInfoInterceptors(
+          script.id, preRunWorldInfoInterceptorIds, worldInfoInterceptorsRegisteredThisRun,
         );
         const staleRpcEndpoints = diffAndCleanStaleEndpoints(
           script.id, preRunRpcEndpoints, rpcEndpointsRegisteredThisRun,

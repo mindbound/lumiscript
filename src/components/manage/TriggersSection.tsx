@@ -55,6 +55,8 @@ export const TRIGGER_EVENT_GROUPS: EventGroup[] = [
       { name: 'PRESET_CHANGED',            description: 'Active prompt preset changed' },
       { name: 'CONNECTION_PROFILE_LOADED', description: 'A connection profile was activated' },
       { name: 'WORLD_INFO_ACTIVATED',      description: 'World Info entries were activated' },
+      { name: 'REGEX_SCRIPT_CHANGED',      description: 'A regex find/replace script was created, updated, duplicated, reordered, or had its enabled state toggled. data.id + data.script (RegexScriptInfo). Requires regex_scripts permission. v0.27.0+.' },
+      { name: 'REGEX_SCRIPT_DELETED',      description: 'A regex find/replace script was deleted. data.id. Requires regex_scripts permission. v0.27.0+.' },
     ],
   },
 ];

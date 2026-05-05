@@ -45,6 +45,7 @@ function makeHarness(): Harness {
     macroInterceptorsSnapshot:     [],
     chatInjectionsSnapshot:        [],
     chatContentProcessorsSnapshot: [],
+    worldInfoInterceptorsSnapshot: [],
   };
   const proxy = buildProxiedAPI(ctx);
   return {

@@ -138,7 +138,11 @@ const activeProxies = new Map<string, ActiveProxyEntry>();
  * `broadcast.on` populates this map; `broadcast-clear` clears it; the
  * unsub function returned by `on` removes a single entry on demand.
  */
-type BroadcastHandlerFn = (payload: unknown) => void;
+// v0.26.4 — return type widened to `unknown` so the broadcast-fire
+// dispatcher can detect thenable returns and emit lifecycle messages
+// for the sidebar status indicator. Sync handlers still return void;
+// async-tracking-opt-in handlers return a Promise.
+type BroadcastHandlerFn = (payload: unknown) => unknown;
 const broadcastHandlers = new Map<string, Map<string, BroadcastHandlerFn>>();
 
 function registerBroadcastHandler(
@@ -198,16 +202,67 @@ function unregisterHandlerClosure(scriptId: string, handlerId: string): void {
   if (scriptHandlers.size === 0) handlerClosures.delete(scriptId);
 }
 
-function handleBroadcastFire(msg: BroadcastFireMessage): void {
+function handleBroadcastFire(
+  proc: SpindleBackendProcessContext,
+  msg: BroadcastFireMessage,
+): void {
   const scriptHandlers = broadcastHandlers.get(msg.scriptId);
   const handler = scriptHandlers?.get(msg.subId);
   if (!handler) return; // late fire after clear/unsub — drop silently
+
+  // Async-tracking opt-in (v0.26.4+): if the user's handler returns a
+  // thenable, forward lifecycle notices to the parent so it can update
+  // `executionStatusStore` (the sidebar dot) for the duration of the
+  // awaited work. Sync handlers and sync-throwing handlers produce no
+  // lifecycle messages — the indicator simply doesn't move for them.
+  let result: unknown;
   try {
-    handler(msg.payload);
+    result = (handler as (payload: unknown) => unknown)(msg.payload);
   } catch {
     // Mirror the bus's existing semantic: errors caught so one bad handler
     // can't break the others. Console capture (Phase 9) will eventually
     // surface these to the LumiScript console pane; for now they're silent.
+    return;
+  }
+
+  if (result !== null && typeof result === 'object' && typeof (result as { then?: unknown }).then === 'function') {
+    const startedAt = Date.now();
+    try {
+      send(proc, {
+        type:     'broadcast-handler-started',
+        scriptId: msg.scriptId,
+        subId:    msg.subId,
+        event:    msg.event,
+      });
+    } catch { /* channel down — best-effort */ }
+
+    void (result as Promise<unknown>).then(
+      () => {
+        try {
+          send(proc, {
+            type:       'broadcast-handler-finished',
+            scriptId:   msg.scriptId,
+            subId:      msg.subId,
+            event:      msg.event,
+            durationMs: Date.now() - startedAt,
+            ok:         true,
+          });
+        } catch { /* channel down — best-effort */ }
+      },
+      (err: unknown) => {
+        try {
+          send(proc, {
+            type:       'broadcast-handler-finished',
+            scriptId:   msg.scriptId,
+            subId:      msg.subId,
+            event:      msg.event,
+            durationMs: Date.now() - startedAt,
+            ok:         false,
+            error:      err instanceof Error ? err.message : String(err),
+          });
+        } catch { /* channel down — best-effort */ }
+      },
+    );
   }
 }
 
@@ -511,6 +566,7 @@ async function runOne(
     macroInterceptorsSnapshot:     req.macroInterceptorsSnapshot     ?? [],
     chatInjectionsSnapshot:        req.chatInjectionsSnapshot        ?? [],
     chatContentProcessorsSnapshot: req.chatContentProcessorsSnapshot ?? [],
+    worldInfoInterceptorsSnapshot: req.worldInfoInterceptorsSnapshot ?? [],
   });
   activeProxies.set(req.runId, { scriptId: req.scriptId, proxy });
 
@@ -713,7 +769,7 @@ export default function (proc: SpindleBackendProcessContext): () => void {
         break;
 
       case 'broadcast-fire':
-        handleBroadcastFire(msg);
+        handleBroadcastFire(proc, msg);
         break;
 
       case 'broadcast-clear':

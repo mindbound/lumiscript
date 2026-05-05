@@ -30,8 +30,35 @@
  *   clearByScriptId() removes all subscriptions owned by that script and is
  *   called from TriggerRegistry.unregister() and from the executor after a
  *   one-shot script completes.
+ *
+ * Status indicator (v0.26.4+):
+ *   Handlers that perform async work can opt into the sidebar status indicator
+ *   (the green/amber/red dot in Manage and Status tabs) by RETURNING the
+ *   thenable instead of fire-and-forget'ing it:
+ *
+ *     // Tracked — dot blinks amber while extraction runs
+ *     api.broadcast.on('tracker:request-rerun', (payload) =>
+ *       (async () => { … await runRerun(...) … })()
+ *     );
+ *
+ *     // NOT tracked — handler returns immediately, dot stays whatever
+ *     api.broadcast.on('tracker:request-rerun', (payload) => {
+ *       void (async () => { … })();
+ *     });
+ *
+ *   `emit()` detects thenable returns and wraps them with markRunning /
+ *   markSuccess / markError around the awaited work. Sync-returning handlers
+ *   produce no status update (current behaviour preserved).
  */
 
+import { executionStatusStore } from './execution-status.js';
+
+// Handler signature stays `=> void` (loose: TS accepts any return type and
+// ignores it). Runtime thenable detection in `emit()` opts a handler into
+// async tracking by returning a Promise/thenable, which TS still allows
+// under `=> void`. Tightening the signature to `=> void | Promise<void>`
+// would propagate as a breaking change to every existing handler whose
+// implicit return value happens to be non-void (e.g. `p => arr.push(p)`).
 type Handler = (payload: unknown) => void;
 
 interface HandlerEntry {
@@ -56,17 +83,71 @@ const handlerIndex = new Map<string, Set<HandlerEntry>>();
  * Emit a named event. All handlers subscribed to `event` are called
  * synchronously in registration order. Errors thrown by individual handlers
  * are caught and logged so one bad handler cannot break the others.
+ *
+ * Async-tracking opt-in (v0.26.4+): handlers that return a thenable are
+ * tracked through `executionStatusStore` for the duration of the awaited
+ * work. The sidebar status indicator blinks amber for the owning script
+ * until the thenable settles, then flips to green (resolve) or red
+ * (reject). Sync-returning handlers produce no status updates.
+ *
+ * Note: emit() itself remains synchronous from the caller's perspective.
+ * Thenable handlers are awaited in detached tasks; the for-loop returns
+ * as soon as every handler has been kicked off.
  */
 export function emit(event: string, payload?: unknown): void {
   const set = bus.get(event);
   if (!set) return;
   for (const entry of set) {
+    let result: unknown;
     try {
-      entry.handler(payload);
+      result = (entry.handler as (payload: unknown) => unknown)(payload);
     } catch (err) {
+      // Sync throw — log and skip status tracking (no Promise to await).
       console.error(`[broadcast-bus] handler for '${event}' threw:`, err);
+      continue;
+    }
+    if (isThenable(result)) {
+      trackAsyncHandler(event, entry.scriptId, result);
     }
   }
+}
+
+/** True if `v` looks like a thenable (Promise or PromiseLike). */
+function isThenable(v: unknown): v is Promise<void> {
+  return (
+    v !== null &&
+    typeof v === 'object' &&
+    typeof (v as { then?: unknown }).then === 'function'
+  );
+}
+
+/**
+ * Wrap a thenable handler return with execution-status updates. Detached
+ * — the caller (`emit`) doesn't await this; we run it as a side-task that
+ * fires markRunning immediately, then markSuccess / markError on settlement.
+ *
+ * Cross-talk with trigger-registry: trigger-registry maintains its own
+ * `runningCounts` to handle concurrent same-script invocations correctly,
+ * and only flips to markSuccess when the count hits 0. This wrapper does
+ * NOT participate in that count — it just sets/unsets status. If a script
+ * has both a trigger run AND a broadcast handler in flight at the same
+ * time, the dot may briefly flash green when the broadcast finishes
+ * before the trigger run does. Acceptable for v1; a future refactor
+ * could share runningCounts across both surfaces if needed.
+ */
+function trackAsyncHandler(event: string, scriptId: string, promise: Promise<void>): void {
+  const startedAt = Date.now();
+  executionStatusStore.markRunning(scriptId);
+  void promise.then(
+    () => {
+      executionStatusStore.markSuccess(scriptId, Date.now() - startedAt);
+    },
+    (err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[broadcast-bus] handler for '${event}' rejected:`, err);
+      executionStatusStore.markError(scriptId, Date.now() - startedAt, message);
+    },
+  );
 }
 
 /**

@@ -1543,6 +1543,124 @@ interface WorldInfoEntryInput {
 type WorldInfoRef = string;
 type ActivatedWorldInfoEntry = WorldInfoEntry & { source: 'keyword' | 'vector'; score?: number };
 
+// ─── Regex Scripts API (api.regexScripts.*) ─────────────────────────────────
+//
+// Full CRUD over the user's regex find/replace scripts. Requires the
+// \`regex_scripts\` permission. Mirrors the resolution Lumiverse uses
+// internally during prompt assembly + response baking + display rendering.
+//
+// Targets:
+//   - \`'prompt'\`   — runs during prompt assembly, against each message
+//     before it goes to the LLM. Does not modify stored content.
+//   - \`'response'\` — runs once after the LLM stream ends, against the
+//     full assistant message. The result is written back to chat storage.
+//   - \`'display'\`  — runs per render in the frontend. Does not modify
+//     stored content.
+
+type RegexPlacement = 'user_input' | 'ai_output' | 'world_info' | 'reasoning';
+type RegexScope     = 'global' | 'character' | 'chat';
+type RegexTarget    = 'prompt' | 'response' | 'display';
+type RegexMacroMode = 'none' | 'raw' | 'escaped';
+
+/**
+ * Snapshot of a regex script. Returned by \`list()\`, \`get()\`, \`findByName()\`,
+ * \`getActive()\`, \`create()\`, and \`update()\`.
+ */
+interface RegexScriptInfo {
+  id: string;
+  name: string;
+  /** Stable, normalized identifier (lowercase + underscores). */
+  scriptId: string;
+  findRegex: string;
+  replaceString: string;
+  /** Any subset of \`gimsu\`. */
+  flags: string;
+  placement: RegexPlacement[];
+  scope: RegexScope;
+  scopeId: string | null;
+  target: RegexTarget;
+  minDepth: number | null;
+  maxDepth: number | null;
+  trimStrings: string[];
+  runOnEdit: boolean;
+  substituteMacros: RegexMacroMode;
+  disabled: boolean;
+  sortOrder: number;
+  description: string;
+  folder: string;
+  metadata: Record<string, unknown>;
+  createdAt: number;
+  updatedAt: number;
+}
+
+interface RegexScriptListOptions {
+  scope?: RegexScope;
+  scopeId?: string;
+  target?: RegexTarget;
+  /** Default 50, max 200. */
+  limit?: number;
+  offset?: number;
+}
+
+interface RegexScriptActiveOptions {
+  /** Required. The execution target to resolve for. */
+  target: RegexTarget;
+  characterId?: string;
+  chatId?: string;
+}
+
+interface RegexScriptCreateInput {
+  name: string;
+  findRegex: string;
+  replaceString?: string;
+  flags?: string;
+  placement?: RegexPlacement[];
+  scope?: RegexScope;
+  scopeId?: string | null;
+  target?: RegexTarget;
+  minDepth?: number | null;
+  maxDepth?: number | null;
+  trimStrings?: string[];
+  runOnEdit?: boolean;
+  substituteMacros?: RegexMacroMode;
+  disabled?: boolean;
+  sortOrder?: number;
+  description?: string;
+  folder?: string;
+  metadata?: Record<string, unknown>;
+  scriptId?: string;
+}
+
+type RegexScriptUpdateInput = Partial<RegexScriptCreateInput>;
+
+/**
+ * \`api.regexScripts.*\` — full CRUD over the user's regex find/replace
+ * scripts. Requires the \`regex_scripts\` permission.
+ *
+ * Lifecycle events: scripts can subscribe to \`REGEX_SCRIPT_CHANGED\` and
+ * \`REGEX_SCRIPT_DELETED\` via the \`@triggers\` directive to keep
+ * extension-side caches in sync.
+ *
+ * @example
+ * // Mirror Lumiverse's resolution for the current chat + character
+ * const active = await api.regexScripts.getActive({
+ *   target: 'display',
+ *   chatId: data.chatId,
+ *   characterId: data.characterId,
+ * });
+ */
+interface RegexScriptsAPI {
+  list(options?: RegexScriptListOptions): Promise<{ data: RegexScriptInfo[]; total: number }>;
+  get(scriptId: string): Promise<RegexScriptInfo | null>;
+  /** Convenience: page through \`list()\` and apply name filter locally. */
+  findByName(name: string, scope?: RegexScope): Promise<RegexScriptInfo | null>;
+  /** Resolve enabled rules for the given target + character/chat context. */
+  getActive(options: RegexScriptActiveOptions): Promise<RegexScriptInfo[]>;
+  create(input: RegexScriptCreateInput): Promise<RegexScriptInfo>;
+  update(scriptId: string, input: RegexScriptUpdateInput): Promise<RegexScriptInfo>;
+  delete(scriptId: string): Promise<boolean>;
+}
+
 interface WorldInfoAPI {
   list(options?: { limit?: number; offset?: number }): Promise<{ data: WorldInfo[]; total: number }>;
   get(ref: WorldInfoRef): Promise<WorldInfo | null>;
@@ -1946,7 +2064,18 @@ interface BroadcastAPI {
   /**
    * Subscribe to a named event. Returns an unsubscribe function.
    * Subscriptions are auto-cleaned when the owning script is disabled or deleted.
-   * @example
+   *
+   * **Async-tracking opt-in (LumiScript ≥0.26.4):** RETURN a Promise from
+   * the handler to make the sidebar status indicator track the awaited
+   * work. Fire-and-forget handlers (\`void (...)()\`) produce no status
+   * update; sync handlers don't either.
+   *
+   * @example  RETURN the async IIFE → status dot blinks amber until settle
+   * api.broadcast.on('tracker:request-rerun', (payload) =>
+   *   (async () => { await runRerun(payload); })()
+   * );
+   *
+   * @example  classic sync handler
    * const unsub = api.broadcast.on('ls:tool:invoked', (ev) => {
    *   console.log(ev.name, 'took', ev.callMs, 'ms');
    * });
@@ -2547,6 +2676,8 @@ interface LumiScriptAPI {
   databanks: DatabanksAPI;
   /** Persona CRUD + active persona switching. Requires personas permission. */
   personas: PersonasAPI;
+  /** Regex find/replace script CRUD plus context-aware \`getActive\` resolver. Requires regex_scripts permission. */
+  regexScripts: RegexScriptsAPI;
   /** Read-only access to the user's Council configuration: settings, members, and the available Lumia-item pool. No permission required. */
   council: CouncilAPI;
   /** File storage across three tiers. Requires allowDangerous. */

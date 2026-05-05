@@ -1,5 +1,5 @@
 {
-  "version": "0.26.3",
+  "version": "0.27.0",
   "name": "LumiScript",
   "identifier": "lumiscript",
   "author": "mindbound",
@@ -19,6 +19,7 @@
     "world_books",
     "databanks",
     "personas",
+    "regex_scripts",
     "context_handler",
     "tools",
     "push_notification",

@@ -59,6 +59,7 @@ function makeHarness(overrides: Partial<ProxyContext> = {}): Harness {
     macroInterceptorsSnapshot:     [],
     chatInjectionsSnapshot:        [],
     chatContentProcessorsSnapshot: [],
+    worldInfoInterceptorsSnapshot: [],
     ...overrides,
   };
   const proxy = buildProxiedAPI(ctx);

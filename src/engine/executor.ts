@@ -81,6 +81,7 @@ import { buildWorldInfoAPI  } from './api/world-info.js';
 import { buildDatabanksAPI } from './api/databanks.js';
 import { buildRpcAPI       } from './api/rpc.js';
 import { buildPersonasAPI  } from './api/personas.js';
+import { buildRegexScriptsAPI } from './api/regex-scripts.js';
 import { buildCouncilAPI   } from './api/council.js';
 import { buildToolsAPI     } from './api/tools.js';
 import { buildBroadcastAPI } from './api/broadcast.js';
@@ -171,6 +172,11 @@ export interface ExecutorOptions {
    * processor surface.
    */
   contentProcessorsRegisteredThisRun?: Set<string>;
+  /**
+   * Per-execution tracker for `api.worldInfo.registerInterceptor(...)` calls
+   * (v0.27.0+). Mirror of `macroInterceptorsRegisteredThisRun`.
+   */
+  worldInfoInterceptorsRegisteredThisRun?: Set<string>;
   /**
    * Per-execution tracker for `api.rpc.sync(...)` / `api.rpc.handle(...)`
    * calls — adds the fully-qualified endpoint name (e.g.
@@ -331,6 +337,7 @@ export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiSc
     macrosRegisteredThisRun,
     macroInterceptorsRegisteredThisRun,
     contentProcessorsRegisteredThisRun,
+    worldInfoInterceptorsRegisteredThisRun,
     rpcEndpointsRegisteredThisRun,
   } = options;
   const hasPerm = (p: string) => grantedPermissions.has(p);
@@ -371,6 +378,7 @@ export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiSc
     macrosRegisteredThisRun,
     macroInterceptorsRegisteredThisRun,
     contentProcessorsRegisteredThisRun,
+    worldInfoInterceptorsRegisteredThisRun,
     rpcEndpointsRegisteredThisRun,
   };
 
@@ -391,6 +399,7 @@ export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiSc
     worldInfo:  buildWorldInfoAPI(deps),
     databanks:  buildDatabanksAPI(deps),
     personas:   buildPersonasAPI(deps),
+    regexScripts: buildRegexScriptsAPI(deps),
     rpc:        buildRpcAPI(deps),
     council:    buildCouncilAPI(deps),
     tools:      buildToolsAPI(deps, () => api),

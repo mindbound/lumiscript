@@ -67,6 +67,12 @@ export interface APIBuildDeps {
    */
   contentProcessorsRegisteredThisRun?: Set<string>;
   /**
+   * Per-execution world-info-interceptor-registration tracker. Mirrors
+   * `macroInterceptorsRegisteredThisRun` for the
+   * `api.worldInfo.registerInterceptor` surface (v0.27.0+).
+   */
+  worldInfoInterceptorsRegisteredThisRun?: Set<string>;
+  /**
    * Per-execution rpc-endpoint-registration tracker. When present,
    * `buildRpcAPI` adds the fully-qualified endpoint name (e.g.
    * `lumiscript.tracker.state`) to this set on every successful

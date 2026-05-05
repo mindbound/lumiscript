@@ -32,16 +32,18 @@ import type {
   RegisteredMacroInterceptorInfo,
   InjectionInfo,
   RegisteredMessageContentProcessorInfo,
+  RegisteredWorldInfoInterceptorInfo,
 } from '../../src/types/script.js';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function makeProxy(snapshots: {
-  tools?:        RegisteredToolInfo[];
-  macros?:       RegisteredMacroInfo[];
-  interceptors?: RegisteredMacroInterceptorInfo[];
-  injections?:   InjectionInfo[];
-  processors?:   RegisteredMessageContentProcessorInfo[];
+  tools?:                 RegisteredToolInfo[];
+  macros?:                RegisteredMacroInfo[];
+  interceptors?:          RegisteredMacroInterceptorInfo[];
+  injections?:            InjectionInfo[];
+  processors?:            RegisteredMessageContentProcessorInfo[];
+  worldInfoInterceptors?: RegisteredWorldInfoInterceptorInfo[];
 } = {}): { proxy: ProxyHandle; sent: ChildToParentMessage[] } {
   const sent: ChildToParentMessage[] = [];
   const ctx: ProxyContext = {
@@ -56,11 +58,12 @@ function makeProxy(snapshots: {
     unregisterBroadcastHandler: () => {},
     registerHandlerClosure:     () => {},
     unregisterHandlerClosure:   () => {},
-    toolsSnapshot:                 snapshots.tools        ?? [],
-    macrosSnapshot:                snapshots.macros       ?? [],
-    macroInterceptorsSnapshot:     snapshots.interceptors ?? [],
-    chatInjectionsSnapshot:        snapshots.injections   ?? [],
-    chatContentProcessorsSnapshot: snapshots.processors   ?? [],
+    toolsSnapshot:                 snapshots.tools                 ?? [],
+    macrosSnapshot:                snapshots.macros                ?? [],
+    macroInterceptorsSnapshot:     snapshots.interceptors          ?? [],
+    chatInjectionsSnapshot:        snapshots.injections            ?? [],
+    chatContentProcessorsSnapshot: snapshots.processors            ?? [],
+    worldInfoInterceptorsSnapshot: snapshots.worldInfoInterceptors ?? [],
   };
   return { proxy: buildProxiedAPI(ctx), sent };
 }

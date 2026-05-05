@@ -5,9 +5,21 @@ import {
   clearByScriptId,
   clearAll,
 } from '../../src/engine/broadcast-bus.js';
+import { executionStatusStore } from '../../src/engine/execution-status.js';
 
 // clearAll is also called by setup.ts preload, but explicit for clarity
-beforeEach(() => clearAll());
+beforeEach(() => {
+  clearAll();
+  executionStatusStore.clear();
+});
+
+/** Microtask flush — settle any pending then-callbacks scheduled during emit. */
+async function flushMicrotasks(): Promise<void> {
+  // Two ticks: one for the inner .then on the user promise, one for the
+  // wrapper's settlement-handler that calls markSuccess / markError.
+  await Promise.resolve();
+  await Promise.resolve();
+}
 
 // ─── emit ────────────────────────────────────────────────────────────────────
 
@@ -184,5 +196,120 @@ describe('clearAll', () => {
 
     expect(h1).toHaveBeenCalledTimes(0);
     expect(h2).toHaveBeenCalledTimes(0);
+  });
+});
+
+// ─── async-tracking opt-in (v0.26.4+) ────────────────────────────────────────
+//
+// Handlers that return a thenable are tracked through executionStatusStore
+// for the duration of the awaited work. Sync-returning handlers produce no
+// status update.
+
+describe('async-tracking opt-in', () => {
+  test('sync handler returning void produces no status update', () => {
+    on('test', () => { /* sync, no return */ }, 'script-1');
+    emit('test');
+    expect(executionStatusStore.getStatus('script-1').status).toBe('idle');
+  });
+
+  test('handler returning Promise marks running immediately, success on resolve', async () => {
+    let resolveInner!: () => void;
+    const innerPromise = new Promise<void>((r) => { resolveInner = r; });
+    on('test', () => innerPromise, 'script-1');
+
+    emit('test');
+    // Immediately after emit returns, status should already be 'running'
+    expect(executionStatusStore.getStatus('script-1').status).toBe('running');
+
+    // Resolve the inner promise; wrapper should flip to 'success' on next tick.
+    resolveInner();
+    await flushMicrotasks();
+
+    const status = executionStatusStore.getStatus('script-1');
+    expect(status.status).toBe('success');
+    expect(typeof status.duration).toBe('number');
+  });
+
+  test('handler returning rejected Promise marks error', async () => {
+    // Suppress the broadcast-bus's console.error for this test — the
+    // rejection is expected and shouldn't surface as a noisy warning.
+    const originalError = console.error;
+    console.error = () => {};
+    try {
+      let rejectInner!: (err: Error) => void;
+      const innerPromise = new Promise<void>((_, r) => { rejectInner = r; });
+      on('test', () => innerPromise, 'script-1');
+
+      emit('test');
+      expect(executionStatusStore.getStatus('script-1').status).toBe('running');
+
+      rejectInner(new Error('boom'));
+      await flushMicrotasks();
+
+      const status = executionStatusStore.getStatus('script-1');
+      expect(status.status).toBe('error');
+      expect(status.errorMessage).toBe('boom');
+      expect(typeof status.duration).toBe('number');
+    } finally {
+      console.error = originalError;
+    }
+  });
+
+  test('sync handler that throws does not call markRunning (no Promise to track)', () => {
+    // Suppress the expected console.error from the throw path.
+    const originalError = console.error;
+    console.error = () => {};
+    try {
+      on('test', () => { throw new Error('sync boom'); }, 'script-1');
+      emit('test');
+      expect(executionStatusStore.getStatus('script-1').status).toBe('idle');
+    } finally {
+      console.error = originalError;
+    }
+  });
+
+  test('mix of sync and async handlers tracked independently', async () => {
+    let resolveAsync!: () => void;
+    const asyncPromise = new Promise<void>((r) => { resolveAsync = r; });
+
+    on('test', () => { /* sync void */ }, 'sync-script');
+    on('test', () => asyncPromise, 'async-script');
+
+    emit('test');
+
+    expect(executionStatusStore.getStatus('sync-script').status).toBe('idle');
+    expect(executionStatusStore.getStatus('async-script').status).toBe('running');
+
+    resolveAsync();
+    await flushMicrotasks();
+
+    expect(executionStatusStore.getStatus('sync-script').status).toBe('idle');
+    expect(executionStatusStore.getStatus('async-script').status).toBe('success');
+  });
+
+  test('non-Promise object return is ignored (not a thenable)', () => {
+    on('test', (() => ({ not: 'a promise' })) as unknown as (p: unknown) => void, 'script-1');
+    emit('test');
+    expect(executionStatusStore.getStatus('script-1').status).toBe('idle');
+  });
+
+  test('thenable-but-not-Promise (PromiseLike) is tracked', async () => {
+    // Anything with a .then() method should be treated as a thenable.
+    let invokedResolve: (() => void) | null = null;
+    const customThenable = {
+      then(resolve: () => void) {
+        invokedResolve = resolve;
+        return undefined as unknown as Promise<void>;
+      },
+    };
+    on('test', (() => customThenable) as unknown as (p: unknown) => Promise<void>, 'script-1');
+    emit('test');
+    expect(executionStatusStore.getStatus('script-1').status).toBe('running');
+
+    // Settle the thenable manually
+    invokedResolve!();
+    await flushMicrotasks();
+
+    expect(executionStatusStore.getStatus('script-1').status).toBe('success');
   });
 });

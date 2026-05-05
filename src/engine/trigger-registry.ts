@@ -46,6 +46,10 @@ import {
   diffAndCleanStale as diffAndCleanStaleContentProcessors,
 } from './message-content-processor-registry.js';
 import {
+  listIdsByScriptId as worldInfoInterceptorIdsByScript,
+  diffAndCleanStale as diffAndCleanStaleWorldInfoInterceptors,
+} from './world-info-interceptor-registry.js';
+import {
   listEndpointsByScriptId as rpcEndpointsByScript,
   diffAndCleanStaleEndpoints,
 } from './rpc-store.js';
@@ -314,16 +318,18 @@ export class TriggerRegistry {
         // ── Execute the current script body ────────────────────────────────
         // Snapshot tool + macro names AND interceptor / processor entry ids
         // before execution for the auto-cleanup diff.
-        const preRunToolNames                    = toolNamesByScript(scriptId);
-        const preRunMacroNames                   = macroNamesByScript(scriptId);
-        const preRunMacroInterceptorIds          = macroInterceptorIdsByScript(scriptId);
-        const preRunContentProcessorIds          = contentProcessorIdsByScript(scriptId);
-        const preRunRpcEndpoints                 = rpcEndpointsByScript(scriptId);
-        const toolsRegisteredThisRun             = new Set<string>();
-        const macrosRegisteredThisRun            = new Set<string>();
-        const macroInterceptorsRegisteredThisRun = new Set<string>();
-        const contentProcessorsRegisteredThisRun = new Set<string>();
-        const rpcEndpointsRegisteredThisRun      = new Set<string>();
+        const preRunToolNames                        = toolNamesByScript(scriptId);
+        const preRunMacroNames                       = macroNamesByScript(scriptId);
+        const preRunMacroInterceptorIds              = macroInterceptorIdsByScript(scriptId);
+        const preRunContentProcessorIds              = contentProcessorIdsByScript(scriptId);
+        const preRunWorldInfoInterceptorIds          = worldInfoInterceptorIdsByScript(scriptId);
+        const preRunRpcEndpoints                     = rpcEndpointsByScript(scriptId);
+        const toolsRegisteredThisRun                 = new Set<string>();
+        const macrosRegisteredThisRun                = new Set<string>();
+        const macroInterceptorsRegisteredThisRun     = new Set<string>();
+        const contentProcessorsRegisteredThisRun     = new Set<string>();
+        const worldInfoInterceptorsRegisteredThisRun = new Set<string>();
+        const rpcEndpointsRegisteredThisRun          = new Set<string>();
 
         // Phase 9c: dispatch through `spindle.backendProcesses` child instead
         // of in-process `executeScript`. Sync-loop recovery now works — the
@@ -353,6 +359,7 @@ export class TriggerRegistry {
             macrosRegisteredThisRun,
             macroInterceptorsRegisteredThisRun,
             contentProcessorsRegisteredThisRun,
+            worldInfoInterceptorsRegisteredThisRun,
             rpcEndpointsRegisteredThisRun,
           },
         );
@@ -376,6 +383,9 @@ export class TriggerRegistry {
         );
         diffAndCleanStaleContentProcessors(
           scriptId, preRunContentProcessorIds, contentProcessorsRegisteredThisRun,
+        );
+        diffAndCleanStaleWorldInfoInterceptors(
+          scriptId, preRunWorldInfoInterceptorIds, worldInfoInterceptorsRegisteredThisRun,
         );
         const staleRpcEndpoints = diffAndCleanStaleEndpoints(
           scriptId, preRunRpcEndpoints, rpcEndpointsRegisteredThisRun,
