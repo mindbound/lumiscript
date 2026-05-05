@@ -1549,15 +1549,33 @@ function handleRegisterHandler(msg: RegisterHandler): void {
         // retained for ToolHandler-signature compatibility.
         _parentApi: LumiScriptAPI,
         ctxArg?:  ToolInvocationContext,
-      ): string | Promise<string> =>
-        sendRunHandlerRequest(
+      ): string | Promise<string> => {
+        // Honor Lumiverse's deadline hint when supplied. Council passes
+        // `args.__deadlineMs = Date.now() + settings.toolsSettings.timeoutMs`
+        // (council-execution.service.ts:313, with the user-configured
+        // 15–120s slider value); the host-side `invokeExtensionTool` then
+        // waits up to that same `timeoutMs` for our `tool_invocation_result`
+        // (worker-host.ts:1782-1798). Honoring the hint end-to-end means
+        // a long Council timeout is no longer truncated to 60s here.
+        //
+        // Direct invocation paths (`api.tools.invoke`, inline
+        // `generateWithTools`) don't supply `__deadlineMs` → fall through
+        // to the historical 60s default. 1s floor protects against clock
+        // skew / queueing delay handing us a near-zero or negative budget.
+        const deadlineHint = (args as Record<string, unknown>).__deadlineMs;
+        const handlerTimeoutMs =
+          typeof deadlineHint === 'number' && Number.isFinite(deadlineHint)
+            ? Math.max(1_000, deadlineHint - Date.now())
+            : 60_000;
+
+        return sendRunHandlerRequest(
           msg.scriptId,
           msg.handlerId,
           'tool',
           // Pass undefined explicitly when no ctx — JSON.stringify drops
           // it from the wire, child-side `handlerArgs[1]` is undefined.
           ctxArg !== undefined ? [args, ctxArg] : [args],
-          60_000,
+          handlerTimeoutMs,
         ).then((result) => {
           if (!result.ok) {
             throw new Error(result.error?.message ?? 'tool handler failed');
@@ -1566,6 +1584,7 @@ function handleRegisterHandler(msg: RegisterHandler): void {
           // defensively in case the user closure returned non-string.
           return String(result.value ?? '');
         });
+      };
 
       // v0.26.1 — fallback to script's current active run if the
       // originating runId's activeRun is gone. See `activeOrLatestForScript`
