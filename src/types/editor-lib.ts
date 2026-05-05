@@ -181,7 +181,14 @@ type MessageContentProcessorOrigin =
   | 'create'
   | 'update'
   | 'swipe_add'
-  | 'swipe_update';
+  | 'swipe_update'
+  /**
+   * Per-message display rendering (Lumiverse host ≥0.9.7). Non-persisting:
+   * fires once per visible message paint, returned \`content\` feeds the
+   * display-regex pass, returned \`extra\` is ignored (no row to mutate).
+   * Use for per-render transforms that depend on transient context.
+   */
+  | 'render';
 
 /**
  * Context passed to a message content processor before a user-initiated
@@ -308,14 +315,18 @@ interface ChatAPI {
   /**
    * Register a message content processor — handler fires before a
    * user-initiated message write hits SQLite (create, update, swipe_add,
-   * swipe_update, and auto-greetings). Return a patch \`{ content?, extra? }\`
-   * to transform the stored row, or \`void\` to pass through. Requires
-   * \`chat_mutation\` permission.
+   * swipe_update, and auto-greetings) AND on per-message display rendering
+   * (render, host ≥0.9.7). Return a patch \`{ content?, extra? }\` to
+   * transform the stored row, or \`void\` to pass through. Returned \`extra\`
+   * is ignored on swipe origins and on \`render\`. Requires \`chat_mutation\`.
    *
    * **Critical perf**: handler runs synchronously inside the message-write
-   * path. Each invocation has a 2-second soft timeout (configurable). DO NOT
-   * call \`api.llm.*\` or \`api.utils.http.*\` from a handler — pre-compute
-   * via a trigger handler, store in \`api.db.*\`, read here.
+   * (or per-render) path. Each invocation has a 2-second soft timeout
+   * (configurable). DO NOT call \`api.llm.*\` or \`api.utils.http.*\` from a
+   * handler — pre-compute via a trigger handler, store in \`api.db.*\`, read
+   * here. The \`render\` origin is especially perf-sensitive: it fires on
+   * every visible message paint, so prefer scoping write-time-only handlers
+   * to the four write origins via \`{ origin: ['create', ...] }\`.
    *
    * **Loop safety**: NOT invoked for \`api.chat.*\` mutations — the host
    * intentionally bypasses the processor chain on extension-initiated writes
@@ -2134,6 +2145,25 @@ interface MacroDefinition {
   returnType?: 'string' | 'integer' | 'number' | 'boolean';
   /** Argument schema shown to preset authors. */
   args?: { name: string; description?: string; required?: boolean }[];
+  /**
+   * Mark the macro as producing output that isn't a pure function of its
+   * args + tracked env reads (time, randomness, IO, mutable external state).
+   * The host's display-regex cache will skip storing resolutions that
+   * include a volatile macro, preventing stale reads across renders.
+   *
+   * LumiScript-specific defaults:
+   *   - Pull-mode (handler provided)  → \`true\` (safe default; LumiScript
+   *     handlers typically read external state via api.* that the host's
+   *     fingerprinter can't see)
+   *   - Push-mode (no handler)        → \`false\` (push-mode resolution is
+   *     pure relative to push events; host invalidates on updateValue)
+   *
+   * Set explicit \`false\` only when you know the handler is pure-from-args
+   * (no api.* reads, no Date / Math.random, no mutable closure state).
+   *
+   * Available on Lumiverse host ≥0.9.7. Older builds silently ignore.
+   */
+  volatile?: boolean;
 }
 
 /** Returned by api.macros.list(). */
@@ -2178,6 +2208,13 @@ interface MacroInterceptorEnv {
     readonly global: Record<string, string>;
     readonly chat: Record<string, string>;
   };
+  /**
+   * Per-call macro overrides supplied by the caller. The display-regex
+   * pipeline (\`phase === 'display'\`) sets \`chat_index\` to the rendered
+   * message's index in the chat. Other callers may set additional fields.
+   * Available on Lumiverse host ≥0.9.7; guard with \`?? {}\` for older builds.
+   */
+  readonly dynamicMacros?: Record<string, string>;
   readonly extra: Record<string, unknown>;
 }
 

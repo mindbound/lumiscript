@@ -73,6 +73,19 @@ export function buildMacrosAPI(deps: APIBuildDeps): import('../../types/script.j
       const category = def.category ?? DEFAULT_CATEGORY;
       const mode: 'push' | 'pull' = handler ? 'pull' : 'push';
 
+      // Volatile flag default policy:
+      //   - Pull-mode (handler provided): default `true`. LumiScript
+      //     handlers read external state via api.* namespaces that the
+      //     host's variable-fingerprinter can't see, so the safe default
+      //     is "always re-resolve". Authors who know their handler is
+      //     pure-from-args can opt out via `volatile: false`.
+      //   - Push-mode: default `false`. Push-mode resolution returns
+      //     the last `updateValue`'d string, which IS pure relative to
+      //     push events; the host already invalidates on macro-value
+      //     updates so additional volatile-flagging is redundant.
+      // Explicit `def.volatile` always wins over both defaults.
+      const volatile = def.volatile ?? (mode === 'pull');
+
       // Store first — `addMacro` enforces reserved-name + cross-script
       // collision rules and throws before we touch Spindle. This avoids the
       // "registered with Spindle but not in our store" split-brain state.
@@ -130,6 +143,10 @@ export function buildMacrosAPI(deps: APIBuildDeps): import('../../types/script.j
           description: def.description,
           returnType:  def.returnType,
           args:        def.args,
+          // `volatile` available on host builds Lumiverse ≥0.9.7
+          // (lumiverse-spindle-types ≥0.4.62). Older builds silently
+          // ignore unknown fields, so passing it unconditionally is safe.
+          volatile,
           handler:     (handler ?? '') as any,
         });
       } catch (err) {

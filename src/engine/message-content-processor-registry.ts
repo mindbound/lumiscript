@@ -9,16 +9,19 @@
  * comment block there for the multiplexer shape and host-side budget
  * reasoning. The differences are:
  *
- *   - Filter is on `origin` (`'create' | 'update' | 'swipe_add' | 'swipe_update'`)
- *     rather than phase + template-marker.
+ *   - Filter is on `origin` (`'create' | 'update' | 'swipe_add' |
+ *     'swipe_update' | 'render'`) rather than phase + template-marker.
  *   - The chained value is a `{ content, extra }` patch shape, not a bare
  *     string. Each handler sees the previous handler's output applied; the
  *     final accumulated patch is what we return to the host.
  *   - `extra` shallow-merges across the chain (omitted keys preserved).
- *   - Per host docs: `extra` is IGNORED on swipe origins (swipes share the
- *     parent message's `extra`). We still propagate it through the chain so
- *     downstream handlers see it, but it's dropped from the final return
- *     value when origin is `'swipe_add'` / `'swipe_update'`.
+ *   - Per host docs: `extra` is IGNORED on three origin variants:
+ *       - `'swipe_add'` / `'swipe_update'` — swipes share the parent
+ *         message's `extra`, which the host's swipe-write paths can't patch.
+ *       - `'render'` — non-persisting per-render transform; there is no row
+ *         to mutate, so only `content` is honored.
+ *     We still propagate `extra` through the chain so downstream handlers
+ *     see it, but it's dropped from the final return value on these origins.
  *
  * Replay across frontend refresh: NOT NEEDED (pure worker↔host hook).
  *
@@ -55,10 +58,15 @@ export interface MessageContentProcessorOptions {
   /** Lower runs first. Default 100. */
   priority?: number;
   /**
-   * Restrict handler to specific origins. Default: all four
-   * (`'create'`, `'update'`, `'swipe_add'`, `'swipe_update'`). Pre-filtered
-   * before invocation — non-matching contexts skip without calling the
-   * handler at all.
+   * Restrict handler to specific origins. Default: all five
+   * (`'create'`, `'update'`, `'swipe_add'`, `'swipe_update'`, `'render'`).
+   * Pre-filtered before invocation — non-matching contexts skip without
+   * calling the handler at all.
+   *
+   * `'render'` is the per-message-render transform (host ≥0.9.7) and fires
+   * frequently (on every paint of every visible message), so handlers
+   * scoping to write-time origins should explicitly include just the four
+   * write origins to avoid being called on display.
    */
   origin?: MessageContentProcessorOrigin | MessageContentProcessorOrigin[];
   /**
@@ -101,6 +109,10 @@ const ALL_ORIGINS: ReadonlyArray<MessageContentProcessorOrigin> = [
   'update',
   'swipe_add',
   'swipe_update',
+  // `'render'` — per-render transform (Lumiverse host ≥0.9.7). Fires on
+  // every visible message paint; non-persisting; returned `extra` is
+  // ignored (no row to mutate). See `originIgnoresExtra` below.
+  'render',
 ];
 
 // ─── Registry state ──────────────────────────────────────────────────────────
@@ -337,11 +349,14 @@ function ctxWith(
 }
 
 /**
- * Whether `origin` is one of the swipe variants where the host ignores
- * `extra` patches (swipes share the parent message's `extra`).
+ * Whether `origin` is one where the host ignores `extra` patches:
+ *   - `'swipe_add'` / `'swipe_update'` — swipes share the parent message's
+ *     `extra`, which the host's swipe-write paths can't patch.
+ *   - `'render'` — non-persisting per-render transform; there is no row
+ *     to mutate (host ≥0.9.7).
  */
 function originIgnoresExtra(origin: MessageContentProcessorOrigin): boolean {
-  return origin === 'swipe_add' || origin === 'swipe_update';
+  return origin === 'swipe_add' || origin === 'swipe_update' || origin === 'render';
 }
 
 /**

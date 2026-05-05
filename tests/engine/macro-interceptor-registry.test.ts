@@ -46,6 +46,9 @@ function ctx(overrides?: Partial<MacroInterceptorCtxDTO>): MacroInterceptorCtxDT
       chat: {},
       system: {},
       variables: { local: {}, global: {}, chat: {} },
+      // Required by upstream `MacroInterceptorEnvDTO` (lumiverse-spindle-types
+      // ≥0.4.62). Per-call macro overrides; empty in fixtures.
+      dynamicMacros: {},
       extra: {},
     },
     commit: false,

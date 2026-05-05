@@ -369,12 +369,19 @@ export interface InjectionInfo {
  * Origin tag identifying which user-initiated message-write path triggered
  * a content-processor invocation. `'create'` covers both ordinary
  * `POST .../messages` writes and auto-inserted greeting rows.
+ *
+ * `'render'` (host ≥0.9.7) is a non-persisting per-render variant — fires
+ * once per visible message paint, returned `content` feeds into the display-
+ * regex pass before paint, returned `extra` is ignored (no row to mutate).
+ * Use it for per-render rewrites that depend on transient context (chat-var
+ * values, message position) and would pollute history if persisted.
  */
 export type MessageContentProcessorOrigin =
   | 'create'
   | 'update'
   | 'swipe_add'
-  | 'swipe_update';
+  | 'swipe_update'
+  | 'render';
 
 /**
  * Context passed to a message content processor before a user-initiated
@@ -538,10 +545,11 @@ export interface ChatAPI {
   /**
    * Register a message content processor — a handler that fires before a
    * user-initiated message write reaches SQLite (create, update, swipe_add,
-   * swipe_update, and auto-inserted greetings). Handlers can transform
-   * `content` and / or shallow-merge `extra`. Returned `extra` is ignored
-   * on swipe origins (swipes share the parent message's `extra`).
-   * Requires `chat_mutation` permission.
+   * swipe_update, auto-inserted greetings) AND on per-message display
+   * rendering (render, host ≥0.9.7). Handlers can transform `content` and
+   * / or shallow-merge `extra`. Returned `extra` is ignored on swipe
+   * origins (swipes share the parent message's `extra`) and on `render`
+   * (no row to mutate). Requires `chat_mutation` permission.
    *
    * Use this when the transform belongs on the stored message itself —
    * not just on the in-flight LLM call. Common patterns:
@@ -3392,6 +3400,36 @@ export interface MacroDefinition {
   returnType?: 'string' | 'integer' | 'number' | 'boolean';
   /** Argument schema shown to preset authors. */
   args?: { name: string; description?: string; required?: boolean }[];
+  /**
+   * Mark the macro as producing output that isn't a pure function of its
+   * args + tracked env reads — time-based output, randomness, IO, mutable
+   * state external to the host's `env.variables.*` maps, etc. The host's
+   * display-regex cache will skip storing resolutions that include a
+   * volatile macro (otherwise stale reads can survive across renders).
+   *
+   * Default behaviour for LumiScript:
+   *   - Pull-mode (handler provided)  → defaults to `true`
+   *   - Push-mode (no handler)        → defaults to `false`
+   *
+   * The pull-mode default is conservative because LumiScript handlers
+   * read external state via `api.db`, `api.variables`, `api.chat.*`, and
+   * other namespaces that are invisible to the host's variable-read
+   * fingerprinter. Without `volatile: true`, the host has no way to know
+   * the cached output went stale when that external state mutates.
+   *
+   * Override only when you know the handler IS pure-from-args (no api.*
+   * reads, no Date / Math.random, no closure-over-mutable-state):
+   *   `api.macros.register('square', { description: '…', volatile: false }, ctx => String(Number(ctx.args[0]) ** 2))`
+   *
+   * Push-mode's `false` default is correct because push-mode resolution
+   * returns whatever string was last `updateValue`'d, which is pure
+   * relative to push events; the host already invalidates the cache on
+   * macro-value updates.
+   *
+   * Available on host builds Lumiverse ≥0.9.7 (lumiverse-spindle-types
+   * ≥0.4.62). Older builds silently ignore the flag.
+   */
+  volatile?: boolean;
 }
 
 /**
@@ -3558,6 +3596,20 @@ export interface MacroInterceptorEnv {
     readonly global: Record<string, string>;
     readonly chat: Record<string, string>;
   };
+  /**
+   * Per-call macro overrides supplied by the caller. Available on Lumiverse
+   * host ≥0.9.7 (lumiverse-spindle-types ≥0.4.62). Older builds omit the
+   * field, so handlers must guard with `?? {}` if they read it.
+   *
+   * The display-regex pipeline (`phase === 'display'`) sets
+   * `chat_index` to the rendered message's index in the chat — useful for
+   * computing per-message context that registered macros can't reach on
+   * their own (e.g. relative position of THIS message in history).
+   *
+   * Other callers may set additional fields. Keys are arbitrary strings;
+   * values are pre-resolved string content.
+   */
+  readonly dynamicMacros?: Record<string, string>;
   readonly extra: Record<string, unknown>;
 }
 

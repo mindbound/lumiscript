@@ -558,17 +558,17 @@ export const KEY_TYPES: TypeDoc[] = [
       { field: 'messageId?',  type: 'string',                          optional: true,  desc: "Undefined for 'create' origins (the row doesn't exist yet)." },
       { field: 'content',     type: 'string',                          optional: false, desc: 'Current content (already transformed by any earlier processors in the chain).' },
       { field: 'extra?',      type: 'Record<string, unknown>',         optional: true,  desc: 'Current extra map (initial.extra + delta-so-far from prior processors). Threaded through the chain even on swipe origins.' },
-      { field: 'origin',      type: "'create' | 'update' | 'swipe_add' | 'swipe_update'", optional: false, desc: 'Which write path triggered this invocation. \'create\' includes auto-greetings.' },
+      { field: 'origin',      type: "'create' | 'update' | 'swipe_add' | 'swipe_update' | 'render'", optional: false, desc: "Which path triggered this invocation. 'create' includes auto-greetings. 'render' (host ≥0.9.7) fires on per-message display rendering — non-persisting, fires often, returned extra ignored." },
       { field: 'swipeIndex?', type: 'number',                          optional: true,  desc: "Set for 'swipe_update' only — zero-based index of the swipe being rewritten." },
       { field: 'userId',      type: 'string',                          optional: false, desc: 'Owning user id for the write.' },
     ],
   },
   {
     name: 'MessageContentProcessorResult',
-    note: "Return value of a registerContentProcessor handler. Return undefined / void to pass through, or a partial patch. content replaces the stored content. extra shallow-merges into existing — keys you omit are PRESERVED. extra is IGNORED on swipe origins (swipes share the parent message's extra). Return ONLY keys you mutated; pristine initial.extra keys are NOT round-tripped to avoid re-stamping unchanged keys on every write.",
+    note: "Return value of a registerContentProcessor handler. Return undefined / void to pass through, or a partial patch. content replaces the stored content. extra shallow-merges into existing — keys you omit are PRESERVED. extra is IGNORED on swipe origins (swipes share the parent message's extra) and on 'render' (no row to mutate; host ≥0.9.7). Return ONLY keys you mutated; pristine initial.extra keys are NOT round-tripped to avoid re-stamping unchanged keys on every write.",
     fields: [
-      { field: 'content?', type: 'string',                  optional: true, desc: 'Replaces the stored content for downstream processors and the DB write.' },
-      { field: 'extra?',   type: 'Record<string, unknown>', optional: true, desc: 'Delta keys to shallow-merge. Ignored on swipe origins.' },
+      { field: 'content?', type: 'string',                  optional: true, desc: "Replaces the stored content for downstream processors and the DB write. On 'render', feeds the display-regex pass before paint." },
+      { field: 'extra?',   type: 'Record<string, unknown>', optional: true, desc: "Delta keys to shallow-merge. Ignored on swipe origins and 'render'." },
     ],
   },
   // ─── Macro interceptor ──────────────────────────────────────────────────────
