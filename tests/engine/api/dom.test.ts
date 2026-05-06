@@ -5,6 +5,8 @@ import { buildDOMAPI } from '../../../src/engine/api/dom.js';
 import {
   getElement,
   resolveStableId,
+  getDelegation,
+  __reset as resetDOMRegistry,
 } from '../../../src/engine/dom-registry.js';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -399,5 +401,168 @@ describe('cleanup', () => {
     dom.cleanup();
     expect(getElement(h.id)).toBeUndefined();
     expect(resolveStableId('test-script-id', 'widget')).toBeUndefined();
+  });
+});
+
+// ─── delegate (v0.27.1) ──────────────────────────────────────────────────────
+//
+// `api.ui.dom.delegate(selector, event, handler, options?)` — capture-phase
+// delegation for events on DOM the script didn't inject. See
+// `notes/tracker-design-journal.md` for the design rationale; the path-4
+// proposal section under the BlazeTracker exploration.
+
+describe('delegate — permission gate', () => {
+  test('throws without app_manipulation (default chat scope)', () => {
+    const dom = buildDOMAPI(createTestDeps({ hasPerm: () => false }));
+    expect(() => dom.delegate('button', 'click', () => {})).toThrow('PERMISSION_DENIED');
+  });
+
+  test('throws without app_manipulation (document scope)', () => {
+    const dom = buildDOMAPI(createTestDeps({ hasPerm: () => false }));
+    expect(() =>
+      dom.delegate('button', 'click', () => {}, { root: 'document' }),
+    ).toThrow('PERMISSION_DENIED');
+  });
+
+  test('chat scope (default) works with app_manipulation', () => {
+    const granted = new Set(['app_manipulation']);
+    const dom = buildDOMAPI(
+      createTestDeps({ hasPerm: (p) => granted.has(p) }),
+    );
+    expect(() => dom.delegate('button', 'click', () => {})).not.toThrow();
+  });
+
+  test('document scope works with app_manipulation (no extra permission required)', () => {
+    const granted = new Set(['app_manipulation']);
+    const dom = buildDOMAPI(
+      createTestDeps({ hasPerm: (p) => granted.has(p) }),
+    );
+    expect(() =>
+      dom.delegate('button', 'click', () => {}, { root: 'document' }),
+    ).not.toThrow();
+  });
+});
+
+describe('delegate — register message', () => {
+  beforeEach(() => {
+    // Reset the registry so per-test delegation counts are clean. Other
+    // describes don't reset — they assert on per-test message dispatch
+    // and don't care about residual entries from earlier test files —
+    // but the delegation tests check `getDelegation()` return shapes,
+    // and a fresh state is the easiest way to keep the assertions tight.
+    resetDOMRegistry();
+  });
+
+  test('sends dom_delegate_register with the right shape', () => {
+    const dom = buildDOMAPI(createTestDeps());
+    dom.delegate('button[data-clickable]', 'click', () => {});
+
+    const msgs = messagesOfType('dom_delegate_register');
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].scriptId).toBe('test-script-id');
+    expect(msgs[0].selector).toBe('button[data-clickable]');
+    expect(msgs[0].event).toBe('click');
+    expect(msgs[0].root).toBe('chat');
+    expect(typeof msgs[0].delegationId).toBe('string');
+    // Defaults absent on the wire: messageId, preventDefault, stopPropagation.
+    expect(msgs[0].messageId).toBeUndefined();
+    expect(msgs[0].preventDefault).toBeUndefined();
+    expect(msgs[0].stopPropagation).toBeUndefined();
+  });
+
+  test('forwards root, messageId, preventDefault, stopPropagation', () => {
+    const granted = new Set(['app_manipulation', 'dom_delegation']);
+    const dom = buildDOMAPI(
+      createTestDeps({ hasPerm: (p) => granted.has(p) }),
+    );
+    dom.delegate('a[href]', 'click', () => {}, {
+      root: 'document',
+      messageId: 'msg-123',
+      preventDefault: true,
+      stopPropagation: true,
+    });
+
+    const msg = messagesOfType('dom_delegate_register')[0];
+    expect(msg.root).toBe('document');
+    expect(msg.messageId).toBe('msg-123');
+    expect(msg.preventDefault).toBe(true);
+    expect(msg.stopPropagation).toBe(true);
+  });
+
+  test('registers entry in the dom-registry under delegationId', () => {
+    const dom = buildDOMAPI(createTestDeps());
+    const handler = (data: unknown) => { void data; };
+    dom.delegate('button', 'click', handler);
+
+    const msg = messagesOfType('dom_delegate_register')[0];
+    const entry = getDelegation(msg.delegationId);
+    expect(entry).toBeDefined();
+    expect(entry!.scriptId).toBe('test-script-id');
+    expect(entry!.selector).toBe('button');
+    expect(entry!.event).toBe('click');
+    expect(entry!.handler).toBe(handler);
+  });
+});
+
+describe('delegate — unsubscribe', () => {
+  beforeEach(() => { resetDOMRegistry(); });
+
+  test('returned unsub fn sends dom_delegate_unregister and removes entry', () => {
+    const dom = buildDOMAPI(createTestDeps());
+    const unsub = dom.delegate('button', 'click', () => {});
+
+    const registerMsg = messagesOfType('dom_delegate_register')[0];
+    expect(getDelegation(registerMsg.delegationId)).toBeDefined();
+
+    unsub();
+
+    const unregMsgs = messagesOfType('dom_delegate_unregister');
+    expect(unregMsgs).toHaveLength(1);
+    expect(unregMsgs[0].delegationId).toBe(registerMsg.delegationId);
+    expect(unregMsgs[0].event).toBe('click');
+    expect(getDelegation(registerMsg.delegationId)).toBeUndefined();
+  });
+
+  test('unsub is idempotent (second call is a no-op, no second unregister fires)', () => {
+    const dom = buildDOMAPI(createTestDeps());
+    const unsub = dom.delegate('button', 'click', () => {});
+    unsub();
+    unsub();
+
+    expect(messagesOfType('dom_delegate_unregister')).toHaveLength(1);
+  });
+});
+
+describe('delegate — cleanup integration', () => {
+  beforeEach(() => { resetDOMRegistry(); });
+
+  test('cleanup() emits dom_delegate_unregister for every delegation', () => {
+    const dom = buildDOMAPI(createTestDeps());
+    dom.delegate('button', 'click', () => {});
+    dom.delegate('input', 'change', () => {});
+    dom.delegate('a[data-link]', 'click', () => {});
+
+    dom.cleanup();
+
+    const unregMsgs = messagesOfType('dom_delegate_unregister');
+    expect(unregMsgs).toHaveLength(3);
+    // One unregister per registered event.
+    const eventsUnregistered = unregMsgs.map((m) => m.event).sort();
+    expect(eventsUnregistered).toEqual(['change', 'click', 'click']);
+  });
+
+  test('cleanup() removes registry entries even when the script had no inject*/addStyle', () => {
+    const dom = buildDOMAPI(createTestDeps());
+    dom.delegate('button', 'click', () => {});
+    const regMsg = messagesOfType('dom_delegate_register')[0];
+
+    dom.cleanup();
+
+    expect(getDelegation(regMsg.delegationId)).toBeUndefined();
+    // No injects / styles were registered, so `dom_cleanup_script` wasn't
+    // sent (matches the "no state" branch). The delegation unregister
+    // still fires because cleanupScript() now returns delegations too.
+    expect(messagesOfType('dom_cleanup_script')).toHaveLength(0);
+    expect(messagesOfType('dom_delegate_unregister')).toHaveLength(1);
   });
 });

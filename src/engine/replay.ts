@@ -43,6 +43,14 @@
  *     6. dom_inject / dom_inject_at_message   (listElementInjectMessages)
  *     7. dom_listen                           (listListenerReplayMessages)
  *     8. dom_make_draggable                   (listDraggableReplayMessages)
+ *     9. dom_delegate_register                (listDelegationReplayMessages)
+ *
+ *   The delegation step (9) lands LAST because the FE's capture-phase
+ *   listeners attach at the chat / document root, which is always mounted
+ *   regardless of the per-script DOM state above. Order vs (1)-(8)
+ *   doesn't matter for correctness, but trailing the sequence keeps the
+ *   "host-UI shells first, then content, then event wiring" mental
+ *   pattern consistent.
  *
  * Modals are deliberately NOT replayed — an open modal represents an
  * interrupted user interaction and refresh-mid-flow is expected to close it.
@@ -65,6 +73,7 @@ import {
   listShellUpdateMessages,
   listListenerReplayMessages,
   listDraggableReplayMessages,
+  listDelegationReplayMessages,
 } from './dom-registry.js';
 
 /**
@@ -87,5 +96,6 @@ export function buildReplayMessages(): BackendToFrontend[] {
     ...listElementInjectMessages(),          // 6. Standalone + shell-scoped DOM injections
     ...listListenerReplayMessages(),         // 7. Re-attach event listeners
     ...listDraggableReplayMessages(),        // 8. Re-wire makeDraggable
+    ...listDelegationReplayMessages(),       // 9. Re-install delegation capture listeners (v0.27.1)
   ];
 }

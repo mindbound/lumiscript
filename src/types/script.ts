@@ -3119,6 +3119,104 @@ export interface DOMListenOptions {
   preventDefault?: boolean;
 }
 
+/** Options for `api.ui.dom.delegate()`. */
+export interface DOMDelegateOptions {
+  /**
+   * Where to attach the actual host-side capture listener. Default: `'chat'`.
+   *
+   * - `'chat'` — restricts matching to the chat-content container.
+   *   Matches descendants of `[data-message-id]` (assistant + user
+   *   messages). The natural surface for reacting to interactive
+   *   elements emitted by the LLM.
+   * - `'document'` — matches anywhere in the page (including Lumiverse's
+   *   own UI surfaces). Both scopes gate on the same `app_manipulation`
+   *   permission as the rest of `api.ui.dom.*` — `'document'` doesn't
+   *   require additional grants beyond what's needed to inject DOM.
+   */
+  root?: 'chat' | 'document';
+
+  /**
+   * When set, only matches inside the `.mes_text` content of the specified
+   * message id. Useful for narrowing a delegation to a particular message
+   * — e.g. wiring up clickables for one specific in-chat form. Has no
+   * effect when `root: 'document'`.
+   */
+  messageId?: string;
+
+  /**
+   * When `true`, the frontend listener calls `event.preventDefault()` on the
+   * native DOM event *before* dispatching to the script handler. Same
+   * rationale as `DOMListenOptions.preventDefault`. Default: `false`.
+   */
+  preventDefault?: boolean;
+
+  /**
+   * When `true`, the frontend listener calls `event.stopPropagation()` after
+   * dispatching, preventing host-side and other delegation listeners from
+   * also reacting. Use when the script wants to fully own the matched
+   * event. Default: `false` (compose with the host).
+   */
+  stopPropagation?: boolean;
+}
+
+/**
+ * Event data delivered to handlers registered via `api.ui.dom.delegate()`.
+ * Extends `DOMEventData` with a serialized snapshot of the element actually
+ * matched by the delegation selector — which may be an ancestor of the
+ * literal `event.target` when the user clicked a child.
+ */
+export interface DOMDelegatedEventData extends DOMEventData {
+  /** The element matched by `event.target.closest(selector)`. */
+  matched: {
+    /** Uppercase tag name (e.g. `'BUTTON'`, `'INPUT'`). */
+    tagName:    string;
+    /** `element.id`, when present. */
+    id?:        string;
+    /** Class list as a flat array. */
+    classList:  string[];
+    /** All `data-*` attributes on the matched element. */
+    dataset:    Record<string, string>;
+    /** Sanitized subset of attributes (excludes `on*` event handlers). */
+    attributes: Record<string, string>;
+    /** `element.textContent`, trimmed of leading/trailing whitespace. */
+    textContent: string;
+    /** `element.value`, for input/select/textarea. Undefined otherwise. */
+    value?:        string;
+    /** `element.checked`, for checkbox/radio. Undefined otherwise. */
+    checked?:      boolean;
+    /** `element.selectedIndex`, for select. Undefined otherwise. */
+    selectedIndex?: number;
+    /** `element.options[selectedIndex].text`, for select. Undefined otherwise. */
+    selectedText?:  string;
+  };
+  /** Modifier-key state at event time. `button` populated for click events. */
+  modifiers: {
+    ctrl:    boolean;
+    shift:   boolean;
+    alt:     boolean;
+    meta:    boolean;
+    /** Mouse button (0=left, 1=middle, 2=right). Click events only. */
+    button?: number;
+  };
+  /**
+   * Populated when the matched element is inside an assistant or user
+   * message. Lets the handler know which message the click came from
+   * without inspecting the DOM tree.
+   *
+   * `swipeId` is the active swipe at dispatch time, resolved backend-
+   * side via the host's chat history. Falls through with `0` if the
+   * chat closed between event fire and dispatch, or if the message id
+   * isn't in the active chat's history (e.g. deleted in the same
+   * window). Scripts that need watertight swipe-resolution can
+   * re-resolve via `api.chat.getMessages()` inside the handler.
+   */
+  message?: {
+    id:      string;
+    role:    'user' | 'assistant';
+    swipeId: number;
+  };
+}
+
 /**
  * Handle returned by `api.ui.dom.inject()`.
  * All methods are fire-and-forget — they send a message to the frontend and return immediately.
@@ -3215,6 +3313,50 @@ export interface DOMAPI {
    * See `DOMAddStyleOptions.id` for the use-case rationale.
    */
   addStyle(css: string, opts?: DOMAddStyleOptions): { remove(): void };
+
+  /**
+   * Attach an event-delegated listener at a known root, matching descendant
+   * elements by CSS selector. Lets scripts react to user interactions with
+   * DOM that the script itself didn't inject — most commonly, interactive
+   * elements (buttons, inputs, selects, textareas) emitted by the LLM into
+   * `.mes_text` content.
+   *
+   * The host installs a SINGLE capture-phase listener per (root, event)
+   * tuple regardless of how many scripts subscribe; selector matching
+   * happens frontend-side via `event.target.closest(selector)`. The IPC
+   * round-trip to the script's handler fires only when a selector matches
+   * — non-matching events have zero overhead beyond the closest() walk.
+   *
+   * Default scope (`options.root: 'chat'`) restricts matching to the chat
+   * content container; wider scope (`options.root: 'document'`) matches
+   * anywhere in the page. Both gate on `app_manipulation` (the same
+   * permission as `inject` / `injectAtMessage` / `addStyle`).
+   *
+   * @param selector  CSS selector matched against `event.target.closest()`
+   * @param event     Event name — `'click'`, `'change'`, `'input'`,
+   *                  `'keydown'`, `'submit'`, etc.
+   * @param handler   Called with serialized `DOMDelegatedEventData` when
+   *                  the selector matches. Async handlers are awaited;
+   *                  thrown errors are logged + swallowed (don't propagate
+   *                  back to the host event loop).
+   * @param options   Scope, message scoping, prevention flags. See
+   *                  `DOMDelegateOptions`.
+   * @returns         An unsubscribe function. Calling it removes this
+   *                  registration; if it's the last subscriber for the
+   *                  (root, event) tuple, the host listener is detached.
+   *
+   * @example
+   * // React to clicks on any LLM-emitted button:
+   * const unsub = api.ui.dom.delegate('button[data-clickable]', 'click', (data) => {
+   *   console.log('clicked:', data.matched.textContent);
+   * });
+   */
+  delegate(
+    selector: string,
+    event:    string,
+    handler:  (data: DOMDelegatedEventData) => void | Promise<void>,
+    options?: DOMDelegateOptions,
+  ): () => void;
 
   /** Remove all DOM injections and styles created by this script. */
   cleanup(): void;

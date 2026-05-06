@@ -6,7 +6,7 @@ import { DEFAULT_SETTINGS } from './types/script.js';
 import { ScriptStorage } from './storage/script-storage.js';
 import { SettingsStore } from './storage/settings-store.js';
 import { executionStatusStore } from './engine/execution-status.js';
-import { setActiveContext, getActiveContext } from './engine/binding.js';
+import { setActiveContext, getActiveContext, getActiveChatId } from './engine/binding.js';
 // All script execution flows through `runScriptViaChild` (trigger-registry
 // + manual-run path). `executeScript` from `engine/executor.ts` is kept
 // for the `inProcessRunner` test fixture only — it's not on any production
@@ -56,7 +56,7 @@ import {
 } from './engine/collection-handle-cache.js';
 import { logCleanup } from './engine/cleanup-log.js';
 import { dispatchToolInvocation } from './engine/tool-invocation.js';
-import { dispatchEvent as dispatchDOMEvent, cleanupScript as cleanupDOMScript } from './engine/dom-registry.js';
+import { dispatchEvent as dispatchDOMEvent, dispatchDelegateEvent as dispatchDOMDelegateEvent, cleanupScript as cleanupDOMScript } from './engine/dom-registry.js';
 import {
   liveModalsByScript as advancedModalsByScript,
   markPendingDismissal as markModalPendingDismissal,
@@ -119,6 +119,51 @@ async function refreshPermissions(): Promise<void> {
   } catch {
     // Keep last known set on error
   }
+}
+
+/**
+ * v0.27.1 — resolve `data.message.swipeId` against the active chat's
+ * history before dispatching a delegated event. The FE emits a
+ * placeholder `0` because `data-swipe-id` isn't stamped on the chat DOM;
+ * the backend has direct access to `spindle.chat.getMessages(chatId)`
+ * which carries the active swipe.
+ *
+ * Fall-through paths (resolution skipped, placeholder `0` preserved):
+ *   - `data.message` not populated (matched element not inside a tracked
+ *     message — possible on `root: 'document'` delegations that fire
+ *     outside chat content).
+ *   - No active chat (chat closed between event fire and dispatch).
+ *   - `getMessages` throws (host-API failure; rare).
+ *   - The message id isn't in the active chat's history (e.g. the user
+ *     deleted the message between click and dispatch — also rare).
+ *
+ * Scripts that genuinely need watertight swipe-resolution can re-resolve
+ * via `api.chat.getMessages()` inside the handler. The common case (read
+ * `swipeId` off the click data) is now correct without that lookup.
+ *
+ * Cost: one host-API roundtrip per delegated event when the matched
+ * element is inside a chat message. Acceptable for the typical click-
+ * latency budget; cache later if hot-path traffic justifies it.
+ */
+async function resolveDelegateEventAndDispatch(
+  delegationId: string,
+  data: import('./types/script.js').DOMDelegatedEventData,
+): Promise<void> {
+  if (data.message?.id) {
+    const chatId = getActiveChatId();
+    if (chatId) {
+      try {
+        const msgs = await spindle.chat.getMessages(chatId);
+        const found = msgs.find((m) => m.id === data.message!.id);
+        if (found) {
+          data.message.swipeId = found.swipe_id;
+        }
+      } catch {
+        // Fall through with placeholder swipeId.
+      }
+    }
+  }
+  dispatchDOMDelegateEvent(delegationId, data);
 }
 
 /**
@@ -1152,6 +1197,22 @@ spindle.onFrontendMessage(async (raw, userId) => {
       // ── DOM events (from frontend) ──────────────────────────────────────
       case 'dom_event': {
         dispatchDOMEvent(msg.listenerId, msg.data);
+        break;
+      }
+
+      // ── DOM delegated events (from frontend; v0.27.1) ───────────────────
+      // Fires when the FE's capture-phase listener finds a registered
+      // selector match. Routes to the host-side wrapper closure stored
+      // by `engine/api/dom.ts:delegate`, which in turn fires
+      // `sendRunHandlerRequest` to invoke the script's child-side handler.
+      //
+      // Swipe-id resolution: the FE populates `data.message.swipeId = 0`
+      // as a placeholder because `data-swipe-id` isn't stamped on the
+      // chat DOM. Resolve to the actual active swipe here via
+      // `resolveDelegateEventAndDispatch` before invoking the wrapper —
+      // fire-and-forget so the message-handler dispatch loop stays sync.
+      case 'dom_delegate_event': {
+        void resolveDelegateEventAndDispatch(msg.delegationId, msg.data);
         break;
       }
 

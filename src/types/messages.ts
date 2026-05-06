@@ -19,6 +19,7 @@ import type {
   InjectionInfo,
   RegisteredToolInfo,
   DOMEventData,
+  DOMDelegatedEventData,
   DbRecord,
 } from './script.js';
 import type { CollectionSummary, CollectionStats } from '../engine/db-admin.js';
@@ -148,6 +149,18 @@ export type FrontendToBackend =
       listenerId: string;
       event: string;
       data: DOMEventData;
+    }
+  | {
+      /**
+       * Fired by the frontend when a delegated event matches a registered
+       * `api.ui.dom.delegate()` selector. v0.27.1+. Carries the matched
+       * delegationId and the serialized DOMDelegatedEventData payload —
+       * backend looks up the delegation in the dom-registry's delegation
+       * table and routes to the script's wrapper closure.
+       */
+      type: 'dom_delegate_event';
+      delegationId: string;
+      data: DOMDelegatedEventData;
     }
   // ─── Advanced modal lifecycle (frontend → backend) ─────────────────
   | {
@@ -483,6 +496,25 @@ export type BackendToFrontend =
   | { type: 'dom_remove_style';    styleId: string }
   | { type: 'dom_listen';          elementId: string; listenerId: string; event: string; preventDefault?: boolean }
   | { type: 'dom_unlisten';        elementId: string; listenerId: string; event: string }
+  // ─── api.ui.dom.delegate (v0.27.1) ────────────────────────────────────
+  // Single-listener-per-(root, event)-tuple capture-phase delegation. The
+  // frontend maintains a Set<{delegationId, selector, options}> per (root,
+  // event) tuple; on a matching event, fires `dom_delegate_event` back
+  // with the matched delegationId + serialized event data.
+  | {
+      type:         'dom_delegate_register';
+      scriptId:     string;
+      delegationId: string;
+      selector:     string;
+      event:        string;
+      /** Where to attach the actual host-side capture listener. */
+      root:         'chat' | 'document';
+      /** Limit matching to a specific message's `.mes_text` subtree. */
+      messageId?:   string;
+      preventDefault?: boolean;
+      stopPropagation?: boolean;
+    }
+  | { type: 'dom_delegate_unregister'; delegationId: string; event: string }
   | { type: 'dom_cleanup_script';  scriptId: string }
   | { type: 'dom_make_draggable';  elementId: string; handleSelector?: string }
   // ─── Advanced modal commands (backend → frontend) ──────────────────

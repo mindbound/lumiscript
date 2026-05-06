@@ -1820,6 +1820,53 @@ function handleRegisterHandler(msg: RegisterHandler): void {
       break;
     }
 
+    case 'domDelegate': {
+      // v0.27.1 — handler signature: (data: DOMDelegatedEventData) => void.
+      // Fires when the frontend's capture listener matches a delegated
+      // selector. Same fire-and-forget shape as `domEventListener`:
+      // the wrapper kicks off `sendRunHandlerRequest` and logs + drops
+      // any closure throw via the rejection path. The user's handler
+      // returns void (or a Promise<void>) so we don't propagate the
+      // result IPC's value back through the canonical engine.
+      const wrapper = (data: import('../types/script.js').DOMDelegatedEventData): void => {
+        sendRunHandlerRequest(
+          msg.scriptId,
+          msg.handlerId,
+          'domDelegate',
+          [data],
+          // 5s budget — DOM events are interactive; anything slower than
+          // that is almost certainly a bug in the user's handler. Same
+          // budget as `domEventListener`.
+          5_000,
+        ).catch((err) => {
+          spindle.log.warn(
+            `[script-runner] api.ui.dom.delegate handler threw for ${msg.scriptId} ` +
+            `(selector="${msg.selector}", event=${msg.event}): ${String(err)}`,
+          );
+        });
+      };
+
+      const active = activeOrLatestForScript(msg.scriptId, msg.runId);
+      if (active) {
+        try {
+          const canonicalUnsub = active.api.ui.dom.delegate(
+            msg.selector,
+            msg.event,
+            wrapper,
+            msg.options,
+          );
+          recordHandlerCleanup(msg.scriptId, msg.handlerId, canonicalUnsub);
+        } catch (err) {
+          spindle.log.warn(
+            `[script-runner] api.ui.dom.delegate failed (script ${msg.scriptId}): ${String(err)}`,
+          );
+        }
+      } else {
+        logLateRegisterSkip(msg);
+      }
+      break;
+    }
+
     case 'domEventListener': {
       // Phase 9d.4.c-2 — handler signature: (data: DOMEventData) => void.
       // Fires when the frontend dispatches a real DOM event matching this
@@ -2061,13 +2108,14 @@ function handleUnregisterHandler(msg: UnregisterHandler): void {
     case 'contentProcessor':
     case 'worldInfoInterceptor':
     case 'domEventListener':
+    case 'domDelegate':
     case 'inputBarActionClick':
     case 'floatWidgetDragEnd':
     case 'drawerTabActivate': {
       // Phase 9d.3.d / 9d.4.c-2 / 9d.4.e-1-b / 9d.4.e-2-b / 9d.4.e-3-b
-      // + v0.27.0 (worldInfoInterceptor) — same shape as commandsOnInvoked:
-      // handlerId-based, canonical's unsub fn (or `handle.remove()`) was
-      // stored under handlerId.
+      // + v0.27.0 (worldInfoInterceptor) + v0.27.1 (domDelegate) — same
+      // shape as commandsOnInvoked: handlerId-based, canonical's unsub fn
+      // (or `handle.remove()`) was stored under handlerId.
       if (msg.handlerId === undefined) {
         spindle.log.warn(`[script-runner] unregister-handler kind=${msg.kind} missing handlerId`);
         return;

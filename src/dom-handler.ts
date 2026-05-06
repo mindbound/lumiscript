@@ -12,7 +12,7 @@
 
 import type { SpindleFrontendContext } from 'lumiverse-spindle-types';
 import type { BackendToFrontend, FrontendToBackend } from './types/messages.js';
-import type { DOMEventData } from './types/script.js';
+import type { DOMEventData, DOMDelegatedEventData } from './types/script.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -25,6 +25,8 @@ type DOMMessage = Extract<BackendToFrontend,
   | { type: 'dom_remove_style' }
   | { type: 'dom_listen' }
   | { type: 'dom_unlisten' }
+  | { type: 'dom_delegate_register' }
+  | { type: 'dom_delegate_unregister' }
   | { type: 'dom_cleanup_script' }
   | { type: 'dom_make_draggable' }
 >;
@@ -87,6 +89,41 @@ const styleScripts = new Map<string, string>();
 /** listenerId → { elementId, event, handler } for cleanup */
 const listenerMap = new Map<string, { elementId: string; event: string; handler: EventListener }>();
 
+// ─── Delegation registry (v0.27.1 — api.ui.dom.delegate) ─────────────────────
+
+/**
+ * Per-delegation entry. Stored on `dom_delegate_register`, removed on
+ * `dom_delegate_unregister`. The capture-phase listener for a given
+ * (root, event) tuple iterates this map at fire time and dispatches a
+ * `dom_delegate_event` for each registration whose selector + scope match.
+ */
+interface DelegationEntry {
+  delegationId:    string;
+  scriptId:        string;
+  selector:        string;
+  event:           string;
+  root:            'chat' | 'document';
+  messageId?:      string;
+  preventDefault?: boolean;
+  stopPropagation?: boolean;
+}
+const delegationsByDelegationId = new Map<string, DelegationEntry>();
+
+/**
+ * Per-(root, event)-tuple installed listener. Reference-counted so a single
+ * capture listener serves many simultaneous registrations under the same
+ * tuple; detached when the last reference disappears.
+ */
+interface InstalledDelegationListener {
+  handler: EventListener;
+  count:   number;
+}
+const installedDelegationListeners = new Map<string, InstalledDelegationListener>();
+
+function delegationKey(root: 'chat' | 'document', event: string): string {
+  return `${root}::${event}`;
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function stableKey(scriptId: string, stableId: string): string {
@@ -140,6 +177,187 @@ function extractEventData(event: Event): DOMEventData {
   }
 
   return data;
+}
+
+/**
+ * Build a serialized `DOMDelegatedEventData` for an event whose selector
+ * matched. Walks the matched element to populate `matched.*`, the original
+ * event for `target.*` + `modifiers`, and the closest `[data-message-id]`
+ * ancestor (when present) for `message.*`.
+ *
+ * Skips `on*` and `data-*` from `matched.attributes` — `on*` would carry
+ * inline-handler text (rare but theoretically present in LLM-emitted
+ * markup), `data-*` is already exposed on `matched.dataset`.
+ */
+function buildDelegatedEventData(
+  event:   Event,
+  matched: HTMLElement,
+): DOMDelegatedEventData {
+  // Base — same target/dataset/value/coords as `extractEventData` for
+  // backward compat; `DOMDelegatedEventData extends DOMEventData`.
+  // `extractEventData` reads `event.target` directly — no need to thread
+  // a separate target parameter through.
+  const base = extractEventData(event);
+
+  // matched.* — curated subset of the matched element's properties.
+  const matchedDataset: Record<string, string> = {};
+  for (const [k, v] of Object.entries(matched.dataset)) {
+    if (v !== undefined) matchedDataset[k] = v;
+  }
+  const matchedAttributes: Record<string, string> = {};
+  for (const attr of Array.from(matched.attributes)) {
+    if (attr.name.startsWith('on'))   continue;  // skip inline handlers
+    if (attr.name.startsWith('data-')) continue; // already in dataset
+    matchedAttributes[attr.name] = attr.value;
+  }
+
+  const matchedField: DOMDelegatedEventData['matched'] = {
+    tagName:     matched.tagName,
+    classList:   Array.from(matched.classList),
+    dataset:     matchedDataset,
+    attributes:  matchedAttributes,
+    textContent: (matched.textContent ?? '').trim(),
+  };
+  if (matched.id) matchedField.id = matched.id;
+
+  // Form-input fields. `instanceof` checks scope us to the right element
+  // types so we don't read .value off random elements.
+  if (matched instanceof HTMLInputElement || matched instanceof HTMLTextAreaElement) {
+    matchedField.value = matched.value;
+    if (matched instanceof HTMLInputElement && (matched.type === 'checkbox' || matched.type === 'radio')) {
+      matchedField.checked = matched.checked;
+    }
+  } else if (matched instanceof HTMLSelectElement) {
+    matchedField.value         = matched.value;
+    matchedField.selectedIndex = matched.selectedIndex;
+    matchedField.selectedText  = matched.options[matched.selectedIndex]?.text;
+  }
+
+  // Modifier-key state. Pointer / mouse events carry button index too.
+  const me = event as MouseEvent;        // cast — null-safe via instanceof
+  const ke = event as KeyboardEvent;     // cast — null-safe via instanceof
+  const modifiers: DOMDelegatedEventData['modifiers'] = {
+    ctrl:  event instanceof MouseEvent || event instanceof KeyboardEvent ? me.ctrlKey  || ke.ctrlKey  : false,
+    shift: event instanceof MouseEvent || event instanceof KeyboardEvent ? me.shiftKey || ke.shiftKey : false,
+    alt:   event instanceof MouseEvent || event instanceof KeyboardEvent ? me.altKey   || ke.altKey   : false,
+    meta:  event instanceof MouseEvent || event instanceof KeyboardEvent ? me.metaKey  || ke.metaKey  : false,
+  };
+  if (event instanceof MouseEvent) modifiers.button = event.button;
+
+  // Optional message context — read from closest [data-message-id] ancestor.
+  // The host stamps both the outer VirtualRow AND inner .card with this
+  // attribute (per dom_inject_at_message comments above); `closest` returns
+  // the nearest one in tree order, which is the inner .card — fine for
+  // identifying the message id. Role comes from the [data-part] descendant
+  // ('user' / 'character' / 'streaming') under the row.
+  let message: DOMDelegatedEventData['message'] | undefined;
+  const msgRow = matched.closest('[data-message-id]');
+  if (msgRow) {
+    const id = msgRow.getAttribute('data-message-id') ?? '';
+    if (id) {
+      // 'character' / 'streaming' / falsy → 'assistant'; only 'user' is user.
+      const partEl = msgRow.querySelector('[data-part]') ?? msgRow;
+      const part   = partEl.getAttribute?.('data-part') ?? 'character';
+      const role: 'user' | 'assistant' = part === 'user' ? 'user' : 'assistant';
+      // swipeId — placeholder. Backend resolves the actual active swipe
+      // via `spindle.chat.getMessages(activeChatId)` in
+      // `resolveDelegateEventAndDispatch` (backend.ts) before invoking
+      // the wrapper. We can't resolve here on the FE without access to
+      // the chat store; backend has direct host-API access and a single
+      // resolution point keeps the per-event cost predictable.
+      message = { id, role, swipeId: 0 };
+    }
+  }
+
+  const out: DOMDelegatedEventData = {
+    ...base,
+    matched:   matchedField,
+    modifiers,
+  };
+  if (message) out.message = message;
+  return out;
+}
+
+/**
+ * Install (or increment ref-count on) a capture-phase listener for a
+ * given (root, event) tuple. Listener iterates the delegation registry
+ * at fire time and dispatches `dom_delegate_event` for each matching
+ * registration.
+ *
+ * Both `'chat'` and `'document'` scope listeners attach at
+ * `document.body` — capture phase sees all events regardless. The
+ * difference is the per-event filtering: `'chat'` requires the matched
+ * element to be inside a `[data-message-id]` ancestor.
+ */
+function installDelegationListenerIfNeeded(
+  root:          'chat' | 'document',
+  event:         string,
+  sendToBackend: (msg: FrontendToBackend) => void,
+): void {
+  const key = delegationKey(root, event);
+  const existing = installedDelegationListeners.get(key);
+  if (existing) {
+    existing.count++;
+    return;
+  }
+
+  const handler: EventListener = (e: Event) => {
+    const target = e.target as HTMLElement | null;
+    if (!target) return;
+
+    // Iterate every delegation registered under this (root, event)
+    // tuple. Most clicks won't match anything, so the inner `closest()`
+    // walk + early-continue keeps the cost proportional to fired events,
+    // not to total registered selectors.
+    for (const reg of delegationsByDelegationId.values()) {
+      if (reg.root !== root || reg.event !== event) continue;
+
+      // Chat-scope filter: target must be inside a tracked message.
+      if (root === 'chat') {
+        const msgRow = target.closest('[data-message-id]');
+        if (!msgRow) continue;
+        if (reg.messageId && msgRow.getAttribute('data-message-id') !== reg.messageId) continue;
+      }
+
+      // Selector match. closest() walks from target upward, returning the
+      // nearest ancestor (or self) matching the selector — exactly the
+      // event-delegation pattern script authors expect.
+      const matched = target.closest(reg.selector) as HTMLElement | null;
+      if (!matched) continue;
+
+      // Per-registration prevention flags. Applied on the first match —
+      // the order delegations are iterated isn't user-controlled, so a
+      // script that sets `preventDefault: true` on its registration is
+      // promised the event WILL be prevented if its selector matches,
+      // not that it's the only handler that runs.
+      if (reg.preventDefault)  e.preventDefault();
+      if (reg.stopPropagation) e.stopPropagation();
+
+      const data = buildDelegatedEventData(e, matched);
+      sendToBackend({ type: 'dom_delegate_event', delegationId: reg.delegationId, data });
+    }
+  };
+
+  document.body.addEventListener(event, handler, true /* capture */);
+  installedDelegationListeners.set(key, { handler, count: 1 });
+}
+
+/**
+ * Decrement ref-count on a (root, event)-tuple's capture listener;
+ * detach when it reaches zero. Idempotent — calling on a key that's
+ * already gone is a no-op.
+ */
+function uninstallDelegationListenerIfUnused(
+  root:  'chat' | 'document',
+  event: string,
+): void {
+  const key = delegationKey(root, event);
+  const entry = installedDelegationListeners.get(key);
+  if (!entry) return;
+  entry.count--;
+  if (entry.count > 0) return;
+  document.body.removeEventListener(event, entry.handler, true);
+  installedDelegationListeners.delete(key);
 }
 
 /**
@@ -494,6 +712,34 @@ export function installDOMHandler(
         break;
       }
 
+      // ── Delegate register (v0.27.1 — api.ui.dom.delegate) ─────────
+      // Add to the per-delegation registry; install (or ref-count) the
+      // (root, event)-tuple's capture-phase listener.
+      case 'dom_delegate_register': {
+        const {
+          delegationId, scriptId, selector, event, root,
+          messageId, preventDefault, stopPropagation,
+        } = msg;
+        delegationsByDelegationId.set(delegationId, {
+          delegationId, scriptId, selector, event, root,
+          messageId, preventDefault, stopPropagation,
+        });
+        installDelegationListenerIfNeeded(root, event, sendToBackend);
+        break;
+      }
+
+      // ── Delegate unregister ────────────────────────────────────────
+      // Drop from registry; decrement listener ref-count (detach when
+      // last delegation under this (root, event) tuple is removed).
+      case 'dom_delegate_unregister': {
+        const { delegationId, event } = msg;
+        const reg = delegationsByDelegationId.get(delegationId);
+        if (!reg) break;
+        delegationsByDelegationId.delete(delegationId);
+        uninstallDelegationListenerIfUnused(reg.root, event);
+        break;
+      }
+
       // ── Cleanup Script ─────────────────────────────────────────────
       case 'dom_cleanup_script': {
         const { scriptId } = msg;
@@ -621,6 +867,20 @@ export function installDOMHandler(
       if (el) el.removeEventListener(entry.event, entry.handler);
     }
     listenerMap.clear();
+
+    // Remove all delegation capture listeners (v0.27.1). Iterate the
+    // installed-listener map directly — each entry corresponds to a
+    // distinct (root, event) tuple at `document.body`. Per-registration
+    // entries in `delegationsByDelegationId` get cleared en masse.
+    for (const [key, entry] of installedDelegationListeners) {
+      // Key shape: '<root>::<event>' — extract event after the
+      // delimiter. (Root is encoded but isn't needed here since both
+      // roots share `document.body` as the actual listener target.)
+      const event = key.split('::')[1] ?? '';
+      if (event) document.body.removeEventListener(event, entry.handler, true);
+    }
+    installedDelegationListeners.clear();
+    delegationsByDelegationId.clear();
 
     // Remove all elements
     for (const [, el] of elementMap) {

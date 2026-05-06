@@ -13,7 +13,7 @@
  *     dom_event messages from the frontend.
  */
 
-import type { DOMEventData } from '../types/script.js';
+import type { DOMEventData, DOMDelegateOptions, DOMDelegatedEventData } from '../types/script.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -126,6 +126,34 @@ const elements = new Map<string, DOMElementEntry>();
 
 /** styleId → entry */
 const styles = new Map<string, DOMStyleEntry>();
+
+/**
+ * v0.27.1 — `api.ui.dom.delegate()` registry.
+ *
+ * Each entry stores the host-side wrapper closure that fires when a
+ * delegated event matches its (selector, event, root) registration. The
+ * frontend installs a single capture-phase listener per (root, event)
+ * tuple regardless of how many scripts subscribe; on match, FE sends
+ * `dom_delegate_event` with the matched delegationId, and the engine's
+ * `dispatchDelegateEvent` routes to the entry's `handler`.
+ *
+ * Lifecycle: registered via `api.ui.dom.delegate(...)`, removed via the
+ * returned unsubscribe fn OR via `cleanupScript(scriptId)` (which sweeps
+ * every delegation owned by the script). Replay-on-reconnect re-emits
+ * `dom_delegate_register` for every live entry.
+ *
+ * delegationId → entry
+ */
+export interface DOMDelegationEntry {
+  delegationId: string;
+  scriptId:     string;
+  selector:     string;
+  event:        string;
+  options:      DOMDelegateOptions;
+  /** Host-side wrapper. Receives the serialized event data on match. */
+  handler:      (data: DOMDelegatedEventData) => void;
+}
+const delegations = new Map<string, DOMDelegationEntry>();
 
 /** scriptId:stableId → elementId  (quick lookup for idempotent injection) */
 const stableIdIndex = new Map<string, string>();
@@ -314,6 +342,75 @@ export function dispatchEvent(listenerId: string, data: DOMEventData): void {
   }
 }
 
+// ─── Delegation operations (v0.27.1 — api.ui.dom.delegate) ───────────────────
+
+/**
+ * Register a delegation entry. The `handler` is invoked when the frontend
+ * fires `dom_delegate_event` for this `delegationId` — typically a host-side
+ * wrapper that fires `sendRunHandlerRequest` to invoke the script's child-
+ * side closure.
+ */
+export function addDelegation(entry: DOMDelegationEntry): void {
+  delegations.set(entry.delegationId, entry);
+}
+
+/**
+ * Remove a delegation entry by id. Returns `true` if an entry was present
+ * and removed, `false` otherwise. Caller is responsible for emitting the
+ * `dom_delegate_unregister` message to the frontend.
+ */
+export function removeDelegation(delegationId: string): boolean {
+  return delegations.delete(delegationId);
+}
+
+/**
+ * Look up a delegation entry by id. Used by replay machinery + tests.
+ */
+export function getDelegation(delegationId: string): DOMDelegationEntry | undefined {
+  return delegations.get(delegationId);
+}
+
+/**
+ * Dispatch an incoming `dom_delegate_event` from the frontend to the
+ * registered wrapper. Errors thrown by the wrapper are swallowed (matches
+ * `dispatchEvent`'s contract) so a misbehaving handler can't crash the
+ * frontend-message dispatch loop.
+ */
+export function dispatchDelegateEvent(delegationId: string, data: DOMDelegatedEventData): void {
+  const entry = delegations.get(delegationId);
+  if (!entry) return;
+  try {
+    entry.handler(data);
+  } catch {
+    // Swallow — same rationale as `dispatchEvent`.
+  }
+}
+
+/**
+ * Build `dom_delegate_register` messages for every live delegation. Emitted
+ * on frontend reconnect so the post-refresh frontend re-installs its
+ * capture listeners + selector index. Order doesn't matter relative to
+ * other replay families — delegations don't depend on injected DOM since
+ * they attach at the chat / document root.
+ */
+export function listDelegationReplayMessages(): import('../types/messages.js').BackendToFrontend[] {
+  const out: import('../types/messages.js').BackendToFrontend[] = [];
+  for (const entry of delegations.values()) {
+    out.push({
+      type:            'dom_delegate_register',
+      scriptId:        entry.scriptId,
+      delegationId:    entry.delegationId,
+      selector:        entry.selector,
+      event:           entry.event,
+      root:            entry.options.root ?? 'chat',
+      messageId:       entry.options.messageId,
+      preventDefault:  entry.options.preventDefault,
+      stopPropagation: entry.options.stopPropagation,
+    });
+  }
+  return out;
+}
+
 // ─── Style operations ────────────────────────────────────────────────────────
 
 /**
@@ -370,11 +467,15 @@ export function lookupStyleByUserId(scriptId: string, userId: string): string | 
  * Returns the IDs so the caller can send cleanup messages to the frontend.
  */
 export function cleanupScript(scriptId: string): {
-  elementIds: string[];
-  styleIds: string[];
+  elementIds:    string[];
+  styleIds:      string[];
+  /** v0.27.1 — delegationIds + their event names so the caller can emit
+   *  `dom_delegate_unregister` per entry. */
+  delegations:   Array<{ delegationId: string; event: string }>;
 } {
-  const elementIds: string[] = [];
-  const styleIds: string[] = [];
+  const elementIds:  string[] = [];
+  const styleIds:    string[] = [];
+  const delegationsOut: Array<{ delegationId: string; event: string }> = [];
 
   for (const [id, entry] of elements) {
     if (entry.scriptId === scriptId) {
@@ -393,7 +494,14 @@ export function cleanupScript(scriptId: string): {
     }
   }
 
-  return { elementIds, styleIds };
+  for (const [id, entry] of delegations) {
+    if (entry.scriptId === scriptId) {
+      delegationsOut.push({ delegationId: id, event: entry.event });
+      delegations.delete(id);
+    }
+  }
+
+  return { elementIds, styleIds, delegations: delegationsOut };
 }
 
 // ─── Replay (frontend reconnect) ─────────────────────────────────────────────
@@ -542,4 +650,5 @@ export function __reset(): void {
   elements.clear();
   styles.clear();
   stableIdIndex.clear();
+  delegations.clear();
 }

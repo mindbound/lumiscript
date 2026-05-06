@@ -949,6 +949,35 @@ interface UIAPI {
      */
     addStyle(css: string, opts?: DOMAddStyleOptions): { remove(): void };
 
+    /**
+     * Attach an event-delegated listener at a known root, matching descendant
+     * elements by CSS selector. Lets scripts react to user interactions with
+     * DOM that the script itself didn't inject — most commonly, interactive
+     * elements (buttons, inputs, selects, textareas) emitted by the LLM
+     * into \`.mes_text\` content.
+     *
+     * Single host-side capture listener per (root, event) tuple; selector
+     * matching happens frontend-side via \`event.target.closest(selector)\`.
+     * IPC fires only when a selector matches.
+     *
+     * Default scope (\`options.root: 'chat'\`) restricts matching to chat
+     * content; wider scope (\`options.root: 'document'\`) matches anywhere
+     * in the page. Both gate on \`app_manipulation\` — same permission
+     * as inject / injectAtMessage / addStyle.
+     *
+     * @param selector CSS selector matched against \`event.target.closest()\`
+     * @param event    Event name ('click', 'change', 'input', 'keydown', ...)
+     * @param handler  Called with serialized DOMDelegatedEventData on match
+     * @param options  Scope, message scoping, prevention flags
+     * @returns        Unsubscribe function
+     */
+    delegate(
+      selector: string,
+      event:    string,
+      handler:  (data: DOMDelegatedEventData) => void | Promise<void>,
+      options?: DOMDelegateOptions,
+    ): () => void;
+
     /** Remove all DOM injections and styles created by this script. */
     cleanup(): void;
   };
@@ -994,6 +1023,61 @@ interface DOMEventData {
   targetChecked?: boolean;
   dataset?: Record<string, string>;
   detail?: unknown;
+}
+
+/** Options for api.ui.dom.delegate(selector, event, handler, options?). */
+interface DOMDelegateOptions {
+  /**
+   * Where to attach the actual host-side capture listener. Default: 'chat'.
+   * - 'chat': restricts matching to the chat content container.
+   * - 'document': matches anywhere in the page (including Lumiverse's
+   *   own UI surfaces). Both gate on \`app_manipulation\`.
+   */
+  root?: 'chat' | 'document';
+  /** Narrow matching to the .mes_text content of one specific message. */
+  messageId?: string;
+  /** Call event.preventDefault() before dispatching. Default: false. */
+  preventDefault?: boolean;
+  /** Call event.stopPropagation() after dispatching. Default: false. */
+  stopPropagation?: boolean;
+}
+
+/**
+ * Event data delivered to handlers registered via api.ui.dom.delegate().
+ * Extends DOMEventData with a serialized snapshot of the element actually
+ * matched by the selector — which may be an ancestor of event.target.
+ */
+interface DOMDelegatedEventData extends DOMEventData {
+  matched: {
+    tagName:        string;
+    id?:            string;
+    classList:      string[];
+    dataset:        Record<string, string>;
+    attributes:     Record<string, string>;
+    textContent:    string;
+    value?:         string;
+    checked?:       boolean;
+    selectedIndex?: number;
+    selectedText?:  string;
+  };
+  modifiers: {
+    ctrl:    boolean;
+    shift:   boolean;
+    alt:     boolean;
+    meta:    boolean;
+    button?: number;
+  };
+  /**
+   * Populated when the matched element is inside an assistant or user
+   * message. swipeId is the active swipe at dispatch time, resolved
+   * backend-side via the host's chat history. Falls through with 0 if
+   * the chat closed before dispatch or the message left the history.
+   */
+  message?: {
+    id:      string;
+    role:    'user' | 'assistant';
+    swipeId: number;
+  };
 }
 
 /**

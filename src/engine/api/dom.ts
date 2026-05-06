@@ -16,7 +16,17 @@
 
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
 
-import type { LumiScriptAPI, DOMAddStyleOptions, DOMEventData, DOMHandle, DOMInjectOptions, DOMListenOptions, DOMMessageInjectOptions } from '../../types/script.js';
+import type {
+  LumiScriptAPI,
+  DOMAddStyleOptions,
+  DOMDelegatedEventData,
+  DOMDelegateOptions,
+  DOMEventData,
+  DOMHandle,
+  DOMInjectOptions,
+  DOMListenOptions,
+  DOMMessageInjectOptions,
+} from '../../types/script.js';
 import type { BackendToFrontend } from '../../types/messages.js';
 import type { APIBuildDeps } from './shared.js';
 import { assertPerm } from './shared.js';
@@ -34,6 +44,8 @@ import {
   updateElementHtml,
   setDraggable,
   collectDescendantIds,
+  addDelegation,
+  removeDelegation,
 } from '../dom-registry.js';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -331,14 +343,76 @@ export function buildDOMAPI(deps: APIBuildDeps): LumiScriptAPI['ui']['dom'] {
       };
     },
 
+    delegate(
+      selector: string,
+      event:    string,
+      handler:  (data: DOMDelegatedEventData) => void | Promise<void>,
+      options:  DOMDelegateOptions = {},
+    ): () => void {
+      // Symmetric with the rest of DOMAPI — `inject` / `injectAtMessage` /
+      // `addStyle` / `cleanup` all gate behind `app_manipulation`. Both
+      // chat-scope and document-scope use the same gate; document-scope
+      // is broader but still bounded by what `app_manipulation` already
+      // grants (full DOM access via `inject` already covers anything a
+      // delegated listener could observe).
+      gate();
+
+      const root = options.root ?? 'chat';
+      const delegationId = nextId('dd');
+
+      // Store BEFORE sending the register message so a race with
+      // `dom_delegate_event` (impossible in practice — register precedes
+      // any FE-side install — but defensively) finds the entry.
+      addDelegation({
+        delegationId,
+        scriptId,
+        selector,
+        event,
+        options,
+        handler,
+      });
+
+      send({
+        type:            'dom_delegate_register',
+        scriptId,
+        delegationId,
+        selector,
+        event,
+        root,
+        messageId:       options.messageId,
+        preventDefault:  options.preventDefault,
+        stopPropagation: options.stopPropagation,
+      });
+
+      return () => {
+        // Idempotent — already-removed delegations are no-ops. Sending
+        // an unregister for an unknown delegationId is harmless on the
+        // frontend (the (root, event) listener stays installed if other
+        // delegations under the same tuple are still active; otherwise
+        // it gets removed there).
+        if (removeDelegation(delegationId)) {
+          send({ type: 'dom_delegate_unregister', delegationId, event });
+        }
+      };
+    },
+
     cleanup(): void {
       gate();
-      const { elementIds, styleIds } = cleanupScript(scriptId);
+      const { elementIds, styleIds, delegations } = cleanupScript(scriptId);
       // Single message tells the frontend to remove everything for this script.
       // The frontend also removes individual elements/styles, but the bulk
       // message is simpler and handles race conditions.
       if (elementIds.length > 0 || styleIds.length > 0) {
         send({ type: 'dom_cleanup_script', scriptId });
+      }
+      // v0.27.1 — `dom_cleanup_script` doesn't sweep delegations on the
+      // frontend (the FE delegation registry is keyed by delegationId, not
+      // scriptId, since a single capture listener serves many scripts).
+      // Emit individual unregister messages so the FE can decrement its
+      // reference counts and detach the underlying DOM listener when the
+      // last delegation per (root, event) tuple is removed.
+      for (const { delegationId, event } of delegations) {
+        send({ type: 'dom_delegate_unregister', delegationId, event });
       }
     },
 

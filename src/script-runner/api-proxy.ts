@@ -50,6 +50,8 @@ import type {
   DOMHandle,
   DOMInjectOptions,
   DOMMessageInjectOptions,
+  DOMDelegateOptions,
+  DOMDelegatedEventData,
   ScriptNamespace,
   ScriptType,
   LLMAPI,
@@ -1318,6 +1320,70 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
         } catch { /* ignore */ }
       }));
       return buildDOMHandleProxy(elementId);
+    },
+
+    /**
+     * v0.27.1 — `api.ui.dom.delegate(selector, event, handler, options?)`.
+     *
+     * Same shape as `macros.registerInterceptor` / `worldInfo.registerInterceptor`:
+     * child generates the handlerId, registers the closure via
+     * `ctx.registerHandlerClosure`, sends a `register-handler` IPC with
+     * `kind: 'domDelegate'` carrying the selector + event + options. The
+     * parent's host-dispatcher routes the register to the canonical
+     * `api.ui.dom.delegate(...)` and binds the resulting unsub fn to the
+     * handlerId via `recordHandlerCleanup`.
+     *
+     * On match (frontend posts `dom_delegate_event`), the parent's
+     * delegation-registry wrapper fires `sendRunHandlerRequest` with the
+     * serialized `DOMDelegatedEventData` as args[0]; the child closure
+     * here dispatches to the user's handler.
+     *
+     * Returns a sync unsub fn — calling it sends `unregister-handler`
+     * IPC AND drops the closure child-side. Fire-and-forget at the user
+     * level (canonical interface returns void from the unsub).
+     */
+    delegate: (
+      selector: string,
+      event:    string,
+      handler:  (data: DOMDelegatedEventData) => void | Promise<void>,
+      options?: DOMDelegateOptions,
+    ): (() => void) => {
+      const handlerId = generateHandlerId('domDelegate');
+
+      ctx.registerHandlerClosure(handlerId, async (...handlerArgs: unknown[]) => {
+        // IPC args shape: [data: DOMDelegatedEventData]. Handler returns
+        // void | Promise<void>; we await + ignore the value either way.
+        await handler(handlerArgs[0] as DOMDelegatedEventData);
+      });
+
+      const msg: RegisterHandler = {
+        type:       'register-handler',
+        kind:       'domDelegate',
+        runId:      runIdContext.getStore() ?? ctx.runId,
+        scriptId:   ctx.scriptId,
+        handlerId,
+        selector,
+        event,
+        options:    options ?? {},
+        hasHandler: true,
+      };
+      try {
+        ctx.send(msg);
+      } catch (err) {
+        ctx.unregisterHandlerClosure(handlerId);
+        throw err instanceof Error ? err : new Error(String(err));
+      }
+
+      return () => {
+        ctx.unregisterHandlerClosure(handlerId);
+        const unsubMsg: UnregisterHandler = {
+          type:       'unregister-handler',
+          kind:       'domDelegate',
+          scriptId:   ctx.scriptId,
+          handlerId,
+        };
+        try { ctx.send(unsubMsg); } catch { /* sync void: no throw */ }
+      };
     },
 
     /**

@@ -784,6 +784,26 @@ export const KEY_TYPES: TypeDoc[] = [
     ],
   },
   {
+    name: 'DOMDelegateOptions',
+    note: 'Options for api.ui.dom.delegate(selector, event, handler, options?). v0.27.1+.',
+    fields: [
+      { field: 'root?',            type: "'chat' | 'document'", optional: true, desc: "Where to attach the actual host-side capture listener. 'chat' (default): restricts matching to chat content; matches descendants of [data-message-id]. 'document': matches anywhere in the page (including Lumiverse's own UI surfaces). Both gate on app_manipulation." },
+      { field: 'messageId?',       type: 'string',              optional: true, desc: 'Limit matching to a specific message id. Has no effect when root is "document".' },
+      { field: 'preventDefault?',  type: 'boolean',             optional: true, desc: "When true, the frontend listener calls event.preventDefault() before dispatching. Default: false." },
+      { field: 'stopPropagation?', type: 'boolean',             optional: true, desc: "When true, the frontend listener calls event.stopPropagation() after dispatching, preventing host-side and other delegation listeners from also reacting. Default: false." },
+    ],
+  },
+  {
+    name: 'DOMDelegatedEventData',
+    note: 'Event data delivered to handlers registered via api.ui.dom.delegate(). Extends DOMEventData with a serialized snapshot of the matched element + modifier-key state + optional message context. v0.27.1+.',
+    fields: [
+      { field: 'matched',                  type: '{ tagName, classList, dataset, attributes, textContent, id?, value?, checked?, selectedIndex?, selectedText? }', optional: false, desc: 'Snapshot of the element matched by event.target.closest(selector). May be an ancestor of the literal event.target. Form-input fields (value/checked/selectedIndex/selectedText) populated only for matching element types.' },
+      { field: 'modifiers',                type: '{ ctrl, shift, alt, meta, button? }',                                                                              optional: false, desc: 'Modifier-key state at event time. button is populated for click events (0=left, 1=middle, 2=right).' },
+      { field: 'message?',                 type: '{ id, role, swipeId }',                                                                                            optional: true,  desc: "Populated when the matched element is inside an assistant or user message. role: 'user' for [data-part=\"user\"], 'assistant' otherwise. swipeId is the active swipe at dispatch time, resolved backend-side via the host's chat history. Falls through with 0 if the chat closed between event fire and dispatch or the message left the history." },
+      { field: '(plus DOMEventData fields)', type: 'see DOMEventData',                                                                                                optional: false, desc: 'Inherits type, targetId, targetValue, targetChecked, dataset, detail, clientX, clientY from DOMEventData (see above).' },
+    ],
+  },
+  {
     name: 'DOMHandle',
     note: 'Returned by api.ui.dom.inject() and api.ui.dom.injectAtMessage(). All methods are fire-and-forget.',
     fields: [
@@ -1812,7 +1832,8 @@ export const API_GROUPS: FnGroup[] = [
       { name: 'inject',          args: 'target, html, options?',     desc: 'Inject sanitized HTML at a CSS selector. Returns DOMHandle { id, update, remove, on }. Options: position (default "beforeend"), id (stable ID for idempotent injection). Requires app_manipulation.' },
       { name: 'injectAtMessage', args: 'messageId, html, options?', desc: 'Inject sanitized HTML into a message bubble. Waits up to 5 s for the element if not yet rendered. Options: position ("footer" default / "header"), id (stable ID). Returns DOMHandle. Requires app_manipulation.' },
       { name: 'addStyle',         args: 'css',                      desc: 'Add a <style> element scoped to this script via @scope. Returns { remove() }. Use --lumiverse-* CSS variables for theming. Requires app_manipulation.' },
-      { name: 'cleanup',          args: '—',                        desc: 'Remove all DOM injections and styles created by this script. Requires app_manipulation.' },
+      { name: 'delegate',         args: 'selector, event, handler, options?', desc: 'Attach an event-delegated listener at a known root, matching descendants by CSS selector. Lets scripts react to clicks/changes on DOM the script didn\'t inject — e.g. interactive elements emitted by the LLM in chat-message content. Single host-side capture listener per (root, event) tuple regardless of how many scripts subscribe; selector matching happens frontend-side via event.target.closest(). Default scope (options.root: "chat") restricts matching to chat content; "document" matches anywhere on the page. Returns an unsubscribe function. v0.27.1+. Requires app_manipulation.' },
+      { name: 'cleanup',          args: '—',                        desc: 'Remove all DOM injections, styles, and delegations created by this script. Requires app_manipulation.' },
     ],
   },
   {

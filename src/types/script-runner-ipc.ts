@@ -43,6 +43,7 @@ import type {
   MessageContentProcessorOptions,
   WorldInfoInterceptorOptions,
   DOMListenOptions,
+  DOMDelegateOptions,
   AdvancedModalDismissReason,
   RegisteredToolInfo,
   RegisteredMacroInfo,
@@ -254,6 +255,7 @@ export type HandlerKind =
   | 'macroInterceptor'       // 9d.3.d
   | 'worldInfoInterceptor'   // v0.27.0 — api.worldInfo.registerInterceptor() handler
   | 'domEventListener'       // 9d.4.c-2 — DOMHandle.on() event handler
+  | 'domDelegate'            // v0.27.1 — api.ui.dom.delegate() event-delegated handler
   | 'inputBarActionClick'    // 9d.4.e-1-b — InputBarActionHandle.onClick() click handler
   | 'floatWidgetDragEnd'     // 9d.4.e-2-b — FloatWidgetHandle.onDragEnd() drag-end handler
   | 'drawerTabActivate'      // 9d.4.e-3-b — DrawerTabHandle.onActivate() activation handler
@@ -615,6 +617,30 @@ export type RegisterHandler =
       elementId: string;
       event:     string;
       options?:  DOMListenOptions;
+      hasHandler: true;
+    }
+  | {
+      // v0.27.1 — api.ui.dom.delegate() handler. Unlike `domEventListener`
+      // (which attaches to a specific script-injected DOMHandle), delegate
+      // installs a CAPTURE-PHASE listener at a known root (chat container
+      // or document) and matches descendants by CSS selector. Used to react
+      // to events on DOM the script DIDN'T inject — primarily LLM-emitted
+      // interactive elements inside `.mes_text` content.
+      //
+      // No `elementId` — the host's frontend manages the (root, event)
+      // listener registry independently from per-script DOM handles. The
+      // child generates the `handlerId` and the parent forwards it to the
+      // frontend's delegation registry; on match, the frontend posts a
+      // `dom-delegate-fired` notice carrying handlerId + serialized event
+      // data, which the host routes back through `sendRunHandlerRequest`.
+      type:      'register-handler';
+      kind:      'domDelegate';
+      runId:     string;
+      scriptId:  string;
+      handlerId: string;
+      selector:  string;
+      event:     string;
+      options?:  DOMDelegateOptions;
       hasHandler: true;
     }
   | {
