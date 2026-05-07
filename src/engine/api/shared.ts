@@ -44,6 +44,19 @@ export interface APIBuildDeps {
    */
   onMacrosChanged?: () => void;
   /**
+   * Parallel to `onToolsChanged` for chat injections. Called immediately after
+   * `api.chat.inject` / `removeInjection` / `clearInjections` /
+   * `clearAllInjections` mutates the injection store, so the LumiScriptPanel's
+   * Active Injections section reflects the change without waiting for the
+   * panel's next manual refresh. The frontend already requests
+   * `get_injections` on mount + on certain lifecycle events; this callback
+   * closes the gap for mid-execution mutations.
+   *
+   * Wired in `backend.ts` to `pushInjections()`. Optional so engine-internal
+   * callers (tests, fixtures) don't need to provide it.
+   */
+  onInjectionsChanged?: () => void;
+  /**
    * Per-execution macro-registration tracker. When present, `buildMacrosAPI`
    * adds every macro name to this set on register. Consumed by
    * `diffAndCleanStaleMacros` at post-execution to auto-unregister macros

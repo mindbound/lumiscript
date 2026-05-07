@@ -596,8 +596,9 @@ const triggerRegistry = new TriggerRegistry(
     grantedPermissions,
     userId: activeUserId,
     scriptStorage,
-    onToolsChanged: pushTools,
-    scriptTimeoutMs: settingsStore.get().scriptTimeoutMs,
+    onToolsChanged:      pushTools,
+    onInjectionsChanged: pushInjections,
+    scriptTimeoutMs:     settingsStore.get().scriptTimeoutMs,
   }),
   send,
 );
@@ -1423,6 +1424,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
               send({ type: 'console_entry', scriptId: script.id, runId, entry });
             },
             onToolsChanged:                         pushTools,
+            onInjectionsChanged:                    pushInjections,
             toolsRegisteredThisRun,
             macrosRegisteredThisRun,
             macroInterceptorsRegisteredThisRun,

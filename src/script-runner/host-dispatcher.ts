@@ -4074,6 +4074,13 @@ export interface DispatchRunScriptOpts {
    */
   onToolsChanged?: () => void;
   /**
+   * v0.27.2+ — fired immediately after `api.chat.inject` /
+   * `removeInjection` / `clearInjections` / `clearAllInjections` so the
+   * LumiScriptPanel's Active Injections section reflects the change
+   * mid-execution. Mirror of `ExecutorOptions.onInjectionsChanged`.
+   */
+  onInjectionsChanged?: () => void;
+  /**
    * Phase 9b — per-run tracking sets. The api implementations on the parent
    * mutate these as the script registers tools / macros / interceptors /
    * content processors. After the run resolves, the caller diffs against a
@@ -4159,6 +4166,7 @@ export function dispatchRunScript(
     grantedPermissions:                     request.grantedPermissions,
     userId:                                 request.userId ?? null,
     onToolsChanged:                         opts.onToolsChanged,
+    onInjectionsChanged:                    opts.onInjectionsChanged,
     toolsRegisteredThisRun:                 opts.toolsRegisteredThisRun,
     macrosRegisteredThisRun:                opts.macrosRegisteredThisRun,
     macroInterceptorsRegisteredThisRun:     opts.macroInterceptorsRegisteredThisRun,

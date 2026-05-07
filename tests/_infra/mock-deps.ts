@@ -42,7 +42,8 @@ export function createTestDeps(
       chatId: 'test-chat-id',
       characterId: 'test-char-id',
     },
-    onToolsChanged: mock(() => {}),
+    onToolsChanged:      mock(() => {}),
+    onInjectionsChanged: mock(() => {}),
     ...depsOverrides,
   };
 }

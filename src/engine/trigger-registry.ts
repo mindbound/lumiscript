@@ -63,6 +63,8 @@ export interface TriggerDeps {
   scriptStorage: ScriptStorage;
   /** Forwarded to ExecutorOptions so api.tools.register/unregister push live updates. */
   onToolsChanged?: () => void;
+  /** Forwarded to ExecutorOptions so api.chat.inject / removeInjection / clearInjections / clearAllInjections push live updates. */
+  onInjectionsChanged?: () => void;
   /**
    * Per-execution async timeout in milliseconds, sourced from
    * `LumiScriptSettings.scriptTimeoutMs`. Defaults to `SCRIPT_TIMEOUT_MS` when absent.
@@ -262,7 +264,7 @@ export class TriggerRegistry {
     for (const event of spindleEvents) {
       const unsub = spindle.on(event, async (payload: unknown) => {
         // ── Fetch current script from storage ──────────────────────────────
-        const { grantedPermissions, userId, scriptStorage, onToolsChanged, scriptTimeoutMs } = this.getDeps();
+        const { grantedPermissions, userId, scriptStorage, onToolsChanged, onInjectionsChanged, scriptTimeoutMs } = this.getDeps();
         const currentScript = scriptStorage.getScript(scriptId);
 
         // Bail if the script has been deleted, disabled, or is no longer a trigger.
@@ -355,6 +357,7 @@ export class TriggerRegistry {
             onConsole: (entry) =>
               this.sendToFrontend({ type: 'console_entry', scriptId: currentScript.id, runId, entry }),
             onToolsChanged,
+            onInjectionsChanged,
             toolsRegisteredThisRun,
             macrosRegisteredThisRun,
             macroInterceptorsRegisteredThisRun,
@@ -562,7 +565,7 @@ export class TriggerRegistry {
    * concurrently.
    */
   private async fireStartup(script: Script): Promise<void> {
-    const { grantedPermissions, userId, scriptStorage, onToolsChanged, scriptTimeoutMs } = this.getDeps();
+    const { grantedPermissions, userId, scriptStorage, onToolsChanged, onInjectionsChanged, scriptTimeoutMs } = this.getDeps();
     const runId = generateUUID();
 
     executionStatusStore.markRunning(script.id);
@@ -603,6 +606,7 @@ export class TriggerRegistry {
         onConsole: (entry) =>
           this.sendToFrontend({ type: 'console_entry', scriptId: script.id, runId, entry }),
         onToolsChanged,
+        onInjectionsChanged,
         toolsRegisteredThisRun,
         macrosRegisteredThisRun,
         macroInterceptorsRegisteredThisRun,
@@ -692,7 +696,7 @@ export class TriggerRegistry {
     // on the earlier disable event, nothing to clean up a second time.
     if (!script.enabled && reason === 'deleted') return;
 
-    const { grantedPermissions, userId, scriptStorage, onToolsChanged, scriptTimeoutMs } = this.getDeps();
+    const { grantedPermissions, userId, scriptStorage, onToolsChanged, onInjectionsChanged, scriptTimeoutMs } = this.getDeps();
     const runId = generateUUID();
 
     executionStatusStore.markRunning(script.id);
@@ -733,6 +737,7 @@ export class TriggerRegistry {
         onConsole: (entry) =>
           this.sendToFrontend({ type: 'console_entry', scriptId: script.id, runId, entry }),
         onToolsChanged,
+        onInjectionsChanged,
         // Intentionally no *RegisteredThisRun trackers — stale-diff cleanup
         // after a teardown run makes no sense; the whole script is about
         // to be unregistered anyway. (Applies to tools, macros, macro

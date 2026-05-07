@@ -140,6 +140,14 @@ export interface ExecutorOptions {
    */
   onToolsChanged?: () => void;
   /**
+   * Called immediately after `api.chat.inject` / `removeInjection` /
+   * `clearInjections` / `clearAllInjections` mutates the injection store
+   * so the LumiScriptPanel's Active Injections section reflects the
+   * change without waiting for the panel's next manual refresh. Wired
+   * in `backend.ts` to `pushInjections()`.
+   */
+  onInjectionsChanged?: () => void;
+  /**
    * Per-execution async timeout override in milliseconds.
    * When set, overrides the module-level `SCRIPT_TIMEOUT_MS` default.
    * Callers should derive this from `LumiScriptSettings.scriptTimeoutMs`.
@@ -333,6 +341,7 @@ export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiSc
     activeContext: providedContext,
     userId,
     onToolsChanged,
+    onInjectionsChanged,
     toolsRegisteredThisRun,
     macrosRegisteredThisRun,
     macroInterceptorsRegisteredThisRun,
@@ -371,6 +380,7 @@ export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiSc
     userId,
     activeContext,
     onToolsChanged,
+    onInjectionsChanged,
     toolsRegisteredThisRun,
     // `onMacrosChanged` is intentionally omitted for v1 — no Status-tab
     // "Active Macros" list yet. The seam exists on APIBuildDeps so the UI

@@ -280,6 +280,74 @@ describe('getInjections', () => {
   });
 });
 
+// ─── onInjectionsChanged callback (v0.27.2+) ─────────────────────────────────
+//
+// `inject` / `removeInjection` / `clearInjections` / `clearAllInjections` are
+// supposed to fire `onInjectionsChanged` after mutating the injection store
+// so the LumiScriptPanel's Active Injections section refreshes mid-execution
+// (without waiting for a manual `get_injections` round-trip). Read-only
+// methods (`getInjections`) must not fire it.
+
+describe('onInjectionsChanged callback', () => {
+  test('inject fires onInjectionsChanged once', () => {
+    const onInjectionsChanged = mock(() => {});
+    const api = buildApi({ onInjectionsChanged });
+    api.inject('inj-1', 'content');
+    expect(onInjectionsChanged).toHaveBeenCalledTimes(1);
+  });
+
+  test('removeInjection fires onInjectionsChanged once', () => {
+    const onInjectionsChanged = mock(() => {});
+    const api = buildApi({ onInjectionsChanged });
+    api.inject('inj-1', 'content');
+    onInjectionsChanged.mockClear();  // ignore the inject() fire above
+    api.removeInjection('inj-1');
+    expect(onInjectionsChanged).toHaveBeenCalledTimes(1);
+  });
+
+  test('clearInjections fires onInjectionsChanged once', () => {
+    const onInjectionsChanged = mock(() => {});
+    const api = buildApi({ onInjectionsChanged });
+    api.inject('inj-1', 'a');
+    api.inject('inj-2', 'b');
+    onInjectionsChanged.mockClear();  // ignore the two inject() fires above
+    api.clearInjections();
+    expect(onInjectionsChanged).toHaveBeenCalledTimes(1);
+  });
+
+  test('clearAllInjections fires onInjectionsChanged once', () => {
+    const onInjectionsChanged = mock(() => {});
+    const api = buildApi({
+      onInjectionsChanged,
+      script: { allowDangerous: true },  // clearAllInjections gates on this
+    });
+    api.inject('inj-1', 'content');
+    onInjectionsChanged.mockClear();
+    api.clearAllInjections();
+    expect(onInjectionsChanged).toHaveBeenCalledTimes(1);
+  });
+
+  test('getInjections does NOT fire onInjectionsChanged', () => {
+    const onInjectionsChanged = mock(() => {});
+    const api = buildApi({ onInjectionsChanged });
+    api.inject('inj-1', 'content');
+    onInjectionsChanged.mockClear();
+    api.getInjections();
+    expect(onInjectionsChanged).not.toHaveBeenCalled();
+  });
+
+  test('mutations are tolerant of an absent callback (no-op when undefined)', () => {
+    // Some test fixtures or future internal callers may build the API without
+    // wiring onInjectionsChanged. The mutation should still mutate the store
+    // and not throw.
+    const api = buildApi({ onInjectionsChanged: undefined });
+    expect(() => {
+      api.inject('inj-1', 'content');
+      api.removeInjection('inj-1');
+    }).not.toThrow();
+  });
+});
+
 // ─── setMessageHidden ────────────────────────────────────────────────────────
 
 describe('setMessageHidden', () => {

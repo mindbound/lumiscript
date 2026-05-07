@@ -90,6 +90,7 @@ export function buildChatAPI(deps: APIBuildDeps): LumiScriptAPI['chat'] {
     activeContext,
     userId,
     contentProcessorsRegisteredThisRun,
+    onInjectionsChanged,
   } = deps;
   const uid = userId ?? undefined;
 
@@ -203,10 +204,16 @@ export function buildChatAPI(deps: APIBuildDeps): LumiScriptAPI['chat'] {
         ephemeral: options?.ephemeral ?? false,
         scriptId:  script.id,
       });
+      // v0.27.2+ — notify the host so the LumiScriptPanel's Active
+      // Injections section updates without waiting for the next manual
+      // refresh. Optional callback; tests / fixtures that don't wire it
+      // get the same store mutation but no FE push.
+      onInjectionsChanged?.();
     },
 
     removeInjection(id) {
       storeRemove(id);
+      onInjectionsChanged?.();
     },
 
     getInjections(): InjectionInfo[] {
@@ -224,12 +231,14 @@ export function buildChatAPI(deps: APIBuildDeps): LumiScriptAPI['chat'] {
     clearInjections() {
       assertPerm('interceptor', hasPerm, script.name);
       clearByScriptId(script.id);
+      onInjectionsChanged?.();
     },
 
     clearAllInjections() {
       assertPerm('interceptor', hasPerm, script.name);
       assertDangerous(script);
       clearAll();
+      onInjectionsChanged?.();
     },
 
     // ── Message hiding ─────────────────────────────────────────────────────
