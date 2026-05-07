@@ -176,6 +176,16 @@ function extractEventData(event: Event): DOMEventData {
     }
   }
 
+  // KeyboardEvent fields — populated for keydown / keyup / keypress only.
+  // `key` is the value (modifier-aware: 'a' / 'A'); `code` is the physical
+  // key (layout-independent: 'KeyA' regardless of shift). Lets scripts
+  // distinguish Enter-to-submit from arbitrary keypresses on text inputs
+  // (the original motivating use case for v0.27.3).
+  if (event instanceof KeyboardEvent) {
+    data.key  = event.key;
+    data.code = event.code;
+  }
+
   return data;
 }
 
@@ -231,6 +241,25 @@ function buildDelegatedEventData(
     matchedField.value         = matched.value;
     matchedField.selectedIndex = matched.selectedIndex;
     matchedField.selectedText  = matched.options[matched.selectedIndex]?.text;
+  }
+
+  // Resolve associated `<label>` text for labelable elements. `.labels`
+  // is a NodeList accessor on input / textarea / select / output / meter
+  // / progress / button — restrict to the form-input subset (matches
+  // the elements that carry value / checked / selectedText above) since
+  // those are the script-author surface where the label-as-form-field-
+  // name convention applies. Both explicit `<label for="x">…</label>
+  // <input id="x">` and implicit `<label>Notes <input></label>`
+  // associations are picked up by the `.labels` accessor without extra
+  // walking (delegated to the host).
+  if (
+    matched instanceof HTMLInputElement ||
+    matched instanceof HTMLTextAreaElement ||
+    matched instanceof HTMLSelectElement
+  ) {
+    const labelEl = matched.labels?.[0];
+    const text    = labelEl?.textContent?.trim();
+    if (text) matchedField.label = text;
   }
 
   // Modifier-key state. Pointer / mouse events carry button index too.

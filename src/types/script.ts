@@ -3101,6 +3101,22 @@ export interface DOMEventData {
   clientX?: number;
   /** Viewport Y coordinate. Populated for the same event families as `clientX`. */
   clientY?: number;
+  /**
+   * `KeyboardEvent.key` — the value of the key pressed, accounting for
+   * modifiers (`'Enter'`, `'Escape'`, `'a'`, `'A'`, `'ArrowUp'`,
+   * `'Shift'`). Populated only for `keydown` / `keyup` / `keypress`
+   * events. Use this when you care about *what character / named key*
+   * the user produced.
+   */
+  key?: string;
+  /**
+   * `KeyboardEvent.code` — the physical key on the keyboard, independent
+   * of layout / modifiers (`'Enter'`, `'Escape'`, `'KeyA'` regardless of
+   * shift, `'ArrowUp'`, `'ShiftLeft'`). Populated only for `keydown` /
+   * `keyup` / `keypress` events. Use this when you care about the
+   * *physical key location* (e.g. WASD bindings).
+   */
+  code?: string;
 }
 
 /** Options for `DOMHandle.on(event, handler, options?)`. */
@@ -3188,6 +3204,20 @@ export interface DOMDelegatedEventData extends DOMEventData {
     selectedIndex?: number;
     /** `element.options[selectedIndex].text`, for select. Undefined otherwise. */
     selectedText?:  string;
+    /**
+     * Trimmed text of the first `<label>` associated with the matched
+     * element. Populated only for input / textarea / select (the labelable
+     * form elements that expose `.labels`); undefined otherwise and when
+     * no label is associated.
+     *
+     * Resolution looks at both `<label for="x">…</label> <input id="x">`
+     * (explicit association) and `<label>Notes <input></label>`
+     * (implicit / wrapping association) — same as the host's
+     * `HTMLInputElement.labels` accessor. Use this in preference to
+     * `attributes['aria-label']` / `attributes.name` when the LLM emits
+     * conventional `<label>` markup.
+     */
+    label?:         string;
   };
   /** Modifier-key state at event time. `button` populated for click events. */
   modifiers: {

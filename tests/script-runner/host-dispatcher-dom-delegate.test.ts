@@ -207,6 +207,123 @@ describe('host-dispatcher: domDelegate wrapper fires run-handler IPC on dispatch
   });
 });
 
+// ─── New v0.27.3 fields propagate end-to-end ─────────────────────────────────
+
+describe('host-dispatcher: domDelegate v0.27.3 fields (key / code / label)', () => {
+  test('keydown payload with key + code routes through to the run-handler IPC', async () => {
+    // The FE-side extraction logic in `dom-handler.ts:extractEventData()`
+    // populates `key` and `code` from KeyboardEvents; this test exercises
+    // the receive-side: a fully-formed payload arriving at the host
+    // wrapper carries those fields verbatim into the run-handler IPC
+    // delivered to the child closure. No DOM environment required —
+    // we fake the payload at the boundary, matching the existing
+    // pattern in this file.
+    const grantedPermissions = new Set([
+      'tools', 'chat_mutation', 'macro_interceptor', 'interceptor',
+      'chats', 'generation', 'app_manipulation',
+    ]);
+    const scn = await setupLateRegisterScenario({ grantedPermissions });
+
+    await scn.sendLateRegister(asLateRegister({
+      type:       'register-handler',
+      kind:       'domDelegate',
+      scriptId:   scn.scriptId,
+      handlerId:  'h-keydown',
+      selector:   'input[name="search"]',
+      event:      'keydown',
+      options:    {},
+      hasHandler: true,
+    }));
+
+    const registerMsg = messagesOfType('dom_delegate_register')[0]!;
+    const entry = getDelegation(registerMsg.delegationId as string)!;
+
+    // Simulate a keydown delegate event. `key` + `code` arrive on the
+    // base `DOMEventData` surface (via inheritance through `extends`).
+    const fakeData: DOMDelegatedEventData = {
+      type: 'keydown',
+      key:  'Enter',
+      code: 'Enter',
+      matched: {
+        tagName:    'INPUT',
+        classList:  [],
+        dataset:    {},
+        attributes: { name: 'search', type: 'text' },
+        textContent: '',
+        value:      'hello',
+        label:      'Search query',
+      },
+      modifiers: { ctrl: false, shift: false, alt: false, meta: false },
+    };
+    entry.handler(fakeData);
+
+    await new Promise((r) => setTimeout(r, 0));
+
+    const inbox = scn.ipc.childInbox();
+    const runHandlerReqs = inbox.filter(
+      (m) => typeof m === 'object' && m !== null && (m as { type?: unknown }).type === 'run-handler',
+    ) as Array<Record<string, unknown>>;
+    const last = runHandlerReqs[runHandlerReqs.length - 1]!;
+    const args = last.args as unknown[];
+    const arg0 = args[0] as DOMDelegatedEventData;
+    expect(arg0.key).toBe('Enter');
+    expect(arg0.code).toBe('Enter');
+    expect(arg0.matched.label).toBe('Search query');
+    expect(arg0.matched.value).toBe('hello');
+  });
+
+  test('payload without key / code / label still routes (fields stay undefined)', async () => {
+    // Verifies the fields are non-required on the type and absence is
+    // structurally valid — guards against an accidental future
+    // `key: string` (non-optional) regression from a `Required<>` or
+    // mapped-type slip.
+    const grantedPermissions = new Set([
+      'tools', 'chat_mutation', 'macro_interceptor', 'interceptor',
+      'chats', 'generation', 'app_manipulation',
+    ]);
+    const scn = await setupLateRegisterScenario({ grantedPermissions });
+
+    await scn.sendLateRegister(asLateRegister({
+      type:       'register-handler',
+      kind:       'domDelegate',
+      scriptId:   scn.scriptId,
+      handlerId:  'h-click-bare',
+      selector:   'button',
+      event:      'click',
+      options:    {},
+      hasHandler: true,
+    }));
+
+    const registerMsg = messagesOfType('dom_delegate_register')[0]!;
+    const entry = getDelegation(registerMsg.delegationId as string)!;
+
+    const fakeData: DOMDelegatedEventData = {
+      type: 'click',
+      matched: {
+        tagName:     'BUTTON',
+        classList:   [],
+        dataset:     {},
+        attributes:  {},
+        textContent: 'OK',
+      },
+      modifiers: { ctrl: false, shift: false, alt: false, meta: false, button: 0 },
+    };
+    entry.handler(fakeData);
+
+    await new Promise((r) => setTimeout(r, 0));
+
+    const inbox = scn.ipc.childInbox();
+    const runHandlerReqs = inbox.filter(
+      (m) => typeof m === 'object' && m !== null && (m as { type?: unknown }).type === 'run-handler',
+    ) as Array<Record<string, unknown>>;
+    const last = runHandlerReqs[runHandlerReqs.length - 1]!;
+    const arg0 = (last.args as unknown[])[0] as DOMDelegatedEventData;
+    expect(arg0.key).toBeUndefined();
+    expect(arg0.code).toBeUndefined();
+    expect(arg0.matched.label).toBeUndefined();
+  });
+});
+
 // ─── Late-register dual-update sanity ────────────────────────────────────────
 
 describe('host-dispatcher: domDelegate late-register lands cleanly', () => {

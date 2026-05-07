@@ -1023,6 +1023,14 @@ interface DOMEventData {
   targetChecked?: boolean;
   dataset?: Record<string, string>;
   detail?: unknown;
+  /** Viewport X coordinate. Populated for MouseEvent / PointerEvent / TouchEvent (first touch). */
+  clientX?: number;
+  /** Viewport Y coordinate. Same event families as clientX. */
+  clientY?: number;
+  /** KeyboardEvent.key — value of the key pressed ('Enter', 'a', 'Shift', 'ArrowUp'). KeyboardEvents only. */
+  key?: string;
+  /** KeyboardEvent.code — physical key, layout-independent ('Enter', 'KeyA', 'ShiftLeft'). KeyboardEvents only. */
+  code?: string;
 }
 
 /** Options for api.ui.dom.delegate(selector, event, handler, options?). */
@@ -1059,6 +1067,8 @@ interface DOMDelegatedEventData extends DOMEventData {
     checked?:       boolean;
     selectedIndex?: number;
     selectedText?:  string;
+    /** Trimmed text of the first associated <label>. Input / textarea / select only. */
+    label?:         string;
   };
   modifiers: {
     ctrl:    boolean;
