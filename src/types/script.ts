@@ -319,6 +319,101 @@ export interface GetMessagesOptions {
 export interface SendMessageOptions {
   role?: 'user' | 'assistant' | 'system';
   metadata?: Record<string, unknown>;
+  /**
+   * When `true`, asks the host to trigger a normal LLM continuation after
+   * the message is appended (same as the user pressing Enter on an empty
+   * input bar). Forwarded to `spindle.chat.appendMessage(..., {
+   * triggerGeneration: true })` — fires the host's full chat-orchestration
+   * pipeline (preset + persona + world info + regex + character card +
+   * streaming).
+   *
+   * Use for "click-to-respond" interactions where the script wants the
+   * LLM to immediately reply to its own appended message — clickable-
+   * inputs / form-submit UIs / tool-result follow-ups. Without this, the
+   * appended message just sits in history until the user manually
+   * triggers a continuation.
+   *
+   * Requires Lumiverse host ≥ 0.9.x with `triggerGeneration` support
+   * (lumiverse-spindle-types ≥ 0.4.66). On older hosts the option is
+   * silently ignored — the message is still appended, but no generation
+   * fires.
+   *
+   * Generation defaults (connection / persona / preset / parameters)
+   * follow the active chat's resolved settings. Use `generation` to
+   * override per-call.
+   */
+  triggerGeneration?: boolean;
+  /**
+   * Per-call overrides for the triggered generation. Only consulted when
+   * `triggerGeneration: true`; silently ignored otherwise. Each field is
+   * optional and falls through to the active chat's defaults when omitted.
+   *
+   * See `ChatGenerationOptions` for field-level docs.
+   */
+  generation?: ChatGenerationOptions;
+}
+
+/**
+ * Per-call generation overrides for `api.chat.sendMessage(..., {
+ * triggerGeneration: true, generation: ... })`. Mirrors the host's
+ * `ChatAppendGenerationOptionsDTO` 1:1 in camelCase.
+ *
+ * Each field is optional. Omitted fields fall through to the active
+ * chat's resolved defaults — same as if the user manually triggered a
+ * continuation through the input bar. Use this to deviate from those
+ * defaults for a single triggered generation (e.g. a tool script that
+ * needs a specific connection / preset / parameters bundle different
+ * from the user's normal chat configuration).
+ */
+export interface ChatGenerationOptions {
+  /**
+   * Override which connection profile to use. Falls back to the user's
+   * default connection when omitted.
+   */
+  connectionId?: string;
+  /**
+   * Override which persona to use. Falls back to the user's active
+   * persona setting when omitted.
+   */
+  personaId?: string;
+  /**
+   * Per-addon enable/disable map for the chosen persona. Keys are addon
+   * ids; values are booleans. Omitted addons inherit the chat-level
+   * persona-addon state, or the persona's own defaults when none.
+   */
+  personaAddonStates?: Record<string, boolean>;
+  /**
+   * Override which preset to use. Falls back to the user's active
+   * preset setting (`activeLoomPresetId`) when omitted, then to the
+   * connection's attached preset.
+   */
+  presetId?: string;
+  /**
+   * When `true`, forces the supplied `presetId` over a connection-bound
+   * preset. Currently only consulted by the host's impersonation
+   * oneliner pipeline — `triggerGeneration` runs as `generation_type:
+   * 'normal'`, where this field is a silent no-op. Exposed for
+   * fidelity with the host DTO + future-proofing.
+   */
+  forcePresetId?: boolean;
+  /**
+   * Per-call parameter overrides (temperature, max_tokens, top_p, etc.)
+   * layered on top of the resolved preset's parameters. Provider-
+   * specific keys are accepted; the host forwards verbatim.
+   */
+  parameters?: Record<string, unknown>;
+  /**
+   * For group chats only: which character should respond to this
+   * generation. Falls back to the chat's `character_id` when omitted.
+   */
+  targetCharacterId?: string;
+  /**
+   * When `true`, retains council-tool results from the previous
+   * generation rather than re-running them — useful for cheap
+   * regenerate-style flows where the council context hasn't changed.
+   * Default `false`.
+   */
+  retainCouncil?: boolean;
 }
 
 /**

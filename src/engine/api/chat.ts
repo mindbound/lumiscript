@@ -28,6 +28,7 @@ import type {
   MessageContentProcessorOptions,
   MessageContentProcessorHandle,
   RegisteredMessageContentProcessorInfo,
+  ChatGenerationOptions,
 } from '../../types/script.js';
 import { type APIBuildDeps, assertPerm, assertDangerous, requireChatId, shielded } from './shared.js';
 import {
@@ -83,6 +84,31 @@ function toUpstreamPatch(patch: MessagePatch): {
   return out;
 }
 
+/**
+ * Translate LumiScript's camelCase `ChatGenerationOptions` to the
+ * snake_case `ChatAppendGenerationOptionsDTO` shape `spindle.chat.appendMessage`'s
+ * third argument expects. Undefined fields are omitted so the host only
+ * sees what the script explicitly provided (matching `toUpstreamPatch`'s
+ * approach for `editMessage`).
+ *
+ * Returns `undefined` when the options bag has no defined fields — the
+ * caller can then omit the `generation` key entirely from the upstream
+ * options object rather than passing an empty `{}` that the host would
+ * have to defensively skip.
+ */
+function toUpstreamGeneration(g: ChatGenerationOptions): Record<string, unknown> | undefined {
+  const out: Record<string, unknown> = {};
+  if (g.connectionId        !== undefined) out.connection_id        = g.connectionId;
+  if (g.personaId           !== undefined) out.persona_id           = g.personaId;
+  if (g.personaAddonStates  !== undefined) out.persona_addon_states = g.personaAddonStates;
+  if (g.presetId            !== undefined) out.preset_id            = g.presetId;
+  if (g.forcePresetId       !== undefined) out.force_preset_id      = g.forcePresetId;
+  if (g.parameters          !== undefined) out.parameters           = g.parameters;
+  if (g.targetCharacterId   !== undefined) out.target_character_id  = g.targetCharacterId;
+  if (g.retainCouncil       !== undefined) out.retain_council       = g.retainCouncil;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 export function buildChatAPI(deps: APIBuildDeps): LumiScriptAPI['chat'] {
   const {
     script,
@@ -126,12 +152,38 @@ export function buildChatAPI(deps: APIBuildDeps): LumiScriptAPI['chat'] {
     sendMessage: (content, opts) => {
       assertPerm('chat_mutation', hasPerm, script.name);
       const id = requireChatId(activeContext);
+      // `triggerGeneration` rides on the third arg of `appendMessage` —
+      // host signature `(chatId, message, options?: ChatAppendMessageOptionsDTO)`
+      // where options is `boolean | { triggerGeneration?: boolean; generation?: ChatAppendGenerationOptionsDTO }`.
+      //
+      // Three behaviours to preserve:
+      //   1. `triggerGeneration: true` (no overrides) → pass `{ triggerGeneration: true }`.
+      //   2. `triggerGeneration: true` + `generation: {...}` → pass both, with
+      //      `generation` translated camelCase → snake_case via `toUpstreamGeneration`.
+      //   3. Neither set → omit the third arg entirely so older hosts
+      //      (lumiverse-spindle-types < 0.4.66) — which only accept the two-
+      //      arg form — see exactly the same call shape as before v0.27.4.
+      //
+      // We don't forward `generation` without `triggerGeneration: true` —
+      // the host ignores `generation` in that case anyway, and skipping the
+      // arg keeps the call shape symmetric with case (3).
+      const message = {
+        role: opts?.role ?? 'user',
+        content,
+        metadata: opts?.metadata,
+      };
+      let appendOpts: { triggerGeneration: true; generation?: Record<string, unknown> } | undefined;
+      if (opts?.triggerGeneration) {
+        appendOpts = { triggerGeneration: true };
+        if (opts.generation) {
+          const upstream = toUpstreamGeneration(opts.generation);
+          if (upstream) appendOpts.generation = upstream;
+        }
+      }
       return shielded(
-        spindle.chat.appendMessage(id, {
-          role: opts?.role ?? 'user',
-          content,
-          metadata: opts?.metadata,
-        }),
+        appendOpts
+          ? spindle.chat.appendMessage(id, message, appendOpts)
+          : spindle.chat.appendMessage(id, message),
       );
     },
 

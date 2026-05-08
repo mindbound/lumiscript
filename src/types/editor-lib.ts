@@ -136,6 +136,40 @@ interface GetMessagesOptions {
 interface SendMessageOptions {
   role?: 'user' | 'assistant' | 'system';
   metadata?: Record<string, unknown>;
+  /**
+   * When true, asks the host to trigger a normal LLM continuation after
+   * the message is appended. Fires the full chat-orchestration pipeline
+   * (preset + persona + world info + regex + character card + streaming).
+   * Requires Lumiverse host >= 0.9.x with triggerGeneration support;
+   * silently ignored on older hosts.
+   */
+  triggerGeneration?: boolean;
+  /**
+   * Per-call overrides for the triggered generation. Only consulted when
+   * triggerGeneration: true. Each field is optional; omitted fields fall
+   * through to the active chat's resolved defaults.
+   */
+  generation?: ChatGenerationOptions;
+}
+
+/** Per-call generation overrides for sendMessage with triggerGeneration. */
+interface ChatGenerationOptions {
+  /** Override the connection profile. Falls back to user's default. */
+  connectionId?: string;
+  /** Override the persona. Falls back to active persona setting. */
+  personaId?: string;
+  /** Per-addon enable map for the chosen persona. */
+  personaAddonStates?: Record<string, boolean>;
+  /** Override the preset. Falls back to activeLoomPresetId / connection preset. */
+  presetId?: string;
+  /** Force the supplied presetId over connection-attached one. Impersonation-only; no-op for triggerGeneration. */
+  forcePresetId?: boolean;
+  /** Per-call parameter overrides (temperature, max_tokens, etc.) layered on the preset. */
+  parameters?: Record<string, unknown>;
+  /** For group chats: which character should respond. Falls back to chat character. */
+  targetCharacterId?: string;
+  /** Retain council-tool results from the previous generation rather than re-running. */
+  retainCouncil?: boolean;
 }
 
 interface InjectOptions {

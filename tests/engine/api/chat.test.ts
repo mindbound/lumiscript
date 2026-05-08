@@ -102,6 +102,124 @@ describe('sendMessage', () => {
     const api = buildApi({ hasPerm: () => false });
     expect(() => api.sendMessage('hi')).toThrow('PERMISSION_DENIED');
   });
+
+  test('forwards triggerGeneration: true as the third appendMessage arg', async () => {
+    // v0.27.4 — host (lumiverse-spindle-types >= 0.4.66) accepts a third
+    // ChatAppendMessageOptionsDTO arg. With triggerGeneration: true the
+    // host fires a normal LLM continuation after the append. Verify
+    // forwarding lands on the third positional with the expected shape.
+    const api = buildApi();
+    await api.sendMessage('hi', { triggerGeneration: true });
+    expect(mockSpindle.chat.appendMessage).toHaveBeenCalledWith(
+      'test-chat-id',
+      { role: 'user', content: 'hi', metadata: undefined },
+      { triggerGeneration: true },
+    );
+  });
+
+  test('omits the third appendMessage arg when triggerGeneration is absent or false', async () => {
+    // Two-arg call shape preserved for the default path so older hosts
+    // (lumiverse-spindle-types < 0.4.66) — which only accept the two-arg
+    // form — see exactly the same invocation as before v0.27.4.
+    const api = buildApi();
+    await api.sendMessage('default-path');
+    await api.sendMessage('explicit-false', { triggerGeneration: false });
+    const calls = mockSpindle.chat.appendMessage.mock.calls as unknown as unknown[][];
+    expect(calls).toHaveLength(2);
+    // Both calls used 2 positional args — the third slot should be
+    // entirely absent (length === 2), not present-but-undefined.
+    expect(calls[0]!.length).toBe(2);
+    expect(calls[1]!.length).toBe(2);
+  });
+
+  test('forwards generation overrides as a snake_case sub-object', async () => {
+    // v0.27.4 — ChatGenerationOptions mirrors the host's
+    // ChatAppendGenerationOptionsDTO 1:1 in camelCase. The engine
+    // translates camelCase → snake_case via toUpstreamGeneration before
+    // forwarding so the host sees its expected shape verbatim.
+    const api = buildApi();
+    await api.sendMessage('hi', {
+      triggerGeneration: true,
+      generation: {
+        connectionId:       'conn-7',
+        personaId:          'persona-42',
+        personaAddonStates: { 'addon-a': true, 'addon-b': false },
+        presetId:           'preset-13',
+        forcePresetId:      true,
+        parameters:         { temperature: 0.3, max_tokens: 256 },
+        targetCharacterId:  'char-9',
+        retainCouncil:      true,
+      },
+    });
+    expect(mockSpindle.chat.appendMessage).toHaveBeenCalledWith(
+      'test-chat-id',
+      { role: 'user', content: 'hi', metadata: undefined },
+      {
+        triggerGeneration: true,
+        generation: {
+          connection_id:        'conn-7',
+          persona_id:           'persona-42',
+          persona_addon_states: { 'addon-a': true, 'addon-b': false },
+          preset_id:            'preset-13',
+          force_preset_id:      true,
+          parameters:           { temperature: 0.3, max_tokens: 256 },
+          target_character_id:  'char-9',
+          retain_council:       true,
+        },
+      },
+    );
+  });
+
+  test('omits undefined generation fields from the upstream object', async () => {
+    // Same selective-forwarding posture as toUpstreamPatch: undefined
+    // fields are stripped so the host only sees what the script
+    // explicitly provided. Nothing should leak through as `key: undefined`.
+    const api = buildApi();
+    await api.sendMessage('hi', {
+      triggerGeneration: true,
+      generation: { presetId: 'only-this-one' },
+    });
+    expect(mockSpindle.chat.appendMessage).toHaveBeenCalledWith(
+      'test-chat-id',
+      { role: 'user', content: 'hi', metadata: undefined },
+      {
+        triggerGeneration: true,
+        generation: { preset_id: 'only-this-one' },
+      },
+    );
+  });
+
+  test('omits the generation key entirely when ChatGenerationOptions has no defined fields', async () => {
+    // An empty `{}` for `generation` should NOT surface as `generation: {}`
+    // upstream — the host would have to defensively skip it. We strip it
+    // at the source via `toUpstreamGeneration` returning undefined for
+    // the empty case.
+    const api = buildApi();
+    await api.sendMessage('hi', {
+      triggerGeneration: true,
+      generation: {},
+    });
+    expect(mockSpindle.chat.appendMessage).toHaveBeenCalledWith(
+      'test-chat-id',
+      { role: 'user', content: 'hi', metadata: undefined },
+      { triggerGeneration: true },
+    );
+  });
+
+  test('ignores generation when triggerGeneration is not true', async () => {
+    // The host ignores `generation` when `triggerGeneration !== true`,
+    // so we don't bother forwarding it — keeps the call shape symmetric
+    // with the no-args case (length === 2). Defensive: a script that
+    // sets generation overrides without triggerGeneration likely has a
+    // bug, but we don't surface that here.
+    const api = buildApi();
+    await api.sendMessage('hi', {
+      generation: { presetId: 'some-preset' },
+    });
+    const calls = mockSpindle.chat.appendMessage.mock.calls as unknown as unknown[][];
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.length).toBe(2);
+  });
 });
 
 // ─── editMessage ─────────────────────────────────────────────────────────────

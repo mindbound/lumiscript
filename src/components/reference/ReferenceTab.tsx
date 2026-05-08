@@ -506,6 +506,22 @@ export const KEY_TYPES: TypeDoc[] = [
     fields: [
       { field: 'role?',     type: "'user' | 'assistant' | 'system'", optional: true, desc: "Sender role. Default 'user'." },
       { field: 'metadata?', type: 'Record<string, unknown>',         optional: true, desc: 'Arbitrary metadata to attach.' },
+      { field: 'triggerGeneration?', type: 'boolean',                optional: true, desc: 'When true, the host triggers a normal LLM continuation after the message is appended (full preset / persona / world info / regex / character card / streaming pipeline — same as the user pressing Enter on an empty input bar). Use for click-to-respond UIs where the script wants the LLM to immediately reply to its appended message. Requires Lumiverse host >= 0.9.x with triggerGeneration support (lumiverse-spindle-types >= 0.4.66); silently ignored on older hosts. v0.27.4+.' },
+      { field: 'generation?', type: 'ChatGenerationOptions',         optional: true, desc: 'Per-call overrides for the triggered generation (connection / persona / preset / parameters / target character / council retention). Only consulted when triggerGeneration is true; silently ignored otherwise. Each field is optional and falls through to the active chat\'s defaults when omitted. v0.27.4+.' },
+    ],
+  },
+  {
+    name: 'ChatGenerationOptions',
+    note: 'Per-call generation overrides for api.chat.sendMessage(content, { triggerGeneration: true, generation: ... }). Mirrors the host\'s ChatAppendGenerationOptionsDTO 1:1 in camelCase. Each field is optional; omitted fields fall through to the active chat\'s resolved defaults (same as a manual UI generation). Use this when a tool script needs to deviate from the user\'s normal chat configuration for a single triggered generation. v0.27.4+.',
+    fields: [
+      { field: 'connectionId?',       type: 'string',                          optional: true, desc: 'Override which connection profile to use. Falls back to the user\'s default connection.' },
+      { field: 'personaId?',          type: 'string',                          optional: true, desc: 'Override which persona to use. Falls back to the user\'s active persona setting.' },
+      { field: 'personaAddonStates?', type: 'Record<string, boolean>',         optional: true, desc: 'Per-addon enable/disable map for the chosen persona. Keys are addon ids; values are booleans. Omitted addons inherit chat-level state.' },
+      { field: 'presetId?',           type: 'string',                          optional: true, desc: 'Override which preset to use. Falls back to the active preset setting (activeLoomPresetId), then to the connection\'s attached preset.' },
+      { field: 'forcePresetId?',      type: 'boolean',                         optional: true, desc: 'When true, forces the supplied presetId over a connection-bound preset. Currently only consulted by the host\'s impersonation oneliner pipeline; triggerGeneration runs as generation_type "normal" where this field is a silent no-op. Exposed for fidelity with the host DTO.' },
+      { field: 'parameters?',         type: 'Record<string, unknown>',         optional: true, desc: 'Per-call parameter overrides (temperature, max_tokens, top_p, etc.) layered on the resolved preset\'s parameters. Provider-specific keys accepted; forwarded verbatim.' },
+      { field: 'targetCharacterId?',  type: 'string',                          optional: true, desc: 'For group chats only: which character should respond. Falls back to the chat\'s character_id.' },
+      { field: 'retainCouncil?',      type: 'boolean',                         optional: true, desc: 'When true, retains council-tool results from the previous generation rather than re-running them. Useful for cheap regenerate-style flows where the council context hasn\'t changed. Default false.' },
     ],
   },
   {
