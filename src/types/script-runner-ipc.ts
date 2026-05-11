@@ -361,6 +361,21 @@ export interface AdvancedModalDismissedNotice {
   reason:  AdvancedModalDismissReason;
 }
 
+/**
+ * Parent asking the child to report its own process resource usage. Used by
+ * the v0.28.0+ diagnostics panel to surface script-runner subprocess health
+ * (RSS, heap, CPU time) without adding host-side periodic instrumentation.
+ *
+ * Child responds with `DiagnosticStatsResponse` carrying the same requestId.
+ * Parent times the request out via the diagnostic-collector's caller — no
+ * timeout enforcement on this end; if the child is hung the response simply
+ * never arrives and the collector falls back to "not available".
+ */
+export interface DiagnosticStatsRequest {
+  type:      'diagnostic-stats-request';
+  requestId: string;
+}
+
 export type ParentToChildMessage =
   | RunScriptRequest
   | ApiProxyResponse
@@ -370,6 +385,7 @@ export type ParentToChildMessage =
   | ScriptUnregisterMessage
   | AdvancedModalDismissedNotice
   | FloatWidgetPositionNotice
+  | DiagnosticStatsRequest
   | ShutdownRequest;
 
 // ─── Child → Parent ─────────────────────────────────────────────────────────
@@ -761,6 +777,34 @@ export type BroadcastHandlerLifecycleNotice =
       error:      string;
     };
 
+/**
+ * Child's response to a `DiagnosticStatsRequest`. Carries a snapshot of
+ * the child process's resource usage at the moment of receipt. Numbers
+ * map to standard Node-compat `process.memoryUsage()` /
+ * `process.cpuUsage()` outputs (bytes and microseconds respectively).
+ *
+ * Both APIs are standard Bun/Node introspection — no banned-API
+ * concern in the post-security-overhaul Lumiverse world.
+ */
+export interface DiagnosticStatsResponse {
+  type:      'diagnostic-stats-response';
+  requestId: string;
+  /** Resident set size in bytes (`process.memoryUsage().rss`). */
+  rss:       number;
+  /** Total heap size in bytes (`heapTotal`). */
+  heapTotal: number;
+  /** Heap actively used in bytes (`heapUsed`). */
+  heapUsed:  number;
+  /** External memory in bytes (typed array buffers, etc.). */
+  external:  number;
+  /** Cumulative user-mode CPU time in microseconds. */
+  cpuUserUs:   number;
+  /** Cumulative system-mode CPU time in microseconds. */
+  cpuSystemUs: number;
+  /** Process uptime in seconds. */
+  uptimeSec: number;
+}
+
 export type ChildToParentMessage =
   | ScriptRunningNotice
   | RunScriptResult
@@ -772,6 +816,7 @@ export type ChildToParentMessage =
   | ConsoleEntryNotice
   | RegisterHandler
   | UnregisterHandler
+  | DiagnosticStatsResponse
   | HandlerResult;
 
 // ─── Type guards ────────────────────────────────────────────────────────────

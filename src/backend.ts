@@ -103,8 +103,14 @@ import {
   setScriptResolver,
   setSendToFrontend,
   unregisterScriptFromChild,
+  getRunnerHealth,
+  queryRunnerStats,
   // shutdownScriptRunner — Phase 10 will wire this into teardown
 } from './script-runner/host-dispatcher.js';
+import {
+  collectBackendDiagnostics,
+  type ScriptRunnerProbeResult,
+} from './engine/diagnostics.js';
 
 // ─── Active user + permission tracking ───────────────────────────────────────
 
@@ -746,6 +752,65 @@ spindle.onFrontendMessage(async (raw, userId) => {
 
       case 'get_variables': {
         await pushVariables(userId);
+        break;
+      }
+
+      // ── Diagnostics panel (v0.28.0+) ────────────────────────────────────
+      case 'request_diagnostics': {
+        // Run async probes in parallel: userStorage round-trip + script-
+        // runner stats IPC. Both have their own bounded timeouts/error
+        // handling — we never await indefinitely. After both settle (or
+        // timeout) we build the synchronous collector report and send
+        // it back to the FE.
+        //
+        // Wrapping each probe in its own try/catch (with `.catch(...)`-
+        // style mappers) so a failure in one doesn't drop the whole
+        // report — the section just renders with an `info` / `fail`
+        // marker pointing at the specific subsystem.
+
+        // Storage probe — small round-trip read on scripts.json to time
+        // userStorage. Already loaded by the time this fires, so this
+        // is just a "can we still read?" liveness check.
+        const storageStart = Date.now();
+        const storageProbe = await spindle.userStorage.getJson('scripts.json', { userId })
+          .then(() => ({ ok: true as const, latencyMs: Date.now() - storageStart }))
+          .catch((err: unknown) => ({
+            ok: false as const,
+            error: err instanceof Error ? err.message : String(err),
+          }));
+
+        // Script-runner: sync health snapshot + async resource-stats IPC.
+        // queryRunnerStats has its own internal 2s timeout; null means
+        // the child either timed out or wasn't alive.
+        const runnerHealth = getRunnerHealth();
+        const runnerStats  = await queryRunnerStats();
+        const scriptRunner: ScriptRunnerProbeResult = {
+          ...runnerHealth,
+          stats: runnerStats === null
+            ? null
+            : {
+                rss:         runnerStats.rss,
+                heapTotal:   runnerStats.heapTotal,
+                heapUsed:    runnerStats.heapUsed,
+                external:    runnerStats.external,
+                cpuUserUs:   runnerStats.cpuUserUs,
+                cpuSystemUs: runnerStats.cpuSystemUs,
+                uptimeSec:   runnerStats.uptimeSec,
+              },
+        };
+
+        const report = collectBackendDiagnostics({
+          scriptStorage,
+          triggerRegistry,
+          lumiScriptVersion:   spindle.manifest.version,
+          minLumiverseVersion: spindle.manifest.minimum_lumiverse_version ?? '0.0.0',
+          grantedPermissions:  [...grantedPermissions],
+          activeUserId,
+          storageProbe,
+          scriptRunner,
+        });
+
+        spindle.sendToFrontend({ type: 'diagnostics_report', report });
         break;
       }
 

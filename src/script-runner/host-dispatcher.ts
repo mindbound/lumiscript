@@ -216,6 +216,27 @@ let restartAttempts: number                               = 0;
 let restartTimer:    ReturnType<typeof setTimeout> | null = null;
 let stabilityTimer:  ReturnType<typeof setTimeout> | null = null;
 
+// v0.28.0+ — Diagnostics-only counters. Separate from `restartAttempts`
+// (which is the *current backoff index* and resets to 0 after a stable
+// period). `totalRestartCount` is monotonic across the whole session so
+// the diagnostics panel can surface "how many times has the script-runner
+// been respawned since LumiScript loaded?" — a sustained non-zero value
+// is a useful signal that something's repeatedly killing the child.
+let totalRestartCount: number       = 0;
+let lastRestartReason: string | null = null;
+
+/**
+ * In-flight `diagnostic-stats-request` correlations. Keyed by the requestId
+ * we generated when sending; resolved by `handleChildMessage`'s response
+ * branch. Cleared by either the resolution OR the caller's timeout cleanup,
+ * whichever comes first.
+ */
+const pendingDiagnosticStats = new Map<
+  string,
+  (response: import('../types/script-runner-ipc.js').DiagnosticStatsResponse) => void
+>();
+let nextDiagnosticRequestSeq = 1;
+
 /**
  * Phase 9c concurrency: when multiple callers race to spawn the child
  * (e.g. several ls:startup scripts firing fire-and-forget at activation
@@ -1444,6 +1465,22 @@ function handleChildMessage(payload: unknown): void {
     case 'handler-result':
       handleHandlerResultMessage(msg);
       break;
+
+    case 'diagnostic-stats-response': {
+      // v0.28.0+ — child replied to our `diagnostic-stats-request`.
+      // Resolve the pending promise; the requester (the diagnostics
+      // collector path in backend.ts) awaits this with a timeout.
+      const resolver = pendingDiagnosticStats.get(msg.requestId);
+      if (resolver) {
+        pendingDiagnosticStats.delete(msg.requestId);
+        resolver(msg);
+      }
+      // No warn on orphan: if the requester timed out before the
+      // response arrived, the resolver entry was already cleaned up
+      // and this branch is a silent no-op. That's the expected late-
+      // response case, not a bug.
+      break;
+    }
 
     default:
       break;
@@ -3924,17 +3961,36 @@ function scheduleRespawn(reason: string): void {
   restartTimer = setTimeout(() => {
     restartTimer = null;
     restartAttempts++;
+    // v0.28.0+ — preserve the originating crash reason for the
+    // diagnostics panel. `scheduleRespawn` is called recursively from
+    // the `.catch` branch below with `respawn-attempt-N-failed` as the
+    // reason; those are retry-internals, not user-visible causes.
+    // Filtering them here ensures `lastRestartReason` holds the
+    // semantically meaningful crash cause (`heartbeat-timeout`,
+    // `async-timeout`, etc.).
+    if (!reason.startsWith('respawn-attempt-')) {
+      lastRestartReason = reason;
+    }
     spindle.log.info(
       `[script-runner] firing respawn attempt #${restartAttempts}`,
     );
-    void spawnScriptRunner(cachedUserId!).catch((err) => {
-      spindle.log.error(
-        `[script-runner] respawn attempt #${restartAttempts} failed: ` +
-        `${err instanceof Error ? err.message : String(err)}`,
-      );
-      // Reschedule with longer backoff (attempts already incremented above).
-      scheduleRespawn(`respawn-attempt-${restartAttempts}-failed`);
-    });
+    void spawnScriptRunner(cachedUserId!)
+      .then(() => {
+        // v0.28.0+ — only count a respawn as a "restart" once it
+        // succeeds. A crash that takes three retries to recover from
+        // is ONE restart event, not three; failed attempts surface
+        // separately via `currentBackoffAttempts` in the diagnostics
+        // snapshot.
+        totalRestartCount++;
+      })
+      .catch((err) => {
+        spindle.log.error(
+          `[script-runner] respawn attempt #${restartAttempts} failed: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+        );
+        // Reschedule with longer backoff (attempts already incremented above).
+        scheduleRespawn(`respawn-attempt-${restartAttempts}-failed`);
+      });
   }, delay);
 }
 
@@ -4683,6 +4739,98 @@ export function __setTrackingSetsCapForTests(cap: number | null): void {
 // so unsettled Promises are dropped with the test's own ALS context. If a
 // future change introduces side effects (e.g. logging unsettled promises),
 // reject explicitly here.
+
+// ─── Diagnostics surface (v0.28.0+) ─────────────────────────────────────────
+
+/**
+ * Synchronous snapshot of script-runner subprocess health from the host's
+ * point of view. Consumed by `src/engine/diagnostics.ts` Section B. No
+ * IPC — purely reflects module-level counters maintained by the lifecycle
+ * machinery.
+ *
+ * `totalRestartCount` is monotonic from LumiScript load; `restartAttempts`
+ * resets to 0 after a stable period (the backoff index, not a counter).
+ * `lastRestartReason` is the most recent respawn reason string, or null if
+ * no respawn has occurred this session.
+ */
+export interface ScriptRunnerHealthSnapshot {
+  /** Total respawns since LumiScript loaded. */
+  totalRestartCount: number;
+  /** Most recent respawn reason, or null if no respawn this session. */
+  lastRestartReason: string | null;
+  /** Current backoff index (resets to 0 after the stability window). */
+  currentBackoffAttempts: number;
+  /** Whether a child process is currently alive (non-null handle). */
+  childAlive: boolean;
+  /** Current child processId, if alive. */
+  processId: string | null;
+}
+
+export function getRunnerHealth(): ScriptRunnerHealthSnapshot {
+  return {
+    totalRestartCount,
+    lastRestartReason,
+    currentBackoffAttempts: restartAttempts,
+    childAlive:             childHandle !== null,
+    processId:              childHandle?.processId ?? null,
+  };
+}
+
+/**
+ * Async — request a process-stats snapshot from the script-runner child
+ * via the `diagnostic-stats-request` IPC. Resolves with the response, or
+ * `null` if the request times out or no child is alive.
+ *
+ * Timeout default 2 seconds — generous; the child's response path is just
+ * a `process.memoryUsage()` + `process.cpuUsage()` read, which is sub-
+ * millisecond on a healthy subprocess. A timeout signals the child is
+ * either hung (sync infinite loop) or recently crashed.
+ *
+ * Consumed by `backend.ts`'s diagnostic-report handler before invoking
+ * `collectBackendDiagnostics`. The diagnostics collector itself stays
+ * synchronous; this helper is the async-bridge.
+ */
+export async function queryRunnerStats(
+  timeoutMs = 2_000,
+): Promise<import('../types/script-runner-ipc.js').DiagnosticStatsResponse | null> {
+  if (childHandle === null) return null;
+
+  const requestId = `diag-${nextDiagnosticRequestSeq++}`;
+
+  return new Promise(resolve => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      pendingDiagnosticStats.delete(requestId);
+      resolve(null);
+    }, timeoutMs);
+
+    pendingDiagnosticStats.set(requestId, response => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(response);
+    });
+
+    try {
+      childHandle?.send({ type: 'diagnostic-stats-request', requestId });
+    } catch (err) {
+      // Child died between the null check and the send — clean up the
+      // pending entry and resolve with null. The lifecycle handler will
+      // eventually retry-spawn but we don't wait for that here.
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      pendingDiagnosticStats.delete(requestId);
+      spindle.log.warn(
+        `[script-runner] diagnostic-stats-request send failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      resolve(null);
+    }
+  });
+}
+
 /** @internal */
 export function __resetForTests(): void {
   // Singletons / scalars
@@ -4692,6 +4840,8 @@ export function __resetForTests(): void {
   lifecycleUnsub           = null;
   cachedUserId             = null;
   restartAttempts          = 0;
+  totalRestartCount        = 0;
+  lastRestartReason        = null;
   if (restartTimer  !== null) { clearTimeout(restartTimer);  restartTimer  = null; }
   if (stabilityTimer !== null) { clearTimeout(stabilityTimer); stabilityTimer = null; }
   spawnInFlight              = null;
@@ -4702,9 +4852,11 @@ export function __resetForTests(): void {
   trackingSetsCapOverride       = null;
 
   // Sequences (counter resets so test-generated IDs stay deterministic across runs)
-  nextHandleSeq      = 1;
-  nextHandlerCallSeq = 1;
-  nextRunSeq         = 1;
+  nextHandleSeq            = 1;
+  nextHandlerCallSeq       = 1;
+  nextRunSeq               = 1;
+  nextDiagnosticRequestSeq = 1;
+  pendingDiagnosticStats.clear();
 
   // Maps without timers — straight clear
   pendingRuns.clear();

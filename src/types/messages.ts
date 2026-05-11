@@ -404,6 +404,13 @@ export type FrontendToBackend =
       type: 'analyze_collection';
       path: string;
     }
+  // ─── Diagnostics (v0.28.0) ──────────────────────────────────────────────
+  // Frontend requests a fresh diagnostics report. Backend collects from
+  // every registry + probes storage + IPC's the script-runner child for
+  // resource stats, then sends `diagnostics_report` back with the merged
+  // result. No correlation id — the FE only has one diagnostics modal
+  // open at a time; rapid re-requests just supersede in flight.
+  | { type: 'request_diagnostics' }
 ;
 
 // ─── Backend → Frontend ───────────────────────────────────────────────────────
@@ -787,5 +794,14 @@ export type BackendToFrontend =
       type: 'collection_stats';
       path: string;
       stats: CollectionStats;
+    }
+  // ─── Diagnostics (v0.28.0) ──────────────────────────────────────────────
+  // Backend's response to `request_diagnostics`. The full structured report
+  // — type defined in `src/engine/diagnostics.ts:DiagnosticsReport`. Backend
+  // builds it via `collectBackendDiagnostics(...)` with merged sync state +
+  // async probe results (storage + script-runner subprocess).
+  | {
+      type:   'diagnostics_report';
+      report: import('../engine/diagnostics.js').DiagnosticsReport;
     }
 ;

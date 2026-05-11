@@ -795,6 +795,27 @@ export default function (proc: SpindleBackendProcessContext): () => void {
         handleFloatWidgetPosition(msg);
         break;
 
+      case 'diagnostic-stats-request': {
+        // v0.28.0+ — parent (diagnostics collector) requests a snapshot
+        // of this child's own resource usage. Standard Node-compat
+        // process introspection APIs; no banned-API concern. Cheap to
+        // sample — both calls return immediately without IO.
+        const mem = process.memoryUsage();
+        const cpu = process.cpuUsage();
+        proc.send({
+          type:        'diagnostic-stats-response',
+          requestId:   msg.requestId,
+          rss:         mem.rss,
+          heapTotal:   mem.heapTotal,
+          heapUsed:    mem.heapUsed,
+          external:    mem.external,
+          cpuUserUs:   cpu.user,
+          cpuSystemUs: cpu.system,
+          uptimeSec:   process.uptime(),
+        });
+        break;
+      }
+
       default:
         // Unknown / not-yet-implemented — silently ignore.
         break;

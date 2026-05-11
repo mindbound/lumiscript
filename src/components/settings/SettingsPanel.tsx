@@ -1,8 +1,9 @@
 import { FC, useState, useEffect } from 'react';
-import { Code2, BookMarked, Terminal, Timer, Type, FileCode2 } from 'lucide-react';
+import { Code2, BookMarked, Terminal, Timer, Type, FileCode2, Activity } from 'lucide-react';
 import type { Script, LumiScriptSettings } from '../../types/script.js';
 import type { BackendToFrontend, FrontendToBackend } from '../../types/messages.js';
 import { DEFAULT_SETTINGS } from '../../types/script.js';
+import { DiagnosticsModal } from '../diagnostics/DiagnosticsModal.js';
 
 interface SettingsPanelProps {
   onBackendMessage: (handler: (msg: unknown) => void) => () => void;
@@ -15,6 +16,10 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
 }) => {
   const [settings, setSettings] = useState<LumiScriptSettings>(DEFAULT_SETTINGS);
   const [scripts, setScripts] = useState<Script[]>([]);
+  // v0.28.0 — diagnostics modal visibility. Triggered from the "View
+  // Diagnostics" button below; the modal mounts via portal under
+  // document.body so it overlays the entire app, not just this panel.
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
 
   useEffect(() => {
     const unsub = onBackendMessage((raw) => {
@@ -202,6 +207,36 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
         </div>
 
       </div>
+
+      {/* Support — Diagnostics affordance. v0.28.0+. Opens a modal that
+          shows runtime state (versions, permissions, registrations,
+          script-runner health, etc.) with a one-click markdown dump for
+          Discord support reports. Lives in Settings rather than as a
+          dock-panel tab to keep it on-demand (matches Memory Cortex
+          Diagnostics pattern in the host's Settings → Memory). */}
+      <div className="ls-settings-section">
+        <div className="ls-settings-section-label">
+          <Activity size={11} />
+          Support
+        </div>
+        <button
+          type="button"
+          className="ls-btn"
+          onClick={() => setDiagnosticsOpen(true)}
+          title="Open the diagnostics modal — runtime state snapshot + copy-as-markdown for Discord support reports"
+        >
+          <Activity size={11} style={{ marginRight: 4 }} />
+          View Diagnostics
+        </button>
+      </div>
+
+      {diagnosticsOpen && (
+        <DiagnosticsModal
+          onClose={() => setDiagnosticsOpen(false)}
+          onBackendMessage={onBackendMessage}
+          sendToBackend={sendToBackend}
+        />
+      )}
     </div>
   );
 };

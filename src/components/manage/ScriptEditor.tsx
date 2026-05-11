@@ -403,6 +403,11 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
                 {editorHealth === 'mount-timeout' && (
                   <li>Open the browser console and look for network errors or CSP violations against <code>cdn.jsdelivr.net</code>.</li>
                 )}
+                <li>
+                  Open <strong>LumiScript Settings &rarr; Support &rarr; View Diagnostics</strong> for a runtime
+                  state snapshot — there&apos;s a <strong>Copy Report</strong> button that produces a
+                  Markdown dump you can paste into Discord support reports.
+                </li>
                 <li>If none of the above resolves it, please report on Discord with browser + OS details and any console output.</li>
               </ul>
               <button

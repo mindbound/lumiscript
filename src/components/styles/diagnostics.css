@@ -1,0 +1,283 @@
+/* ============================================================================
+ * LumiScript Diagnostics Modal (v0.28.0+)
+ * ============================================================================
+ * Portal-rendered modal (mounted at document.body) — so the host theme's
+ * --lumiverse-* tokens do NOT cascade in. ALL token references include
+ * hard-coded rgb()/hex fallbacks per the portal-modal CSS-token gotcha
+ * documented in saved memory. Canonical purple is rgb(147, 112, 219).
+ *
+ * Mirrors the visual structure of Lumiverse's MemoryCortexDiagnosticsModal
+ * (matching backdrop, modal shell, header, body, section spacing) so the
+ * diagnostic affordance feels native to the host.
+ */
+
+/* ── Backdrop + modal shell ────────────────────────────────────────────── */
+
+.ls-diag-backdrop {
+  position: fixed;
+  inset: 0;
+  /* z-index 10010 places this above Lumiverse's standard modal layer
+     (10002 — used by SettingsModal, ConfirmationModal, etc.) but below
+     the context-menu layer (11000). Matches Lumiverse's own
+     ExpandedTextEditor z-index, which is the canonical "secondary modal
+     opened from inside another modal" pattern (same use case as ours:
+     the diagnostics modal is triggered from inside Lumiverse's settings
+     modal via LumiScript's SettingsPanel). */
+  z-index: 10010;
+  background: rgba(0, 0, 0, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  /* Click on the backdrop dismisses; modal stops propagation via onClick check in JSX. */
+}
+
+.ls-diag-modal {
+  width: 100%;
+  max-width: 980px;
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--lumiverse-bg-elevated, rgb(10, 10, 10));
+  border: 1px solid var(--lumiverse-border, hsla(255, 100%, 56%, 0.12));
+  border-radius: var(--lumiverse-radius, 8px);
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.9));
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+
+/* ── Header ────────────────────────────────────────────────────────────── */
+
+.ls-diag-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 22px 14px;
+  border-bottom: 1px solid var(--lumiverse-border-light, rgba(128, 128, 128, 0.12));
+}
+
+.ls-diag-title-wrap {
+  min-width: 0;
+}
+
+.ls-diag-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--lumiverse-accent, rgb(147, 112, 219));
+  margin-bottom: 4px;
+}
+
+.ls-diag-title {
+  margin: 0 0 4px;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.ls-diag-subtitle {
+  margin: 0;
+  font-size: 12px;
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.65));
+  max-width: 640px;
+  line-height: 1.45;
+}
+
+.ls-diag-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* Header buttons share a base style with the rest of the panel. */
+.ls-diag-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  border: 1px solid var(--lumiverse-border, hsla(255, 100%, 56%, 0.12));
+  border-radius: var(--lumiverse-radius-sm, 6px);
+  background: var(--lumiverse-bg-hover, rgb(15, 15, 15));
+  color: inherit;
+  cursor: pointer;
+  transition: background 120ms;
+}
+.ls-diag-action-btn:hover:not(:disabled) {
+  background: var(--lumiverse-fill-medium, rgba(0, 0, 0, 0.25));
+}
+.ls-diag-action-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.ls-diag-action-btn-done {
+  background: rgba(74, 222, 128, 0.18);
+  color: rgb(74, 222, 128);
+  border-color: rgba(74, 222, 128, 0.35);
+}
+.ls-diag-action-btn-error {
+  background: rgba(239, 68, 68, 0.18);
+  color: rgb(239, 68, 68);
+  border-color: rgba(239, 68, 68, 0.35);
+}
+
+.ls-diag-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  background: transparent;
+  border: none;
+  border-radius: var(--lumiverse-radius-sm, 6px);
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.65));
+  cursor: pointer;
+}
+.ls-diag-close:hover {
+  background: var(--lumiverse-fill-medium, rgba(0, 0, 0, 0.25));
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.9));
+}
+
+/* ── Summary chip (header) ─────────────────────────────────────────────── */
+
+.ls-diag-summary-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--lumiverse-fill-medium, rgba(0, 0, 0, 0.25));
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.9));
+}
+.ls-diag-summary-chip > span {
+  display: inline-block;
+}
+.ls-diag-summary-chip > span + span {
+  border-left: 1px solid rgba(255, 255, 255, 0.12);
+  padding-left: 8px;
+}
+
+/* ── Body ──────────────────────────────────────────────────────────────── */
+
+.ls-diag-body {
+  flex: 1;
+  overflow: auto;
+  padding: 16px 22px 22px;
+}
+
+.ls-diag-loading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 32px 0;
+  justify-content: center;
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.65));
+  font-size: 12px;
+}
+
+.ls-diag-section {
+  margin-bottom: 22px;
+}
+.ls-diag-section:last-child {
+  margin-bottom: 0;
+}
+
+.ls-diag-section-title {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.92));
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--lumiverse-border-light, rgba(128, 128, 128, 0.12));
+}
+
+.ls-diag-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ls-diag-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 7px 10px;
+  background: var(--lumiverse-bg-040, hsla(255, 30%, 12%, 0.4));
+  border-radius: var(--lumiverse-radius-xs, 4px);
+}
+
+.ls-diag-check-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.ls-diag-check-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.92));
+  margin-bottom: 2px;
+}
+
+.ls-diag-check-message {
+  font-size: 11.5px;
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.7));
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+/* ── Status badges + tone colours ──────────────────────────────────────── */
+
+.ls-diag-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.ls-diag-tone-pass {
+  background: rgba(74, 222, 128, 0.18);
+  color: rgb(74, 222, 128);
+}
+.ls-diag-tone-warn {
+  background: rgba(250, 204, 21, 0.18);
+  color: rgb(250, 204, 21);
+}
+.ls-diag-tone-fail {
+  background: rgba(239, 68, 68, 0.18);
+  color: rgb(239, 68, 68);
+}
+.ls-diag-tone-info {
+  background: rgba(96, 165, 250, 0.16);
+  color: rgb(96, 165, 250);
+}
+
+/* When a summary chip carries a tone, tint its background too — but
+   only subtly; the per-check badges carry the main colour signal. */
+.ls-diag-summary-chip.ls-diag-tone-fail {
+  background: rgba(239, 68, 68, 0.15);
+}
+.ls-diag-summary-chip.ls-diag-tone-warn {
+  background: rgba(250, 204, 21, 0.15);
+}
+.ls-diag-summary-chip.ls-diag-tone-pass {
+  background: rgba(74, 222, 128, 0.15);
+}
+
+/* ── Refresh-button spin animation ─────────────────────────────────────── */
+
+@keyframes ls-diag-spin-kf {
+  to { transform: rotate(360deg); }
+}
+.ls-diag-spin {
+  animation: ls-diag-spin-kf 1s linear infinite;
+}

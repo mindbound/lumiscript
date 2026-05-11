@@ -191,3 +191,15 @@ export function clearAll(): void {
   bus.clear();
   handlerIndex.clear();
 }
+
+/**
+ * Count of all active subscriptions across every event and every script.
+ * O(events) — sums each per-event Set's size; cheap even with hundreds of
+ * subscriptions. Used by the v0.28.0+ diagnostics panel to surface live
+ * broadcast-bus state.
+ */
+export function countSubscriptions(): number {
+  let n = 0;
+  for (const set of bus.values()) n += set.size;
+  return n;
+}

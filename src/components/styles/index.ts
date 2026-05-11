@@ -21,16 +21,17 @@
  *   settings.css  — settings panel, toggle switch, count cards
  */
 
-import BASE_CSS      from './base.css'     with { type: 'text' };
-import LIST_CSS      from './list.css'     with { type: 'text' };
-import EDITOR_CSS    from './editor.css'   with { type: 'text' };
-import CONSOLE_CSS   from './console.css'  with { type: 'text' };
-import BINDINGS_CSS  from './bindings.css' with { type: 'text' };
-import TRIGGERS_CSS  from './triggers.css' with { type: 'text' };
-import MODAL_CSS     from './modal.css'     with { type: 'text' };
-import STATUS_CSS    from './status.css'    with { type: 'text' };
-import SETTINGS_CSS  from './settings.css'  with { type: 'text' };
-import REFERENCE_CSS from './reference.css' with { type: 'text' };
+import BASE_CSS         from './base.css'         with { type: 'text' };
+import LIST_CSS         from './list.css'         with { type: 'text' };
+import EDITOR_CSS       from './editor.css'       with { type: 'text' };
+import CONSOLE_CSS      from './console.css'      with { type: 'text' };
+import BINDINGS_CSS     from './bindings.css'     with { type: 'text' };
+import TRIGGERS_CSS     from './triggers.css'     with { type: 'text' };
+import MODAL_CSS        from './modal.css'        with { type: 'text' };
+import STATUS_CSS       from './status.css'       with { type: 'text' };
+import SETTINGS_CSS     from './settings.css'     with { type: 'text' };
+import REFERENCE_CSS    from './reference.css'    with { type: 'text' };
+import DIAGNOSTICS_CSS  from './diagnostics.css'  with { type: 'text' };
 export const PANEL_CSS =
   BASE_CSS +
   LIST_CSS +
@@ -41,4 +42,5 @@ export const PANEL_CSS =
   MODAL_CSS +
   STATUS_CSS +
   SETTINGS_CSS +
-  REFERENCE_CSS;
+  REFERENCE_CSS +
+  DIAGNOSTICS_CSS;
