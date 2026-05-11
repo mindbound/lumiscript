@@ -20,6 +20,7 @@ import type {
   RegisteredToolInfo,
   DOMEventData,
   DOMDelegatedEventData,
+  ConditionalPreventDefault,
   DbRecord,
 } from './script.js';
 import type { CollectionSummary, CollectionStats } from '../engine/db-admin.js';
@@ -494,7 +495,7 @@ export type BackendToFrontend =
   | { type: 'dom_remove';          elementId: string }
   | { type: 'dom_add_style';       scriptId: string; styleId: string; css: string }
   | { type: 'dom_remove_style';    styleId: string }
-  | { type: 'dom_listen';          elementId: string; listenerId: string; event: string; preventDefault?: boolean }
+  | { type: 'dom_listen';          elementId: string; listenerId: string; event: string; preventDefault?: boolean | ConditionalPreventDefault }
   | { type: 'dom_unlisten';        elementId: string; listenerId: string; event: string }
   // ─── api.ui.dom.delegate (v0.27.1) ────────────────────────────────────
   // Single-listener-per-(root, event)-tuple capture-phase delegation. The
@@ -511,7 +512,11 @@ export type BackendToFrontend =
       root:         'chat' | 'document';
       /** Limit matching to a specific message's `.mes_text` subtree. */
       messageId?:   string;
-      preventDefault?: boolean;
+      /**
+       * v0.27.5+: can be `boolean` (legacy: fire on every selector match)
+       * or `ConditionalPreventDefault` (fire only on matching event data).
+       */
+      preventDefault?: boolean | ConditionalPreventDefault;
       stopPropagation?: boolean;
     }
   | { type: 'dom_delegate_unregister'; delegationId: string; event: string }

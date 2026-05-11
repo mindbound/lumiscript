@@ -12,7 +12,7 @@
 
 import type { SpindleFrontendContext } from 'lumiverse-spindle-types';
 import type { BackendToFrontend, FrontendToBackend } from './types/messages.js';
-import type { DOMEventData, DOMDelegatedEventData } from './types/script.js';
+import type { DOMEventData, DOMDelegatedEventData, ConditionalPreventDefault } from './types/script.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -104,7 +104,7 @@ interface DelegationEntry {
   event:           string;
   root:            'chat' | 'document';
   messageId?:      string;
-  preventDefault?: boolean;
+  preventDefault?: boolean | ConditionalPreventDefault;
   stopPropagation?: boolean;
 }
 const delegationsByDelegationId = new Map<string, DelegationEntry>();
@@ -308,6 +308,71 @@ function buildDelegatedEventData(
 }
 
 /**
+ * Evaluate a `preventDefault` rule against a fired event (v0.27.5+).
+ *
+ * Boolean rules pass through directly (`true` → always prevent, `false` /
+ * undefined → never prevent). `ConditionalPreventDefault` rules check each
+ * provided filter; ALL filters must match for `preventDefault` to fire
+ * (AND semantics). Empty `{}` is treated as "always match" (consistent
+ * with `preventDefault: true`).
+ *
+ * Filters reference `KeyboardEvent` / `MouseEvent` data. When a filter
+ * requires a field the event doesn't carry (e.g. `onKeys` on a MouseEvent),
+ * the rule fails to match — preventDefault does NOT fire for that event,
+ * letting unrelated events through.
+ *
+ * Runs synchronously inside the capture-phase listener, BEFORE the
+ * dispatch to the script handler. The synchronous evaluation is what
+ * makes per-fire conditional prevention possible — the async worker-
+ * boundary dispatch couldn't preventDefault in time.
+ */
+export function shouldPreventDefault(
+  rule: boolean | ConditionalPreventDefault | undefined,
+  event: Event,
+): boolean {
+  if (rule === undefined || rule === false) return false;
+  if (rule === true) return true;
+
+  // Conditional rule — narrow to the event-data fields each filter needs.
+  const ke = event as Partial<KeyboardEvent>;
+  const me = event as Partial<MouseEvent>;
+
+  if (rule.onKeys !== undefined) {
+    if (ke.key === undefined || !rule.onKeys.includes(ke.key)) return false;
+  }
+  if (rule.onCodes !== undefined) {
+    if (ke.code === undefined || !rule.onCodes.includes(ke.code)) return false;
+  }
+  if (rule.onButtons !== undefined) {
+    if (me.button === undefined || !rule.onButtons.includes(me.button)) return false;
+  }
+  if (rule.whenModifiers !== undefined) {
+    // KeyboardEvent and MouseEvent both expose ctrl/shift/alt/meta keys
+    // identically — Partial<KeyboardEvent> is sufficient to read all four.
+    // Events lacking these fields (e.g. plain Event) are treated as
+    // "no modifiers held".
+    const state = {
+      ctrl:  ke.ctrlKey  ?? false,
+      shift: ke.shiftKey ?? false,
+      alt:   ke.altKey   ?? false,
+      meta:  ke.metaKey  ?? false,
+    };
+    const { require, exclude } = rule.whenModifiers;
+    if (require) {
+      for (const mod of require) {
+        if (!state[mod]) return false;
+      }
+    }
+    if (exclude) {
+      for (const mod of exclude) {
+        if (state[mod]) return false;
+      }
+    }
+  }
+  return true;
+}
+
+/**
  * Install (or increment ref-count on) a capture-phase listener for a
  * given (root, event) tuple. Listener iterates the delegation registry
  * at fire time and dispatches `dom_delegate_event` for each matching
@@ -358,8 +423,10 @@ function installDelegationListenerIfNeeded(
       // the order delegations are iterated isn't user-controlled, so a
       // script that sets `preventDefault: true` on its registration is
       // promised the event WILL be prevented if its selector matches,
-      // not that it's the only handler that runs.
-      if (reg.preventDefault)  e.preventDefault();
+      // not that it's the only handler that runs. v0.27.5: `preventDefault`
+      // can also be a `ConditionalPreventDefault` object that fires only
+      // on matching event data — see `shouldPreventDefault` above.
+      if (shouldPreventDefault(reg.preventDefault, e)) e.preventDefault();
       if (reg.stopPropagation) e.stopPropagation();
 
       const data = buildDelegatedEventData(e, matched);
@@ -720,8 +787,10 @@ export function installDOMHandler(
         const handler: EventListener = (evt: Event) => {
           // Suppress the browser's default action synchronously — the
           // backend dispatch is async across the worker boundary and
-          // returns too late to preventDefault on its own.
-          if (preventDefault) evt.preventDefault();
+          // returns too late to preventDefault on its own. v0.27.5:
+          // `preventDefault` can be a `ConditionalPreventDefault` object
+          // that fires only on matching event data.
+          if (shouldPreventDefault(preventDefault, evt)) evt.preventDefault();
           const data = extractEventData(evt);
           sendToBackend({ type: 'dom_event', elementId, listenerId, event, data });
         };

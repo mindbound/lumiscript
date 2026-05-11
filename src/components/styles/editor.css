@@ -55,8 +55,70 @@
   background: var(--lumiverse-accent, rgba(147, 112, 219, 0.9));
   flex-shrink: 0;
 }
-.ls-editor-monaco { flex: 1; min-height: 0; }
+.ls-editor-monaco { flex: 1; min-height: 0; position: relative; }
 .ls-editor-docs   { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+
+/* v0.27.5 — Monaco init-failure overlay. Renders inside .ls-editor-monaco
+   (which now has position:relative as its anchor) over the editor canvas
+   when the init-success probe detects mount timeout or non-responsiveness.
+   Hard-coded rgba on the backdrop so the overlay reads correctly even if
+   the host theme tokens haven't fully resolved (same defensive pattern as
+   the portal-modal CSS-token gotcha for accent fallbacks elsewhere). */
+.ls-editor-failed-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  padding: 24px 32px;
+  background: rgba(10, 10, 14, 0.92);
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.9));
+  font-size: 12px;
+  line-height: 1.5;
+  overflow: auto;
+}
+.ls-editor-failed-title {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.95));
+}
+.ls-editor-failed-desc {
+  margin: 0 0 12px;
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.7));
+}
+.ls-editor-failed-steps-label {
+  margin: 0 0 4px;
+  font-weight: 600;
+}
+.ls-editor-failed-steps {
+  margin: 0 0 16px;
+  padding-left: 20px;
+}
+.ls-editor-failed-steps li { margin-bottom: 6px; }
+.ls-editor-failed-steps code {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-family: 'Fira Code', 'Cascadia Code', Consolas, monospace;
+  font-size: 11px;
+}
+.ls-editor-failed-dismiss {
+  align-self: flex-start;
+  padding: 6px 14px;
+  font-size: 12px;
+  border: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.12));
+  border-radius: var(--lumiverse-radius, 6px);
+  background: var(--lumiverse-accent, rgb(147, 112, 219));
+  color: var(--lumiverse-accent-fg, #ffffff);
+  cursor: pointer;
+  transition: filter var(--lumiverse-transition-fast, 120ms);
+}
+.ls-editor-failed-dismiss:hover {
+  filter: brightness(1.1);
+}
 
 /* ── Metadata footer ────────────────────────────────────────────────────── */
 .ls-meta-footer {

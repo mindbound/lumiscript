@@ -3214,6 +3214,60 @@ export interface DOMEventData {
   code?: string;
 }
 
+/**
+ * Predicate-based `preventDefault` rule, evaluated synchronously on the
+ * frontend before the script handler dispatches. Use when you want to
+ * suppress browser defaults for a specific key / mouse button / modifier
+ * combination only, while letting other events through (the binary
+ * `preventDefault: true` cannot do this — it fires on every selector match).
+ *
+ * Each filter is optional. When multiple filters are set, ALL must match
+ * for `preventDefault` to fire (AND semantics). An empty `{}` is treated
+ * as "always match" (equivalent to `preventDefault: true`).
+ *
+ * Common shapes:
+ *
+ *   // Plain Enter on a textarea, but let Shift+Enter through (newline):
+ *   { onKeys: ['Enter'], whenModifiers: { exclude: ['shift'] } }
+ *
+ *   // Ctrl+S override (suppress browser Save dialog) but let other keys type:
+ *   { onKeys: ['s', 'S'], whenModifiers: { require: ['ctrl'] } }
+ *
+ *   // Right-click only (custom context menu on a button), pass left-click through:
+ *   { onButtons: [2] }
+ *
+ * Available since LumiScript v0.27.5.
+ */
+export interface ConditionalPreventDefault {
+  /**
+   * Match a specific `KeyboardEvent.key` value (or any of several — OR
+   * semantics within the array). When set, non-KeyboardEvents are skipped
+   * (preventDefault does NOT fire for them).
+   */
+  onKeys?: string[];
+  /**
+   * Match a specific `KeyboardEvent.code` value (or any of several). Same
+   * KeyboardEvent-only semantics as `onKeys`. Use this for physical-key
+   * bindings (e.g. WASD) that should be layout-independent.
+   */
+  onCodes?: string[];
+  /**
+   * Match a specific `MouseEvent.button` value (or any of several).
+   * 0=left, 1=middle, 2=right, 3=back, 4=forward. When set,
+   * non-MouseEvents are skipped.
+   */
+  onButtons?: number[];
+  /**
+   * Modifier-key constraint. ALL of `require` must be held; NONE of
+   * `exclude` may be held. Applies to KeyboardEvent and MouseEvent. When
+   * set, other event types are skipped.
+   */
+  whenModifiers?: {
+    require?: Array<'shift' | 'ctrl' | 'alt' | 'meta'>;
+    exclude?: Array<'shift' | 'ctrl' | 'alt' | 'meta'>;
+  };
+}
+
 /** Options for `DOMHandle.on(event, handler, options?)`. */
 export interface DOMListenOptions {
   /**
@@ -3226,8 +3280,15 @@ export interface DOMListenOptions {
    * Because the handler dispatches asynchronously across the worker boundary,
    * `preventDefault` must be decided at listener-registration time rather
    * than inside the handler body. Default: `false`.
+   *
+   * **Conditional form** (v0.27.5+) — pass a `ConditionalPreventDefault`
+   * object to fire `preventDefault` only when event data matches specific
+   * key / button / modifier filters. The binary `true` fires on every
+   * event matching the selector, which is the wrong granularity for cases
+   * like "plain Enter on textarea but let Shift+Enter through" or
+   * "Ctrl+S override but let other keystrokes type normally".
    */
-  preventDefault?: boolean;
+  preventDefault?: boolean | ConditionalPreventDefault;
 }
 
 /** Options for `api.ui.dom.delegate()`. */
@@ -3258,8 +3319,14 @@ export interface DOMDelegateOptions {
    * When `true`, the frontend listener calls `event.preventDefault()` on the
    * native DOM event *before* dispatching to the script handler. Same
    * rationale as `DOMListenOptions.preventDefault`. Default: `false`.
+   *
+   * **Conditional form** (v0.27.5+) — pass a `ConditionalPreventDefault`
+   * object to fire `preventDefault` only when event data matches specific
+   * key / button / modifier filters. Particularly useful for keyboard-driven
+   * delegations where the selector matches every keystroke on the element
+   * but only specific keys should suppress browser defaults.
    */
-  preventDefault?: boolean;
+  preventDefault?: boolean | ConditionalPreventDefault;
 
   /**
    * When `true`, the frontend listener calls `event.stopPropagation()` after

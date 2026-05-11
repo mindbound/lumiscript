@@ -1078,10 +1078,52 @@ interface DOMDelegateOptions {
   root?: 'chat' | 'document';
   /** Narrow matching to the .mes_text content of one specific message. */
   messageId?: string;
-  /** Call event.preventDefault() before dispatching. Default: false. */
-  preventDefault?: boolean;
+  /**
+   * Call event.preventDefault() before dispatching. Default: false.
+   * v0.27.5+: can also be a ConditionalPreventDefault object to fire
+   * only on specific key / button / modifier combinations.
+   */
+  preventDefault?: boolean | ConditionalPreventDefault;
   /** Call event.stopPropagation() after dispatching. Default: false. */
   stopPropagation?: boolean;
+}
+
+/** Options for DOMHandle.on(event, handler, options?). */
+interface DOMListenOptions {
+  /**
+   * Call event.preventDefault() before dispatching. Default: false.
+   * v0.27.5+: can also be a ConditionalPreventDefault object to fire
+   * only on specific key / button / modifier combinations.
+   */
+  preventDefault?: boolean | ConditionalPreventDefault;
+}
+
+/**
+ * Predicate-based preventDefault — fires only when event data matches
+ * specific filters. Use when you want browser defaults suppressed on a
+ * specific key / button / modifier combo while letting others through.
+ *
+ * All filters are AND'd. Empty {} is "always match" (equivalent to true).
+ *
+ * Examples:
+ *   { onKeys: ['Enter'], whenModifiers: { exclude: ['shift'] } }  // plain Enter only
+ *   { onKeys: ['s', 'S'], whenModifiers: { require: ['ctrl'] } }  // Ctrl+S
+ *   { onButtons: [2] }                                            // right-click only
+ *
+ * Available since LumiScript v0.27.5.
+ */
+interface ConditionalPreventDefault {
+  /** KeyboardEvent.key value(s) — OR-matched. Non-keyboard events skipped when set. */
+  onKeys?: string[];
+  /** KeyboardEvent.code value(s) — layout-independent. Non-keyboard events skipped when set. */
+  onCodes?: string[];
+  /** MouseEvent.button value(s) — 0=left, 1=middle, 2=right, 3=back, 4=forward. */
+  onButtons?: number[];
+  /** Modifier constraint. ALL require must be held; NONE of exclude may be. */
+  whenModifiers?: {
+    require?: Array<'shift' | 'ctrl' | 'alt' | 'meta'>;
+    exclude?: Array<'shift' | 'ctrl' | 'alt' | 'meta'>;
+  };
 }
 
 /**
@@ -1142,7 +1184,7 @@ interface DOMHandle {
    * });
    * // Later: unsub();
    */
-  on(event: string, handler: (data: DOMEventData) => void): () => void;
+  on(event: string, handler: (data: DOMEventData) => void, options?: DOMListenOptions): () => void;
   /**
    * Enable frontend-only drag on this element.
    * @param handleSelector Optional CSS selector for the drag handle.

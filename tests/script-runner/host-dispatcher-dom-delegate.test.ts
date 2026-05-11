@@ -140,6 +140,46 @@ describe('host-dispatcher: kind=\'domDelegate\' register-handler', () => {
     expect(sentMsg.stopPropagation).toBe(true);
     expect(sentMsg.messageId).toBe('msg-7');
   });
+
+  test('forwards conditional preventDefault shape verbatim through the IPC envelope', async () => {
+    // v0.27.5 — `ConditionalPreventDefault` objects must survive the
+    // dispatch-to-FE roundtrip unchanged so the FE's `shouldPreventDefault`
+    // evaluator sees the same shape the script passed. The IPC envelope
+    // type is `boolean | ConditionalPreventDefault`; coercion to boolean
+    // would silently drop the predicate filters and the feature would
+    // regress to v0.27.1's binary behavior.
+    const grantedPermissions = new Set([
+      'tools', 'chat_mutation', 'macro_interceptor', 'interceptor',
+      'chats', 'generation', 'app_manipulation',
+    ]);
+    const scn = await setupLateRegisterScenario({ grantedPermissions });
+
+    const conditional = {
+      onKeys: ['Enter'],
+      whenModifiers: {
+        exclude: ['shift'] as Array<'shift' | 'ctrl' | 'alt' | 'meta'>,
+      },
+    };
+
+    await scn.sendLateRegister(asLateRegister({
+      type:       'register-handler',
+      kind:       'domDelegate',
+      scriptId:   scn.scriptId,
+      handlerId:  'h-delegate-cond',
+      selector:   'textarea',
+      event:      'keydown',
+      options:    {
+        root: 'chat',
+        preventDefault: conditional,
+      },
+      hasHandler: true,
+    }));
+
+    const sentMsg = messagesOfType('dom_delegate_register')[0]!;
+    // toEqual (deep) — confirms the nested whenModifiers.exclude array
+    // survives intact, not coerced to boolean or stripped to {}.
+    expect(sentMsg.preventDefault).toEqual(conditional);
+  });
 });
 
 // ─── Wrapper fires sendRunHandlerRequest on event ────────────────────────────

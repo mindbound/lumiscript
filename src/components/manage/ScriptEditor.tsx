@@ -43,6 +43,17 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
   const [viewMode, setViewMode] = useState<'code' | 'docs'>('code');
   const [copied, setCopied] = useState(false);
   const [confirmDangerous, setConfirmDangerous] = useState(false);
+  // v0.27.5 — Monaco init-success detection. Surfaces a troubleshooting
+  // overlay if the editor either fails to mount within 15s ('mount-timeout')
+  // or mounts but its input pipeline doesn't respond to user clicks
+  // ('unresponsive'). Catches silent failure modes like the Firefox/Windows
+  // DirectWrite hang documented in
+  // `notes/known-issue-monaco-firefox-windows-init-hang.md`. Without this,
+  // the user sees a blank-looking editor with no clue what went wrong.
+  const [editorHealth, setEditorHealth] = useState<
+    'pending' | 'ok' | 'mount-timeout' | 'unresponsive'
+  >('pending');
+  const mountTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const editorRef = useRef<any>(null);
@@ -65,7 +76,32 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
     setUnsaved(false);
     setRenameValue(script.name);
     setConfirmDangerous(false);
+    // v0.27.5 — reset Monaco health probe when the user switches scripts so
+    // each open script gets a fresh init-detection cycle. A persistent
+    // 'unresponsive' would otherwise mask a working subsequent script.
+    setEditorHealth('pending');
   }, [script.id, script.code, script.name]);
+
+  // v0.27.5 — Mount-timeout probe (layer 1). If `handleMount` doesn't fire
+  // within 15s of the code view being active, Monaco failed to load entirely
+  // (network blockage, CSP violation, etc.) and the user is staring at a
+  // blank panel with no feedback. 15s is generous — typical mount on a
+  // healthy machine is sub-second. We keep this on a generous side because
+  // false positives are worse than slow legitimate mounts; the user can
+  // always dismiss the overlay.
+  useEffect(() => {
+    if (viewMode !== 'code')         return;
+    if (editorHealth !== 'pending')  return;
+    mountTimeoutRef.current = setTimeout(() => {
+      setEditorHealth(curr => (curr === 'pending' ? 'mount-timeout' : curr));
+    }, 15_000);
+    return () => {
+      if (mountTimeoutRef.current) {
+        clearTimeout(mountTimeoutRef.current);
+        mountTimeoutRef.current = null;
+      }
+    };
+  }, [viewMode, editorHealth]);
 
   // v0.26.x diagnostic + safety net — on unmount, flush any pending autosave.
   // Without this, closing the modal within `autosaveDebounceMs` of the last
@@ -132,6 +168,15 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
   const handleMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
 
+    // v0.27.5 — handleMount fired, so layer-1 mount succeeded. Clear the
+    // 15s mount-timeout guard and mark health 'ok'. Layer-2 (responsiveness
+    // probe) is set up below — it kicks in on the user's first mousedown.
+    if (mountTimeoutRef.current) {
+      clearTimeout(mountTimeoutRef.current);
+      mountTimeoutRef.current = null;
+    }
+    setEditorHealth('ok');
+
     // ── IntelliSense: register LumiScript ambient types once ─────────────────
     // Runs only on the first editor mount per page session (_defsRegistered flag).
     // The editor uses `javascript` language mode, so only jsDefaults is active.
@@ -170,6 +215,32 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
       saveCode(editor.getValue());
     });
     editor.getModel()?.setEOL(monaco.editor.EndOfLineSequence.LF);
+
+    // v0.27.5 — Responsiveness probe (layer 2). Once on the user's first
+    // mousedown inside the editor DOM, listen for the corresponding
+    // `onDidFocusEditorWidget` event. If focus doesn't fire within 1s,
+    // Monaco's input pipeline is broken even though the DOM rendered
+    // (the failure mode observed on the affected Firefox/Windows user —
+    // see `notes/known-issue-monaco-firefox-windows-init-hang.md`). The
+    // capture phase + `{ once: true }` listener self-detaches after the
+    // single probe — we don't keep re-checking on every click, the layer-1
+    // mount timeout already covered the cold-start case.
+    const editorDom = editor.getDomNode();
+    if (editorDom) {
+      const onFirstMousedown = () => {
+        let focused = false;
+        const focusDisposable = editor.onDidFocusEditorWidget(() => {
+          focused = true;
+        });
+        setTimeout(() => {
+          focusDisposable.dispose();
+          if (!focused) {
+            setEditorHealth(curr => (curr === 'ok' ? 'unresponsive' : curr));
+          }
+        }, 1000);
+      };
+      editorDom.addEventListener('mousedown', onFirstMousedown, { once: true, capture: true });
+    }
   };
 
   const handleRun = () => {
@@ -293,6 +364,55 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
               fontFamily: "'Fira Code', 'Cascadia Code', Consolas, monospace",
             }}
           />
+          {/* v0.27.5 — Init-failure overlay. Renders over the Monaco area
+              when our two-layer init-success probe (mount timeout + first-
+              mousedown focus probe) detects that the editor didn't load or
+              isn't accepting input. The Monaco DOM stays mounted underneath
+              so dismissing the overlay (which sets health back to 'ok')
+              gives the user a chance to retry without a full re-render. */}
+          {(editorHealth === 'mount-timeout' || editorHealth === 'unresponsive') && (
+            <div className="ls-editor-failed-overlay">
+              <h3 className="ls-editor-failed-title">
+                {editorHealth === 'mount-timeout'
+                  ? 'The script editor failed to load.'
+                  : "The editor isn't accepting input."}
+              </h3>
+              <p className="ls-editor-failed-desc">
+                {editorHealth === 'mount-timeout'
+                  ? 'Monaco did not finish initialising within 15 seconds. This usually means the Monaco CDN is blocked (corporate firewall, browser extension, restrictive network), or the browser environment is preventing the bundle from running.'
+                  : 'You clicked into the editor but it did not receive focus within 1 second. This usually means a browser-specific Monaco init failure — most commonly seen on Firefox with corrupted Windows font cache or aggressive security software.'}
+              </p>
+              <p className="ls-editor-failed-steps-label">Try these steps:</p>
+              <ul className="ls-editor-failed-steps">
+                <li>Reload the page (Ctrl+R / Cmd+R).</li>
+                <li>Try a different browser — Chrome and Edge are generally most reliable.</li>
+                {editorHealth === 'unresponsive' && (
+                  <>
+                    <li>
+                      On Firefox + Windows: clear the Windows Font Cache.
+                      Open <code>services.msc</code>, stop <em>Windows Font Cache Service</em>,
+                      delete <code>C:\Windows\System32\FNTCACHE.DAT</code>, start the service
+                      again, then reload the page.
+                    </li>
+                    <li>
+                      Try a fresh Firefox profile via <code>about:profiles</code> to rule
+                      out profile-level configuration interference.
+                    </li>
+                  </>
+                )}
+                {editorHealth === 'mount-timeout' && (
+                  <li>Open the browser console and look for network errors or CSP violations against <code>cdn.jsdelivr.net</code>.</li>
+                )}
+                <li>If none of the above resolves it, please report on Discord with browser + OS details and any console output.</li>
+              </ul>
+              <button
+                className="ls-editor-failed-dismiss"
+                onClick={() => setEditorHealth('ok')}
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
         </div>
       )}
 

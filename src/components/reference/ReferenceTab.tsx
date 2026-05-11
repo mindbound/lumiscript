@@ -805,7 +805,7 @@ export const KEY_TYPES: TypeDoc[] = [
     fields: [
       { field: 'root?',            type: "'chat' | 'document'", optional: true, desc: "Where to attach the actual host-side capture listener. 'chat' (default): restricts matching to chat content; matches descendants of [data-message-id]. 'document': matches anywhere in the page (including Lumiverse's own UI surfaces). Both gate on app_manipulation." },
       { field: 'messageId?',       type: 'string',              optional: true, desc: 'Limit matching to a specific message id. Has no effect when root is "document".' },
-      { field: 'preventDefault?',  type: 'boolean',             optional: true, desc: "When true, the frontend listener calls event.preventDefault() before dispatching. Default: false." },
+      { field: 'preventDefault?',  type: 'boolean | ConditionalPreventDefault', optional: true, desc: "When true, the frontend listener calls event.preventDefault() before dispatching on every selector match. v0.27.5+: can also be a ConditionalPreventDefault object to fire only on specific key / button / modifier combinations (e.g. plain Enter on textarea while letting Shift+Enter through). Default: false." },
       { field: 'stopPropagation?', type: 'boolean',             optional: true, desc: "When true, the frontend listener calls event.stopPropagation() after dispatching, preventing host-side and other delegation listeners from also reacting. Default: false." },
     ],
   },
@@ -850,7 +850,17 @@ export const KEY_TYPES: TypeDoc[] = [
     name: 'DOMListenOptions',
     note: 'Options bag for DOMHandle.on(event, handler, options?).',
     fields: [
-      { field: 'preventDefault?', type: 'boolean', optional: true, desc: "When true, the frontend listener calls event.preventDefault() synchronously before dispatching to the script handler. Must be set at registration time — the async worker-boundary dispatch returns too late to preventDefault from inside the handler body. Default: false." },
+      { field: 'preventDefault?', type: 'boolean | ConditionalPreventDefault', optional: true, desc: "When true, the frontend listener calls event.preventDefault() synchronously before dispatching to the script handler. Must be set at registration time — the async worker-boundary dispatch returns too late to preventDefault from inside the handler body. v0.27.5+: can also be a ConditionalPreventDefault object to fire only on specific key / button / modifier combinations. Default: false." },
+    ],
+  },
+  {
+    name: 'ConditionalPreventDefault',
+    note: "Predicate-based preventDefault rule for DOMDelegateOptions / DOMListenOptions (v0.27.5+). Fires event.preventDefault() only when the event matches all provided filters (AND semantics). Each filter is optional; empty {} = always match (equivalent to `preventDefault: true`). Filters are evaluated synchronously frontend-side at fire time. Common shapes: { onKeys: ['Enter'], whenModifiers: { exclude: ['shift'] } } (plain Enter, not Shift+Enter); { onKeys: ['s', 'S'], whenModifiers: { require: ['ctrl'] } } (Ctrl+S override); { onButtons: [2] } (right-click only).",
+    fields: [
+      { field: 'onKeys?',       type: 'string[]',                       optional: true, desc: 'KeyboardEvent.key value(s) — OR-matched within the array. Non-keyboard events skipped (preventDefault does NOT fire) when this is set.' },
+      { field: 'onCodes?',      type: 'string[]',                       optional: true, desc: 'KeyboardEvent.code value(s) — physical key, layout-independent. Same keyboard-only semantics as onKeys. Use for physical-position bindings (e.g. WASD).' },
+      { field: 'onButtons?',    type: 'number[]',                       optional: true, desc: 'MouseEvent.button value(s) — 0=left, 1=middle, 2=right, 3=back, 4=forward. Non-mouse events skipped when set.' },
+      { field: 'whenModifiers?', type: '{ require?, exclude? }',         optional: true, desc: 'Modifier-key constraint. ALL of require must be held; NONE of exclude may be held. Values: shift / ctrl / alt / meta. Applies to KeyboardEvent and MouseEvent.' },
     ],
   },
   // ─── LLM ─────────────────────────────────────────────────────────────────────
