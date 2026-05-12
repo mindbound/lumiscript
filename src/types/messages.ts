@@ -467,6 +467,14 @@ export type FrontendToBackend =
   // annotations) and sends it back via `assistant_thread_exported` —
   // frontend triggers the user-facing download via a temporary blob URL.
   | { type: 'assistant_export_thread'; threadId: string }
+  // Reset the four generation-default settings to "no override":
+  // assistantTemperature / assistantTopP / assistantMaxTokens → undefined;
+  // assistantParallelToolCalls → true. Done via a dedicated IPC rather
+  // than `update_settings` because JSON.stringify drops undefined values
+  // at the wire, so the existing patch shape can't carry "delete this
+  // field" intent. Backend follows up with the standard `settings_updated`
+  // broadcast so the inputs re-render empty.
+  | { type: 'assistant_reset_generation_defaults' }
 ;
 
 // ─── Backend → Frontend ───────────────────────────────────────────────────────

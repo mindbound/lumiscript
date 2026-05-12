@@ -1948,6 +1948,22 @@ spindle.onFrontendMessage(async (raw, userId) => {
         break;
       }
 
+      case 'assistant_reset_generation_defaults': {
+        // Single-purpose IPC: clears the three optional numeric overrides
+        // (temperature / top_p / max_tokens) and resets parallel-tool-calls
+        // to the default `true`. Spread + undefined cleanly wipes the
+        // fields from the persisted JSON; FE re-renders inputs as empty
+        // via the standard `settings_updated` broadcast.
+        await settingsStore.update({
+          assistantTemperature: undefined,
+          assistantTopP: undefined,
+          assistantMaxTokens: undefined,
+          assistantParallelToolCalls: true,
+        });
+        pushSettings();
+        break;
+      }
+
 
 
       // ── Run ───────────────────────────────────────────────────────────────

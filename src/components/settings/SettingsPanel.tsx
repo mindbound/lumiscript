@@ -1,5 +1,5 @@
 import { FC, useState, useEffect } from 'react';
-import { Code2, BookMarked, Terminal, Timer, Type, FileCode2, Activity, MessageCircle, Trash2 } from 'lucide-react';
+import { Code2, BookMarked, Terminal, Timer, Type, FileCode2, Activity, MessageCircle, Trash2, RotateCcw } from 'lucide-react';
 import type { Script, LumiScriptSettings } from '../../types/script.js';
 import type { BackendToFrontend, FrontendToBackend } from '../../types/messages.js';
 import { DEFAULT_SETTINGS } from '../../types/script.js';
@@ -265,7 +265,18 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
             Numeric fields use "blank = no override; use connection preset"
             semantic. Empty input value → undefined in settings → field
             omitted in the IPC. */}
-        <div className="ls-settings-subheading">Generation defaults</div>
+        <div className="ls-settings-subheading-row">
+          <span className="ls-settings-subheading">Generation defaults</span>
+          <button
+            type="button"
+            className="ls-settings-subheading-action"
+            onClick={() => sendToBackend({ type: 'assistant_reset_generation_defaults' })}
+            title="Clear all four overrides — temperature, top-p, and max tokens go blank; parallel tool calls returns to the default (on)."
+          >
+            <RotateCcw size={10} />
+            <span>Reset</span>
+          </button>
+        </div>
 
         <div className="ls-settings-field">
           <label className="ls-settings-field-label" title="Sampling temperature (0-2). Higher = more creative / random; lower = more deterministic. Leave blank to use the connection's preset.">

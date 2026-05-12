@@ -99,6 +99,36 @@
   margin: 10px 0 6px;
   opacity: 0.75;
 }
+/* Subheading row variant — subheading + a small action button (e.g. Reset)
+   on the right of the same row. Inherits subheading styling on the label
+   side, button gets its own muted treatment that brightens on hover. */
+.ls-settings-subheading-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 10px 0 6px;
+}
+.ls-settings-subheading-row .ls-settings-subheading {
+  margin: 0;
+}
+.ls-settings-subheading-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  font-size: 10px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: var(--lumiverse-text-muted);
+  cursor: pointer;
+  transition: background 120ms, color 120ms, border-color 120ms;
+}
+.ls-settings-subheading-action:hover {
+  background: var(--lumiverse-fill);
+  color: var(--lumiverse-text);
+  border-color: var(--lumiverse-border);
+}
 /* Danger variant of `.ls-btn` — used for the "Clear all threads" button.
    Restrained styling — the destructive intent is conveyed by the icon +
    the host's confirm modal, not by aggressive button styling at rest. */
