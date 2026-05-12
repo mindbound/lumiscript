@@ -3226,6 +3226,67 @@
       "api.broadcast.emit"
     ]
   },
+  "api.rpc.sync": {
+    "kind": "method",
+    "method": "api.rpc.sync",
+    "namespace": "api.rpc",
+    "signature": "sync<T = unknown>(channel: string, value: T, options?: { as?: string }): Promise<string>",
+    "description": "Publish the latest value on a channel. Returns the fully-qualified endpoint.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.rpc.handle",
+      "api.rpc.read",
+      "api.rpc.unregister",
+      "Promise"
+    ]
+  },
+  "api.rpc.handle": {
+    "kind": "method",
+    "method": "api.rpc.handle",
+    "namespace": "api.rpc",
+    "signature": "handle<T = unknown>(\n    channel: string,\n    handler: (ctx: RpcRequestContext) => T | Promise<T>,\n    options?: { as?: string },\n  ): Promise<string>",
+    "description": "Register an on-demand handler. Returns the fully-qualified endpoint.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.rpc.sync",
+      "api.rpc.read",
+      "api.rpc.unregister",
+      "RpcRequestContext",
+      "Promise"
+    ]
+  },
+  "api.rpc.read": {
+    "kind": "method",
+    "method": "api.rpc.read",
+    "namespace": "api.rpc",
+    "signature": "read<T = unknown>(endpoint: string): Promise<T>",
+    "description": "Read a value from another extension's published endpoint (`<extensionId>.<channel>`).",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.rpc.sync",
+      "api.rpc.handle",
+      "api.rpc.unregister",
+      "Promise"
+    ]
+  },
+  "api.rpc.unregister": {
+    "kind": "method",
+    "method": "api.rpc.unregister",
+    "namespace": "api.rpc",
+    "signature": "unregister(channel: string, options?: { as?: string }): Promise<void>",
+    "description": "Remove a channel previously published by the calling script. Idempotent.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.rpc.sync",
+      "api.rpc.handle",
+      "api.rpc.read",
+      "Promise"
+    ]
+  },
   "api.commands.register": {
     "kind": "method",
     "method": "api.commands.register",
@@ -3756,67 +3817,6 @@
       "script.type",
       "Promise",
       "LSIconsExports"
-    ]
-  },
-  "api.rpc.sync": {
-    "kind": "method",
-    "method": "api.rpc.sync",
-    "namespace": "api.rpc",
-    "signature": "sync<T = unknown>(channel: string, value: T, options?: { as?: string }): Promise<string>",
-    "description": "Publish the latest value on a channel. Returns the fully-qualified endpoint.",
-    "permissions": [],
-    "examples": [],
-    "see_also": [
-      "api.rpc.handle",
-      "api.rpc.read",
-      "api.rpc.unregister",
-      "Promise"
-    ]
-  },
-  "api.rpc.handle": {
-    "kind": "method",
-    "method": "api.rpc.handle",
-    "namespace": "api.rpc",
-    "signature": "handle<T = unknown>(\n    channel: string,\n    handler: (ctx: RpcRequestContext) => T | Promise<T>,\n    options?: { as?: string },\n  ): Promise<string>",
-    "description": "Register an on-demand handler. Returns the fully-qualified endpoint.",
-    "permissions": [],
-    "examples": [],
-    "see_also": [
-      "api.rpc.sync",
-      "api.rpc.read",
-      "api.rpc.unregister",
-      "RpcRequestContext",
-      "Promise"
-    ]
-  },
-  "api.rpc.read": {
-    "kind": "method",
-    "method": "api.rpc.read",
-    "namespace": "api.rpc",
-    "signature": "read<T = unknown>(endpoint: string): Promise<T>",
-    "description": "Read a value from another extension's published endpoint (`<extensionId>.<channel>`).",
-    "permissions": [],
-    "examples": [],
-    "see_also": [
-      "api.rpc.sync",
-      "api.rpc.handle",
-      "api.rpc.unregister",
-      "Promise"
-    ]
-  },
-  "api.rpc.unregister": {
-    "kind": "method",
-    "method": "api.rpc.unregister",
-    "namespace": "api.rpc",
-    "signature": "unregister(channel: string, options?: { as?: string }): Promise<void>",
-    "description": "Remove a channel previously published by the calling script. Idempotent.",
-    "permissions": [],
-    "examples": [],
-    "see_also": [
-      "api.rpc.sync",
-      "api.rpc.handle",
-      "api.rpc.read",
-      "Promise"
     ]
   },
   "ls:components.messageFooter": {

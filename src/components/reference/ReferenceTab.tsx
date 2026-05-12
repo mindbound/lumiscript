@@ -223,6 +223,7 @@ export const PERM_GROUPS: PermGroup[] = [
       { method: 'api.events.*', perms: ['event_tracking'] },
       { method: 'api.tokens.*', perms: [] },
       { method: 'api.db.*', perms: [] },
+      { method: 'api.rpc.*', perms: [] },
     ],
   },
 ];
@@ -2131,6 +2132,15 @@ export const API_GROUPS: FnGroup[] = [
     ],
   },
   {
+    group: 'api.rpc',
+    rows: [
+      { name: 'sync',       args: 'channel, value, options?', desc: 'Publish the latest value on a channel for cross-extension consumption. Endpoints are auto-namespaced as `lumiscript.<scriptSlug>.<channel>` — `scriptSlug` auto-derives from the calling script\'s name, overridable via `options.as`. Returns the fully-qualified endpoint string. Free tier (no permission). Endpoints auto-unregister on script disable / delete / stale-after-re-run.' },
+      { name: 'handle',     args: 'channel, handler, options?', desc: 'Register an on-demand handler for a channel. Handler receives `RpcRequestContext { endpoint, requesterExtensionId }` and returns the response value (sync or async). Same `lumiscript.<scriptSlug>.<channel>` namespacing as `sync`. Returns the fully-qualified endpoint string. Free tier.' },
+      { name: 'read',       args: 'endpoint',                  desc: 'Read a value from another extension\'s published endpoint. Pass the full `<extensionId>.<channel>` path. Throws on missing endpoint. For cross-extension data sharing — use `api.broadcast` for in-extension pub/sub instead.' },
+      { name: 'unregister', args: 'channel, options?',         desc: 'Remove a channel previously published by the calling script via `sync` or `handle`. Idempotent — no-op if the channel isn\'t registered. Pass the same `options.as` you used at registration time if any.' },
+    ],
+  },
+  {
     group: 'api.commands',
     rows: [
       { name: 'register',   args: 'commands[]',         desc: 'Register (or replace) command palette entries. Max 20 per extension.' },
@@ -2480,6 +2490,9 @@ export const NAMESPACE_CONCEPTS: Record<string, string> = {
 
   'api.broadcast':
     'In-memory real-time pub/sub between scripts. Events are NOT persisted — handlers fire synchronously when an event is emitted, and there\'s no replay across script reloads. Subscriptions persist between trigger runs (host wipes them at the START of each new run, not the end), so a "subscriber-only" script can watch events from a script it isn\'t co-triggered with. The `ls:*` prefix is reserved for system events; scripts should namespace their own events with a project-specific prefix. **Distinct from `api.events`** — that one is for persistent event tracking; this one is for real-time messaging.',
+
+  'api.rpc':
+    'Cross-extension shared RPC pool. Wraps Spindle\'s `spindle.rpcPool` with two-tier namespacing: every endpoint is fully-qualified as `lumiscript.<scriptSlug>.<channel>` where `scriptSlug` auto-derives from the calling script\'s name (overridable via `options.as`). Use `sync(channel, value)` to publish a latest-value snapshot and `handle(channel, fn)` to register on-demand handlers — other LumiScript scripts AND other Lumiverse extensions can `read(endpoint)` from these channels. Free tier (no permission). Endpoints auto-unregister on script disable / delete / stale-after-re-run. **Distinct from `api.broadcast`** — broadcast is in-process pub/sub between LumiScript user-scripts; rpc is cross-extension, asks-the-pool RPC where the caller knows the target endpoint by name. Backend-console logs registrations for cross-extension exposure visibility.',
 
   'api.events':
     'Persistent event tracking + replay. Events are durably stored and queryable across script reloads / extension restarts. Use cases: audit logs, state-resuming scripts (`getLatestState` for keys), custom analytics. **Distinct from `api.broadcast`** — that one is in-memory real-time pub/sub; this one is durable storage. Recording requires `event_tracking` permission.',

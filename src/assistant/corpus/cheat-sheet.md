@@ -380,6 +380,17 @@ _The same method set applies to each of the 4 namespaces above._
 | `emit` | event, payload? | Fire a named event to all subscribed handlers across all scripts. |
 | `on` | event, handler | Subscribe to a named event. Returns an unsubscribe function. |
 
+## api.rpc
+
+> **Concepts:** Cross-extension shared RPC pool. Wraps Spindle's `spindle.rpcPool` with two-tier namespacing: every endpoint is fully-qualified as `lumiscript.<scriptSlug>.<channel>` where `scriptSlug` auto-derives from the calling script's name (overridable via `options.as`). Use `sync(channel, value)` to publish a latest-value snapshot and `handle(channel, fn)` to register on-demand handlers — other LumiScript scripts AND other Lumiverse extensions can `read(endpoint)` from these channels. Free tier (no permission). Endpoints auto-unregister on script disable / delete / stale-after-re-run. **Distinct from `api.broadcast`** — broadcast is in-process pub/sub between LumiScript user-scripts; rpc is cross-extension, asks-the-pool RPC where the caller knows the target endpoint by name. Backend-console logs registrations for cross-extension exposure visibility.
+
+| Method | Args | Description |
+|---|---|---|
+| async `sync` | channel, value, options? | Publish the latest value on a channel for cross-extension consumption. Endpoints are auto-namespaced as `lumiscript.<scriptSlug>.<channel>` — `scriptSlug` auto-derives from the calling script's name, overridable via `options.as`. Returns the fully-qualified endpoint string. Free tier (no permission). Endpoints auto-unregister on script disable / delete / stale-after-re-run. |
+| async `handle` | channel, handler, options? | Register an on-demand handler for a channel. Handler receives `RpcRequestContext { endpoint, requesterExtensionId }` and returns the response value (sync or async). Same `lumiscript.<scriptSlug>.<channel>` namespacing as `sync`. Returns the fully-qualified endpoint string. Free tier. |
+| async `read` | endpoint | Read a value from another extension's published endpoint. Pass the full `<extensionId>.<channel>` path. Throws on missing endpoint. For cross-extension data sharing — use `api.broadcast` for in-extension pub/sub instead. |
+| async `unregister` | channel, options? | Remove a channel previously published by the calling script via `sync` or `handle`. Idempotent — no-op if the channel isn't registered. Pass the same `options.as` you used at registration time if any. |
+
 ## api.commands
 
 | Method | Args | Description |

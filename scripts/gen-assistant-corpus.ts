@@ -477,8 +477,9 @@ const EDITOR_ONLY_ALLOWLIST: Allowlist = [
   //  isMessageHidden backfilled into API_GROUPS, surfaced by Q7 where the
   //  model concluded "no hide method exists" because it had no reason to
   //  probe lookup_api on a method name that wasn't in the cheat-sheet view.)
-  // Entire api.rpc namespace missing from API_GROUPS.
-  { match: 'api.rpc.', prefix: true, reason: 'TODO: backfill api.rpc namespace into API_GROUPS.' },
+  // (Resolved 2026-05-13 — api.rpc namespace backfilled into API_GROUPS +
+  //  PERM_GROUPS + NAMESPACE_CONCEPTS, closing the last remaining piece
+  //  of design-doc gap #9.)
 ];
 
 function isAllowlisted(fqName: string, allowlist: Allowlist): boolean {
