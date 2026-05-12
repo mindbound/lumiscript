@@ -447,6 +447,15 @@ export type FrontendToBackend =
   // recent (or creates a new fresh thread if none remain). Backend pushes
   // `assistant_threads` and — if the active thread changed — `assistant_thread_loaded`.
   | { type: 'assistant_delete_thread'; threadId: string }
+  // "Apply to script" — user clicked the apply button on a fenced code block
+  // in an assistant message. Backend auto-classifies trigger vs library from
+  // the code shape (presence of `// @triggers` → trigger; `module.exports`
+  // → library; else default trigger), generates a name, prepends a
+  // provenance header, and calls scriptStorage.createScript. Replies via
+  // `assistant_apply_success` (or `assistant_apply_error` on failure).
+  // `languageHint` is the markdown fence language tag (`js`, `ts`, etc.) —
+  // not strictly required but useful for the heuristic.
+  | { type: 'assistant_apply_to_script'; code: string; languageHint?: string }
 ;
 
 // ─── Backend → Frontend ───────────────────────────────────────────────────────
@@ -908,4 +917,15 @@ export type BackendToFrontend =
       title: string;
       messages: import('lumiverse-spindle-types').LlmMessageDTO[];
     }
+  // Success confirmation for `assistant_apply_to_script` — carries the
+  // generated script name + classified type so the modal can render a
+  // brief toast / inline confirmation. Frontend may also auto-trigger
+  // `pushScripts` consumers to refresh the script-manager list.
+  | {
+      type: 'assistant_apply_success';
+      scriptName: string;
+      scriptType: import('./script.js').ScriptType;
+    }
+  // Failure path — surfaced as an error toast inline in the modal.
+  | { type: 'assistant_apply_error'; error: string }
 ;

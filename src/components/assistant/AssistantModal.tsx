@@ -30,7 +30,7 @@ import type { BackendToFrontend, FrontendToBackend } from '../../types/messages.
 import type { LlmMessagePart } from '../../types/script.js';
 import type { LlmMessageDTO } from 'lumiverse-spindle-types';
 import type { AssistantThreadIndexEntry } from '../../assistant/types.js';
-import { MarkdownContent } from './MarkdownContent.js';
+import { MarkdownContent, AssistantApplyContext } from './MarkdownContent.js';
 
 /**
  * How often (ms) the streaming-bubble's markdown content is allowed to
@@ -203,6 +203,9 @@ export const AssistantModal: FC<AssistantModalProps> = ({
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [renamingThreadId, setRenamingThreadId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
+  /** Inline toast for the "Apply to script" feedback. Cleared automatically
+   *  after a few seconds via the auto-dismiss effect below. */
+  const [applyToast, setApplyToast] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -352,6 +355,18 @@ export const AssistantModal: FC<AssistantModalProps> = ({
           setTotalUsage({ promptTokens: 0, completionTokens: 0, totalTokens: 0 });
           setError(null);
           break;
+        case 'assistant_apply_success':
+          setApplyToast({
+            kind: 'success',
+            text: `Created ${msg.scriptType} script "${msg.scriptName}". Open it in the Script Manager to edit.`,
+          });
+          break;
+        case 'assistant_apply_error':
+          setApplyToast({
+            kind: 'error',
+            text: `Couldn't create script: ${msg.error}`,
+          });
+          break;
         default:
           break;
       }
@@ -380,6 +395,17 @@ export const AssistantModal: FC<AssistantModalProps> = ({
     if (!el) return;
     el.scrollTop = el.scrollHeight;
   }, [messages.length, streaming]);
+
+  // Apply-toast auto-dismiss — success fades after 4s, errors stick longer
+  // (8s) since the user may need to read the error message.
+  useEffect(() => {
+    if (!applyToast) return;
+    const t = setTimeout(
+      () => setApplyToast(null),
+      applyToast.kind === 'success' ? 4000 : 8000,
+    );
+    return () => clearTimeout(t);
+  }, [applyToast]);
 
   const handleSend = () => {
     const content = input.trim();
@@ -431,6 +457,21 @@ export const AssistantModal: FC<AssistantModalProps> = ({
   const handleAbort = () => {
     if (!isGenerating) return;
     sendToBackend({ type: 'assistant_abort' });
+  };
+
+  /** "Apply to script" — invoked from the code-block apply button via the
+   *  AssistantApplyContext. Sends the raw code + fence-language hint;
+   *  backend classifies trigger vs library, generates a name, prepends a
+   *  provenance header, and creates the script. Result surfaces via
+   *  `assistant_apply_success` / `assistant_apply_error`. */
+  const applyContextValue = {
+    onApply: (code: string, languageHint: string | undefined) => {
+      sendToBackend({
+        type: 'assistant_apply_to_script',
+        code,
+        ...(languageHint ? { languageHint } : {}),
+      });
+    },
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -516,49 +557,57 @@ export const AssistantModal: FC<AssistantModalProps> = ({
               )}
             </div>
 
-            <main className="ls-asst-body" ref={scrollRef}>
-              {messages.length === 0 && !streaming && !isGenerating && (
-                <div className="ls-asst-empty">
-                  <p>
-                    Ask about LumiScript or Spindle APIs. Examples:
-                  </p>
-                  <ul>
-                    <li>"How do I send a chat message and trigger generation?"</li>
-                    <li>"Show me an agentic tool-call loop"</li>
-                    <li>"What's the difference between <code>api.broadcast</code> and <code>api.events</code>?"</li>
-                    <li>"What permissions does <code>api.databanks.create</code> need?"</li>
-                  </ul>
-                </div>
-              )}
+            <AssistantApplyContext.Provider value={applyContextValue}>
+              <main className="ls-asst-body" ref={scrollRef}>
+                {messages.length === 0 && !streaming && !isGenerating && (
+                  <div className="ls-asst-empty">
+                    <p>
+                      Ask about LumiScript or Spindle APIs. Examples:
+                    </p>
+                    <ul>
+                      <li>"How do I send a chat message and trigger generation?"</li>
+                      <li>"Show me an agentic tool-call loop"</li>
+                      <li>"What's the difference between <code>api.broadcast</code> and <code>api.events</code>?"</li>
+                      <li>"What permissions does <code>api.databanks.create</code> need?"</li>
+                    </ul>
+                  </div>
+                )}
 
-              {messages.map((m, i) => (
-                <MessageBubble key={i} message={m} />
-              ))}
+                {messages.map((m, i) => (
+                  <MessageBubble key={i} message={m} />
+                ))}
 
-              {(streaming || streamingReasoning) && (
-                <MessageBubble
-                  message={{
-                    role: 'assistant',
-                    content: streaming,
-                    ...(streamingReasoning ? { reasoning: streamingReasoning } : {}),
-                  }}
-                  streaming
-                />
-              )}
+                {(streaming || streamingReasoning) && (
+                  <MessageBubble
+                    message={{
+                      role: 'assistant',
+                      content: streaming,
+                      ...(streamingReasoning ? { reasoning: streamingReasoning } : {}),
+                    }}
+                    streaming
+                  />
+                )}
 
-              {isGenerating && !streaming && !streamingReasoning && (
-                <div className="ls-asst-thinking">
-                  <Loader2 size={14} className="ls-asst-spin" />
-                  <span>Lisa is thinking…</span>
-                </div>
-              )}
+                {isGenerating && !streaming && !streamingReasoning && (
+                  <div className="ls-asst-thinking">
+                    <Loader2 size={14} className="ls-asst-spin" />
+                    <span>Lisa is thinking…</span>
+                  </div>
+                )}
 
-              {error && (
-                <div className="ls-asst-error">
-                  <strong>Error:</strong> {error}
-                </div>
-              )}
-            </main>
+                {error && (
+                  <div className="ls-asst-error">
+                    <strong>Error:</strong> {error}
+                  </div>
+                )}
+
+                {applyToast && (
+                  <div className={`ls-asst-apply-toast ls-asst-apply-toast-${applyToast.kind}`}>
+                    {applyToast.text}
+                  </div>
+                )}
+              </main>
+            </AssistantApplyContext.Provider>
 
             <div className="ls-asst-usage-bar" aria-live="polite">
               {lastTurnUsage && (

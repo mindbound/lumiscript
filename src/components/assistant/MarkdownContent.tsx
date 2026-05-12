@@ -24,7 +24,7 @@
  * sanitised by construction.
  */
 
-import { memo, type ReactNode } from 'react';
+import { memo, createContext, useContext, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { PrismLight as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -34,6 +34,27 @@ import json from 'react-syntax-highlighter/dist/esm/languages/prism/json';
 import css from 'react-syntax-highlighter/dist/esm/languages/prism/css';
 import markup from 'react-syntax-highlighter/dist/esm/languages/prism/markup';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import { FilePlus } from 'lucide-react';
+
+// ─── Apply-to-script context ─────────────────────────────────────────────────
+//
+// Lets the assistant modal expose a "create a script from this code block"
+// callback to deeply-nested code-block renderers without prop-drilling
+// through `memo`'d MarkdownContent (which would break memoisation). When
+// the context value is non-null, fenced code blocks render a hover-
+// revealed "Apply to script" button in the top-right.
+//
+// Set to null (or leave at default `null`) when there's no apply target
+// (e.g. tool-chip content viewer, error message rendering, future surfaces
+// that re-use MarkdownContent outside the assistant modal).
+
+export interface AssistantApplyContextValue {
+  /** Called when the user clicks the apply button on a code block. Receives
+   *  the raw code text + the fence-language tag (e.g. 'js', 'ts') if known. */
+  onApply: (code: string, languageHint: string | undefined) => void;
+}
+
+export const AssistantApplyContext = createContext<AssistantApplyContextValue | null>(null);
 
 // ─── Language registration (one-time module-load) ────────────────────────────
 
@@ -57,25 +78,45 @@ interface CodeBlockProps {
 
 const CodeBlock = ({ className, children, ...rest }: CodeBlockProps) => {
   const match = /language-(\w+)/.exec(className ?? '');
+  const apply = useContext(AssistantApplyContext);
   if (match) {
     const lang = match[1]!;
     const code = String(children ?? '').replace(/\n$/, '');
     return (
-      <SyntaxHighlighter
-        language={lang}
-        style={oneDark}
-        PreTag="div"
-        customStyle={{
-          margin: '8px 0',
-          padding: '10px 12px',
-          borderRadius: 6,
-          fontSize: '12px',
-          background: 'rgba(0, 0, 0, 0.42)',
-        }}
-        wrapLongLines
-      >
-        {code}
-      </SyntaxHighlighter>
+      // Wrapper sets `position: relative` so the apply button can sit
+      // absolutely in the top-right. The block's outer chrome (margin /
+      // background / border-radius) is supplied by .ls-asst-md-code-wrap
+      // in assistant.css so the absolutely-positioned button doesn't
+      // escape its rounded corner.
+      <div className="ls-asst-md-code-wrap">
+        <SyntaxHighlighter
+          language={lang}
+          style={oneDark}
+          PreTag="div"
+          customStyle={{
+            margin: 0,
+            padding: '10px 12px',
+            borderRadius: 6,
+            fontSize: '12px',
+            background: 'rgba(0, 0, 0, 0.42)',
+          }}
+          wrapLongLines
+        >
+          {code}
+        </SyntaxHighlighter>
+        {apply && (
+          <button
+            type="button"
+            className="ls-asst-md-apply"
+            onClick={() => apply.onApply(code, lang)}
+            title="Apply to script — drop this code into a new LumiScript slot"
+            aria-label="Apply to script"
+          >
+            <FilePlus size={11} />
+            <span>Apply</span>
+          </button>
+        )}
+      </div>
     );
   }
   return <code className="ls-asst-md-inline-code" {...rest}>{children}</code>;

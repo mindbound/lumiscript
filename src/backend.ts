@@ -1136,6 +1136,68 @@ spindle.onFrontendMessage(async (raw, userId) => {
         break;
       }
 
+      case 'assistant_apply_to_script': {
+        // "Apply to script" affordance — user clicked a code block's apply
+        // button in the assistant modal. We classify trigger vs library from
+        // the code shape, generate a name, prepend a provenance header, and
+        // create the script via scriptStorage. Returns success/error event
+        // for the modal's inline confirmation.
+        try {
+          const codeRaw = msg.code ?? '';
+          // Classification heuristic: presence-based, conservative defaults.
+          //   - `// @triggers` comment anywhere → trigger (user is writing
+          //     a trigger-shaped script even if @triggers is documentary)
+          //   - `module.exports` or `exports.X = ...` → library
+          //   - else → trigger (more common case in user code)
+          let scriptType: import('./types/script.js').ScriptType = 'trigger';
+          if (/\/\/\s*@triggers\b/m.test(codeRaw)) {
+            scriptType = 'trigger';
+          } else if (/(^|\s)module\.exports\s*=|(^|\s)exports\.\w+\s*=/m.test(codeRaw)) {
+            scriptType = 'library';
+          }
+
+          // Name derivation: pull from the first description-style comment if
+          // present (`// @name Something`, `// @description Something`, or
+          // first non-frontmatter comment line). Else fall back to a
+          // timestamp-based default. Cap at 60 chars for the script-list.
+          let derivedName: string | null = null;
+          const nameMatch = codeRaw.match(/\/\/\s*@name\s+(.+)$/m);
+          if (nameMatch?.[1]) derivedName = nameMatch[1].trim();
+          if (!derivedName) {
+            const descMatch = codeRaw.match(/\/\/\s*@description\s+(.+)$/m);
+            if (descMatch?.[1]) derivedName = descMatch[1].trim();
+          }
+          if (!derivedName) {
+            const stamp = new Date().toISOString().replace('T', ' ').slice(0, 16);
+            derivedName = `Imported from Lisa — ${stamp}`;
+          }
+          if (derivedName.length > 60) derivedName = `${derivedName.slice(0, 57)}…`;
+
+          // Provenance header prepended unless the code already starts with
+          // a frontmatter block (existing @triggers / @name / etc.).
+          const hasFrontmatter = /^\/\/\s*@\w+/m.test(codeRaw.split('\n').slice(0, 5).join('\n'));
+          const headerLine = `// Imported from Lisa — ${new Date().toISOString().slice(0, 10)} — review before enabling.`;
+          const finalCode = hasFrontmatter
+            ? `${headerLine}\n${codeRaw}`
+            : `${headerLine}\n\n${codeRaw}`;
+
+          await scriptStorage.createScript(derivedName, scriptType, finalCode);
+          pushScripts();
+          void syncTriggers();
+          pushTools();
+          spindle.sendToFrontend({
+            type:       'assistant_apply_success',
+            scriptName: derivedName,
+            scriptType,
+          });
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          spindle.log.warn(`[LumiScript] assistant_apply_to_script failed: ${errMsg}`);
+          spindle.sendToFrontend({ type: 'assistant_apply_error', error: errMsg });
+        }
+        break;
+      }
+
       // ── Storage panel: Collections (admin view) ─────────────────────────
       case 'list_collections': {
         await pushCollections(userId);

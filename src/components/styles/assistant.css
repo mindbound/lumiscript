@@ -336,6 +336,28 @@
   font-size: 12px;
 }
 
+/* Inline "Apply to script" toast — appears at the bottom of the message
+   body after the user clicks an apply button. Auto-dismisses after 4s
+   (success) / 8s (error) via a timer in the modal. */
+.ls-asst-apply-toast {
+  align-self: stretch;
+  padding: 8px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--lumiverse-radius-sm, 6px);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+.ls-asst-apply-toast-success {
+  background: rgba(74, 222, 128, 0.10);
+  border-color: rgba(74, 222, 128, 0.32);
+  color: rgb(134, 239, 172);
+}
+.ls-asst-apply-toast-error {
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.35);
+  color: rgb(252, 165, 165);
+}
+
 /* ── Usage strip ───────────────────────────────────────────────────────── */
 
 .ls-asst-usage-bar {
@@ -608,6 +630,48 @@
 .ls-asst-md pre code {
   padding: 0;
   background: transparent;
+}
+
+/* ── Code-block wrapper + "Apply to script" button ─────────────────────── */
+
+/* Wrapper around each fenced code block — provides the positioning context
+   for the absolutely-placed apply button and supplies the outer 8px
+   vertical margin (the inner SyntaxHighlighter's customStyle margin is
+   zeroed to make room for this wrapper). */
+.ls-asst-md-code-wrap {
+  position: relative;
+  margin: 8px 0;
+}
+
+/* Hover-revealed apply button — top-right of the code block. Renders only
+   when the assistant's AssistantApplyContext provider is present (i.e.
+   in the modal; not in tool-chip viewers or other markdown surfaces). */
+.ls-asst-md-apply {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  font-size: 10.5px;
+  font-weight: 500;
+  background: var(--lumiverse-fill-3, rgba(255, 255, 255, 0.12));
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.92));
+  border: 1px solid var(--lumiverse-border-light, rgba(128, 128, 128, 0.28));
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms, background 120ms, border-color 120ms;
+}
+.ls-asst-md-code-wrap:hover .ls-asst-md-apply,
+.ls-asst-md-apply:focus-visible {
+  opacity: 1;
+}
+.ls-asst-md-apply:hover {
+  background: var(--lumiverse-accent, rgb(147, 112, 219));
+  color: var(--lumiverse-accent-fg, #ffffff);
+  border-color: var(--lumiverse-accent, rgb(147, 112, 219));
 }
 
 .ls-asst-md ul,
