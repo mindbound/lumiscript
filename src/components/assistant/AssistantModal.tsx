@@ -25,7 +25,7 @@
 
 import { FC, useState, useEffect, useRef, KeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
-import { Send, X, Loader2, Coffee, Square, Brain, ChevronRight, MessageSquarePlus, Pencil, Trash2, Check } from 'lucide-react';
+import { Send, X, Loader2, Coffee, Square, Brain, ChevronRight, MessageSquarePlus, Pencil, Trash2, Check, Download } from 'lucide-react';
 import type { BackendToFrontend, FrontendToBackend } from '../../types/messages.js';
 import type { LlmMessagePart } from '../../types/script.js';
 import type { LlmMessageDTO } from 'lumiverse-spindle-types';
@@ -367,6 +367,32 @@ export const AssistantModal: FC<AssistantModalProps> = ({
             text: `Couldn't create script: ${msg.error}`,
           });
           break;
+        case 'assistant_thread_exported': {
+          // Backend assembled the Markdown — trigger a user-facing download
+          // via a temporary blob URL. No host download API exists for
+          // extensions; falling back to the browser-native pattern.
+          try {
+            const blob = new Blob([msg.content], { type: 'text/markdown;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = msg.filename;
+            a.style.display = 'none';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            // Revoke after a tick so the browser has time to start the
+            // download — premature revoke breaks the save dialog in some
+            // browsers.
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+          } catch (err) {
+            setApplyToast({
+              kind: 'error',
+              text: `Couldn't export thread: ${err instanceof Error ? err.message : String(err)}`,
+            });
+          }
+          break;
+        }
         default:
           break;
       }
@@ -454,6 +480,16 @@ export const AssistantModal: FC<AssistantModalProps> = ({
     sendToBackend({ type: 'assistant_delete_thread', threadId });
   };
 
+  /** Export a thread as Markdown — backend assembles the content and pushes
+   *  it back via `assistant_thread_exported`, which triggers a browser
+   *  download via a temporary blob URL (handled in the message subscriber
+   *  above). Disabled while a turn is streaming, same lockout as other
+   *  thread actions. */
+  const handleExportThread = (threadId: string) => {
+    if (isGenerating) return;
+    sendToBackend({ type: 'assistant_export_thread', threadId });
+  };
+
   const handleAbort = () => {
     if (!isGenerating) return;
     sendToBackend({ type: 'assistant_abort' });
@@ -522,6 +558,7 @@ export const AssistantModal: FC<AssistantModalProps> = ({
             onCancelRename={handleCancelRename}
             onRenameDraftChange={setRenameDraft}
             onDeleteThread={handleDeleteThread}
+            onExportThread={handleExportThread}
           />
 
           <div className="ls-asst-main-col">
@@ -694,6 +731,7 @@ interface ThreadSidebarProps {
   onCancelRename: () => void;
   onRenameDraftChange: (next: string) => void;
   onDeleteThread: (id: string) => void;
+  onExportThread: (id: string) => void;
 }
 
 const ThreadSidebar: FC<ThreadSidebarProps> = ({
@@ -709,6 +747,7 @@ const ThreadSidebar: FC<ThreadSidebarProps> = ({
   onCancelRename,
   onRenameDraftChange,
   onDeleteThread,
+  onExportThread,
 }) => {
   return (
     <aside className="ls-asst-sidebar">
@@ -794,6 +833,18 @@ const ThreadSidebar: FC<ThreadSidebarProps> = ({
                     title="Rename thread"
                   >
                     <Pencil size={11} />
+                  </button>
+                  <button
+                    type="button"
+                    className="ls-asst-thread-action"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onExportThread(t.id);
+                    }}
+                    disabled={disabled}
+                    title="Export thread as Markdown"
+                  >
+                    <Download size={11} />
                   </button>
                   <button
                     type="button"

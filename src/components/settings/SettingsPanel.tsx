@@ -1,5 +1,5 @@
 import { FC, useState, useEffect } from 'react';
-import { Code2, BookMarked, Terminal, Timer, Type, FileCode2, Activity, MessageCircle } from 'lucide-react';
+import { Code2, BookMarked, Terminal, Timer, Type, FileCode2, Activity, MessageCircle, Trash2 } from 'lucide-react';
 import type { Script, LumiScriptSettings } from '../../types/script.js';
 import type { BackendToFrontend, FrontendToBackend } from '../../types/messages.js';
 import { DEFAULT_SETTINGS } from '../../types/script.js';
@@ -260,6 +260,99 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
             }}
           />
         </div>
+
+        {/* Generation defaults — passed to runAssistantTurn via parameters.
+            Numeric fields use "blank = no override; use connection preset"
+            semantic. Empty input value → undefined in settings → field
+            omitted in the IPC. */}
+        <div className="ls-settings-subheading">Generation defaults</div>
+
+        <div className="ls-settings-field">
+          <label className="ls-settings-field-label" title="Sampling temperature (0-2). Higher = more creative / random; lower = more deterministic. Leave blank to use the connection's preset.">
+            Temperature
+          </label>
+          <input
+            type="number"
+            className="ls-number-input"
+            min={0}
+            max={2}
+            step={0.1}
+            value={settings.assistantTemperature ?? ''}
+            placeholder="default"
+            onChange={e => {
+              const raw = e.target.value;
+              const parsed = raw === '' ? undefined : Math.max(0, Math.min(2, Number(raw)));
+              const v: number | undefined = parsed === undefined || Number.isNaN(parsed) ? undefined : parsed;
+              sendToBackend({ type: 'update_settings', patch: { assistantTemperature: v } });
+            }}
+          />
+        </div>
+
+        <div className="ls-settings-field">
+          <label className="ls-settings-field-label" title="Top-P nucleus sampling (0-1). Independent of temperature; most users tune one or the other, not both. Leave blank to use the connection's preset.">
+            Top-P
+          </label>
+          <input
+            type="number"
+            className="ls-number-input"
+            min={0}
+            max={1}
+            step={0.05}
+            value={settings.assistantTopP ?? ''}
+            placeholder="default"
+            onChange={e => {
+              const raw = e.target.value;
+              const parsed = raw === '' ? undefined : Math.max(0, Math.min(1, Number(raw)));
+              const v: number | undefined = parsed === undefined || Number.isNaN(parsed) ? undefined : parsed;
+              sendToBackend({ type: 'update_settings', patch: { assistantTopP: v } });
+            }}
+          />
+        </div>
+
+        <div className="ls-settings-field">
+          <label className="ls-settings-field-label" title="Output token cap per turn. Lower bounds the response length; raise for long-form answers. Leave blank to use the connection's preset.">
+            Max tokens
+          </label>
+          <input
+            type="number"
+            className="ls-number-input"
+            min={1}
+            max={32768}
+            step={256}
+            value={settings.assistantMaxTokens ?? ''}
+            placeholder="default"
+            onChange={e => {
+              const raw = e.target.value;
+              const parsed = raw === '' ? undefined : Math.max(1, Math.min(32768, Number(raw)));
+              const v: number | undefined = parsed === undefined || Number.isNaN(parsed) ? undefined : parsed;
+              sendToBackend({ type: 'update_settings', patch: { assistantMaxTokens: v } });
+            }}
+          />
+        </div>
+
+        <div className="ls-toggle-row" title="When unchecked, Lisa requests serialised (one-at-a-time) tool calls. Most providers handle parallel calls fine; uncheck only for Mistral and other providers that choke on parallelism.">
+          <label className="ls-toggle">
+            <input
+              type="checkbox"
+              checked={settings.assistantParallelToolCalls}
+              onChange={e => sendToBackend({ type: 'update_settings', patch: { assistantParallelToolCalls: e.target.checked } })}
+            />
+            <span className="ls-toggle-slider" />
+          </label>
+          <span style={{ fontSize: 12 }}>Parallel tool calls</span>
+        </div>
+
+        <div className="ls-settings-subheading">Conversation management</div>
+
+        <button
+          type="button"
+          className="ls-btn ls-btn-danger"
+          onClick={() => sendToBackend({ type: 'assistant_clear_all_threads' })}
+          title="Permanently delete every Lisa thread and its conversation history. Confirms before acting."
+        >
+          <Trash2 size={11} style={{ marginRight: 4 }} />
+          Clear all threads
+        </button>
 
         <button
           type="button"

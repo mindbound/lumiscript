@@ -146,6 +146,20 @@ export interface LumiScriptSettings {
    * Range: 2 – 20.
    */
   assistantMaxIterations: number;
+  /**
+   * Generation defaults passed through `RunTurnOptions.parameters` to the
+   * underlying `spindle.generate.rawStream` call. The three numeric fields
+   * are OPTIONAL — blank / undefined means "no override; use the
+   * connection's preset value." `parallelToolCalls` is a non-optional
+   * boolean (the checkbox UI can't carry an undefined state); defaults to
+   * `true` (most providers' default). Only forces serialised tool use
+   * when set to `false` — useful for Mistral and other providers that
+   * choke on parallel tool calls.
+   */
+  assistantTemperature?: number;
+  assistantTopP?: number;
+  assistantMaxTokens?: number;
+  assistantParallelToolCalls: boolean;
 }
 
 export const DEFAULT_TRIGGER_TEMPLATE =
@@ -176,6 +190,10 @@ export const DEFAULT_SETTINGS: LumiScriptSettings = {
   defaultTriggerTemplate: DEFAULT_TRIGGER_TEMPLATE,
   defaultLibraryTemplate: DEFAULT_LIBRARY_TEMPLATE,
   assistantMaxIterations: 8,
+  // Generation defaults — temperature / topP / maxTokens are intentionally
+  // omitted (undefined). The "no override; use connection preset" semantic
+  // is meaningful state — only set them if the user explicitly tweaks.
+  assistantParallelToolCalls: true,
 };
 
 // ─── Execution ────────────────────────────────────────────────────────────────

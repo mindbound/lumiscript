@@ -87,6 +87,30 @@
   color: var(--lumiverse-text-muted);
   margin-bottom: 8px;
 }
+/* Secondary heading within a section — used inside the Assistant section
+   for "Generation defaults" + "Conversation management" sub-groups. Lighter
+   weight than `.ls-settings-section-label` since it's a sub-level. */
+.ls-settings-subheading {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--lumiverse-text-muted);
+  margin: 10px 0 6px;
+  opacity: 0.75;
+}
+/* Danger variant of `.ls-btn` — used for the "Clear all threads" button.
+   Restrained styling — the destructive intent is conveyed by the icon +
+   the host's confirm modal, not by aggressive button styling at rest. */
+.ls-btn-danger {
+  color: rgb(252, 165, 165);
+  border-color: rgba(239, 68, 68, 0.32);
+}
+.ls-btn-danger:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.12);
+  color: rgb(239, 68, 68);
+  border-color: rgba(239, 68, 68, 0.55);
+}
 .ls-settings-field {
   display: flex;
   align-items: center;

@@ -456,6 +456,17 @@ export type FrontendToBackend =
   // `languageHint` is the markdown fence language tag (`js`, `ts`, etc.) —
   // not strictly required but useful for the heuristic.
   | { type: 'assistant_apply_to_script'; code: string; languageHint?: string }
+  // ─── Conversation management (v0.30.x — gap #10) ────────────────────────
+  // Delete every thread (with confirm). Backend pops a Spindle-native modal
+  // for confirmation; on confirm, deletes all per-thread files, clears the
+  // index, creates a fresh empty active thread. Pushes `assistant_threads`
+  // (empty + new active id) and `assistant_thread_loaded` (empty body).
+  | { type: 'assistant_clear_all_threads' }
+  // Export a single thread as Markdown. Backend assembles the markdown
+  // (title + role-headed message blocks + reasoning content + tool-call
+  // annotations) and sends it back via `assistant_thread_exported` —
+  // frontend triggers the user-facing download via a temporary blob URL.
+  | { type: 'assistant_export_thread'; threadId: string }
 ;
 
 // ─── Backend → Frontend ───────────────────────────────────────────────────────
@@ -928,4 +939,12 @@ export type BackendToFrontend =
     }
   // Failure path — surfaced as an error toast inline in the modal.
   | { type: 'assistant_apply_error'; error: string }
+  // Thread export payload — backend assembled the Markdown; frontend
+  // triggers the actual user-facing download via a temporary blob URL.
+  | {
+      type: 'assistant_thread_exported';
+      threadId: string;
+      filename: string;
+      content: string;
+    }
 ;

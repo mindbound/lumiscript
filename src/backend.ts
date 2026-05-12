@@ -948,13 +948,26 @@ spindle.onFrontendMessage(async (raw, userId) => {
         assistantStreamedContent = '';
         let aborted = false;
         try {
+          // Generation parameter defaults from settings. Optional numeric
+          // fields pass through only when explicitly set ("blank = use
+          // connection default" semantic). `parallel_tool_calls=true` is
+          // also the host's default — we still send it explicitly so
+          // settings-driven `false` always wins over connection presets.
+          const s = settingsStore.get();
+          const parameters: Record<string, unknown> = {};
+          if (typeof s.assistantTemperature === 'number') parameters.temperature       = s.assistantTemperature;
+          if (typeof s.assistantTopP        === 'number') parameters.top_p             = s.assistantTopP;
+          if (typeof s.assistantMaxTokens   === 'number') parameters.max_tokens        = s.assistantMaxTokens;
+          parameters.parallel_tool_calls = s.assistantParallelToolCalls;
+
           const result = await runAssistantTurn(
             {
               history: activeAssistantThread.messages,
               userInput: msg.content,
               userId: activeUserId,
-              maxIterations: settingsStore.get().assistantMaxIterations,
+              maxIterations: s.assistantMaxIterations,
               signal: assistantAbortController.signal,
+              parameters,
               ...(msg.connectionId ? { connectionId: msg.connectionId } : {}),
             },
             {
@@ -1195,6 +1208,151 @@ spindle.onFrontendMessage(async (raw, userId) => {
           spindle.log.warn(`[LumiScript] assistant_apply_to_script failed: ${errMsg}`);
           spindle.sendToFrontend({ type: 'assistant_apply_error', error: errMsg });
         }
+        break;
+      }
+
+      case 'assistant_clear_all_threads': {
+        if (!activeUserId || !assistantInitialized) break;
+
+        // Spindle-native confirm before anything destructive.
+        const confirmRes = await spindle.modal.confirm({
+          title:        'Clear all threads?',
+          message:      `This will permanently delete every Lisa thread (${assistantThreadIndex.length} total) and all their conversation history. This can't be undone.`,
+          variant:      'danger',
+          confirmLabel: 'Delete all',
+          cancelLabel:  'Keep',
+          userId:       activeUserId,
+        }).catch(() => ({ confirmed: false }));
+        if (!confirmRes.confirmed) break;
+
+        // Walk the index and delete each thread file. Idempotent — failures
+        // are swallowed per-thread (deleteThreadFile already does this).
+        const idsToDelete = assistantThreadIndex.map((e) => e.id);
+        await Promise.all(idsToDelete.map((id) => deleteThreadFile(activeUserId!, id)));
+
+        // Clear the in-memory index + persist the empty file.
+        assistantThreadIndex = [];
+        try {
+          await saveThreadIndex(activeUserId, assistantThreadIndex);
+        } catch (err) {
+          spindle.log.warn(
+            `[LumiScript] assistant_clear_all_threads: index save failed: ` +
+            (err instanceof Error ? err.message : String(err)),
+          );
+        }
+
+        // Replace the active slot with a fresh empty thread (not persisted
+        // — same as the post-`assistant_new_thread` state).
+        activeAssistantThread = createNewThread();
+        pushAssistantThreads();
+        pushActiveThreadLoaded();
+        break;
+      }
+
+      case 'assistant_export_thread': {
+        if (!activeUserId || !assistantInitialized) break;
+
+        // Load the target thread — prefer in-memory if it's the active
+        // one, fall back to disk.
+        const thread = activeAssistantThread?.id === msg.threadId
+          ? activeAssistantThread
+          : await loadThread(activeUserId, msg.threadId).catch(() => null);
+        if (!thread) {
+          spindle.log.warn(`[LumiScript] assistant_export_thread: thread ${msg.threadId} not found.`);
+          break;
+        }
+
+        // Assemble Markdown. Format: title header + per-message blocks with
+        // role-coded headers. Tool-use parts render as inline annotations.
+        // Reasoning content renders as a > blockquote before the assistant
+        // bubble's text.
+        const lines: string[] = [];
+        lines.push(`# ${thread.title}`);
+        lines.push('');
+        lines.push(`_Exported from Lisa — ${new Date(thread.updatedAt).toISOString().slice(0, 19).replace('T', ' ')}_`);
+        lines.push('');
+        lines.push('---');
+        lines.push('');
+
+        // Map tool_use_id → result, to pair tool calls with their outcomes
+        // when rendering (same pattern the modal's historyToDisplay uses).
+        const toolResults = new Map<string, { content: string; isError: boolean }>();
+        for (const m of thread.messages) {
+          if (m.role !== 'user' || !Array.isArray(m.content)) continue;
+          for (const part of m.content as Array<{ type: string; tool_use_id?: string; content?: string; is_error?: boolean }>) {
+            if (part.type === 'tool_result' && part.tool_use_id) {
+              toolResults.set(part.tool_use_id, {
+                content: typeof part.content === 'string' ? part.content : JSON.stringify(part.content),
+                isError: !!part.is_error,
+              });
+            }
+          }
+        }
+
+        for (const m of thread.messages) {
+          if (m.role === 'system') continue;
+          if (m.role === 'user' && Array.isArray(m.content)) continue; // tool_result-only, handled inline below
+          const roleLabel = m.role === 'user' ? '👤 User' : '🤖 Assistant';
+          lines.push(`## ${roleLabel}`);
+          lines.push('');
+
+          // Reasoning content first if present (assistant only).
+          const reasoning = (m as { reasoning_content?: string }).reasoning_content;
+          if (reasoning) {
+            lines.push('> **Reasoning:**');
+            for (const rline of reasoning.split('\n')) lines.push(`> ${rline}`);
+            lines.push('');
+          }
+
+          if (typeof m.content === 'string') {
+            lines.push(m.content);
+            lines.push('');
+          } else if (Array.isArray(m.content)) {
+            for (const part of m.content as Array<{ type: string; text?: string; id?: string; name?: string; input?: Record<string, unknown> }>) {
+              if (part.type === 'text' && part.text) {
+                lines.push(part.text);
+                lines.push('');
+              } else if (part.type === 'tool_use' && part.id && part.name) {
+                const result = toolResults.get(part.id);
+                const inputJson = JSON.stringify(part.input ?? {}, null, 2);
+                lines.push(`**🔧 Tool call: \`${part.name}\`**`);
+                lines.push('');
+                lines.push('```json');
+                lines.push(inputJson);
+                lines.push('```');
+                if (result) {
+                  lines.push('');
+                  lines.push(result.isError ? '**✕ Tool error:**' : '**✓ Tool result:**');
+                  lines.push('');
+                  lines.push('```');
+                  lines.push(result.content);
+                  lines.push('```');
+                }
+                lines.push('');
+              }
+            }
+          }
+          lines.push('---');
+          lines.push('');
+        }
+
+        const content = lines.join('\n');
+        // Filename: derive from the title with a date suffix. Strip / replace
+        // chars that don't survive in filesystem-safe names.
+        const safeTitle = thread.title
+          .replace(/[\\/:*?"<>|]/g, '-')
+          .replace(/\s+/g, '-')
+          .replace(/-+/g, '-')
+          .slice(0, 60) || 'thread';
+        const datePart = new Date().toISOString().slice(0, 10);
+        const filename = `lisa-${safeTitle}-${datePart}.md`;
+
+        spindle.sendToFrontend({
+          type:     'assistant_thread_exported',
+          threadId: thread.id,
+          filename,
+          content,
+        });
         break;
       }
 
