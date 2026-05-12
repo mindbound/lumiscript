@@ -57,24 +57,24 @@ const GroupHeader: FC<{ label: React.ReactNode; cols: number }> = ({ label, cols
 
 // ─── Events table ─────────────────────────────────────────────────────────────
 
-export interface EventRow { name: string; group: string; payload: string; }
+export interface EventRow { name: string; group: string; payload: string; fires?: string }
 
 export const EVENTS: EventRow[] = [
-  { group: 'LumiScript', name: 'ls:startup',                 payload: '{ __event: "ls:startup" }' },
-  { group: 'LumiScript', name: 'ls:teardown',                payload: "{ reason: 'disabled' | 'deleted', scriptId, scriptName }" },
-  { group: 'Chat',       name: 'MESSAGE_SENT',               payload: '{ chatId, message }' },
+  { group: 'LumiScript', name: 'ls:startup',                 payload: '{ __event: "ls:startup" }', fires: 'Once per LumiScript boot (extension enable / app start). Use for one-shot setup work.' },
+  { group: 'LumiScript', name: 'ls:teardown',                payload: "{ reason: 'disabled' | 'deleted', scriptId, scriptName }", fires: 'Per-script when the script is disabled or deleted. Use for cleanup.' },
+  { group: 'Chat',       name: 'MESSAGE_SENT',               payload: '{ chatId, message }', fires: 'Once per **user**-initiated send. Does NOT fire for assistant-side messages — use `GENERATION_ENDED` for those.' },
   { group: 'Chat',       name: 'MESSAGE_EDITED',             payload: '{ chatId, message }' },
   { group: 'Chat',       name: 'MESSAGE_DELETED',            payload: '{ chatId, messageId }' },
-  { group: 'Chat',       name: 'MESSAGE_SWIPED',             payload: '{ chatId, message, action, swipeId, previousSwipeId? }' },
+  { group: 'Chat',       name: 'MESSAGE_SWIPED',             payload: '{ chatId, message, action, swipeId, previousSwipeId? }', fires: 'Twice per swipe-with-regen (initiation + completion); once for swipe-without-regen.' },
   { group: 'Chat',       name: 'SWIPE_EDITED',               payload: '{ chatId, message, previousSwipeId }' },
   { group: 'Chat',       name: 'CHARACTER_MESSAGE_RENDERED', payload: '{ chatId, messageId }' },
   { group: 'Chat',       name: 'USER_MESSAGE_RENDERED',      payload: '{ chatId, messageId }' },
   { group: 'Generation', name: 'GENERATION_STARTED',         payload: '{ generationId, chatId, model }' },
-  { group: 'Generation', name: 'GENERATION_ENDED',           payload: '{ generationId, chatId, messageId, content }' },
+  { group: 'Generation', name: 'GENERATION_ENDED',           payload: '{ generationId, chatId, messageId, content }', fires: 'Assistant-side message arrival (the counterpart to `MESSAGE_SENT` for user messages). Payload has no `swipeId` — look it up via `api.chat.getMessages` if needed.' },
   { group: 'Generation', name: 'GENERATION_STOPPED',         payload: '{ generationId, chatId, content }' },
   { group: 'Generation', name: 'STREAM_TOKEN_RECEIVED',      payload: '{ generationId, chatId, token }' },
-  { group: 'Entities',   name: 'CHAT_CHANGED',               payload: '{ chatId }' },
-  { group: 'Entities',   name: 'CHAT_SWITCHED',              payload: '{ chatId: string | null }  // null on return-to-home' },
+  { group: 'Entities',   name: 'CHAT_CHANGED',               payload: '{ chatId }', fires: 'Chat **metadata** mutations only (rename, etc.). Does NOT fire on chat open/switch — use `CHAT_SWITCHED` for that.' },
+  { group: 'Entities',   name: 'CHAT_SWITCHED',              payload: '{ chatId: string | null }  // null on return-to-home', fires: 'Active chat opens, switches, or closes (chatId becomes null on return-to-home).' },
   { group: 'Entities',   name: 'CHARACTER_EDITED',           payload: '{ id, character }' },
   { group: 'Entities',   name: 'CHARACTER_DELETED',          payload: '{ id }' },
   { group: 'Entities',   name: 'CHARACTER_DUPLICATED',       payload: '{ id, newId }' },
@@ -97,6 +97,7 @@ const EventsTable: FC = () => {
           <th>Event</th>
           <th>Group</th>
           <th>Payload shape</th>
+          <th>Fires</th>
         </tr>
       </thead>
       <tbody>
@@ -108,6 +109,7 @@ const EventsTable: FC = () => {
               <td><Code>{ev.name}</Code></td>
               <td><span className="ls-ref-muted">{groupCell}</span></td>
               <td><span className="ls-ref-muted">{ev.payload}</span></td>
+              <td><span className="ls-ref-muted">{ev.fires ?? ''}</span></td>
             </tr>
           );
         })}
@@ -1725,6 +1727,97 @@ export const KEY_TYPES: TypeDoc[] = [
       { field: 'mimeType?', type: 'string',     optional: true,  desc: "Optional content type. Defaults to 'image/png' on the host side." },
     ],
   },
+
+  // ─── Databanks ───────────────────────────────────────────────────────────────
+  {
+    name: 'DatabankScope',
+    note: "**Enum**: `'global' | 'character' | 'chat'`. Activation scope for a databank. There are EXACTLY THREE values — there is no `'script'` scope. `'global'` is unscoped (available everywhere); `'character'` is keyed by a character UUID via `scopeId`; `'chat'` is keyed by a chat UUID via `scopeId`. `scopeId` is REQUIRED for `'character'` and `'chat'`, omitted (or null) for `'global'`. Scope cannot be changed after creation — pick the right one up front.",
+    fields: [],
+  },
+  {
+    name: 'DatabankDocumentStatus',
+    note: "**Enum**: `'pending' | 'processing' | 'ready' | 'error'`. Ingestion lifecycle of an uploaded document. New uploads land as `'pending'` and progress through `'processing'` to `'ready'` (success) or `'error'` (terminal failure). `documents.getContent()` returns null for anything other than `'ready'`; `documents.waitUntilReady()` polls until ready and throws on `'error'` or timeout.",
+    fields: [],
+  },
+  {
+    name: 'DatabankInfo',
+    note: 'Returned by api.databanks.get / findByName / create / update; entries inside list().',
+    fields: [
+      { field: 'id',              type: 'string',                  optional: false, desc: 'Databank ID.' },
+      { field: 'name',            type: 'string',                  optional: false, desc: 'Display name.' },
+      { field: 'description',     type: 'string',                  optional: false, desc: 'Free-form description; empty string if unset.' },
+      { field: 'scope',           type: 'DatabankScope',           optional: false, desc: "Activation scope: 'global' | 'character' | 'chat'." },
+      { field: 'scopeId',         type: 'string | null',           optional: false, desc: "Owner key for 'character' (character UUID) or 'chat' (chat UUID) scopes. null for 'global'." },
+      { field: 'enabled',         type: 'boolean',                 optional: false, desc: 'Whether the databank participates in retrieval.' },
+      { field: 'metadata',        type: 'Record<string, unknown>', optional: false, desc: 'Arbitrary metadata bag.' },
+      { field: 'documentCount?',  type: 'number',                  optional: true,  desc: 'Number of documents in the databank. May be omitted on bulk list responses for performance.' },
+      { field: 'createdAt',       type: 'number',                  optional: false, desc: 'Creation timestamp (ms since epoch).' },
+      { field: 'updatedAt',       type: 'number',                  optional: false, desc: 'Last-modified timestamp (ms since epoch).' },
+    ],
+  },
+  {
+    name: 'DatabankCreateInput',
+    note: 'Passed to api.databanks.create(input). Validates host-side — invalid scope or missing scopeId rejects the call.',
+    fields: [
+      { field: 'name',         type: 'string',         optional: false, desc: 'Display name for the new databank.' },
+      { field: 'description?', type: 'string',         optional: true,  desc: 'Free-form description.' },
+      { field: 'scope',        type: 'DatabankScope',  optional: false, desc: "Activation scope. MUST be one of 'global' | 'character' | 'chat' — see DatabankScope. There is no 'script' scope." },
+      { field: 'scopeId?',     type: 'string | null',  optional: true,  desc: "Owner key. REQUIRED when scope is 'character' or 'chat' (character UUID or chat UUID respectively). Omit (or pass null) when scope is 'global'." },
+    ],
+  },
+  {
+    name: 'DatabankUpdateInput',
+    note: 'Passed to api.databanks.update(databankId, input). Scope cannot be changed after creation — there are no scope/scopeId fields here on purpose.',
+    fields: [
+      { field: 'name?',        type: 'string',  optional: true, desc: 'New display name.' },
+      { field: 'description?', type: 'string',  optional: true, desc: 'New description.' },
+      { field: 'enabled?',     type: 'boolean', optional: true, desc: 'Whether this databank participates in retrieval.' },
+    ],
+  },
+  {
+    name: 'DatabankDocumentInfo',
+    note: 'Returned by api.databanks.documents.get / findByName / create / update / waitUntilReady; entries inside documents.list().',
+    fields: [
+      { field: 'id',           type: 'string',                  optional: false, desc: 'Document ID.' },
+      { field: 'databankId',   type: 'string',                  optional: false, desc: 'Parent databank ID.' },
+      { field: 'name',         type: 'string',                  optional: false, desc: 'Display name.' },
+      { field: 'slug',         type: 'string',                  optional: false, desc: 'URL-safe slug derived from name. Regenerated on rename.' },
+      { field: 'mimeType',     type: 'string',                  optional: false, desc: 'MIME type recorded at upload.' },
+      { field: 'fileSize',     type: 'number',                  optional: false, desc: 'Size in bytes.' },
+      { field: 'contentHash',  type: 'string',                  optional: false, desc: 'Content fingerprint (hash). Use to detect external content changes between uploads.' },
+      { field: 'totalChunks',  type: 'number',                  optional: false, desc: 'Number of chunks the document was split into for embedding.' },
+      { field: 'status',       type: 'DatabankDocumentStatus',  optional: false, desc: "Ingestion lifecycle: 'pending' | 'processing' | 'ready' | 'error'." },
+      { field: 'errorMessage', type: 'string | null',           optional: false, desc: "Human-readable error description when status is 'error'. null otherwise." },
+      { field: 'metadata',     type: 'Record<string, unknown>', optional: false, desc: 'Arbitrary metadata bag.' },
+      { field: 'createdAt',    type: 'number',                  optional: false, desc: 'Upload timestamp (ms since epoch).' },
+      { field: 'updatedAt',    type: 'number',                  optional: false, desc: 'Last-modified timestamp (ms since epoch).' },
+    ],
+  },
+  {
+    name: 'DatabankDocumentCreateInput',
+    note: 'Passed to api.databanks.documents.create(databankId, input). Upload returns immediately with status=\'pending\' — use waitUntilReady() to await ingestion. Max size 10 MB.',
+    fields: [
+      { field: 'data',      type: 'string | Uint8Array', optional: false, desc: 'Document content. string values are UTF-8 encoded internally; pass Uint8Array directly for already-binary sources.' },
+      { field: 'filename',  type: 'string',              optional: false, desc: 'Original filename including extension. Supported extensions: .txt .md .markdown .csv .tsv .json .xml .html .htm .yaml .yml .log .rst .rtf.' },
+      { field: 'mimeType?', type: 'string',              optional: true,  desc: 'Optional MIME type recorded on the document. Derived from filename extension when omitted.' },
+      { field: 'name?',     type: 'string',              optional: true,  desc: 'Display name override. Defaults to filename minus the extension.' },
+    ],
+  },
+  {
+    name: 'DatabankDocumentUpdateInput',
+    note: 'Passed to api.databanks.documents.update(documentId, input). The URL-safe slug regenerates automatically from the new name.',
+    fields: [
+      { field: 'name', type: 'string', optional: false, desc: 'New display name.' },
+    ],
+  },
+  {
+    name: 'DatabankWaitUntilReadyOptions',
+    note: 'Optional polling parameters for api.databanks.documents.waitUntilReady(documentId, options?). Throws on timeout, error status, or document deletion.',
+    fields: [
+      { field: 'timeoutMs?',      type: 'number', optional: true, desc: 'Max wait in ms. Default 60_000 (60s). Throws on timeout.' },
+      { field: 'pollIntervalMs?', type: 'number', optional: true, desc: 'Poll interval in ms. Default 500.' },
+    ],
+  },
 ];
 
 const KeyTypesTable: FC = () => (
@@ -1797,7 +1890,7 @@ export const API_GROUPS: FnGroup[] = [
     ],
   },
   {
-    group: 'api.variables.local / .global / .character',
+    group: 'api.variables.local / .global / .character / .chat',
     rows: [
       { name: 'get',    args: 'key, defaultValue?', desc: 'Get a variable. Returns defaultValue if the key does not exist.' },
       { name: 'set',    args: 'key, value',          desc: 'Set a variable (JSON-serialized).' },
@@ -1951,6 +2044,26 @@ export const API_GROUPS: FnGroup[] = [
       { name: 'getCapturedActive',   args: 'chatId?',           desc: 'Get all entries that would activate for the current chat (full pipeline).' },
       { name: 'registerInterceptor', args: 'handler, options?', desc: 'Register a handler that runs BEFORE world info activation. Returns disable / enable / force / mutate decisions for the candidate entries. Returns handle { id, remove }. Multiple handlers compose by priority; vote-off precedence on disabled. 2s soft timeout (configurable). Requires generation. v0.27.0+.' },
       { name: 'listInterceptors',    args: '—',                 desc: 'Sync read of all currently-registered world-info interceptors. Diagnostic surface. Returns RegisteredWorldInfoInterceptorInfo[]. v0.27.0+.' },
+    ],
+  },
+  {
+    group: 'api.databanks',
+    rows: [
+      { name: 'list',                       args: 'options?',                  desc: 'List databanks (paginated). Options: limit, offset, scope, scopeId. Returns { data: DatabankInfo[], total }. Requires databanks permission.' },
+      { name: 'get',                        args: 'databankId',                desc: 'Get a databank by ID. Returns null if not found. Requires databanks permission.' },
+      { name: 'findByName',                 args: 'name, scope?',              desc: 'Find the first databank whose display name exactly matches (case-sensitive) within an optional scope. Convenience over list(). Returns null if no match. Requires databanks permission.' },
+      { name: 'create',                     args: 'input',                     desc: 'Create a new databank. `input.scope` must be one of `\'global\' | \'character\' | \'chat\'` (DatabankScope) — `\'script\'` is NOT a valid scope. `scopeId` is REQUIRED for `\'character\'` and `\'chat\'` scopes; omit for `\'global\'`. Requires databanks permission.' },
+      { name: 'update',                     args: 'databankId, input',         desc: 'Update a databank (name / description / enabled). Scope cannot be changed after creation. Requires databanks permission.' },
+      { name: 'delete',                     args: 'databankId',                desc: 'Delete a databank and all its documents. Returns true if deleted. Requires databanks permission.' },
+      { name: 'documents.list',             args: 'databankId, options?',      desc: 'List documents inside a databank (paginated). Returns { data: DatabankDocumentInfo[], total }. Requires databanks permission.' },
+      { name: 'documents.get',              args: 'documentId',                desc: 'Get a document by ID. Returns null if not found. Requires databanks permission.' },
+      { name: 'documents.findByName',       args: 'databankId, name',          desc: 'Find the first document whose display name exactly matches inside a databank. Returns null if no match. Requires databanks permission.' },
+      { name: 'documents.create',           args: 'databankId, input',         desc: 'Upload a document. **Required input fields**: `data` (`string | Uint8Array` — NOT `content`) and `filename` (string with extension, e.g. `\'notes.md\'`). **Optional**: `mimeType`, `name` (display override). Returns immediately with `status: \'pending\'` — ingestion (chunking + vectorisation) runs async. Use `waitUntilReady()` or poll `get()` to await completion. Max size 10 MB; supported extensions in DatabankDocumentCreateInput. Requires databanks permission.' },
+      { name: 'documents.update',           args: 'documentId, input',         desc: 'Update document display name (URL slug regenerates). Requires databanks permission.' },
+      { name: 'documents.delete',           args: 'documentId',                desc: 'Delete a document. Returns true if deleted. Requires databanks permission.' },
+      { name: 'documents.getContent',       args: 'documentId',                desc: 'Read the document\'s ingested text content. Returns null if the document does not exist OR has not finished processing — check `status === \'ready\'` via `get()` first, or call `waitUntilReady()` to block. Requires databanks permission.' },
+      { name: 'documents.reprocess',        args: 'documentId',                desc: 'Reset a document to `status: \'pending\'`, drop its vectors, and re-queue for full reingestion. Useful after upstream content changes or when ingestion errored. Requires databanks permission.' },
+      { name: 'documents.waitUntilReady',   args: 'documentId, options?',      desc: 'Poll until the document reaches `status: \'ready\'`. Throws on error/timeout/deletion. Default 60s timeout, 500ms poll interval — override via DatabankWaitUntilReadyOptions. Use after `create()` or `reprocess()` to await ingestion. Requires databanks permission.' },
     ],
   },
   {
@@ -2334,6 +2447,222 @@ const BuiltinLibrariesSection: FC = () => (
     </table>
   </>
 );
+
+// ─── Assistant corpus constants (consumed by gen-assistant-corpus.ts) ────────
+//
+// The constants below feed the build-time corpus generator that produces
+// the in-app assistant's cheat-sheet + lookup table. They live in this file
+// rather than a separate one so the Reference tab + the assistant share a
+// single source of truth — when the API surface changes, you only update
+// here and both consumers refresh.
+
+/**
+ * Per-namespace conceptual context. Surfaces information that's important
+ * for using a namespace correctly but doesn't fit naturally on any single
+ * method's `desc` field — things like scope dimensions, async lifecycle,
+ * sub-namespace organisation, or when-to-use vs. neighboring namespaces.
+ *
+ * Keys are fully-qualified namespace paths matching `FnGroup.group` (or
+ * the first segment for multi-scope groups).
+ */
+export const NAMESPACE_CONCEPTS: Record<string, string> = {
+  'api.variables.local / .global / .character / .chat':
+    'Four scopes with identical method surface (get / set / delete / has / clear). `local` is per-script and transient between trigger fires. `global` is extension-wide, persists across scripts. `character` follows the active character UUID. `chat` follows the active chat UUID. The `character` and `chat` scopes auto-resolve from the active context — no need to pass the UUID explicitly.',
+
+  'api.files — user* (per-user persistent)':
+    'Three storage tiers, each with its own method-name prefix. `user*` is per-user persistent (survives extension reload, scoped to the active user). `shared*` is extension-wide persistent (shared across users). `temp*` is TTL-bound (deleted after `ttlMs` expires; requires `ephemeral_storage` permission). Same operations across tiers — read / write / delete / exists / list / mkdir / stat / move — just with the tier prefix on each method name.',
+
+  'api.db':
+    'Per-script schema-validated JSON collections. Each collection is a typed array of records persisted under the owning script\'s storage path; collections never leak across scripts. Optional Zod schema validates writes (insert + update). Built-in fields `id` / `createdAt` / `updatedAt` are reserved and auto-managed; Zod\'s `.strict()` / unknown-key stripping preserves them. Use for structured per-script data; for cross-script shared state see `api.variables.global`.',
+
+  'api.broadcast':
+    'In-memory real-time pub/sub between scripts. Events are NOT persisted — handlers fire synchronously when an event is emitted, and there\'s no replay across script reloads. Subscriptions persist between trigger runs (host wipes them at the START of each new run, not the end), so a "subscriber-only" script can watch events from a script it isn\'t co-triggered with. The `ls:*` prefix is reserved for system events; scripts should namespace their own events with a project-specific prefix. **Distinct from `api.events`** — that one is for persistent event tracking; this one is for real-time messaging.',
+
+  'api.events':
+    'Persistent event tracking + replay. Events are durably stored and queryable across script reloads / extension restarts. Use cases: audit logs, state-resuming scripts (`getLatestState` for keys), custom analytics. **Distinct from `api.broadcast`** — that one is in-memory real-time pub/sub; this one is durable storage. Recording requires `event_tracking` permission.',
+
+  'api.macros':
+    'Two registration modes. **Pull mode** (`register(name, handler)`): handler runs at macro-resolution time, can be sync or async (function-reference form; string-handler form is sync-only). **Push mode** (`register(name)` + `updateMacroValue(name, value)`): register once with no handler, push values whenever they change — avoids RPC latency at generation time. Pull is simpler but pays per-resolve cost; push is faster but requires upstream "value changed" knowledge. Pick based on whether macro resolution is hot.',
+
+  'api.tools':
+    'Two execution paths for tool registration. **Council tools** go through a sidecar LLM with the tool\'s description-as-prompt — the sidecar reasons about which tools to invoke. **Extension tools** bypass the LLM entirely and receive `{context, __deadlineMs}` directly from the Council pipeline. For extension tools, do your own analysis inside the handler (`generateStructured` against a fast connection is the common pattern). One-line tool descriptions are sufficient for extension tools — the description doesn\'t prompt anything; it\'s purely a human label.',
+
+  'api.databanks':
+    'Three ownership scopes — `global` (no owner key), `character` (owned by character UUID), `chat` (owned by chat UUID). Documents within a databank inherit their parent\'s scope. Document ingestion is **asynchronous**: `documents.create()` returns immediately with `status: \'pending\'`; use `documents.waitUntilReady(docId)` to await chunking + vectorization. For input-bar actions or other UI surfaces that need ready-state confirmation, prefer `waitUntilReady` over manual polling.',
+};
+
+/**
+ * The architectural intro for the permission-model section of the
+ * assistant's cheat-sheet. Explains how permissions are declared and
+ * granted at the extension level (NOT per-script), how `allowDangerous`
+ * differs (separate per-script toggle, not a Spindle permission), and
+ * why script-header `@permissions` / `@permission` directives are not
+ * recognised (they're a common hallucination from framework training).
+ *
+ * The leading "DO NOT WRITE" banner is deliberately in-your-face — Q5 and
+ * Q4-retry tests showed strong models (Opus 4.6) still hallucinating
+ * `@permissions` headers even after a calmer prose explanation. The bold
+ * banner closes that gap for models that DO read corpus content at the
+ * top of a section.
+ */
+export const PERMISSION_MODEL_INTRO: string =
+  '**DO NOT WRITE `// @permissions` OR `// @permission` IN YOUR SCRIPT.** Neither is a LumiScript directive. **LumiScript does not parse ANY script-header directives currently** — including `// @triggers`, which despite the name is purely a documentary comment with no runtime effect (event wiring happens in the editor UI; see the **Trigger model** section). Writing `@permissions` or `@permission` in a script header is a **no-op** — it looks like it grants permissions but actually does nothing; your script will then fail at runtime when it calls a gated method. This is the single most common script-permission-bug we see; if you find yourself reaching for an `@permission` directive, stop and re-read this section.\n\n' +
+  'How permissions actually work: LumiScript permissions are declared **at the extension level** in `spindle.json` and granted once by the user when the extension is enabled. **There are no per-script permission declarations** — every script inside the LumiScript extension shares the same grant set. The user (not the script author) controls what\'s granted. ' +
+  '(Earlier mental models à la SillyTavern, where each script declares its own perms, do NOT apply here.)\n\n' +
+  '**Permissions gate `api.*` method calls, NOT the `data` trigger global.** Reading `data.message.content` from a `MESSAGE_SENT` trigger does NOT require `chat_mutation` — the host already routed the event payload to your script for free. Permissions only kick in when your script reaches back through the API (e.g. `api.chat.getMessages`, `api.chat.editMessage`). Don\'t list a permission unless your script actually calls a gated method.\n\n' +
+  '**`allowDangerous` is SEPARATE** — it\'s a per-script LumiScript-level UI toggle (in the script-list row), NOT a Spindle permission. It gates risky operations (outbound HTTP, encrypted secrets, file I/O, cross-script side effects). When a method\'s permission tag below shows `[X, + allowDangerous]`, BOTH gates must be on: the extension must have permission `X` granted AND the calling script must have `allowDangerous` toggled on.';
+
+/**
+ * Permission name → one-line description. Surfaced in the Permission Model
+ * cheat-sheet section as a reference table.
+ *
+ * Validated at corpus-generation time: every permission appearing in
+ * `PERM_GROUPS` must have a description here. New permissions added to
+ * `PERM_GROUPS` will fail the build until documented.
+ */
+export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
+  chat_mutation:     'Read / send / edit / delete chat messages. Required for most `api.chat.*` operations.',
+  chats:             'Chat session metadata + CRUD on the chat list. Distinct from message content (chat_mutation).',
+  characters:        'CRUD on characters via `api.characters.*`.',
+  personas:          'CRUD on personas via `api.personas.*`.',
+  world_books:       'CRUD on world books and entries via `api.worldInfo.*`.',
+  regex_scripts:     'CRUD on regex find/replace scripts via `api.regexScripts.*`.',
+  generation:        'Call LLM providers via `api.llm.*`. Also required to register world-info interceptors that touch the assembled prompt.',
+  interceptor:       'Register prompt injections, content processors, world-info interceptors — anything that mutates host data mid-flight.',
+  macro_interceptor: 'Register macro-resolution interceptors (`api.macros.registerInterceptor`). Performance-sensitive; gated separately from `interceptor`.',
+  cors_proxy:        'Outbound HTTP via `api.utils.http.*`. Paired with `allowDangerous` (both gates required).',
+  ui_panels:         'Float widgets / dock panels — surfaces that hold their own persistent UI region in the app shell.',
+  app_manipulation:  'DOM injection, advanced modals, context menus — surfaces that script-own DOM in the host app shell.',
+  push_notification: 'OS-level push notifications via `api.ui.pushNotification` (delivered when the app is unfocused).',
+  ephemeral_storage: 'TTL-bound `api.files.temp*` file storage with auto-expiry.',
+  tools:             'Register Council-eligible LLM tools via `api.tools.*`.',
+  event_tracking:    'Record + query persistent events via `api.events.*`.',
+  databanks:         'CRUD on databanks + their documents via `api.databanks.*` (vectorised reference material attached to global / character / chat scopes).',
+};
+
+/**
+ * The architectural intro for the trigger-model section of the assistant's
+ * cheat-sheet. Explains the editor-UI wiring + body-is-the-handler model.
+ *
+ * **Important correction (2026-05-12):** earlier versions of this constant
+ * called `@triggers` a "comment directive" — that was wrong. Event wiring
+ * is editor-UI-only; the host does not parse `@triggers` comments. They
+ * are documentary only, with no runtime effect. A future LumiScript version
+ * may add a programmatic-subscription API; current versions do not.
+ */
+export const TRIGGER_MODEL_INTRO: string =
+  "**LumiScript does NOT use runtime event subscription.** There is no `api.on()`, no `api.events.on()`, no `api.subscribe()`, no `api.listen()`, no `api.triggers.on()` — and no, you don't write `event.on('message', handler)` either. None of those exist. **Do not lookup_api on any of them.** The paradigm is completely different from Node.js EventEmitter or DOM event listeners.\n\n" +
+  '**Event wiring is configured in the editor UI, not in the script source.** When you create or edit a script in LumiScript\'s script editor, an event-selector control lets you pick which Lumiverse events should run this script\'s body. There is no script-side syntax that subscribes — the wiring lives in the script\'s editor config, alongside its name, enabled flag, and binding.\n\n' +
+  '**`// @triggers EVENT_NAME[, ...]` in a script header is INFORMATIVE ONLY.** It\'s a comment convention you may write at the top of your script to document which events the script is *intended* to be wired to. The host does not parse it — writing `@triggers` has zero runtime effect. The actual events that fire your script come from the editor-UI wiring, not from this comment. (A future LumiScript version may add a programmatic-subscription API; current versions do not.)\n\n' +
+  'When a wired event fires, the **script body itself runs as the handler** — the entire body executes top-to-bottom with the event\'s payload available as the `data` global. No callback, no subscription object, no listener registry. `data.__event` carries the event name (e.g. `"MESSAGE_SENT"`); the rest of `data` is the event-specific payload (see the **Events** section for per-event payload shapes).\n\n' +
+  '```js\n' +
+  '// Optional documentary comment — has no effect on what triggers the script.\n' +
+  '// Actual wiring (e.g. "MESSAGE_SENT, MESSAGE_EDITED") is set in the editor UI.\n' +
+  '// @triggers MESSAGE_SENT, MESSAGE_EDITED\n\n' +
+  "// The body runs every time a wired event fires.\n" +
+  "// `data.__event` identifies which event triggered this invocation;\n" +
+  "// the rest of `data` is the event-specific payload.\n" +
+  "if (data.__event === 'MESSAGE_SENT') {\n" +
+  '  const score = await api.llm.generateStructured(/* ... */);\n' +
+  "  await api.databanks.documents.create('reviews-databank-id', {\n" +
+  '    data: JSON.stringify(score),\n' +
+  '    filename: `score-${data.message.id}.json`,\n' +
+  '  });\n' +
+  '}\n' +
+  '```\n\n' +
+  'The full list of available event names + their payload shapes + firing semantics is in the **Events** section below. To make a script react to one of those events, open it in the editor and select the event in the UI.\n\n' +
+  "**Three similar-sounding systems, three different problems** — keep them straight:\n\n" +
+  "- **Editor-UI event wiring** — react to Lumiverse host *lifecycle* events (MESSAGE_SENT, GENERATION_ENDED, CHAT_CHANGED, ...). Configured per-script in the script editor.\n" +
+  "- `api.broadcast.*` — real-time *script-to-script* pub/sub between user scripts running inside the same LumiScript extension. Use for custom in-extension messaging.\n" +
+  "- `api.events.*` — *persistent log* of custom events (`track` / `query` / `replay` / `getLatestState`). Use for audit trails, state-resuming scripts, custom analytics. **NOT** for subscribing to host events.";
+
+/**
+ * Wrong-path → redirect-message map for `lookup_api`. The assistant's tool
+ * returns these as `kind: 'redirect'` envelopes when the model queries a
+ * path that doesn't exist but where the *intent* is recoverable.
+ *
+ * Mechanism: model probes the wrong path, hits an exact-match in the
+ * lookup table, gets the redirect as a SUCCESSFUL tool result (`isError:
+ * false` — so the model treats it as useful info, not a retry-provoking
+ * failure), reads the corrective message, redirects. Turns the model's
+ * tool-call instinct against itself.
+ *
+ * Pattern observation: redirect batches cluster by training-data convention
+ * (EventEmitter, React useContext, etc.), not by LumiScript-internal
+ * structure. New batches are added as they surface in Q-tests rather than
+ * pre-enumerated.
+ */
+export const REDIRECTS: Record<string, string> = {
+  // ─── Event-subscription antipatterns ────────────────────────────────────
+  'api.on':
+    "`api.on` does not exist. LumiScript does not use runtime event subscription. To make a script react to Lumiverse events, open the script in the editor UI and select the events you want in the event-wiring control — there is no script-source syntax for subscription. The script body then runs as the handler when any wired event fires (with the payload on the `data` global). See the **Trigger model** section.",
+  'api.on.message':
+    "Not how LumiScript works. There is no `api.on(...)` family. To react to message events, wire the script to `MESSAGE_SENT` (and/or `GENERATION_ENDED` for assistant messages) via the editor UI — there is no script-source subscription syntax. See **Trigger model**.",
+  'api.events.on':
+    "`api.events.on` is a category error. `api.events.*` is for *recording* custom events (track / query / replay / getLatestState), not for *subscribing* to host events. To make a script react to Lumiverse events, wire it via the editor UI — see **Trigger model**.",
+  'api.events.subscribe':
+    "Same category error as `api.events.on`. `api.events.*` is for persistent event *tracking*, not subscription. To subscribe to host events, wire the script via the editor UI — see **Trigger model**.",
+  'api.broadcast.subscribe':
+    "Wrong method. The method on `api.broadcast` for receiving events is `on(event, handler)`, not `subscribe`. BUT note that `api.broadcast` is for inter-script messaging between user scripts, NOT for subscribing to Lumiverse lifecycle events (MESSAGE_SENT etc.). For those, wire the script via the editor UI — see **Trigger model**.",
+  'api.broadcast.listen':
+    "Wrong method name. Use `api.broadcast.on(event, handler)`. (And if you're trying to react to Lumiverse host events like MESSAGE_SENT, wire the script via the editor UI instead — see **Trigger model**.)",
+  'api.subscribe':
+    "`api.subscribe` does not exist. LumiScript does not use runtime subscription patterns. To react to Lumiverse events, wire the script via the editor UI — see **Trigger model**.",
+  'api.listen':
+    "`api.listen` does not exist. LumiScript does not use runtime listener patterns. To react to Lumiverse events, wire the script via the editor UI — see **Trigger model**.",
+  'api.triggers':
+    "`api.triggers` is not an API namespace. Event wiring lives in the script editor UI, not in script source. The `// @triggers` comment some scripts carry at the top of the source is **informative only** — it documents intent but the host does not parse it. See **Trigger model**.",
+  'api.triggers.on':
+    "`api.triggers.on` is not real. Event wiring is editor-UI-only — there is no runtime API for subscribing scripts to events. (`// @triggers` in a script header is a documentary comment, not parsed by the host.) See **Trigger model**.",
+  'api.trigger':
+    "`api.trigger` is not an API namespace. Event wiring is editor-UI-only — there is no runtime API for subscribing scripts to events. (`// @triggers` in a script header is a documentary comment, not parsed by the host.) See **Trigger model**.",
+
+  // ─── Singular/plural typos ──────────────────────────────────────────────
+  'api.databank':
+    "Singular `api.databank` is not a namespace — try `api.databanks` (plural). Lookup that for the methods + sub-namespace structure.",
+  'api.event':
+    "Singular `api.event` is not a namespace — try `api.events` (plural). BUT note: `api.events.*` is for *recording* custom events (persistent tracking), not for subscribing to host events. For subscription, see **Trigger model**.",
+  'api.character':
+    "Singular `api.character` is not a namespace — try `api.characters` (plural).",
+  'api.persona':
+    "Singular `api.persona` is not a namespace — try `api.personas` (plural).",
+  'api.macro':
+    "Singular `api.macro` is not a namespace — try `api.macros` (plural).",
+  'api.tool':
+    "Singular `api.tool` is not a namespace — try `api.tools` (plural).",
+  'api.command':
+    "Singular `api.command` is not a namespace — try `api.commands` (plural).",
+  'api.token':
+    "Singular `api.token` is not a namespace — try `api.tokens` (plural).",
+  'api.chat.send':
+    "Incomplete method name. Try `api.chat.sendMessage`.",
+
+  // ─── Event-name hallucinations (real events live in the Events table) ───
+  'MESSAGE_RECEIVED':
+    "`MESSAGE_RECEIVED` is not a Lumiverse event. The correct events for incoming messages are `MESSAGE_SENT` (user-initiated sends) and `GENERATION_ENDED` (assistant-side message arrival). Wire the script to one or both via the editor UI (event-wiring control in the script editor — not a script-source directive). See the **Events** table in the cheat-sheet for the full list with firing semantics.",
+  'MESSAGE_RECEIVE':
+    "`MESSAGE_RECEIVE` is not a Lumiverse event. See the `MESSAGE_RECEIVED` redirect — real events are `MESSAGE_SENT` (user) and `GENERATION_ENDED` (assistant).",
+  'MESSAGE_NEW':
+    "`MESSAGE_NEW` is not a Lumiverse event. See the `MESSAGE_RECEIVED` redirect — real events are `MESSAGE_SENT` (user) and `GENERATION_ENDED` (assistant).",
+
+  // ─── Context-accessor probes ────────────────────────────────────────────
+  // Models reach for a central `api.context` / `getContext()` object out of
+  // framework-API training prior (React useContext, Express req.context,
+  // etc.). LumiScript doesn't have a unified context accessor — context is
+  // composed from multiple primitives depending on what you're after.
+  'api.context':
+    "There is no unified `api.context` namespace. Context is composed from several primitives depending on what you need: **trigger payload** — the `data` global (already delivered to your script — e.g. `data.chatId`, `data.message`, `data.__event`). **Active chat ID** — `api.chat.getChatId()` (sync, returns string|null). **Full active chat session** — `await api.chats.getActive()` (requires `chats` permission). **Active persona** — `await api.personas.getActive()` (requires `personas`). **Script self-info** — the `script` global (`script.id`, `script.name`, `script.type`). Pick the specific primitive for your need; there's no aggregate object.",
+  'api.getContext':
+    "`api.getContext` does not exist. LumiScript doesn't have a unified getContext accessor. Use the specific primitive for what you need: trigger payload via the `data` global; active chat ID via `api.chat.getChatId()`; full chat session via `await api.chats.getActive()` (needs `chats` perm); active persona via `await api.personas.getActive()` (needs `personas`); script self-info via the `script` global. See `api.context` redirect note for the full list.",
+  'api.ctx':
+    "`api.ctx` is not a LumiScript namespace. Context-y data lives across several primitives — see the `api.context` redirect for the full enumeration. Most commonly you want the `data` global (trigger payload, free) or `api.chat.getChatId()` (active chat ID, no permission required).",
+  'api.activeContext':
+    "`api.activeContext` does not exist. There is no aggregate-context accessor in LumiScript. For trigger payload use the `data` global; for active chat use `api.chat.getChatId()` (sync) or `await api.chats.getActive()` (full session); for active persona use `await api.personas.getActive()`. See the `api.context` redirect for the full list.",
+  'api.session':
+    "`api.session` is not a namespace. If you want the active chat session, use `await api.chats.getActive()` (requires `chats` permission) — the returned object is a `ChatSession`. If you just want the active chat ID, `api.chat.getChatId()` is sync and permission-free.",
+  'api.state':
+    "`api.state` does not exist. LumiScript doesn't have a unified app-state accessor — there's no host-settings or app-state read surface exposed to scripts. For script-readable state: variables via `api.variables.*` (four scopes); persistent files via `api.files.*`; script-owned databases via `api.db.*`; trigger payload via the `data` global; script self-info via the `script` global.",
+};
 
 // ─── Reference tab root ───────────────────────────────────────────────────────
 
