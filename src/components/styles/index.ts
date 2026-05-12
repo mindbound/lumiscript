@@ -19,6 +19,8 @@
  *   modal.css     — modal overlay, card, header, sidebar/main layout
  *   status.css    — status tab, event badges, placeholder
  *   settings.css  — settings panel, toggle switch, count cards
+ *   assistant.css — in-app code assistant (Lisa): modal shell, sidebar,
+ *                   bubbles, reasoning panel, markdown rendering (v0.30.x)
  */
 
 import BASE_CSS         from './base.css'         with { type: 'text' };
@@ -32,6 +34,7 @@ import STATUS_CSS       from './status.css'       with { type: 'text' };
 import SETTINGS_CSS     from './settings.css'     with { type: 'text' };
 import REFERENCE_CSS    from './reference.css'    with { type: 'text' };
 import DIAGNOSTICS_CSS  from './diagnostics.css'  with { type: 'text' };
+import ASSISTANT_CSS    from './assistant.css'    with { type: 'text' };
 export const PANEL_CSS =
   BASE_CSS +
   LIST_CSS +
@@ -43,4 +46,5 @@ export const PANEL_CSS =
   STATUS_CSS +
   SETTINGS_CSS +
   REFERENCE_CSS +
-  DIAGNOSTICS_CSS;
+  DIAGNOSTICS_CSS +
+  ASSISTANT_CSS;
