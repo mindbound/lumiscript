@@ -615,6 +615,12 @@
   margin: 6px 0;
   padding-left: 22px;
 }
+/* Restore list-style explicitly — the host page's CSS reset zeroes
+   `list-style: none` on every element, which suppresses both bullets and
+   numbers. Letting the browser defaults handle nesting (disc → circle →
+   square for ul; decimal → lower-alpha → lower-roman for ol). */
+.ls-asst-md ul { list-style: disc outside; }
+.ls-asst-md ol { list-style: decimal outside; }
 .ls-asst-md li {
   margin: 2px 0;
   line-height: 1.5;
