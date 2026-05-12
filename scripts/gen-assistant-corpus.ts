@@ -458,6 +458,14 @@ const API_ONLY_ALLOWLIST: Allowlist = [
   // Reference tab and editor-lib use different paths for these.
   { match: 'api.worldInfo.registerInterceptor', reason: 'Reference-tab entry has no 1:1 editor-lib counterpart at this path.' },
   { match: 'api.worldInfo.listInterceptors',    reason: 'Reference-tab entry has no 1:1 editor-lib counterpart at this path.' },
+  // The four api.variables scopes share a single VariablesAPI interface at
+  // the type level — editor-lib only walks under api.variables.local. The
+  // .global / .character / .chat methods all exist in the API surface (same
+  // shape, different storage backend) but don't appear in editorLibIndex.
+  // Allowlisted as a known-multi-scope expansion.
+  { match: 'api.variables.global.',    prefix: true, reason: 'Multi-scope group: api.variables.{local,global,character,chat} share one VariablesAPI interface; editor-lib walks only the .local instance.' },
+  { match: 'api.variables.character.', prefix: true, reason: 'Multi-scope group: api.variables.{local,global,character,chat} share one VariablesAPI interface; editor-lib walks only the .local instance.' },
+  { match: 'api.variables.chat.',      prefix: true, reason: 'Multi-scope group: api.variables.{local,global,character,chat} share one VariablesAPI interface; editor-lib walks only the .local instance.' },
 ];
 
 const EDITOR_ONLY_ALLOWLIST: Allowlist = [
@@ -791,10 +799,10 @@ function renderCheatSheet(): string {
   for (const group of LS_MACRO_GROUPS) {
     lines.push(`### ${group.label}`);
     lines.push('');
-    lines.push('| Macro | Description |');
-    lines.push('|---|---|');
+    lines.push('| Macro | Aliases | Returns | Description |');
+    lines.push('|---|---|---|---|');
     for (const row of group.rows) {
-      lines.push(`| \`${row.name}\` | ${escapeCell(row.desc)} |`);
+      lines.push(`| \`${row.macro}\` | ${escapeCell(row.aliases)} | ${escapeCell(String(row.returns))} | ${escapeCell(row.desc)} |`);
     }
     lines.push('');
   }

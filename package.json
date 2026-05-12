@@ -9,7 +9,9 @@
     "build:frontend": "bun build src/frontend.tsx --minify --outfile dist/frontend.js --target browser",
     "typecheck": "bunx tsc --noEmit",
     "typecheck:test": "bunx tsc --noEmit -p tsconfig.test.json",
-    "build": "bun run typecheck && bun run typecheck:test && bun run build:backend && bun run build:script-runner && bun run build:frontend",
+    "typecheck:scripts": "bunx tsc --noEmit -p tsconfig.scripts.json",
+    "gen:corpus": "bun scripts/gen-assistant-corpus.ts",
+    "build": "bun run gen:corpus && bun run typecheck:scripts && bun run typecheck && bun run typecheck:test && bun run build:backend && bun run build:script-runner && bun run build:frontend",
     "test": "bun test",
     "test:watch": "bun test --watch",
     "pack2js": "bun scripts/pack2js.ts",
@@ -24,12 +26,16 @@
     "lucide-react": "^1.14.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
+    "react-markdown": "^10.1.0",
+    "react-syntax-highlighter": "^15.6.6",
+    "remark-gfm": "^4.0.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^25.7.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
+    "@types/react-syntax-highlighter": "^15.5.13",
     "bun-types": "^1.3.13",
     "lumiverse-spindle-types": "^0.4.71",
     "typescript": "^6.0.3"
