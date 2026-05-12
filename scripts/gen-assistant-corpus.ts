@@ -469,17 +469,14 @@ const API_ONLY_ALLOWLIST: Allowlist = [
 ];
 
 const EDITOR_ONLY_ALLOWLIST: Allowlist = [
-  // Real Reference-tab data gaps. These methods exist in editor-lib (and
-  // ship in the API surface) but aren't documented in API_GROUPS yet. The
-  // assistant lookup table still covers them via the editor-lib fallback;
-  // the cheat-sheet should be updated when API_GROUPS catches up.
-  { match: 'api.chat.setMessageHidden',   reason: 'TODO: backfill API_GROUPS entry.' },
-  { match: 'api.chat.setMessagesHidden',  reason: 'TODO: backfill API_GROUPS entry.' },
-  { match: 'api.chat.isMessageHidden',    reason: 'TODO: backfill API_GROUPS entry.' },
   // (Resolved 2026-05-12 — multi-scope group now includes `.chat` so the
   //  fourth variables scope is documented and no longer drifts.)
   // (Resolved 2026-05-12 — api.databanks namespace backfilled into API_GROUPS
   //  with full method surface + 9 type entries in KEY_TYPES.)
+  // (Resolved 2026-05-12 — api.chat.setMessageHidden / setMessagesHidden /
+  //  isMessageHidden backfilled into API_GROUPS, surfaced by Q7 where the
+  //  model concluded "no hide method exists" because it had no reason to
+  //  probe lookup_api on a method name that wasn't in the cheat-sheet view.)
   // Entire api.rpc namespace missing from API_GROUPS.
   { match: 'api.rpc.', prefix: true, reason: 'TODO: backfill api.rpc namespace into API_GROUPS.' },
 ];

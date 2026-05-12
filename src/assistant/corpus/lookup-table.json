@@ -258,6 +258,63 @@
       "RegisteredMessageContentProcessorInfo"
     ]
   },
+  "api.chat.setMessageHidden": {
+    "kind": "method",
+    "method": "api.chat.setMessageHidden",
+    "namespace": "api.chat",
+    "signature": "setMessageHidden(id: string, hidden: boolean): Promise<void>",
+    "description": "Mark a single message as hidden or visible. Hidden messages are excluded from vector retrieval but still included in prompt assembly. Requires chat_mutation permission.",
+    "permissions": [
+      "chat_mutation"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.chat.getMessages",
+      "api.chat.sendMessage",
+      "api.chat.editMessage",
+      "api.chat.deleteMessage",
+      "api.chat.getChatId",
+      "Promise"
+    ]
+  },
+  "api.chat.setMessagesHidden": {
+    "kind": "method",
+    "method": "api.chat.setMessagesHidden",
+    "namespace": "api.chat",
+    "signature": "setMessagesHidden(ids: string[], hidden: boolean): Promise<void>",
+    "description": "Bulk variant — mark multiple messages as hidden or visible. Max 500 IDs per call. Requires chat_mutation permission.",
+    "permissions": [
+      "chat_mutation"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.chat.getMessages",
+      "api.chat.sendMessage",
+      "api.chat.editMessage",
+      "api.chat.deleteMessage",
+      "api.chat.getChatId",
+      "Promise"
+    ]
+  },
+  "api.chat.isMessageHidden": {
+    "kind": "method",
+    "method": "api.chat.isMessageHidden",
+    "namespace": "api.chat",
+    "signature": "isMessageHidden(id: string): Promise<boolean>",
+    "description": "Check whether a message is hidden. Returns false for messages that have never had the flag set. Requires chat_mutation permission.",
+    "permissions": [
+      "chat_mutation"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.chat.getMessages",
+      "api.chat.sendMessage",
+      "api.chat.editMessage",
+      "api.chat.deleteMessage",
+      "api.chat.getChatId",
+      "Promise"
+    ]
+  },
   "api.llm.generate": {
     "kind": "method",
     "method": "api.llm.generate",
@@ -3699,63 +3756,6 @@
       "script.type",
       "Promise",
       "LSIconsExports"
-    ]
-  },
-  "api.chat.setMessageHidden": {
-    "kind": "method",
-    "method": "api.chat.setMessageHidden",
-    "namespace": "api.chat",
-    "signature": "setMessageHidden(id: string, hidden: boolean): Promise<void>",
-    "description": "Mark a single message as hidden or visible. Hidden messages are excluded from vector retrieval but still included in prompt assembly. Requires chat_mutation permission.",
-    "permissions": [
-      "chat_mutation"
-    ],
-    "examples": [],
-    "see_also": [
-      "api.chat.getMessages",
-      "api.chat.sendMessage",
-      "api.chat.editMessage",
-      "api.chat.deleteMessage",
-      "api.chat.getChatId",
-      "Promise"
-    ]
-  },
-  "api.chat.setMessagesHidden": {
-    "kind": "method",
-    "method": "api.chat.setMessagesHidden",
-    "namespace": "api.chat",
-    "signature": "setMessagesHidden(ids: string[], hidden: boolean): Promise<void>",
-    "description": "Bulk variant — mark multiple messages as hidden or visible. Max 500 IDs per call. Requires chat_mutation permission.",
-    "permissions": [
-      "chat_mutation"
-    ],
-    "examples": [],
-    "see_also": [
-      "api.chat.getMessages",
-      "api.chat.sendMessage",
-      "api.chat.editMessage",
-      "api.chat.deleteMessage",
-      "api.chat.getChatId",
-      "Promise"
-    ]
-  },
-  "api.chat.isMessageHidden": {
-    "kind": "method",
-    "method": "api.chat.isMessageHidden",
-    "namespace": "api.chat",
-    "signature": "isMessageHidden(id: string): Promise<boolean>",
-    "description": "Check whether a message is hidden. Returns false for messages that have never had the flag set. Requires chat_mutation permission.",
-    "permissions": [
-      "chat_mutation"
-    ],
-    "examples": [],
-    "see_also": [
-      "api.chat.getMessages",
-      "api.chat.sendMessage",
-      "api.chat.editMessage",
-      "api.chat.deleteMessage",
-      "api.chat.getChatId",
-      "Promise"
     ]
   },
   "api.rpc.sync": {

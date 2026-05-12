@@ -1878,6 +1878,9 @@ export const API_GROUPS: FnGroup[] = [
       { name: 'clearAllInjections', args: '—',                   desc: 'Remove ALL injections across all scripts.' },
       { name: 'registerContentProcessor', args: 'handler, options?', desc: 'Register a handler that fires before a user-initiated message write hits SQLite. Returns a patch { content?, extra? } to transform what gets stored. Options: id, priority (default 100), origin filter, timeoutMs (default 2000). NOT invoked for api.chat.* mutations (loop safety). Returns handle { id, remove }. Requires chat_mutation.' },
       { name: 'listContentProcessors', args: '—',                  desc: 'List all currently registered message content processors across all scripts.' },
+      { name: 'setMessageHidden',  args: 'id, hidden',              desc: 'Mark a single message as hidden or visible. Hidden messages are excluded from vector retrieval but still included in prompt assembly. Toggle pattern: pass `true` to hide, `false` to unhide. Persists on the message — survives reloads. Requires chat_mutation permission.' },
+      { name: 'setMessagesHidden', args: 'ids, hidden',             desc: 'Bulk variant of `setMessageHidden`. Max 500 IDs per call. Same hidden-flag semantics (excluded from vector retrieval, still included in prompt assembly). Requires chat_mutation permission.' },
+      { name: 'isMessageHidden',   args: 'id',                      desc: 'Check whether a message is hidden. Returns false for messages that have never had the flag set (default state). Requires chat_mutation permission.' },
     ],
   },
   {
