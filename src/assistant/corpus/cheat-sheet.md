@@ -563,7 +563,7 @@ Public types referenced by `api.*` method signatures. **Each type is in the look
 - `LLMOptions` — Resolution order: connectionId → connectionName → provider + model → active user connection.
 - `DryRunOptions` — Passed to api.llm.dryRun(options?). All fields are optional; defaults use the active context.
 - `LLMRawResult` — Return type of api.llm.generateWithTools() without a schema. On intermediate steps tool_calls is set; on the final step content holds the text response.
-- `LLMRawResultStructured<T>` — Return type of api.llm.generateWithTools(messages, tools, opts, schema). On intermediate steps only tool_calls is set. On the final step only content is set.
+- `LLMRawResultStructured` — Generic type `LLMRawResultStructured<T>`. Return type of `api.llm.generateWithTools(messages, tools, opts, schema)` — the structured-output overload. On intermediate steps only `tool_calls` is set. On the final step only `content` is set, typed as `T` (the schema-parsed result).
 - `ToolCall` — A single function call inside LLMRawResult.tool_calls or LLMRawResultStructured.tool_calls.
 - `DryRunResult` — Return type of api.llm.dryRun(). Contains everything that would be sent to the LLM plus diagnostic data.
 - `DryRunBlock` — A single prompt composition block inside DryRunResult.breakdown.

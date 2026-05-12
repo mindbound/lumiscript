@@ -921,10 +921,10 @@ export const KEY_TYPES: TypeDoc[] = [
     ],
   },
   {
-    name: 'LLMRawResultStructured<T>',
-    note: 'Return type of api.llm.generateWithTools(messages, tools, opts, schema). On intermediate steps only tool_calls is set. On the final step only content is set.',
+    name: 'LLMRawResultStructured',
+    note: 'Generic type `LLMRawResultStructured<T>`. Return type of `api.llm.generateWithTools(messages, tools, opts, schema)` — the structured-output overload. On intermediate steps only `tool_calls` is set. On the final step only `content` is set, typed as `T` (the schema-parsed result).',
     fields: [
-      { field: 'content?',    type: 'T',          optional: true, desc: 'Final step: JSON-parsed and Zod-validated result typed as T.' },
+      { field: 'content?',    type: 'T',          optional: true, desc: 'Final step: JSON-parsed and Zod-validated result typed as T (the schema you passed as the 4th arg to generateWithTools).' },
       { field: 'tool_calls?', type: 'ToolCall[]', optional: true, desc: 'Intermediate steps: function calls requested by the LLM. When present, content is absent.' },
     ],
   },
