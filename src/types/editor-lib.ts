@@ -389,9 +389,26 @@ interface ChatAPI {
 
 // ─── LLM API ─────────────────────────────────────────────────────────────────
 
+/**
+ * A single message content part. Used to thread native \`tool_use\` /
+ * \`tool_result\` payloads through an agentic loop without text-encoding them
+ * as pseudo-turns. Available since v0.29.0.
+ */
+type LlmMessagePart =
+  | { type: 'text';        text: string;                                                  cache_control?: Record<string, unknown> }
+  | { type: 'image';       data: string; mime_type: string;                               cache_control?: Record<string, unknown> }
+  | { type: 'audio';       data: string; mime_type: string;                               cache_control?: Record<string, unknown> }
+  | { type: 'tool_use';    id: string;   name: string; input: Record<string, unknown>;    cache_control?: Record<string, unknown> }
+  | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean;      cache_control?: Record<string, unknown> };
+
 interface LLMMessage {
   role: 'system' | 'user' | 'assistant';
-  content: string;
+  /**
+   * Either a plain string OR an array of \`LlmMessagePart\`. Parts let scripts
+   * thread native \`tool_use\` / \`tool_result\` through an agentic loop
+   * (preferable to text-encoded pseudo-turns).
+   */
+  content: string | LlmMessagePart[];
 }
 
 type LLMProvider =
@@ -534,15 +551,20 @@ interface LLMAPI {
    * Use in an agentic loop: call repeatedly until \`result.tool_calls\` is empty.
    * Requires generation permission.
    * @example
+   * // Recommended (v0.29.0+): thread tool calls through native parts content.
+   * // Providers understand tool_use / tool_result parts as first-class signals,
+   * // unlike the legacy text-encoded "[Tool: X]" / "[Result]: ..." pseudo-turns.
    * const schemas = api.tools.list().map(t => ({ name: t.name, description: t.description, parameters: t.parameters }));
    * let msgs = [...history];
    * for (let i = 0; i < 8; i++) {
    *   const r = await api.llm.generateWithTools(msgs, schemas, { connectionName: 'tools' });
    *   if (!r.tool_calls?.length) { if (r.content) api.chat.inject('res', r.content); break; }
-   *   for (const call of r.tool_calls) {
-   *     const result = await api.tools.invoke(call.name, call.args);
-   *     msgs = [...msgs, { role: 'assistant', content: \`[Tool: \${call.name}]\` }, { role: 'user', content: result }];
-   *   }
+   *   const toolUses = r.tool_calls.map(c => ({ type: 'tool_use' as const, id: c.call_id, name: c.name, input: c.args }));
+   *   msgs.push({ role: 'assistant', content: toolUses });
+   *   const results = await Promise.all(r.tool_calls.map(async c => ({
+   *     type: 'tool_result' as const, tool_use_id: c.call_id, content: await api.tools.invoke(c.name, c.args),
+   *   })));
+   *   msgs.push({ role: 'user', content: results });
    * }
    */
   generateWithTools(

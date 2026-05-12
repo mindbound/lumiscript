@@ -1,5 +1,6 @@
 import { describe, test, expect, beforeEach } from 'bun:test';
 import { buildLLMAPI } from '../../../src/engine/api/llm.js';
+import { messageContentToString } from '../../../src/types/script.js';
 import { createTestDeps } from '../../_infra/mock-deps.js';
 // Use `any` for mock spindle — tests override mock returns with custom shapes
 // that don't perfectly match the typed defaults from createMockSpindle().
@@ -490,5 +491,162 @@ describe('generateStructured (Zod + helpers)', () => {
     const messages = call[0].messages;
     expect(messages[0].role).toBe('system');
     expect(messages[0].content).toContain('You must respond with valid JSON');
+  });
+});
+
+// ─── Parts-content (LlmMessagePart) ──────────────────────────────────────────
+// Available since v0.29.0 / lumiverse-spindle-types ≥0.4.71 / host commit c67dcdf6.
+// LLMMessage.content widened from `string` to `string | LlmMessagePart[]` to
+// support native tool_use / tool_result threading through agentic loops.
+
+describe('parts-content forwarding', () => {
+  test('generate forwards string content unchanged (backwards-compat sanity)', async () => {
+    mockSpindle.connections.list.mockReturnValueOnce(Promise.resolve([]));
+    mockSpindle.generate.raw.mockReturnValueOnce(Promise.resolve({ content: 'ok' }));
+    const api = buildApi();
+    await api.generate([{ role: 'user', content: 'hi' }]);
+    const call = mockSpindle.generate.raw.mock.calls[0] as any;
+    expect(call[0].messages[0].content).toBe('hi');
+  });
+
+  test('generate forwards parts-content unchanged', async () => {
+    mockSpindle.connections.list.mockReturnValueOnce(Promise.resolve([]));
+    mockSpindle.generate.raw.mockReturnValueOnce(Promise.resolve({ content: 'ack' }));
+    const api = buildApi();
+    const parts = [
+      { type: 'text' as const, text: 'Look at this:' },
+      { type: 'image' as const, data: 'AAAA', mime_type: 'image/png' },
+    ];
+    await api.generate([{ role: 'user', content: parts }]);
+    const call = mockSpindle.generate.raw.mock.calls[0] as any;
+    expect(call[0].messages[0].content).toEqual(parts);
+    // Reference equality: pipeline must not have re-allocated the array
+    expect(call[0].messages[0].content).toBe(parts);
+  });
+
+  test('generate forwards tool_use + tool_result parts unchanged (agentic-loop turn)', async () => {
+    mockSpindle.connections.list.mockReturnValueOnce(Promise.resolve([]));
+    mockSpindle.generate.raw.mockReturnValueOnce(Promise.resolve({ content: 'done' }));
+    const api = buildApi();
+    const assistantToolUse = [{
+      type: 'tool_use' as const,
+      id: 'call_abc123',
+      name: 'lookup_weather',
+      input: { city: 'Helsinki' },
+    }];
+    const userToolResult = [{
+      type: 'tool_result' as const,
+      tool_use_id: 'call_abc123',
+      content: '{"temp_c":-3,"sky":"clear"}',
+    }];
+    await api.generate([
+      { role: 'user',      content: 'weather?' },
+      { role: 'assistant', content: assistantToolUse },
+      { role: 'user',      content: userToolResult },
+    ]);
+    const call = mockSpindle.generate.raw.mock.calls[0] as any;
+    expect(call[0].messages[1].content).toEqual(assistantToolUse);
+    expect(call[0].messages[2].content).toEqual(userToolResult);
+    // Reference equality preserved
+    expect(call[0].messages[1].content).toBe(assistantToolUse);
+    expect(call[0].messages[2].content).toBe(userToolResult);
+  });
+
+  test('generateStructured flattens parts-system-message before appending schema instruction', async () => {
+    // System messages with parts-content are rare but legal. enhanceMessagesWithSchema
+    // needs to concat a string instruction onto the system message — if we widened
+    // the type but kept the concat naive, parts arrays would coerce to "[object Object]"
+    // before append. The flatten helper prevents that.
+    mockSpindle.connections.list.mockReturnValueOnce(Promise.resolve([]));
+    mockSpindle.generate.raw.mockReturnValueOnce(Promise.resolve({ content: '{"a":1}' }));
+    const api = buildApi();
+    await api.generateStructured(
+      [
+        { role: 'system', content: [{ type: 'text' as const, text: 'You are an analyst.' }] },
+        { role: 'user',   content: 'go' },
+      ],
+      { type: 'object', properties: { a: { type: 'number' } } },
+    );
+    const call = mockSpindle.generate.raw.mock.calls[0] as any;
+    const sysContent = call[0].messages[0].content;
+    expect(typeof sysContent).toBe('string');
+    expect(sysContent).toContain('You are an analyst.');
+    expect(sysContent).toContain('You must respond with valid JSON');
+    // Must NOT contain "[object Object]" coercion artefact
+    expect(sysContent).not.toContain('[object Object]');
+  });
+
+  test('generateWithTools forwards parts-content unchanged', async () => {
+    mockSpindle.connections.list.mockReturnValueOnce(Promise.resolve([]));
+    mockSpindle.generate.raw.mockReturnValueOnce(Promise.resolve({
+      content: '',
+      tool_calls: [{ name: 'do_x', args: {}, call_id: 'c1' }],
+    }));
+    const api = buildApi();
+    const turn = [{
+      type: 'tool_result' as const,
+      tool_use_id: 'c0',
+      content: 'previous-result',
+    }];
+    await api.generateWithTools(
+      [
+        { role: 'user', content: 'start' },
+        { role: 'user', content: turn },
+      ],
+      [{ name: 'do_x', description: 'Do thing' }],
+    );
+    const call = mockSpindle.generate.raw.mock.calls[0] as any;
+    expect(call[0].messages[1].content).toBe(turn);
+  });
+});
+
+// ─── messageContentToString helper ───────────────────────────────────────────
+
+describe('messageContentToString', () => {
+  test('returns string content unchanged', () => {
+    expect(messageContentToString('hello')).toBe('hello');
+    expect(messageContentToString('')).toBe('');
+  });
+
+  test('joins text parts into a single string', () => {
+    expect(messageContentToString([
+      { type: 'text', text: 'Hello, ' },
+      { type: 'text', text: 'world!' },
+    ])).toBe('Hello, world!');
+  });
+
+  test('renders tool_use as bracketed marker including args JSON', () => {
+    const out = messageContentToString([
+      { type: 'tool_use', id: 'c1', name: 'add', input: { a: 1, b: 2 } },
+    ]);
+    expect(out).toContain('[tool_use add(');
+    expect(out).toContain('"a":1');
+    expect(out).toContain('"b":2');
+  });
+
+  test('renders tool_result as bracketed marker with id + content', () => {
+    expect(messageContentToString([
+      { type: 'tool_result', tool_use_id: 'c1', content: '3' },
+    ])).toBe('[tool_result c1: 3]');
+  });
+
+  test('renders image / audio as type-only markers', () => {
+    expect(messageContentToString([
+      { type: 'image', data: 'AAAA', mime_type: 'image/png' },
+      { type: 'audio', data: 'BBBB', mime_type: 'audio/mp3' },
+    ])).toBe('[image][audio]');
+  });
+
+  test('mixed parts compose left-to-right', () => {
+    const out = messageContentToString([
+      { type: 'text',        text: 'Result: ' },
+      { type: 'tool_result', tool_use_id: 'c1', content: '42' },
+      { type: 'text',        text: ' (good)' },
+    ]);
+    expect(out).toBe('Result: [tool_result c1: 42] (good)');
+  });
+
+  test('empty parts array returns empty string', () => {
+    expect(messageContentToString([])).toBe('');
   });
 });

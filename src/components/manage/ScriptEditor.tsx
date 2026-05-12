@@ -76,11 +76,27 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
     setUnsaved(false);
     setRenameValue(script.name);
     setConfirmDangerous(false);
-    // v0.27.5 — reset Monaco health probe when the user switches scripts so
-    // each open script gets a fresh init-detection cycle. A persistent
-    // 'unresponsive' would otherwise mask a working subsequent script.
-    setEditorHealth('pending');
   }, [script.id, script.code, script.name]);
+
+  // v0.27.5 — reset Monaco health probe ONLY on actual script switch (script.id
+  // change), not on every code/name update. The Editor below is keyed by
+  // script.id, so switching scripts unmounts + remounts the Monaco component
+  // and re-fires handleMount — which clears the timeout and sets health 'ok'.
+  //
+  // v0.29.0 — split off from the script-sync effect above. Keeping it bundled
+  // with `[script.id, script.code, script.name]` deps caused the false-positive
+  // "Monaco failed to load" overlay reported after every script run: each
+  // autosave round-trip mutates `script.code` (backend → pushScripts → new
+  // prop), the bundled effect re-ran, reset editorHealth → 'pending', the
+  // mount-timeout effect re-ran and scheduled a fresh 15s timer. Monaco
+  // doesn't re-mount in that scenario (script.id unchanged → same key), so
+  // handleMount never fired again to clear the timer, and ~15s after the
+  // most recent autosave the overlay appeared. Most reliably reproduced via
+  // handleRun, which calls saveCode synchronously when unsaved=true → forced
+  // round-trip every Run.
+  useEffect(() => {
+    setEditorHealth('pending');
+  }, [script.id]);
 
   // v0.27.5 — Mount-timeout probe (layer 1). If `handleMount` doesn't fire
   // within 15s of the code view being active, Monaco failed to load entirely

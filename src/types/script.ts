@@ -694,9 +694,61 @@ export interface ChatAPI {
 
 // ─── LLM API ─────────────────────────────────────────────────────────────────
 
+/**
+ * A single message content part.
+ *
+ * `LLMMessage.content` can be either a plain string (the simple case — most
+ * scripts won't need parts) OR an array of these parts. Parts let scripts
+ * pass native `tool_use` / `tool_result` payloads back into the LLM during
+ * an agentic loop (preferable to text-encoded `[Tool: X]` / `[Result]: ...`
+ * pseudo-turns — providers understand parts as first-class signals).
+ *
+ * Available since LumiScript v0.29.0 / Lumiverse host commit `c67dcdf6`
+ * + lumiverse-spindle-types ≥0.4.71.
+ *
+ * Mirrors `LlmMessagePartDTO` from `lumiverse-spindle-types`. Image and
+ * audio parts are accepted by the host but most providers will only consume
+ * them when the connection's model supports the modality.
+ */
+export type LlmMessagePart =
+  | { type: 'text';        text: string;                                          cache_control?: Record<string, unknown> }
+  | { type: 'image';       data: string; mime_type: string;                       cache_control?: Record<string, unknown> }
+  | { type: 'audio';       data: string; mime_type: string;                       cache_control?: Record<string, unknown> }
+  | { type: 'tool_use';    id: string;   name: string; input: Record<string, unknown>; cache_control?: Record<string, unknown> }
+  | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean;   cache_control?: Record<string, unknown> };
+
 export interface LLMMessage {
   role: 'system' | 'user' | 'assistant';
-  content: string;
+  /**
+   * Either a plain string OR an array of `LlmMessagePart`. Parts let scripts
+   * thread native `tool_use` / `tool_result` payloads through an agentic loop
+   * — preferable to text-encoded pseudo-turns. See `LlmMessagePart`.
+   */
+  content: string | LlmMessagePart[];
+}
+
+/**
+ * Flatten an `LLMMessage`'s content to a plain string. Used by code paths
+ * that need a `string` (e.g. concatenating system-prompt schema instructions,
+ * rendering messages in diagnostic previews). `text` parts contribute their
+ * text; `tool_use` / `tool_result` parts render as bracketed placeholders;
+ * `image` / `audio` parts render as a `[<type>]` marker.
+ *
+ * NB: this is a lossy projection — only call it when string content is what
+ * you actually need. Forwarding to the LLM should pass parts through as-is.
+ */
+export function messageContentToString(content: LLMMessage['content']): string {
+  if (typeof content === 'string') return content;
+  return content.map(p => {
+    switch (p.type) {
+      case 'text':        return p.text;
+      case 'tool_use':    return `[tool_use ${p.name}(${JSON.stringify(p.input)})]`;
+      case 'tool_result': return `[tool_result ${p.tool_use_id}: ${p.content}]`;
+      case 'image':       return '[image]';
+      case 'audio':       return '[audio]';
+      default:            return '';
+    }
+  }).join('');
 }
 
 /**
@@ -933,23 +985,35 @@ export interface LLMAPI {
    * Requires generation permission.
    *
    * @example
+   * // Recommended (v0.29.0+): thread tool calls through native parts content.
+   * // Providers understand `tool_use` / `tool_result` parts as first-class
+   * // signals, unlike the legacy text-encoded pseudo-turns. Falls back
+   * // automatically to string content on older hosts that don't understand
+   * // parts arrays.
    * const schemas = api.tools.list().map(t => ({
    *   name: t.name, description: t.description, parameters: t.parameters,
    * }));
-   * let msgs = [...history];
+   * let msgs: LLMMessage[] = [...history];
    * for (let i = 0; i < 8; i++) {
-   *   const r = await api.llm.generateWithTools(msgs, schemas, { connection: 'tools' });
+   *   const r = await api.llm.generateWithTools(msgs, schemas, { connectionName: 'tools' });
    *   if (!r.tool_calls?.length) {
    *     if (r.content) api.chat.inject('result', r.content, { mode: 'intercept' });
    *     break;
    *   }
-   *   for (const call of r.tool_calls) {
-   *     const result = await api.tools.invoke(call.name, call.args);
-   *     msgs = [...msgs,
-   *       { role: 'assistant', content: `[Tool call: ${call.name}]` },
-   *       { role: 'user',      content: `[Result]: ${result}` },
-   *     ];
-   *   }
+   *   // Assistant turn: one tool_use part per call requested by the model.
+   *   msgs.push({
+   *     role: 'assistant',
+   *     content: r.tool_calls.map(c => ({
+   *       type: 'tool_use', id: c.call_id, name: c.name, input: c.args,
+   *     })),
+   *   });
+   *   // User turn: one tool_result part per call, paired by call_id.
+   *   const results = await Promise.all(r.tool_calls.map(async c => ({
+   *     type: 'tool_result' as const,
+   *     tool_use_id: c.call_id,
+   *     content: await api.tools.invoke(c.name, c.args),
+   *   })));
+   *   msgs.push({ role: 'user', content: results });
    * }
    */
   generateWithTools(

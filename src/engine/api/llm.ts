@@ -21,6 +21,7 @@ import type {
   ZodLike,
   DryRunOptions,
 } from '../../types/script.js';
+import { messageContentToString } from '../../types/script.js';
 import { type APIBuildDeps, assertPerm, shielded } from './shared.js';
 
 // ─── Provider validation ──────────────────────────────────────────────────────
@@ -153,9 +154,13 @@ function enhanceMessagesWithSchema(
   const other   = messages.filter(m => m.role !== 'system');
   if (sysMsgs.length > 0) {
     const last = sysMsgs[sysMsgs.length - 1]!;
+    // System messages with parts-content (rare but legal) are flattened to a
+    // string before appending the schema instruction — keeps the system
+    // prompt a single text blob, which is what every provider expects.
+    const baseText = messageContentToString(last.content);
     return [
       ...sysMsgs.slice(0, -1),
-      { ...last, content: last.content + instruction },
+      { ...last, content: baseText + instruction },
       ...other,
     ];
   }

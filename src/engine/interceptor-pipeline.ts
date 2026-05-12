@@ -54,10 +54,23 @@ import type { InjectionEntry } from './injection-store.js';
  * structural subset of `LlmMessageDTO` we touch — keeps this module
  * decoupled from `lumiverse-spindle-types` so tests don't need a
  * mock spindle to import.
+ *
+ * `content` mirrors `LlmMessageDTO.content` (string | parts array) since
+ * spindle-types 0.4.71. The pipeline does NOT introspect content — it
+ * only constructs new injection messages (always string-content) and
+ * shallow-copies references into the output array. Parts-content from
+ * upstream simply flows through.
  */
+export type PipelineMessagePart =
+  | { type: 'text';        text: string;                                                  cache_control?: Record<string, unknown> }
+  | { type: 'image';       data: string; mime_type: string;                               cache_control?: Record<string, unknown> }
+  | { type: 'audio';       data: string; mime_type: string;                               cache_control?: Record<string, unknown> }
+  | { type: 'tool_use';    id: string;   name: string; input: Record<string, unknown>;    cache_control?: Record<string, unknown> }
+  | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean;      cache_control?: Record<string, unknown> };
+
 export interface PipelineMessage {
   role: 'system' | 'user' | 'assistant';
-  content: string;
+  content: string | PipelineMessagePart[];
 }
 
 /**

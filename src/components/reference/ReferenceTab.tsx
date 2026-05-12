@@ -868,8 +868,20 @@ export const KEY_TYPES: TypeDoc[] = [
     name: 'LLMMessage',
     note: 'A single message in the messages array passed to api.llm.generate / generateStructured / generateWithTools.',
     fields: [
-      { field: 'role',    type: "'system' | 'user' | 'assistant'", optional: false, desc: 'Message sender role.' },
-      { field: 'content', type: 'string',                          optional: false, desc: 'Message text content.' },
+      { field: 'role',    type: "'system' | 'user' | 'assistant'",      optional: false, desc: 'Message sender role.' },
+      { field: 'content', type: 'string | LlmMessagePart[]',            optional: false, desc: 'Plain string (simple case) OR an array of parts. Parts let scripts thread native tool_use / tool_result payloads through an agentic loop instead of text-encoding them. Available since v0.29.0.' },
+    ],
+  },
+  {
+    name: 'LlmMessagePart',
+    note: 'A single content part inside an LLMMessage. Discriminated union — switch on the `type` field. Mirrors the host\'s LlmMessagePartDTO; available since v0.29.0 / lumiverse-spindle-types ≥0.4.71.',
+    fields: [
+      { field: "{ type: 'text', text }",                                                                   type: '', optional: false, desc: 'A plain text segment.' },
+      { field: "{ type: 'image', data, mime_type }",                                                       type: '', optional: false, desc: 'Base64-encoded image. Consumed only by connections whose model supports image input.' },
+      { field: "{ type: 'audio', data, mime_type }",                                                       type: '', optional: false, desc: 'Base64-encoded audio. Consumed only by connections whose model supports audio input.' },
+      { field: "{ type: 'tool_use', id, name, input }",                                                    type: '', optional: false, desc: 'A tool call the LLM is invoking. Re-pair with a matching tool_result in the next user turn (tool_result.tool_use_id === this.id).' },
+      { field: "{ type: 'tool_result', tool_use_id, content, is_error? }",                                 type: '', optional: false, desc: 'Result of a tool call, paired by tool_use_id. Set is_error=true to signal failure (model adapts retry/abandon strategy).' },
+      { field: 'cache_control? (all variants)',                                                            type: '', optional: true,  desc: 'Provider-specific cache hint (e.g. Anthropic ephemeral). Most callers leave undefined.' },
     ],
   },
   {

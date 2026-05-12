@@ -50,6 +50,7 @@ import type {
   CouncilSystemPromptOptions,
   LLMMessage,
 } from '../../types/script.js';
+import { messageContentToString } from '../../types/script.js';
 import type { BuiltinLibraryFactory } from '../builtin-library-registry.js';
 
 // ─── Building blocks ─────────────────────────────────────────────────────────
@@ -270,8 +271,13 @@ function memberSnapshotContent(cm: CouncilMemberContext): string {
 /** Unframed messages body — each message gets a header + subrule + content. */
 function messagesContent(messages: LLMMessage[]): string {
   return messages.map((m, i) => {
-    const header = `[${i + 1}] ${m.role} — ${m.content.length} chars`;
-    return `${header}\n${SUBRULE}\n${m.content}`;
+    // Flatten parts-content (rare in council messages — we construct them as
+    // strings — but defensively handle the union). messageContentToString
+    // renders tool_use/tool_result parts as bracketed markers so they're
+    // legible in the diagnostic preview.
+    const text = messageContentToString(m.content);
+    const header = `[${i + 1}] ${m.role} — ${text.length} chars`;
+    return `${header}\n${SUBRULE}\n${text}`;
   }).join('\n\n');
 }
 
