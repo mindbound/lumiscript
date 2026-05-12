@@ -136,7 +136,11 @@
 }
 .ls-select:focus { outline: none; border-color: var(--lumiverse-accent); }
 .ls-number-input {
-  width: 54px;
+  /* Widened from 54px → 78px so the "default" placeholder fits without
+     getting clipped by the spinner control. Pre-existing inputs (Tool
+     iterations, Font size, Console history, Autosave) all use 2-4 digit
+     numeric values which sit comfortably at this width too. */
+  width: 78px;
   font-size: 11px;
   padding: 3px 6px;
   border-radius: var(--lumiverse-radius);
