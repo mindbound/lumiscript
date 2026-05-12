@@ -111,11 +111,41 @@ import {
   collectBackendDiagnostics,
   type ScriptRunnerProbeResult,
 } from './engine/diagnostics.js';
+import { runAssistantTurn } from './assistant/agent.js';
+import {
+  loadThreadIndex,
+  saveThreadIndex,
+  loadThread,
+  saveThread,
+  deleteThreadFile,
+  createNewThread,
+  deriveTitle,
+  buildIndexEntry,
+  upsertIndexEntry,
+  removeIndexEntry,
+} from './assistant/storage.js';
+import type { AssistantThread, AssistantThreadIndexEntry } from './assistant/types.js';
 
 // ─── Active user + permission tracking ───────────────────────────────────────
 
 let activeUserId: string | null = null;
 const grantedPermissions = new Set<string>();
+
+// ─── In-app assistant — module-level state (v0.30.2 persistence) ─────────────
+//
+// Threads persist to `spindle.userStorage` under `assistant/threads/<id>.json`,
+// indexed at `assistant/threads.json`. Only one thread is "active" — its body
+// lives in memory between turns and gets persisted after each terminal turn.
+// Other threads' bodies are loaded lazily on `assistant_switch_thread`.
+let assistantThreadIndex: AssistantThreadIndexEntry[] = [];
+let activeAssistantThread: AssistantThread | null = null;
+
+// At most one assistant turn is in flight at a time. The abort controller +
+// streamed-content buffer get cleared on every terminal outcome (completed
+// / aborted / errored).
+let assistantAbortController: AbortController | null = null;
+let assistantStreamedContent = '';
+let assistantInitialized = false;
 
 async function refreshPermissions(): Promise<void> {
   try {
@@ -627,6 +657,78 @@ async function syncTriggers(): Promise<void> {
   });
 }
 
+// ─── Assistant thread bootstrap + helpers (v0.30.2) ──────────────────────────
+
+/**
+ * One-time boot of the assistant state. Called on the same cold-start path
+ * as `triggersInitialized`. Loads the threads index; if any threads exist,
+ * loads the most-recently-updated one as active. Otherwise creates a fresh
+ * empty thread (not yet persisted — that happens on first user message).
+ */
+async function bootstrapAssistant(userId: string): Promise<void> {
+  if (assistantInitialized) return;
+  try {
+    assistantThreadIndex = await loadThreadIndex(userId);
+  } catch (err) {
+    spindle.log.warn(
+      `[LumiScript] assistant: failed to load thread index — starting fresh. ` +
+      (err instanceof Error ? err.message : String(err)),
+    );
+    assistantThreadIndex = [];
+  }
+  assistantThreadIndex.sort((a, b) => b.updatedAt - a.updatedAt);
+  if (assistantThreadIndex.length > 0) {
+    const mostRecent = assistantThreadIndex[0]!;
+    const loaded = await loadThread(userId, mostRecent.id).catch(() => null);
+    if (loaded) {
+      activeAssistantThread = loaded;
+    } else {
+      assistantThreadIndex = removeIndexEntry(assistantThreadIndex, mostRecent.id);
+      activeAssistantThread = createNewThread();
+    }
+  } else {
+    activeAssistantThread = createNewThread();
+  }
+  assistantInitialized = true;
+}
+
+function pushAssistantThreads(): void {
+  spindle.sendToFrontend({
+    type: 'assistant_threads',
+    threads: assistantThreadIndex,
+    activeThreadId: activeAssistantThread?.id ?? null,
+  });
+}
+
+function pushActiveThreadLoaded(): void {
+  if (!activeAssistantThread) return;
+  spindle.sendToFrontend({
+    type: 'assistant_thread_loaded',
+    threadId: activeAssistantThread.id,
+    title:    activeAssistantThread.title,
+    messages: activeAssistantThread.messages,
+  });
+}
+
+async function persistActiveThread(userId: string): Promise<void> {
+  if (!activeAssistantThread) return;
+  const hasContent = activeAssistantThread.messages.some((m) => m.role !== 'system');
+  if (!hasContent) return;
+  try {
+    const saved = await saveThread(userId, activeAssistantThread);
+    activeAssistantThread = saved;
+    const entry = buildIndexEntry(saved);
+    assistantThreadIndex = upsertIndexEntry(assistantThreadIndex, entry);
+    await saveThreadIndex(userId, assistantThreadIndex);
+    pushAssistantThreads();
+  } catch (err) {
+    spindle.log.warn(
+      `[LumiScript] assistant: failed to persist thread ${activeAssistantThread.id} — ` +
+      (err instanceof Error ? err.message : String(err)),
+    );
+  }
+}
+
 // ─── Frontend message handler ─────────────────────────────────────────────────
 
 let triggersInitialized = false;
@@ -665,6 +767,10 @@ spindle.onFrontendMessage(async (raw, userId) => {
     triggersInitialized = true;
     const contextPromise = refreshActiveContext(activeUserId);
     void syncTriggers();
+    // Bootstrap the assistant's thread state at the same time — independent
+    // of triggers, can run in parallel. Fire-and-forget; on failure we'll
+    // lazily retry on the next assistant interaction.
+    void bootstrapAssistant(activeUserId);
     await contextPromise;
     publishActiveCharId();
     // Verify the host meets our minimum Lumiverse version (declared in
@@ -811,6 +917,222 @@ spindle.onFrontendMessage(async (raw, userId) => {
         });
 
         spindle.sendToFrontend({ type: 'diagnostics_report', report });
+        break;
+      }
+
+      // ── In-app assistant ────────────────────────────────────────────────
+      case 'assistant_send': {
+        spindle.sendToFrontend({ type: 'assistant_user_turn', content: msg.content });
+        if (!activeUserId) {
+          spindle.sendToFrontend({
+            type: 'assistant_error',
+            error: 'Assistant unavailable: no active user. Make sure Lumiverse has finished loading before opening Lisa.',
+          });
+          break;
+        }
+        if (!assistantInitialized) await bootstrapAssistant(activeUserId);
+        if (!activeAssistantThread) {
+          spindle.sendToFrontend({
+            type: 'assistant_error',
+            error: 'Assistant unavailable: failed to initialise thread state.',
+          });
+          break;
+        }
+        // Title derivation on first user message in a brand-new thread.
+        const isFirstUserMessage =
+          activeAssistantThread.messages.filter((m) => m.role !== 'system').length === 0;
+        if (isFirstUserMessage) {
+          activeAssistantThread.title = deriveTitle(msg.content);
+        }
+        assistantAbortController = new AbortController();
+        assistantStreamedContent = '';
+        let aborted = false;
+        try {
+          const result = await runAssistantTurn(
+            {
+              history: activeAssistantThread.messages,
+              userInput: msg.content,
+              userId: activeUserId,
+              maxIterations: settingsStore.get().assistantMaxIterations,
+              signal: assistantAbortController.signal,
+              ...(msg.connectionId ? { connectionId: msg.connectionId } : {}),
+            },
+            {
+              onToken: (token) => {
+                assistantStreamedContent += token;
+                spindle.sendToFrontend({ type: 'assistant_token', token });
+              },
+              onReasoning: (token) => spindle.sendToFrontend({ type: 'assistant_reasoning', token }),
+              onToolCall: (ev) => spindle.sendToFrontend({
+                type:    'assistant_tool_call',
+                callId:  ev.callId,
+                name:    ev.name,
+                args:    ev.args,
+                result:  ev.result,
+                isError: ev.isError,
+              }),
+              onAborted: () => { aborted = true; },
+            },
+          );
+          activeAssistantThread.messages = result.messages.filter((m) => m.role !== 'system');
+          spindle.sendToFrontend({
+            type:    'assistant_completed',
+            content: result.content,
+            ...(result.usage ? { usage: result.usage } : {}),
+          });
+          void persistActiveThread(activeUserId);
+        } catch (err) {
+          if (aborted) {
+            spindle.sendToFrontend({
+              type:    'assistant_aborted',
+              content: assistantStreamedContent,
+            });
+          } else {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            spindle.log.warn(`[LumiScript] assistant_send failed: ${errMsg}`);
+            spindle.sendToFrontend({ type: 'assistant_error', error: errMsg });
+          }
+        } finally {
+          assistantAbortController = null;
+          assistantStreamedContent = '';
+        }
+        break;
+      }
+
+      case 'assistant_reset':
+      case 'assistant_new_thread': {
+        if (!activeUserId) break;
+        if (!assistantInitialized) await bootstrapAssistant(activeUserId);
+        activeAssistantThread = createNewThread();
+        pushAssistantThreads();
+        pushActiveThreadLoaded();
+        break;
+      }
+
+      case 'assistant_abort': {
+        assistantAbortController?.abort();
+        break;
+      }
+
+      case 'request_assistant_connections': {
+        try {
+          const list = await spindle.connections.list(activeUserId ?? undefined);
+          spindle.sendToFrontend({
+            type: 'assistant_connections',
+            connections: list.map((c) => ({
+              id:        c.id,
+              name:      c.name,
+              model:     c.model,
+              provider:  c.provider,
+              isDefault: c.is_default ?? false,
+            })),
+          });
+        } catch (err) {
+          spindle.log.warn(
+            `[LumiScript] request_assistant_connections failed: ` +
+            (err instanceof Error ? err.message : String(err)),
+          );
+          spindle.sendToFrontend({ type: 'assistant_connections', connections: [] });
+        }
+        break;
+      }
+
+      case 'request_assistant_threads': {
+        if (!activeUserId) {
+          spindle.sendToFrontend({ type: 'assistant_threads', threads: [], activeThreadId: null });
+          break;
+        }
+        if (!assistantInitialized) await bootstrapAssistant(activeUserId);
+        pushAssistantThreads();
+        if (activeAssistantThread) pushActiveThreadLoaded();
+        break;
+      }
+
+      case 'assistant_switch_thread': {
+        if (!activeUserId || !assistantInitialized) break;
+        if (assistantAbortController) {
+          spindle.log.warn(
+            `[LumiScript] assistant_switch_thread refused: turn in flight. Abort first.`,
+          );
+          break;
+        }
+        const target = await loadThread(activeUserId, msg.threadId).catch(() => null);
+        if (!target) {
+          assistantThreadIndex = removeIndexEntry(assistantThreadIndex, msg.threadId);
+          await saveThreadIndex(activeUserId, assistantThreadIndex);
+          pushAssistantThreads();
+          break;
+        }
+        activeAssistantThread = target;
+        pushAssistantThreads();
+        pushActiveThreadLoaded();
+        break;
+      }
+
+      case 'assistant_rename_thread': {
+        if (!activeUserId || !assistantInitialized) break;
+        const newTitle = msg.title.trim() || 'Untitled';
+        const target = activeAssistantThread?.id === msg.threadId
+          ? activeAssistantThread
+          : await loadThread(activeUserId, msg.threadId).catch(() => null);
+        if (!target) break;
+        target.title = newTitle;
+        target.updatedAt = Date.now();
+        if (activeAssistantThread?.id === msg.threadId) {
+          activeAssistantThread = target;
+        }
+        try {
+          await saveThread(activeUserId, target);
+          const entry = buildIndexEntry(target);
+          assistantThreadIndex = upsertIndexEntry(assistantThreadIndex, entry);
+          await saveThreadIndex(activeUserId, assistantThreadIndex);
+          pushAssistantThreads();
+        } catch (err) {
+          spindle.log.warn(
+            `[LumiScript] assistant_rename_thread failed: ` +
+            (err instanceof Error ? err.message : String(err)),
+          );
+        }
+        break;
+      }
+
+      case 'assistant_delete_thread': {
+        if (!activeUserId || !assistantInitialized) break;
+        // Confirm via the Spindle-native modal — host-themed, accessible,
+        // can't accidentally lose a long thread.
+        const target = assistantThreadIndex.find((e) => e.id === msg.threadId);
+        const titlePreview = target?.title ?? 'this thread';
+        const confirmRes = await spindle.modal.confirm({
+          title:        'Delete thread?',
+          message:      `Deleting "${titlePreview}" will permanently remove its conversation history. This can't be undone.`,
+          variant:      'danger',
+          confirmLabel: 'Delete',
+          cancelLabel:  'Keep',
+          userId:       activeUserId,
+        }).catch(() => ({ confirmed: false }));
+        if (!confirmRes.confirmed) break;
+
+        await deleteThreadFile(activeUserId, msg.threadId);
+        assistantThreadIndex = removeIndexEntry(assistantThreadIndex, msg.threadId);
+        try {
+          await saveThreadIndex(activeUserId, assistantThreadIndex);
+        } catch (err) {
+          spindle.log.warn(
+            `[LumiScript] assistant_delete_thread index save failed: ` +
+            (err instanceof Error ? err.message : String(err)),
+          );
+        }
+        if (activeAssistantThread?.id === msg.threadId) {
+          if (assistantThreadIndex.length > 0) {
+            const next = assistantThreadIndex[0]!;
+            const loaded = await loadThread(activeUserId, next.id).catch(() => null);
+            activeAssistantThread = loaded ?? createNewThread();
+          } else {
+            activeAssistantThread = createNewThread();
+          }
+          pushActiveThreadLoaded();
+        }
+        pushAssistantThreads();
         break;
       }
 

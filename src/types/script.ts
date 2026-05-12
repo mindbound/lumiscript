@@ -135,6 +135,17 @@ export interface LumiScriptSettings {
    * placeholder `module.exports`.
    */
   defaultLibraryTemplate: string;
+  // ─── Assistant (Lisa) ────────────────────────────────────────────────────────
+  /**
+   * Maximum tool-call iterations the in-app assistant's agentic loop is
+   * allowed before failing with a "did not converge" error. Each
+   * `lookup_api` call counts as one iteration. Lower values fail fast for
+   * models that thrash on negative-evidence loops (observed with Opus 4.6
+   * — see `notes/model-observation-opus-4.6.md`); higher values give
+   * headroom on genuinely hard agentic questions. Default: 8.
+   * Range: 2 – 20.
+   */
+  assistantMaxIterations: number;
 }
 
 export const DEFAULT_TRIGGER_TEMPLATE =
@@ -164,6 +175,7 @@ export const DEFAULT_SETTINGS: LumiScriptSettings = {
   autosaveDebounceMs: 1_200,
   defaultTriggerTemplate: DEFAULT_TRIGGER_TEMPLATE,
   defaultLibraryTemplate: DEFAULT_LIBRARY_TEMPLATE,
+  assistantMaxIterations: 8,
 };
 
 // ─── Execution ────────────────────────────────────────────────────────────────

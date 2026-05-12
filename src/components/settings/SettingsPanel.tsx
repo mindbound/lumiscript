@@ -1,9 +1,10 @@
 import { FC, useState, useEffect } from 'react';
-import { Code2, BookMarked, Terminal, Timer, Type, FileCode2, Activity } from 'lucide-react';
+import { Code2, BookMarked, Terminal, Timer, Type, FileCode2, Activity, MessageCircle } from 'lucide-react';
 import type { Script, LumiScriptSettings } from '../../types/script.js';
 import type { BackendToFrontend, FrontendToBackend } from '../../types/messages.js';
 import { DEFAULT_SETTINGS } from '../../types/script.js';
 import { DiagnosticsModal } from '../diagnostics/DiagnosticsModal.js';
+import { AssistantModal } from '../assistant/AssistantModal.js';
 
 interface SettingsPanelProps {
   onBackendMessage: (handler: (msg: unknown) => void) => () => void;
@@ -20,6 +21,9 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
   // Diagnostics" button below; the modal mounts via portal under
   // document.body so it overlays the entire app, not just this panel.
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  // v0.30.x — assistant modal visibility. Opens the in-app code assistant
+  // (persona: Lisa). Portal-mounted same way as Diagnostics.
+  const [assistantOpen, setAssistantOpen] = useState(false);
 
   useEffect(() => {
     const unsub = onBackendMessage((raw) => {
@@ -230,9 +234,54 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
         </button>
       </div>
 
+      {/* Assistant — v0.30.x. Opens the in-app code assistant (persona:
+          Lisa) for Q&A about LumiScript / Spindle APIs. Tool-iteration
+          ceiling is user-configurable for models that thrash on hard
+          questions (see notes/model-observation-opus-4.6.md). */}
+      <div className="ls-settings-section">
+        <div className="ls-settings-section-label">
+          <MessageCircle size={11} />
+          Assistant
+        </div>
+
+        <div className="ls-settings-field">
+          <label className="ls-settings-field-label" title="Maximum tool-call iterations Lisa is allowed per turn. Each lookup_api call counts as one. Lower this if your model thrashes on hard questions; raise it if Lisa hits the ceiling on genuinely complex Q&A.">
+            Tool iterations
+          </label>
+          <input
+            type="number"
+            className="ls-number-input"
+            min={2}
+            max={20}
+            value={settings.assistantMaxIterations}
+            onChange={e => {
+              const n = Math.max(2, Math.min(20, Number(e.target.value) || 8));
+              sendToBackend({ type: 'update_settings', patch: { assistantMaxIterations: n } });
+            }}
+          />
+        </div>
+
+        <button
+          type="button"
+          className="ls-btn"
+          onClick={() => setAssistantOpen(true)}
+          title="Open the in-app code assistant. Quality depends on the LLM connection you're using."
+        >
+          <MessageCircle size={11} style={{ marginRight: 4 }} />
+          Ask Lisa
+        </button>
+      </div>
+
       {diagnosticsOpen && (
         <DiagnosticsModal
           onClose={() => setDiagnosticsOpen(false)}
+          onBackendMessage={onBackendMessage}
+          sendToBackend={sendToBackend}
+        />
+      )}
+      {assistantOpen && (
+        <AssistantModal
+          onClose={() => setAssistantOpen(false)}
           onBackendMessage={onBackendMessage}
           sendToBackend={sendToBackend}
         />

@@ -411,6 +411,42 @@ export type FrontendToBackend =
   // result. No correlation id — the FE only has one diagnostics modal
   // open at a time; rapid re-requests just supersede in flight.
   | { type: 'request_diagnostics' }
+  // ─── In-app code assistant ──────────────────────────────────────────────
+  // New user turn. Backend echoes via `assistant_user_turn` + streams
+  // tokens / reasoning / tool calls back, finalising with
+  // `assistant_completed` (or `assistant_aborted` / `assistant_error`).
+  | {
+      type: 'assistant_send';
+      /** The user's new message. */
+      content: string;
+      /** Lumiverse LLM connection ID. */
+      connectionId?: string;
+    }
+  // "New chat" — creates a new thread and switches the active thread to it.
+  | { type: 'assistant_reset' }
+  // Frontend asks the backend for the connection list (modal mount).
+  | { type: 'request_assistant_connections' }
+  // Abort the in-flight assistant turn, if any. Idempotent.
+  | { type: 'assistant_abort' }
+  // ─── Thread management (v0.30.2) ───────────────────────────────────────
+  // Frontend asks the backend for the threads index + the currently active
+  // thread id. Sent on modal mount. Backend replies via `assistant_threads`.
+  | { type: 'request_assistant_threads' }
+  // Switch the active thread. Backend loads the target's body from storage,
+  // updates `activeAssistantThreadId`, and replies via `assistant_thread_loaded`
+  // with the full message history. Aborts any in-flight turn first.
+  | { type: 'assistant_switch_thread'; threadId: string }
+  // Create a brand-new thread + switch to it. Equivalent to `assistant_reset`
+  // semantically but explicit about intent for the sidebar "New chat" button.
+  | { type: 'assistant_new_thread' }
+  // Rename a thread. Updates the in-memory thread (if active), the on-disk
+  // file, and the index. Backend pushes an updated `assistant_threads`.
+  | { type: 'assistant_rename_thread'; threadId: string; title: string }
+  // Delete a thread. Backend confirms via Spindle-native modal before acting.
+  // If the deleted thread was active, backend auto-switches to the next-most-
+  // recent (or creates a new fresh thread if none remain). Backend pushes
+  // `assistant_threads` and — if the active thread changed — `assistant_thread_loaded`.
+  | { type: 'assistant_delete_thread'; threadId: string }
 ;
 
 // ─── Backend → Frontend ───────────────────────────────────────────────────────
@@ -803,5 +839,73 @@ export type BackendToFrontend =
   | {
       type:   'diagnostics_report';
       report: import('../engine/diagnostics.js').DiagnosticsReport;
+    }
+  // ─── In-app code assistant ──────────────────────────────────────────────
+  // The user-sent turn is echoed back so the frontend doesn't have to
+  // optimistically render and then reconcile.
+  | { type: 'assistant_user_turn'; content: string }
+  // Incremental content / reasoning tokens streamed from rawStream.
+  | { type: 'assistant_token'; token: string }
+  | { type: 'assistant_reasoning'; token: string }
+  // Mid-turn tool invocation surfaced as a compact chip.
+  | {
+      type: 'assistant_tool_call';
+      callId: string;
+      name: string;
+      args: Record<string, unknown>;
+      result: string;
+      isError: boolean;
+    }
+  // Final assistant message + cumulative usage. End-of-turn signal.
+  // `usage` is optional — some providers/endpoints don't surface usage on
+  // streaming responses. `usage.estimated` is true when the agent fell
+  // back to client-side counting via `spindle.tokens.countText`.
+  | {
+      type: 'assistant_completed';
+      content: string;
+      usage?: {
+        promptTokens: number;
+        completionTokens: number;
+        totalTokens: number;
+        estimated?: boolean;
+      };
+    }
+  // Failure path — emitted instead of `assistant_completed`.
+  | { type: 'assistant_error'; error: string }
+  // User-initiated abort confirmed by backend.
+  | {
+      type: 'assistant_aborted';
+      content: string;
+      usage?: {
+        promptTokens: number;
+        completionTokens: number;
+        totalTokens: number;
+        estimated?: boolean;
+      };
+    }
+  // Connection list pushed to the frontend in response to
+  // `request_assistant_connections`.
+  | {
+      type: 'assistant_connections';
+      connections: Array<{
+        id: string;
+        name: string;
+        model: string;
+        provider: string;
+        isDefault: boolean;
+      }>;
+    }
+  // Threads index + currently active thread id. Sorted by `updatedAt` desc.
+  | {
+      type: 'assistant_threads';
+      threads: import('../assistant/types.js').AssistantThreadIndexEntry[];
+      activeThreadId: string | null;
+    }
+  // Body of a thread loaded into the active slot.
+  | {
+      type: 'assistant_thread_loaded';
+      threadId: string;
+      title: string;
+      messages: import('lumiverse-spindle-types').LlmMessageDTO[];
     }
 ;
