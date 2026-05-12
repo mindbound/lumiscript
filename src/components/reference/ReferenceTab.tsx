@@ -2571,6 +2571,18 @@ export const TRIGGER_MODEL_INTRO: string =
   '}\n' +
   '```\n\n' +
   'The full list of available event names + their payload shapes + firing semantics is in the **Events** section below. To make a script react to one of those events, open it in the editor and select the event in the UI.\n\n' +
+  '**Execution isolation — every fire is a fresh function scope.** When a wired event fires, the host wraps your script body in a brand-new `AsyncFunction` and invokes it ONCE. Module-scope `let` / `const` / `var` declarations at the top of your script body are LOCAL to that one invocation — they do NOT survive to the next fire of the same script. A pattern like:\n\n' +
+  '```js\n' +
+  'let bankId = null;\n' +
+  "if (data.__event === 'ls:startup')  bankId = await ensureBank();\n" +
+  "if (data.__event === 'MESSAGE_SENT' && bankId) { /* ... */ }\n" +
+  '```\n\n' +
+  '...does NOT work. The `ls:startup` fire writes to `bankId` and returns; the function instance is discarded; the next `MESSAGE_SENT` fire is a fresh `AsyncFunction` invocation with its own brand-new `bankId = null`. The two fires share no local state.\n\n' +
+  'For state that needs to survive across fires, pick one of:\n\n' +
+  '- **`globalThis.<key>`** — process-scoped, persists for the lifetime of the script-runner subprocess (i.e. until the extension reloads). Cheapest option; ideal for in-memory caches. Example: `globalThis.lsScoringBankId ??= await ensureBank();`. (Note: globalThis values survive *editor saves* too — see the saved memory note about globalThis-cache-invalidation traps if you cache anything keyed on script identity.)\n' +
+  '- **`api.variables.{local,global,character,chat}`** — durable JSON-serialised stores with explicit scope semantics. Survives extension reloads.\n' +
+  '- **Registered handlers** (`api.broadcast.on(event, handler)`, `api.macros.register(...)`, `api.tools.register(...)`, `api.chat.registerContentProcessor(...)`, etc.) — these capture closures over the proxy and *do* survive across fires until the script is disabled or deleted. Useful for "subscriber-only" patterns where a script registers a handler in one fire and that handler fires later from a different source.\n\n' +
+  '**Common misconception**: "the local variable persists until the extension reloads." It does NOT. Each fire is its own scope. The boundary is per-fire, not per-extension-load.\n\n' +
   "**Three similar-sounding systems, three different problems** — keep them straight:\n\n" +
   "- **Editor-UI event wiring** — react to Lumiverse host *lifecycle* events (MESSAGE_SENT, GENERATION_ENDED, CHAT_CHANGED, ...). Configured per-script in the script editor.\n" +
   "- `api.broadcast.*` — real-time *script-to-script* pub/sub between user scripts running inside the same LumiScript extension. Use for custom in-extension messaging.\n" +
