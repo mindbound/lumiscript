@@ -1292,7 +1292,10 @@ spindle.onFrontendMessage(async (raw, userId) => {
         for (const m of thread.messages) {
           if (m.role === 'system') continue;
           if (m.role === 'user' && Array.isArray(m.content)) continue; // tool_result-only, handled inline below
-          const roleLabel = m.role === 'user' ? '👤 User' : '🤖 Assistant';
+          // Display label: "Lisa" for assistant bubbles, matching the
+          // modal's `ASSISTANT_DISPLAY_NAME` (kept in sync with the
+          // backend's LISA_PERSONA.name).
+          const roleLabel = m.role === 'user' ? '👤 User' : '🤖 Lisa';
           lines.push(`## ${roleLabel}`);
           lines.push('');
 

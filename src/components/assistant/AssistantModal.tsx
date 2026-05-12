@@ -40,6 +40,15 @@ import { MarkdownContent, AssistantApplyContext } from './MarkdownContent.js';
  */
 const STREAM_RENDER_THROTTLE_MS = 50;
 
+/**
+ * Display name shown on assistant bubbles' role header. Hard-coded to
+ * match `LISA_PERSONA.name` rather than reading the persona at runtime —
+ * the persona lives backend-side and the modal doesn't import it. If the
+ * persona ever becomes user-configurable, this needs to be threaded
+ * through via an IPC at modal mount instead.
+ */
+const ASSISTANT_DISPLAY_NAME = 'Lisa';
+
 interface AssistantModalProps {
   onClose: () => void;
   onBackendMessage: (handler: (msg: unknown) => void) => () => void;
@@ -889,10 +898,14 @@ const MessageBubble: FC<{ message: DisplayMessage; streaming?: boolean }> = ({
       </div>
     );
   }
+  // Display label: assistant bubbles show the persona's name ("Lisa")
+  // instead of the bare 'assistant' role. User / error / tool labels are
+  // unchanged.
+  const roleLabel = message.role === 'assistant' ? ASSISTANT_DISPLAY_NAME : message.role;
   return (
     <div className={`ls-asst-bubble ls-asst-bubble-${message.role}${message.aborted ? ' ls-asst-bubble-aborted' : ''}`}>
       <div className="ls-asst-bubble-role">
-        {message.role}
+        {roleLabel}
         {message.aborted && <span className="ls-asst-bubble-aborted-tag"> · stopped</span>}
       </div>
       {message.reasoning && (
