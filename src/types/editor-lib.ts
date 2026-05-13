@@ -409,6 +409,17 @@ interface LLMMessage {
    * (preferable to text-encoded pseudo-turns).
    */
   content: string | LlmMessagePart[];
+  /**
+   * Thinking-mode reasoning content from the previous assistant turn, echoed
+   * back on the next request. Required by DeepSeek thinking-mode models on
+   * tool-call continuations (the API rejects with 400 otherwise). Plain-text
+   * continuations and non-thinking models don't need it. Other providers
+   * routing DeepSeek (NanoGPT, OpenRouter) inherit the requirement; providers
+   * without thinking mode ignore the field. Copy from
+   * \`LLMRawResult.reasoning_content\` after each generateWithTools call.
+   * Available since v0.30.2.
+   */
+  reasoning_content?: string;
 }
 
 type LLMProvider =
@@ -510,6 +521,12 @@ interface LLMRawResult {
   content: string;
   /** Function calls requested by the LLM. Present on intermediate agentic steps. */
   tool_calls?: ToolCall[];
+  /**
+   * Thinking-mode reasoning content. Present on tool-call iterations against
+   * DeepSeek-thinking models. Copy onto the assistant turn you append to
+   * history before the next call. See \`LLMMessage.reasoning_content\`.
+   */
+  reasoning_content?: string;
 }
 
 interface LLMRawResultStructured<T> {
@@ -517,6 +534,12 @@ interface LLMRawResultStructured<T> {
   content?: T;
   /** Function calls requested by the LLM. Present on intermediate agentic steps. */
   tool_calls?: ToolCall[];
+  /**
+   * Thinking-mode reasoning content. Present on tool-call iterations against
+   * DeepSeek-thinking models. Copy onto the assistant turn you append to
+   * history before the next call. See \`LLMMessage.reasoning_content\`.
+   */
+  reasoning_content?: string;
 }
 
 interface LLMAPI {
@@ -551,16 +574,20 @@ interface LLMAPI {
    * Use in an agentic loop: call repeatedly until \`result.tool_calls\` is empty.
    * Requires generation permission.
    * @example
-   * // Recommended (v0.29.0+): thread tool calls through native parts content.
-   * // Providers understand tool_use / tool_result parts as first-class signals,
-   * // unlike the legacy text-encoded "[Tool: X]" / "[Result]: ..." pseudo-turns.
+   * // Recommended (v0.30.2+): native parts content + echo reasoning_content
+   * // on the assistant turn so DeepSeek-thinking accepts the continuation.
+   * // Other providers ignore both fields; pattern is provider-portable.
    * const schemas = api.tools.list().map(t => ({ name: t.name, description: t.description, parameters: t.parameters }));
    * let msgs = [...history];
    * for (let i = 0; i < 8; i++) {
    *   const r = await api.llm.generateWithTools(msgs, schemas, { connectionName: 'tools' });
    *   if (!r.tool_calls?.length) { if (r.content) api.chat.inject('res', r.content); break; }
    *   const toolUses = r.tool_calls.map(c => ({ type: 'tool_use' as const, id: c.call_id, name: c.name, input: c.args }));
-   *   msgs.push({ role: 'assistant', content: toolUses });
+   *   msgs.push({
+   *     role: 'assistant',
+   *     content: toolUses,
+   *     ...(r.reasoning_content ? { reasoning_content: r.reasoning_content } : {}),
+   *   });
    *   const results = await Promise.all(r.tool_calls.map(async c => ({
    *     type: 'tool_result' as const, tool_use_id: c.call_id, content: await api.tools.invoke(c.name, c.args),
    *   })));

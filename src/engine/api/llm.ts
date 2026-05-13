@@ -385,7 +385,18 @@ export function buildLLMAPI(deps: APIBuildDeps): LumiScriptAPI['llm'] {
             parameters: { ...buildLLMParams(opts), ...extraParams },
             userId: userId ?? undefined,
             ...(opts?.signal ? { signal: opts.signal } : {}),
-          } as any) as Promise<{ content?: string; tool_calls?: Array<{ name: string; args: Record<string, unknown>; call_id: string }> }>).then(raw => {
+          } as any) as Promise<{ content?: string; reasoning?: string; tool_calls?: Array<{ name: string; args: Record<string, unknown>; call_id: string }> }>).then(raw => {
+            // Surface DeepSeek-style reasoning_content to callers — DeepSeek
+            // thinking-mode tool loops require the previous turn's reasoning
+            // to be echoed back on the next request. Other providers don't
+            // emit a non-empty `reasoning` field, so this is harmless for
+            // them. v0.30.2+. The host (`spindle.generate.raw`) surfaces the
+            // field on the `done` chunk as `reasoning` (string); we forward
+            // it to scripts as `reasoning_content` to match the wire-side
+            // field name on the inbound LLMMessage.
+            const reasoning_content = raw.reasoning && raw.reasoning.length > 0
+              ? raw.reasoning
+              : undefined;
             // Structured output path: parse/validate on the final step (no tool_calls returned)
             if (schema && !raw.tool_calls?.length) {
               let parsed: unknown;
@@ -400,11 +411,16 @@ export function buildLLMAPI(deps: APIBuildDeps): LumiScriptAPI['llm'] {
                   parsed = (schema as ZodLike<T>).parse(parsed);
                 } catch { /* return raw-parsed value if Zod validation fails */ }
               }
-              return { content: parsed as T, tool_calls: undefined };
+              return {
+                content: parsed as T,
+                tool_calls: undefined,
+                ...(reasoning_content ? { reasoning_content } : {}),
+              };
             }
             return {
               content:    raw.content ?? '',
               tool_calls: raw.tool_calls?.length ? raw.tool_calls : undefined,
+              ...(reasoning_content ? { reasoning_content } : {}),
             };
           });
         }),

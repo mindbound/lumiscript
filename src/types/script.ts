@@ -755,6 +755,28 @@ export interface LLMMessage {
    * — preferable to text-encoded pseudo-turns. See `LlmMessagePart`.
    */
   content: string | LlmMessagePart[];
+  /**
+   * Thinking-mode reasoning content from the previous assistant turn, echoed
+   * back on the next request. **Required** by DeepSeek's thinking-mode models
+   * (`deepseek-reasoner`, `deepseek-chat` with thinking enabled) **on
+   * tool-call continuations** — without it the upstream API rejects the
+   * request with `400 invalid_request_error: "The 'reasoning_content' in the
+   * thinking mode must be passed back to the API."` Plain-text continuations
+   * (no tool calls in the message) don't need this; nor do non-thinking
+   * models. Other providers routing DeepSeek (NanoGPT, OpenRouter, etc.)
+   * inherit the same requirement; providers without reasoning_content
+   * ignore the field harmlessly.
+   *
+   * Pattern: after each `generateWithTools` call that returns `tool_calls`,
+   * copy the result's `reasoning_content` (also added by this release) onto
+   * the assistant turn you append to your message history before the next
+   * iteration. Lisa's own agent loop does this automatically; for
+   * user-script tool loops it's now your responsibility.
+   *
+   * Available since LumiScript v0.30.2 / Lumiverse host commit
+   * `9fe172899a` + lumiverse-spindle-types ≥0.4.72.
+   */
+  reasoning_content?: string;
 }
 
 /**
@@ -961,6 +983,13 @@ export interface LLMRawResultStructured<T> {
   content?: T;
   /** Function calls requested by the LLM. When present, `content` is absent. */
   tool_calls?: ToolCall[];
+  /**
+   * Thinking-mode reasoning content from this turn. Present on tool-call
+   * iterations against DeepSeek-thinking models — copy onto the assistant
+   * turn you append to history before the next call. See
+   * `LLMMessage.reasoning_content` for the full rationale.
+   */
+  reasoning_content?: string;
 }
 
 /** A single function call made by the LLM during a `generateWithTools()` call. */
@@ -982,6 +1011,13 @@ export interface LLMRawResult {
   content: string;
   /** Function calls requested by the LLM. When present, content is typically empty. */
   tool_calls?: ToolCall[];
+  /**
+   * Thinking-mode reasoning content from this turn. Present on tool-call
+   * iterations against DeepSeek-thinking models — copy onto the assistant
+   * turn you append to history before the next call. See
+   * `LLMMessage.reasoning_content` for the full rationale.
+   */
+  reasoning_content?: string;
 }
 
 export interface LLMAPI {
@@ -1015,11 +1051,13 @@ export interface LLMAPI {
    * Requires generation permission.
    *
    * @example
-   * // Recommended (v0.29.0+): thread tool calls through native parts content.
-   * // Providers understand `tool_use` / `tool_result` parts as first-class
-   * // signals, unlike the legacy text-encoded pseudo-turns. Falls back
-   * // automatically to string content on older hosts that don't understand
-   * // parts arrays.
+   * // Recommended (v0.30.2+): thread tool calls through native parts content
+   * // AND echo back `reasoning_content` on the assistant turn — required by
+   * // DeepSeek thinking-mode tool loops, harmlessly ignored by other
+   * // providers. Without it, DeepSeek-thinking returns a 400 on the next
+   * // turn ("The 'reasoning_content' in the thinking mode must be passed
+   * // back to the API."). Providers without parts arrays / reasoning_content
+   * // ignore both fields, so this pattern is provider-portable.
    * const schemas = api.tools.list().map(t => ({
    *   name: t.name, description: t.description, parameters: t.parameters,
    * }));
@@ -1030,12 +1068,14 @@ export interface LLMAPI {
    *     if (r.content) api.chat.inject('result', r.content, { mode: 'intercept' });
    *     break;
    *   }
-   *   // Assistant turn: one tool_use part per call requested by the model.
+   *   // Assistant turn: one tool_use part per call + echo reasoning_content
+   *   // back so DeepSeek-thinking accepts the continuation.
    *   msgs.push({
    *     role: 'assistant',
    *     content: r.tool_calls.map(c => ({
    *       type: 'tool_use', id: c.call_id, name: c.name, input: c.args,
    *     })),
+   *     ...(r.reasoning_content ? { reasoning_content: r.reasoning_content } : {}),
    *   });
    *   // User turn: one tool_result part per call, paired by call_id.
    *   const results = await Promise.all(r.tool_calls.map(async c => ({

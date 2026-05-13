@@ -23,7 +23,7 @@
         "@types/react-dom": "^19.2.3",
         "@types/react-syntax-highlighter": "^15.5.13",
         "bun-types": "^1.3.14",
-        "lumiverse-spindle-types": "^0.4.71",
+        "lumiverse-spindle-types": "^0.4.72",
         "typescript": "^6.0.3",
       },
     },
@@ -139,7 +139,7 @@
 
     "lucide-react": ["lucide-react@1.14.0", "", { "peerDependencies": { "react": "^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0" } }, "sha512-+1mdWcfSJVUsaTIjN9zoezmUhfXo5l0vP7ekBMPo3jcS/aIkxHnXqAPsByszMZx/Y8oQBRJxJx5xg+RH3urzxA=="],
 
-    "lumiverse-spindle-types": ["lumiverse-spindle-types@0.4.71", "", {}, "sha512-+ilFBQ09xYg7v7aHk2KdHIwZbCrsR7iaCGgoKwg3QVdATYkhhHj+E4xE4eTLIvVUM5UJZvKo8hm3EKZ/I0M/Ug=="],
+    "lumiverse-spindle-types": ["lumiverse-spindle-types@0.4.72", "", {}, "sha512-yvhRJyM8aFu/pQkAA62ztStSGgriYpP80oCK9kFoocD2sp6uR8hbxHCpTOmruTiuxpt3mJY+ow6ZPH/yX0tEJg=="],
 
     "markdown-table": ["markdown-table@3.0.4", "", {}, "sha512-wiYz4+JrLyb/DqW2hkFJxP7Vd7JuTDm77fvbM8VfEQdmSMqcImWeeRbHwZjBjIFki/VaMK2BhFi7oUUZeM5bqw=="],
 

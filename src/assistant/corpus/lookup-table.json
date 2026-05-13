@@ -5632,6 +5632,12 @@
         "type": "string | LlmMessagePart[]",
         "optional": false,
         "desc": "Plain string (simple case) OR an array of parts. Parts let scripts thread native tool_use / tool_result payloads through an agentic loop instead of text-encoding them. Available since v0.29.0."
+      },
+      {
+        "field": "reasoning_content?",
+        "type": "string",
+        "optional": true,
+        "desc": "Thinking-mode reasoning content from the previous assistant turn, echoed back on the next request. REQUIRED by DeepSeek thinking-mode models on tool-call continuations (the API returns 400 invalid_request_error: \"The 'reasoning_content' in the thinking mode must be passed back to the API.\" without it). Plain-text continuations and non-thinking models don't need it. Other providers routing DeepSeek (NanoGPT, OpenRouter) inherit the requirement; providers without thinking mode ignore the field. Copy from LLMRawResult.reasoning_content after each generateWithTools call. Available since v0.30.2 / lumiverse-spindle-types ≥0.4.72."
       }
     ],
     "usedBy": [
@@ -5807,6 +5813,12 @@
         "type": "ToolCall[]",
         "optional": true,
         "desc": "Function calls requested by the LLM. When present, content is typically empty."
+      },
+      {
+        "field": "reasoning_content?",
+        "type": "string",
+        "optional": true,
+        "desc": "Thinking-mode reasoning content from this turn. Present on tool-call iterations against DeepSeek-thinking models. Copy onto the assistant turn you append to history before the next call (set LLMMessage.reasoning_content). Other providers ignore it. Available since v0.30.2."
       }
     ],
     "usedBy": []
@@ -5827,6 +5839,12 @@
         "type": "ToolCall[]",
         "optional": true,
         "desc": "Intermediate steps: function calls requested by the LLM. When present, content is absent."
+      },
+      {
+        "field": "reasoning_content?",
+        "type": "string",
+        "optional": true,
+        "desc": "Thinking-mode reasoning content from this turn. Same semantics as LLMRawResult.reasoning_content — copy onto the next assistant turn for DeepSeek-thinking tool loops. Available since v0.30.2."
       }
     ],
     "usedBy": [
