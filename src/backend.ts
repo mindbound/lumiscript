@@ -1269,7 +1269,11 @@ spindle.onFrontendMessage(async (raw, userId) => {
         const lines: string[] = [];
         lines.push(`# ${thread.title}`);
         lines.push('');
-        lines.push(`_Exported from Lisa — ${new Date(thread.updatedAt).toISOString().slice(0, 19).replace('T', ' ')}_`);
+        // Timestamp is the actual export-click time, not the thread's
+        // last-activity time — the latter is misleading when "Exported"
+        // is in the header (reads like "exported just now"). `Date.now()`
+        // is more truthful for the Discord-support-report use case.
+        lines.push(`_Exported from Lisa — ${new Date().toISOString().slice(0, 19).replace('T', ' ')}_`);
         lines.push('');
         lines.push('---');
         lines.push('');
@@ -1327,8 +1331,27 @@ spindle.onFrontendMessage(async (raw, userId) => {
                   lines.push('');
                   lines.push(result.isError ? '**✕ Tool error:**' : '**✓ Tool result:**');
                   lines.push('');
-                  lines.push('```');
-                  lines.push(result.content);
+                  // Try to render the result as pretty-printed JSON for
+                  // readability — tool results from `lookup_api` and
+                  // friends are JSON-shaped, and the raw form is a
+                  // single line of escape-spaghetti (literal \n and \"
+                  // sequences). Fall back to the raw string when the
+                  // payload isn't parseable (e.g. plain error messages
+                  // from `is_error: true` results, or non-JSON tool
+                  // contents from future tools). When we successfully
+                  // pretty-print, tag the fence as `json` so Markdown
+                  // viewers can syntax-highlight — matching what tool
+                  // call inputs already do above.
+                  let resultBody = result.content;
+                  let resultLang = '';
+                  try {
+                    resultBody = JSON.stringify(JSON.parse(result.content), null, 2);
+                    resultLang = 'json';
+                  } catch {
+                    // Leave defaults — raw string, no language tag.
+                  }
+                  lines.push('```' + resultLang);
+                  lines.push(resultBody);
                   lines.push('```');
                 }
                 lines.push('');

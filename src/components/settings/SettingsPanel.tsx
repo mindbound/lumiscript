@@ -5,6 +5,7 @@ import type { BackendToFrontend, FrontendToBackend } from '../../types/messages.
 import { DEFAULT_SETTINGS } from '../../types/script.js';
 import { DiagnosticsModal } from '../diagnostics/DiagnosticsModal.js';
 import { AssistantModal } from '../assistant/AssistantModal.js';
+import { LS_OPEN_ASSISTANT_EVENT, dispatchOpenAssistant } from '../assistant/openAssistant.js';
 
 interface SettingsPanelProps {
   onBackendMessage: (handler: (msg: unknown) => void) => () => void;
@@ -37,6 +38,18 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
 
     return unsub;
   }, [onBackendMessage, sendToBackend]);
+
+  // v0.30.x — cross-root invocation. The dock-panel React root (where the
+  // script editor lives) can't reach this component's state directly because
+  // the two roots have no common React parent (see `openAssistant.ts`).
+  // Listening for the `ls:open-assistant` window event lets the editor's
+  // topbar button — and any future invocation site — pop this modal without
+  // a shared ancestor.
+  useEffect(() => {
+    const handleOpen = () => setAssistantOpen(true);
+    window.addEventListener(LS_OPEN_ASSISTANT_EVENT, handleOpen);
+    return () => window.removeEventListener(LS_OPEN_ASSISTANT_EVENT, handleOpen);
+  }, []);
 
   const triggerCount = scripts.filter(s => s.type === 'trigger').length;
   const libraryCount = scripts.filter(s => s.type === 'library').length;
@@ -368,7 +381,7 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
         <button
           type="button"
           className="ls-btn"
-          onClick={() => setAssistantOpen(true)}
+          onClick={() => dispatchOpenAssistant()}
           title="Open the in-app code assistant. Quality depends on the LLM connection you're using."
         >
           <MessageCircle size={11} style={{ marginRight: 4 }} />

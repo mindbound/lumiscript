@@ -1,6 +1,6 @@
 import { FC, useRef, useState, useEffect, useCallback } from 'react';
 import Editor, { type OnMount } from '@monaco-editor/react';
-import { Play, Loader2, Shield, ShieldAlert, Clock, Calendar, Code2, BookOpen, Copy, Check, FolderOpen } from 'lucide-react';
+import { Play, Loader2, Shield, ShieldAlert, Clock, Calendar, Code2, BookOpen, Copy, Check, FolderOpen, MessageCircle } from 'lucide-react';
 import type { Script, ScriptBindingEntry, ConsoleEntry } from '../../types/script.js';
 import type { FrontendToBackend } from '../../types/messages.js';
 import { ScriptConsole } from './ScriptConsole.js';
@@ -8,6 +8,7 @@ import { BindingsSection, type ActiveContext } from './BindingsSection.js';
 import { TriggersSection } from './TriggersSection.js';
 import { LUMISCRIPT_DEFS } from '../../types/editor-lib.js';
 import { ReferenceTab } from '../reference/ReferenceTab.js';
+import { dispatchOpenAssistant } from '../assistant/openAssistant.js';
 
 // Register the LumiScript ambient type definitions with Monaco's JavaScript
 // language service once — subsequent editor mounts reuse the existing registration.
@@ -347,6 +348,41 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
         >
           <BookOpen size={10} style={{ display: 'inline', marginRight: 3 }} />
           Docs
+        </button>
+
+        {/* v0.30.x — open the in-app code assistant (persona: Lisa) directly
+            from the editor topbar. Cross-root dispatch via window event;
+            the modal lives in the SettingsPanel React root.
+            Square icon-only treatment matches Run's height + border for
+            toolbar rhythm. `align-self: stretch` makes height auto-match
+            whatever Run renders to (Run's text line-height pushes its
+            content area ~17px, taller than a 15px icon alone — so a pure
+            padding-based calc undershoots Run by 2-3px depending on
+            host theme/font). `aspect-ratio: 1` then locks width = height,
+            yielding a clean square that tracks Run automatically.
+            `borderColor` borrows Run's accent purple via the same token
+            Run uses — only the colour, not the fill, so Lisa reads as a
+            secondary affordance rather than a duplicate primary action.
+            Styles are inline (rather than via a `.ls-btn-square` class in
+            base.css) because the host can be flaky about reloading the
+            CSS-in-JS bundle on extension toggle, and inline always wins
+            on specificity. Tooltip carries the affordance copy. */}
+        <button
+          type="button"
+          className="ls-btn"
+          style={{
+            alignSelf: 'stretch',
+            aspectRatio: '1',
+            padding: 0,
+            justifyContent: 'center',
+            boxSizing: 'border-box',
+            borderColor: 'var(--lumiverse-accent)',
+          }}
+          onClick={() => dispatchOpenAssistant()}
+          title="Ask Lisa about LumiScript"
+          aria-label="Ask Lisa about LumiScript"
+        >
+          <MessageCircle size={15} />
         </button>
 
         {script.type !== 'library' && (
