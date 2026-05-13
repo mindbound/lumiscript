@@ -110,8 +110,10 @@ import {
 import {
   collectBackendDiagnostics,
   type ScriptRunnerProbeResult,
+  type AssistantProbeResult,
 } from './engine/diagnostics.js';
 import { runAssistantTurn } from './assistant/agent.js';
+import { LOOKUP_TABLE } from './assistant/corpus/lookup-table.js';
 import {
   loadThreadIndex,
   saveThreadIndex,
@@ -905,6 +907,116 @@ spindle.onFrontendMessage(async (raw, userId) => {
               },
         };
 
+        // Assistant probe — bundles the four checks that drive the
+        // "Assistant (Lisa)" section of the report. Corpus count is
+        // constant-time (Object.keys on a bundled record); thread-storage
+        // and connections probes are async with per-step try/catch so a
+        // failure in one doesn't sink the whole section. Skipped when
+        // there's no active user (no userId means userStorage rejects;
+        // surfaced as the "Not probed" info row from the collector).
+        let assistantProbe: AssistantProbeResult | undefined;
+        if (activeUserId) {
+          // Capture as a non-null local so closures inside `index.map`
+          // below don't lose the type narrowing (TS treats the outer
+          // `activeUserId` as `string | null` again inside the callback).
+          const userIdForProbe = activeUserId;
+          const corpusEntries = Object.keys(LOOKUP_TABLE).length;
+
+          // Thread-storage probe. Index load is the gate — if it fails the
+          // rest is moot, just record the error. Per-thread reads are
+          // best-effort: a single corrupted thread file shouldn't disqualify
+          // the others. `Promise.allSettled` collects every outcome; we
+          // sum bytes + tally readable count from the fulfilled subset and
+          // surface the FIRST per-thread error in the details for context.
+          let indexLoaded     = false;
+          let threadsIndexed  = 0;
+          let threadsReadable = 0;
+          let totalBytes      = 0;
+          let storageError: string | undefined;
+          try {
+            const index = await loadThreadIndex(userIdForProbe);
+            indexLoaded    = true;
+            threadsIndexed = index.length;
+            const reads = await Promise.allSettled(
+              index.map((entry) =>
+                spindle.userStorage.getJson<unknown>(
+                  `assistant/threads/${entry.id}.json`,
+                  { fallback: null, userId: userIdForProbe },
+                ).then((body) => {
+                  if (body === null) throw new Error('thread file missing');
+                  // Re-serialise to estimate the on-disk byte cost. The
+                  // host's `getJson` parses for us, so we don't have the
+                  // raw bytes — `JSON.stringify(...).length` is a close
+                  // approximation (modulo whitespace differences). Good
+                  // enough for capacity reporting; we're not bill-grade.
+                  totalBytes += JSON.stringify(body).length;
+                  threadsReadable += 1;
+                }),
+              ),
+            );
+            const firstFailure = reads.find((r) => r.status === 'rejected');
+            if (firstFailure && firstFailure.status === 'rejected') {
+              const reasonMsg = firstFailure.reason instanceof Error
+                ? firstFailure.reason.message
+                : String(firstFailure.reason);
+              storageError =
+                `${threadsIndexed - threadsReadable} thread file(s) unreadable; first error: ${reasonMsg}`;
+            }
+          } catch (err) {
+            storageError = err instanceof Error ? err.message : String(err);
+          }
+
+          // Connections probe — same `spindle.connections.list` call the
+          // modal's picker uses on open. List failure leaves the counts
+          // at zero (no swallowed details — the section's pass/warn logic
+          // already surfaces "zero connections" as a warn row).
+          let connectionsCount = 0;
+          let defaultName:     string | undefined;
+          let defaultModel:    string | undefined;
+          let defaultProvider: string | undefined;
+          try {
+            const list = await spindle.connections.list(userIdForProbe);
+            connectionsCount = list.length;
+            const dflt = list.find((conn) => conn.is_default);
+            if (dflt) {
+              defaultName     = dflt.name;
+              defaultModel    = dflt.model;
+              defaultProvider = dflt.provider;
+            }
+          } catch (err) {
+            spindle.log.warn(
+              `[LumiScript] diagnostics: connections probe failed: ` +
+              (err instanceof Error ? err.message : String(err)),
+            );
+          }
+
+          const s = settingsStore.get();
+          assistantProbe = {
+            initialised: assistantInitialized,
+            corpusEntries,
+            storage: {
+              indexLoaded,
+              threadsIndexed,
+              threadsReadable,
+              totalBytes,
+              ...(storageError ? { error: storageError } : {}),
+            },
+            connections: {
+              count: connectionsCount,
+              ...(defaultName     ? { defaultName     } : {}),
+              ...(defaultModel    ? { defaultModel    } : {}),
+              ...(defaultProvider ? { defaultProvider } : {}),
+            },
+            settings: {
+              maxIterations: s.assistantMaxIterations,
+              ...(s.assistantTemperature !== undefined ? { temperature: s.assistantTemperature } : {}),
+              ...(s.assistantTopP        !== undefined ? { topP:        s.assistantTopP        } : {}),
+              ...(s.assistantMaxTokens   !== undefined ? { maxTokens:   s.assistantMaxTokens   } : {}),
+              parallelToolCalls: s.assistantParallelToolCalls,
+            },
+          };
+        }
+
         const report = collectBackendDiagnostics({
           scriptStorage,
           triggerRegistry,
@@ -914,6 +1026,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
           activeUserId,
           storageProbe,
           scriptRunner,
+          assistantProbe,
         });
 
         spindle.sendToFrontend({ type: 'diagnostics_report', report });

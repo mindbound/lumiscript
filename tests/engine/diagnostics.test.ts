@@ -19,6 +19,7 @@ import { describe, test, expect, beforeEach } from 'bun:test';
 import {
   collectBackendDiagnostics,
   type DiagnosticsCollectorDeps,
+  type AssistantProbeResult,
 } from '../../src/engine/diagnostics.js';
 import { setActiveContext, resetContext } from '../../src/engine/binding.js';
 import { addInjection } from '../../src/engine/injection-store.js';
@@ -68,11 +69,11 @@ beforeEach(() => {
 // ─── Top-level shape ────────────────────────────────────────────────────────
 
 describe('collectBackendDiagnostics — shape', () => {
-  test('returns five sections in stable order', () => {
+  test('returns six sections in stable order', () => {
     const report = collectBackendDiagnostics(makeDeps());
-    expect(report.sections).toHaveLength(5);
+    expect(report.sections).toHaveLength(6);
     expect(report.sections.map(s => s.id)).toEqual([
-      'lumiscript', 'scriptRunner', 'activeContext', 'registrations', 'storage',
+      'lumiscript', 'scriptRunner', 'activeContext', 'registrations', 'storage', 'assistant',
     ]);
   });
 
@@ -407,5 +408,189 @@ describe('collectBackendDiagnostics — Section B (script-runner)', () => {
     })).sections.find(s => s.id === 'scriptRunner')!
       .checks.find(c => c.label === 'Total restarts (this session)')!;
     expect(check.message).toContain('heartbeat-timeout');
+  });
+});
+
+// ─── Assistant section (Lisa) ───────────────────────────────────────────────
+
+/** Build a fully-populated AssistantProbeResult with sensible defaults.
+ *  Tests override individual fields via the deep-partial-style helper
+ *  inside their own bodies. */
+function makeAssistantProbe(overrides: Partial<AssistantProbeResult> = {}): AssistantProbeResult {
+  return {
+    initialised:   true,
+    corpusEntries: 394,
+    storage: {
+      indexLoaded:     true,
+      threadsIndexed:  0,
+      threadsReadable: 0,
+      totalBytes:      0,
+    },
+    connections: {
+      count: 0,
+    },
+    settings: {
+      maxIterations:     8,
+      parallelToolCalls: true,
+    },
+    ...overrides,
+  };
+}
+
+describe('collectBackendDiagnostics — Assistant section', () => {
+  test('emits a single "Not probed" info row when assistantProbe is undefined', () => {
+    const section = collectBackendDiagnostics(makeDeps()).sections.find(s => s.id === 'assistant')!;
+    expect(section.checks).toHaveLength(1);
+    const only = section.checks[0]!;
+    expect(only).toMatchObject({ status: 'info', label: 'Status' });
+    expect(only.message).toContain('Not probed');
+  });
+
+  test('fails Corpus loaded when entry count is 0 (would silently hallucinate)', () => {
+    const section = collectBackendDiagnostics(
+      makeDeps({ assistantProbe: makeAssistantProbe({ corpusEntries: 0 }) }),
+    ).sections.find(s => s.id === 'assistant')!;
+    const corpus = section.checks.find(c => c.label === 'Corpus loaded')!;
+    expect(corpus.status).toBe('fail');
+    expect(corpus.details).toMatchObject({ corpusEntries: 0 });
+  });
+
+  test('passes Corpus loaded with the entry count in the message', () => {
+    const section = collectBackendDiagnostics(
+      makeDeps({ assistantProbe: makeAssistantProbe({ corpusEntries: 394 }) }),
+    ).sections.find(s => s.id === 'assistant')!;
+    const corpus = section.checks.find(c => c.label === 'Corpus loaded')!;
+    expect(corpus.status).toBe('pass');
+    expect(corpus.message).toContain('394');
+  });
+
+  test('fails Thread storage when the index is unreadable', () => {
+    const section = collectBackendDiagnostics(
+      makeDeps({
+        assistantProbe: makeAssistantProbe({
+          storage: {
+            indexLoaded: false, threadsIndexed: 0, threadsReadable: 0, totalBytes: 0,
+            error: 'EACCES: permission denied',
+          },
+        }),
+      }),
+    ).sections.find(s => s.id === 'assistant')!;
+    const storage = section.checks.find(c => c.label === 'Thread storage')!;
+    expect(storage.status).toBe('fail');
+    expect(storage.message).toContain('EACCES');
+  });
+
+  test('warns Thread storage when some threads are unreadable', () => {
+    const section = collectBackendDiagnostics(
+      makeDeps({
+        assistantProbe: makeAssistantProbe({
+          storage: {
+            indexLoaded: true, threadsIndexed: 5, threadsReadable: 3, totalBytes: 12_345,
+            error: '2 thread file(s) unreadable; first error: corrupt JSON',
+          },
+        }),
+      }),
+    ).sections.find(s => s.id === 'assistant')!;
+    const storage = section.checks.find(c => c.label === 'Thread storage')!;
+    expect(storage.status).toBe('warn');
+    expect(storage.message).toMatch(/3 of 5 threads readable/);
+  });
+
+  test('passes Thread storage on full readability', () => {
+    const section = collectBackendDiagnostics(
+      makeDeps({
+        assistantProbe: makeAssistantProbe({
+          storage: {
+            indexLoaded: true, threadsIndexed: 3, threadsReadable: 3, totalBytes: 8_192,
+          },
+        }),
+      }),
+    ).sections.find(s => s.id === 'assistant')!;
+    const storage = section.checks.find(c => c.label === 'Thread storage')!;
+    expect(storage.status).toBe('pass');
+    expect(storage.message).toContain('3 thread(s) readable');
+  });
+
+  test('warns LLM connections when count is 0 (Lisa unable to run)', () => {
+    const section = collectBackendDiagnostics(
+      makeDeps({ assistantProbe: makeAssistantProbe({ connections: { count: 0 } }) }),
+    ).sections.find(s => s.id === 'assistant')!;
+    const conn = section.checks.find(c => c.label === 'LLM connections')!;
+    expect(conn.status).toBe('warn');
+    expect(conn.message).toContain('No LLM connections');
+  });
+
+  test('passes LLM connections and surfaces the default in the message', () => {
+    const section = collectBackendDiagnostics(
+      makeDeps({
+        assistantProbe: makeAssistantProbe({
+          connections: {
+            count: 2,
+            defaultName:     'OpenRouter Sonnet',
+            defaultModel:    'anthropic/claude-3.5-sonnet',
+            defaultProvider: 'openrouter',
+          },
+        }),
+      }),
+    ).sections.find(s => s.id === 'assistant')!;
+    const conn = section.checks.find(c => c.label === 'LLM connections')!;
+    expect(conn.status).toBe('pass');
+    expect(conn.message).toContain('OpenRouter Sonnet');
+    expect(conn.message).toContain('claude-3.5-sonnet');
+  });
+
+  test('Generation defaults renders "No overrides" when all four are at defaults', () => {
+    const section = collectBackendDiagnostics(
+      makeDeps({
+        assistantProbe: makeAssistantProbe({
+          settings: { maxIterations: 8, parallelToolCalls: true },
+        }),
+      }),
+    ).sections.find(s => s.id === 'assistant')!;
+    const gen = section.checks.find(c => c.label === 'Generation defaults')!;
+    expect(gen.status).toBe('info');
+    expect(gen.message).toContain('No overrides');
+  });
+
+  test('Generation defaults lists each active override', () => {
+    const section = collectBackendDiagnostics(
+      makeDeps({
+        assistantProbe: makeAssistantProbe({
+          settings: {
+            maxIterations:     12,
+            temperature:       0.4,
+            topP:              0.9,
+            maxTokens:         2048,
+            parallelToolCalls: false,
+          },
+        }),
+      }),
+    ).sections.find(s => s.id === 'assistant')!;
+    const gen = section.checks.find(c => c.label === 'Generation defaults')!;
+    expect(gen.message).toContain('temperature=0.4');
+    expect(gen.message).toContain('top-p=0.9');
+    expect(gen.message).toContain('max-tokens=2048');
+    expect(gen.message).toContain('parallel-tool-calls=off');
+  });
+
+  test('Tool iterations ceiling reflects the configured value', () => {
+    const section = collectBackendDiagnostics(
+      makeDeps({
+        assistantProbe: makeAssistantProbe({
+          settings: { maxIterations: 14, parallelToolCalls: true },
+        }),
+      }),
+    ).sections.find(s => s.id === 'assistant')!;
+    const iters = section.checks.find(c => c.label === 'Tool iterations ceiling')!;
+    expect(iters.status).toBe('info');
+    expect(iters.message).toContain('14');
+  });
+
+  test('Initialised: info row when bootstrap has not yet run', () => {
+    const section = collectBackendDiagnostics(
+      makeDeps({ assistantProbe: makeAssistantProbe({ initialised: false }) }),
+    ).sections.find(s => s.id === 'assistant')!;
+    const init = section.checks.find(c => c.label === 'Initialised')!;
+    expect(init.status).toBe('info');
   });
 });

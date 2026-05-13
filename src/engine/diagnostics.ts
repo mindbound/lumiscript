@@ -12,6 +12,10 @@
  *   - Section C — Active context (chat / character / user resolution)
  *   - Section D — Registrations (all engine registry counts)
  *   - Section E — Storage health (probe results threaded in by caller)
+ *   - Assistant (Lisa) — corpus, threads, connections, generation
+ *     settings. Added in v0.30.0 — not lettered because the existing
+ *     section-letter scheme is full and this slot was inserted at the
+ *     end of the backend output rather than renumbering Section F.
  *
  * Sections B (script-runner subprocess) and F (Monaco / fonts / worker /
  * CDN) are collected separately — B by the script-runner host-dispatcher,
@@ -101,6 +105,54 @@ export interface StorageProbeResult {
 }
 
 /**
+ * Snapshot of assistant-subsystem state threaded in by the caller. All
+ * fields are populated synchronously where possible; the storage + the
+ * connections inspections are async at the caller and bundled into this
+ * shape before invoking the collector so the collector itself stays
+ * pure. `undefined` (as a whole) signals "caller chose to skip", matching
+ * the storage / script-runner probe-result patterns above.
+ */
+export interface AssistantProbeResult {
+  /** True once `bootstrapAssistant()` has completed for the current user.
+   *  Bootstrap is lazy (deferred until the first assistant IPC), so
+   *  `false` is normal when the user hasn't opened Lisa yet — surfaced as
+   *  `info` not `fail`. */
+  initialised: boolean;
+  /** Number of entries in the runtime corpus lookup table (methods +
+   *  types + namespaces). Zero is a hard fail — Lisa's `lookup_api` tool
+   *  would silently return nothing and she'd hallucinate API surface. */
+  corpusEntries: number;
+  /** Thread-storage probe outcome. */
+  storage: {
+    indexLoaded: boolean;
+    threadsIndexed: number;
+    threadsReadable: number;
+    totalBytes: number;
+    /** First error encountered (per-thread or index-level). Present on
+     *  any failure path; absent on the clean-pass case. */
+    error?: string;
+  };
+  /** LLM-connections probe — same `spindle.connections.list` call the
+   *  modal's connection picker uses. */
+  connections: {
+    count: number;
+    defaultName?: string;
+    defaultModel?: string;
+    defaultProvider?: string;
+  };
+  /** Current assistant-related settings snapshot. Mirrors the four
+   *  generation-default fields + the iteration ceiling — used to
+   *  contextualise behaviour reports ("Lisa thrashed" → check ceiling). */
+  settings: {
+    maxIterations: number;
+    temperature?: number;
+    topP?: number;
+    maxTokens?: number;
+    parallelToolCalls: boolean;
+  };
+}
+
+/**
  * Script-runner subprocess snapshot threaded in by the caller — combines
  * `getRunnerHealth()` (sync, from host-dispatcher module state) with the
  * optional async stats from `queryRunnerStats()` (IPC to the child). When
@@ -159,6 +211,12 @@ export interface DiagnosticsCollectorDeps {
    * script-runner state). When present, drives Section B's checks.
    */
   scriptRunner?:       ScriptRunnerProbeResult;
+  /**
+   * Assistant subsystem snapshot. `undefined` if the caller chose to
+   * skip the assistant section (e.g. tests that don't exercise it).
+   * When present, drives the "Assistant (Lisa)" section's checks.
+   */
+  assistantProbe?:     AssistantProbeResult;
 }
 
 // ─── Entry point ────────────────────────────────────────────────────────────
@@ -176,6 +234,7 @@ export function collectBackendDiagnostics(deps: DiagnosticsCollectorDeps): Diagn
     buildActiveContextSection(deps),
     buildRegistrationsSection(deps),
     buildStorageSection(deps),
+    buildAssistantSection(deps),
   ];
   return {
     generatedAt: Date.now(),
@@ -512,6 +571,141 @@ function buildStorageSection(deps: DiagnosticsCollectorDeps): DiagnosticSection 
     name: 'Storage',
     checks,
   };
+}
+
+// ─── Assistant section (Lisa) ───────────────────────────────────────────────
+//
+// Surfaces the assistant-subsystem state most likely to inform a support
+// report when a user says "Lisa is misbehaving":
+//
+//   • Initialised — bootstrap lifecycle marker. False is normal until the
+//     user opens the modal for the first time this session; surfaced as
+//     `info`, not `fail`.
+//   • Corpus loaded — the single highest-value check. An empty corpus
+//     means `lookup_api` silently returns nothing and Lisa hallucinates;
+//     `fail` if zero, `pass` otherwise.
+//   • Thread storage — index parseable + per-thread readability. `fail`
+//     on index-load failure, `warn` when some-but-not-all threads load,
+//     `pass` on full readability. Aggregated byte count goes in the
+//     details for capacity-trending support reports.
+//   • LLM connections — count + default. `warn` if zero (Lisa can't
+//     run), `pass` otherwise. We don't validate the default model
+//     against Lisa's needs (that would require a live API call); we
+//     just confirm there's something configured.
+//   • Generation defaults — info dump of the current overrides. Lets
+//     support see at a glance what knobs the user has turned.
+//   • Tool iterations ceiling — info, separately surfaced since it's
+//     the most commonly-tuned knob and worth scanning quickly.
+
+function buildAssistantSection(deps: DiagnosticsCollectorDeps): DiagnosticSection {
+  if (deps.assistantProbe === undefined) {
+    return {
+      id:   'assistant',
+      name: 'Assistant (Lisa)',
+      checks: [
+        { label: 'Status', status: 'info', message: 'Not probed (caller chose to skip)' },
+      ],
+    };
+  }
+
+  const probe = deps.assistantProbe;
+  const checks: DiagnosticCheck[] = [];
+
+  checks.push({
+    label:   'Initialised',
+    status:  probe.initialised ? 'pass' : 'info',
+    message: probe.initialised
+      ? 'Bootstrap complete'
+      : 'Not yet bootstrapped (will initialise on first assistant IPC)',
+  });
+
+  checks.push({
+    label:   'Corpus loaded',
+    status:  probe.corpusEntries > 0 ? 'pass' : 'fail',
+    message: probe.corpusEntries > 0
+      ? `${probe.corpusEntries} entries indexed`
+      : "No entries found — Lisa's lookup_api tool will return nothing",
+    details: { corpusEntries: probe.corpusEntries },
+  });
+
+  const s = probe.storage;
+  let storageStatus: DiagnosticStatus;
+  let storageMessage: string;
+  if (!s.indexLoaded) {
+    storageStatus  = 'fail';
+    storageMessage = s.error ? `Index unreadable: ${s.error}` : 'Index unreadable';
+  } else if (s.threadsReadable < s.threadsIndexed) {
+    storageStatus = 'warn';
+    storageMessage =
+      `${s.threadsReadable} of ${s.threadsIndexed} threads readable, ${formatBytes(s.totalBytes)} on disk` +
+      (s.error ? ` (${s.error})` : '');
+  } else {
+    storageStatus  = 'pass';
+    storageMessage = `${s.threadsIndexed} thread(s) readable, ${formatBytes(s.totalBytes)} on disk`;
+  }
+  checks.push({
+    label:   'Thread storage',
+    status:  storageStatus,
+    message: storageMessage,
+    details: {
+      indexLoaded:     s.indexLoaded,
+      threadsIndexed:  s.threadsIndexed,
+      threadsReadable: s.threadsReadable,
+      totalBytes:      s.totalBytes,
+      ...(s.error ? { error: s.error } : {}),
+    },
+  });
+
+  const c = probe.connections;
+  checks.push({
+    label:   'LLM connections',
+    status:  c.count > 0 ? 'pass' : 'warn',
+    message: c.count > 0
+      ? `${c.count} connection(s)` +
+        (c.defaultName
+          ? ` · default: "${c.defaultName}" (${c.defaultModel ?? '<no model>'} via ${c.defaultProvider ?? '<no provider>'})`
+          : ' · no default set')
+      : 'No LLM connections configured — Lisa cannot generate responses',
+    details: {
+      count: c.count,
+      ...(c.defaultName     ? { defaultName:     c.defaultName     } : {}),
+      ...(c.defaultModel    ? { defaultModel:    c.defaultModel    } : {}),
+      ...(c.defaultProvider ? { defaultProvider: c.defaultProvider } : {}),
+    },
+  });
+
+  // Generation defaults — info, dumps current settings values.
+  // Renders compactly when nothing is overridden ("No overrides") so the
+  // common case is one line; expands to a comma-separated list when the
+  // user has tweaked.
+  const set = probe.settings;
+  const overrides: string[] = [];
+  if (set.temperature !== undefined)   overrides.push(`temperature=${set.temperature}`);
+  if (set.topP !== undefined)          overrides.push(`top-p=${set.topP}`);
+  if (set.maxTokens !== undefined)     overrides.push(`max-tokens=${set.maxTokens}`);
+  if (set.parallelToolCalls === false) overrides.push('parallel-tool-calls=off');
+  checks.push({
+    label:   'Generation defaults',
+    status:  'info',
+    message: overrides.length > 0
+      ? `Overrides: ${overrides.join(', ')}`
+      : 'No overrides (all defaults inherited from active connection)',
+    details: {
+      maxIterations: set.maxIterations,
+      ...(set.temperature !== undefined ? { temperature: set.temperature } : {}),
+      ...(set.topP !== undefined        ? { topP:        set.topP        } : {}),
+      ...(set.maxTokens !== undefined   ? { maxTokens:   set.maxTokens   } : {}),
+      parallelToolCalls: set.parallelToolCalls,
+    },
+  });
+
+  checks.push({
+    label:   'Tool iterations ceiling',
+    status:  'info',
+    message: `${set.maxIterations} per turn`,
+  });
+
+  return { id: 'assistant', name: 'Assistant (Lisa)', checks };
 }
 
 // ─── Summary helper ─────────────────────────────────────────────────────────
