@@ -104,6 +104,41 @@ export interface LumiScriptSettings {
    */
   scriptTimeoutMs: number;
   /**
+   * Number of concurrent script-runner worker subprocesses to spawn.
+   * Larger values distribute scripts across more processes for better fault
+   * isolation (one bad script no longer affects others) at the cost of
+   * more memory (~50-100 MB per worker at idle).
+   * Default: 1.  Range: 1 – 16 (host enforces a 16-process cap per
+   * extension via Spindle's `MAX_BACKEND_PROCESSES`).
+   *
+   * Phase C1: setting exists but is not yet consumed; runtime always
+   * uses 1 worker. Phase C2 promotes this to actual pool sizing.
+   */
+  workerCount: number;
+  /**
+   * How long a worker may remain idle (no script firing, no handler
+   * invocation) before it's torn down to reclaim memory. On next event
+   * for any script assigned to that worker, the worker respawns (~150-300
+   * ms cold-start hitch).
+   * Default: 1 800 000 (30 minutes).  Range: 60 000 (1 min) – 86 400 000
+   * (24 hours).  Set to a very large value to effectively disable
+   * idle eviction.
+   *
+   * Phase E (v1.0 runtime-isolation): consumed by the eviction sweep.
+   */
+  workerIdleTimeoutMs: number;
+  /**
+   * Total memory ceiling (in MB) for all script-runner workers combined.
+   * When the sum of all workers' resident-set sizes exceeds this, the
+   * eviction sweep LRU-evicts an eligible worker (no active runs, above
+   * the minimum-warm-worker count) until the total falls under the
+   * ceiling.
+   * Default: 512 (MB).  Range: 64 – 8 192.
+   *
+   * Phase E (v1.0 runtime-isolation): consumed by the eviction sweep.
+   */
+  workerMemoryCeilingMb: number;
+  /**
    * Maximum number of console log entries retained per script in the editor
    * console.  Older entries are silently dropped once this cap is reached.
    * Default: 500.  Range: 50 – 2 000.
@@ -184,6 +219,12 @@ module.exports = {
 export const DEFAULT_SETTINGS: LumiScriptSettings = {
   enabled: true,
   scriptTimeoutMs: 60_000,
+  // Phase C1: defaults are conservative (single worker, 30-min idle).
+  // Phase D will promote `workerCount` default to 4 once multi-worker
+  // is fully validated. Range / consumer logic lives in Phase C2.
+  workerCount: 1,
+  workerIdleTimeoutMs: 30 * 60 * 1000,
+  workerMemoryCeilingMb: 512,
   consoleHistoryLimit: 500,
   editorFontSize: 12,
   autosaveDebounceMs: 1_200,

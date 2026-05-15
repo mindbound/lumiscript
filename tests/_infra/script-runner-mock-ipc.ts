@@ -38,6 +38,11 @@ import type {
   BackendProcessInfoDTO,
 } from 'lumiverse-spindle-types';
 import type { MockSpindle } from './mock-spindle.js';
+// v1.0 runtime-isolation refactor (Phase C1): the mock fixture defaults
+// `key` to whatever DEFAULT_WORKER_KEY is, so a rename of the production
+// default doesn't desync the lifecycle filter — tests would otherwise hang
+// waiting for events that the filter rejects.
+import { DEFAULT_WORKER_KEY } from '../../src/script-runner/host-dispatcher.js';
 
 export interface ScriptRunnerMockIpc {
   /**
@@ -123,7 +128,7 @@ export function installScriptRunnerMockIpc(
 ): ScriptRunnerMockIpc {
   const processId = opts.processId ?? 'mock-script-runner-1';
   const kind      = opts.kind      ?? 'lumiscript-script-runner';
-  const key       = opts.key       ?? 'main';
+  const key       = opts.key       ?? DEFAULT_WORKER_KEY;
   const entry     = opts.entry     ?? 'dist/script-runner.js';
 
   const childInbox:  unknown[] = [];
@@ -254,6 +259,275 @@ export function installScriptRunnerMockIpc(
       heartbeats       = 0;
       completedResult  = null;
       failedError      = null;
+    },
+  };
+}
+
+// ─── Multi-worker mock IPC (Phase C2-polish) ────────────────────────────────
+//
+// Direct multi-pair install for testing cross-worker routing logic. Each
+// worker key gets its own `ScriptRunnerMockIpc` pair (childInbox,
+// childContext, parentInbox, lifecycle/stop wiring) — but the shared
+// `spindle.backendProcesses.onLifecycle` / `onMessage` subscriptions are
+// installed ONCE globally and fan out to all pairs.
+//
+// `spindle.backendProcesses.spawn({ kind, key, … })` routes by `(kind, key)`
+// to the matching pair's `childHandle`. Spawns for unknown keys reject
+// (loud failure surfaces test wiring mistakes immediately).
+//
+// Why direct (one-call install) rather than layered (multiple
+// `installScriptRunnerMockIpc` calls): each install replaces the
+// `spindle.backendProcesses` slot wholesale, so layered installs would
+// just leave the last install's stub in place. The direct shape is the
+// only structurally-correct option — see Phase C design discussion Q3.
+
+export interface InstallMultiWorkerOpts {
+  /**
+   * Worker keys to set up pairs for. Order matters — `pairs[i]`
+   * corresponds to `workerKeys[i]`.
+   */
+  workerKeys: string[];
+  /** Shared `kind` for all pairs. Default: 'lumiscript-script-runner'. */
+  kind?: string;
+}
+
+export interface MultiWorkerMockIpc {
+  /** One mock pair per worker, in `opts.workerKeys` order. */
+  pairs: ScriptRunnerMockIpc[];
+  /** Look up a pair by workerKey. Throws if the key isn't configured. */
+  pairForKey(workerKey: string): ScriptRunnerMockIpc;
+  /** Reset all pairs + clear shared subscription handlers. */
+  reset(): void;
+  /**
+   * Phase E test support — set the memory RSS (in bytes) that this worker
+   * should report when the dispatcher sends a `diagnostic-stats-request`
+   * IPC. The mock auto-replies with the configured value (or 0 if unset).
+   * Lets eviction-sweep tests drive memory pressure deterministically
+   * without bringing up the full child runtime.
+   */
+  setWorkerMemoryBytes(workerKey: string, bytes: number): void;
+}
+
+export function installMultiWorkerMockIpc(
+  spindle: MockSpindle,
+  opts:    InstallMultiWorkerOpts,
+): MultiWorkerMockIpc {
+  const kind = opts.kind ?? 'lumiscript-script-runner';
+
+  // Shared subscription handlers across all workers — the dispatcher
+  // installs ONE `onMessage` + ONE `onLifecycle` handler and filters
+  // internally by `processId` / `(kind, key)`, so the mock has to fan
+  // every parent-bound event out via a shared Set.
+  const lifecycleHandlers     = new Set<(event: BackendProcessLifecycleEventDTO) => void>();
+  const parentMessageHandlers = new Set<(event: { processId: string; payload: unknown; userId: string }) => void>();
+
+  interface PairInternal {
+    pair:       ScriptRunnerMockIpc;
+    info:       BackendProcessInfoDTO;
+    setUserId:  (uid: string | undefined) => void;
+  }
+  const pairs: ScriptRunnerMockIpc[] = [];
+  const byKey = new Map<string, PairInternal>();
+
+  // Phase E test support — per-worker memory RSS. Defaults to 0; tests
+  // configure via `setWorkerMemoryBytes`. Auto-replies to
+  // `diagnostic-stats-request` sent to a worker.
+  const memoryBytesByWorker = new Map<string, number>();
+
+  for (let i = 0; i < opts.workerKeys.length; i++) {
+    const workerKey = opts.workerKeys[i]!;
+    const processId = `mock-${workerKey}-${i}`;
+    const entry     = 'dist/script-runner.js';
+
+    const childInbox:           unknown[]                                              = [];
+    const parentInbox:          unknown[]                                              = [];
+    const childMessageHandlers: Set<(payload: unknown) => void>                        = new Set();
+    const childStopHandlers:    Set<(detail: { reason?: string }) => void>             = new Set();
+
+    let childReady:      boolean                            = false;
+    let heartbeats:      number                             = 0;
+    let completedResult: { result: unknown } | null         = null;
+    let failedError:     string | null                      = null;
+    let capturedUserId:  string | undefined;
+
+    const info: BackendProcessInfoDTO = {
+      processId,
+      extensionId: 'lumiscript',
+      kind,
+      key:         workerKey,
+      entry,
+      state:       'running',
+      startedAt:   new Date().toISOString(),
+      lastSeenAt:  new Date().toISOString(),
+    } as BackendProcessInfoDTO;
+
+    const childHandle: BackendProcessHandle = {
+      processId,
+      entry,
+      kind,
+      key: workerKey,
+      info,
+      send(payload) {
+        childInbox.push(payload);
+        // Phase E test support — auto-reply to `diagnostic-stats-request`
+        // so eviction-sweep tests don't time out waiting for a stats
+        // response that a real child would produce. Synchronous reply via
+        // the shared parentMessageHandlers Set (same path as a real
+        // child→parent IPC).
+        if (
+          payload !== null &&
+          typeof payload === 'object' &&
+          (payload as { type?: unknown }).type === 'diagnostic-stats-request'
+        ) {
+          const requestId = (payload as { requestId?: string }).requestId;
+          const rss       = memoryBytesByWorker.get(workerKey) ?? 0;
+          const response  = {
+            type:        'diagnostic-stats-response' as const,
+            requestId,
+            rss,
+            heapTotal:   0,
+            heapUsed:    0,
+            external:    0,
+            cpuUserUs:   0,
+            cpuSystemUs: 0,
+            uptimeSec:   1,
+          };
+          // Defer one microtask so the dispatcher's `pendingDiagnosticStats.set`
+          // call (which happens after handle.send returns) is registered
+          // before our reply hits parentMessageHandlers.
+          queueMicrotask(() => {
+            const snapshot = [...parentMessageHandlers];
+            for (const h of snapshot) {
+              h({ processId, payload: response, userId: capturedUserId ?? '' });
+            }
+          });
+        }
+        const snapshot = [...childMessageHandlers];
+        for (const h of snapshot) h(payload);
+      },
+      stop:    mock(() => Promise.resolve()),
+      refresh: mock(() => Promise.resolve(info)),
+    };
+
+    const childContext: SpindleBackendProcessContext = {
+      processId,
+      entry,
+      kind,
+      key: workerKey,
+      payload: {},
+      get userId() { return capturedUserId; },
+      ready()      { childReady = true; },
+      heartbeat()  { heartbeats++; },
+      send(payload) {
+        parentInbox.push(payload);
+        const snapshot = [...parentMessageHandlers];
+        for (const h of snapshot) {
+          h({ processId, payload, userId: capturedUserId ?? '' });
+        }
+      },
+      onMessage(handler) {
+        childMessageHandlers.add(handler);
+        return () => childMessageHandlers.delete(handler);
+      },
+      complete(result) { completedResult = { result }; },
+      fail(err)        { failedError    = err; },
+      onStop(handler) {
+        childStopHandlers.add(handler);
+        return () => childStopHandlers.delete(handler);
+      },
+    };
+
+    const pair: ScriptRunnerMockIpc = {
+      childHandle,
+      childContext,
+      childInbox:  () => [...childInbox],
+      parentInbox: () => [...parentInbox],
+      fireLifecycle(event) {
+        const snapshot = [...lifecycleHandlers];
+        for (const h of snapshot) h(event);
+      },
+      isChildReady:    () => childReady,
+      heartbeats:      () => heartbeats,
+      completedResult: () => completedResult,
+      failedError:     () => failedError,
+      triggerStop(detail = {}) {
+        const snapshot = [...childStopHandlers];
+        for (const h of snapshot) h(detail);
+      },
+      reset() {
+        childInbox.length  = 0;
+        parentInbox.length = 0;
+        childMessageHandlers.clear();
+        childStopHandlers.clear();
+        childReady       = false;
+        heartbeats       = 0;
+        completedResult  = null;
+        failedError      = null;
+      },
+    };
+
+    pairs.push(pair);
+    byKey.set(workerKey, {
+      pair,
+      info,
+      setUserId: (uid) => { capturedUserId = uid; },
+    });
+  }
+
+  spindle.backendProcesses = {
+    spawn: (spawnOpts: BackendProcessSpawnOptionsDTO) => {
+      if (spawnOpts.kind !== kind) {
+        return Promise.reject(new Error(
+          `installMultiWorkerMockIpc: spawn for unexpected kind '${spawnOpts.kind}' (configured: '${kind}')`,
+        ));
+      }
+      const internal = spawnOpts.key !== undefined ? byKey.get(spawnOpts.key) : undefined;
+      if (!internal) {
+        return Promise.reject(new Error(
+          `installMultiWorkerMockIpc: no mock pair for key '${spawnOpts.key ?? '(undefined)'}'`,
+        ));
+      }
+      internal.setUserId(spawnOpts.userId);
+      return Promise.resolve(internal.pair.childHandle);
+    },
+    list: () => Promise.resolve(Array.from(byKey.values()).map((p) => p.info)),
+    get: (id: string) => {
+      for (const p of byKey.values()) {
+        if (p.pair.childHandle.processId === id) return Promise.resolve(p.info);
+      }
+      return Promise.resolve(null);
+    },
+    stop: () => Promise.resolve(),
+    onLifecycle(handler) {
+      lifecycleHandlers.add(handler);
+      return () => { lifecycleHandlers.delete(handler); };
+    },
+    onMessage(handler) {
+      parentMessageHandlers.add(handler);
+      return () => { parentMessageHandlers.delete(handler); };
+    },
+  };
+
+  return {
+    pairs,
+    pairForKey(workerKey: string): ScriptRunnerMockIpc {
+      const internal = byKey.get(workerKey);
+      if (!internal) {
+        throw new Error(`MultiWorkerMockIpc: no pair configured for workerKey '${workerKey}'`);
+      }
+      return internal.pair;
+    },
+    reset() {
+      for (const internal of byKey.values()) internal.pair.reset();
+      lifecycleHandlers.clear();
+      parentMessageHandlers.clear();
+      memoryBytesByWorker.clear();
+    },
+    setWorkerMemoryBytes(workerKey: string, bytes: number): void {
+      if (!byKey.has(workerKey)) {
+        throw new Error(`MultiWorkerMockIpc: cannot set memory for unknown workerKey '${workerKey}'`);
+      }
+      memoryBytesByWorker.set(workerKey, bytes);
     },
   };
 }

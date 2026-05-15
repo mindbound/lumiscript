@@ -152,7 +152,9 @@ describe('host-dispatcher: sendRunHandlerRequest snapshot lookup', () => {
     // No setup() — no IPC pair, no spawn.
     await expect(
       __sendRunHandlerRequestForTests('script-A', 'handler-1', 'macro', [], 5_000),
-    ).rejects.toThrow(/child not running/);
+    // Phase C1 (v1.0 runtime-isolation): error message now names the
+    // worker (and the script the handler belongs to) that's not running.
+    ).rejects.toThrow(/worker '.*' for script .* not running/);
   });
 });
 

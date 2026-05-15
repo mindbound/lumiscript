@@ -1,5 +1,5 @@
 import { FC, useState, useEffect } from 'react';
-import { Code2, BookMarked, Terminal, Timer, Type, FileCode2, Activity, MessageCircle, Trash2, RotateCcw } from 'lucide-react';
+import { Code2, BookMarked, Terminal, Timer, Type, FileCode2, Activity, MessageCircle, Trash2, RotateCcw, Cpu, Shuffle } from 'lucide-react';
 import type { Script, LumiScriptSettings } from '../../types/script.js';
 import type { BackendToFrontend, FrontendToBackend } from '../../types/messages.js';
 import { DEFAULT_SETTINGS } from '../../types/script.js';
@@ -137,6 +137,83 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
             }}
           />
         </div>
+      </div>
+
+      {/* Workers — Phase F (v1.0 runtime-isolation). Worker pool size +
+          eviction thresholds + manual rebalance action. Decreasing the
+          worker count from a higher value auto-shuts down over-cap workers
+          (soft-decrease via rebalanceWorkerPool); the manual Rebalance
+          button below redistributes ALL script assignments. */}
+      <div className="ls-settings-section">
+        <div className="ls-settings-section-label">
+          <Cpu size={11} />
+          Workers
+        </div>
+
+        {/* Pool size — count of concurrent script-runner subprocesses */}
+        <div className="ls-settings-field">
+          <label className="ls-settings-field-label" title="Number of concurrent script-runner worker subprocesses. Larger values distribute scripts across more processes for better fault isolation, at the cost of more memory (~50-100 MB per worker at idle). Capped at 16 by the host (Spindle's MAX_BACKEND_PROCESSES).">
+            Worker count
+          </label>
+          <input
+            type="number"
+            className="ls-number-input"
+            min={1}
+            max={16}
+            value={settings.workerCount}
+            onChange={e => {
+              const count = Math.max(1, Math.min(16, Number(e.target.value) || 1));
+              sendToBackend({ type: 'update_settings', patch: { workerCount: count } });
+            }}
+          />
+        </div>
+
+        {/* Idle timeout — displayed in minutes, stored as ms */}
+        <div className="ls-settings-field">
+          <label className="ls-settings-field-label" title="How long a worker may remain idle (no script fires, no handler invocations) before it's torn down to reclaim memory. On next event for any of its assigned scripts, the worker respawns (~150-300 ms cold-start hitch).">
+            Idle timeout (min)
+          </label>
+          <input
+            type="number"
+            className="ls-number-input"
+            min={1}
+            max={1440}
+            value={Math.round(settings.workerIdleTimeoutMs / 60_000)}
+            onChange={e => {
+              const mins = Math.max(1, Math.min(1440, Number(e.target.value) || 30));
+              sendToBackend({ type: 'update_settings', patch: { workerIdleTimeoutMs: mins * 60_000 } });
+            }}
+          />
+        </div>
+
+        {/* Memory ceiling — displayed in MB, stored as MB */}
+        <div className="ls-settings-field">
+          <label className="ls-settings-field-label" title="Total memory ceiling (sum across all worker subprocesses). When exceeded, the eviction sweep LRU-evicts idle workers until total memory drops back under the ceiling. Workers with active runs are exempt; the sweep always keeps at least one worker warm.">
+            Memory ceiling (MB)
+          </label>
+          <input
+            type="number"
+            className="ls-number-input"
+            min={64}
+            max={8192}
+            value={settings.workerMemoryCeilingMb}
+            onChange={e => {
+              const mb = Math.max(64, Math.min(8192, Number(e.target.value) || 512));
+              sendToBackend({ type: 'update_settings', patch: { workerMemoryCeilingMb: mb } });
+            }}
+          />
+        </div>
+
+        {/* Rebalance pool — manual full redistribution */}
+        <button
+          type="button"
+          className="ls-btn"
+          onClick={() => sendToBackend({ type: 'rebalance_pool' })}
+          title="Releases all script→worker assignments. Each script's next fire reassigns via least-loaded over the current pool. Useful after increasing Worker count to redistribute existing scripts onto the new workers (assignments are sticky by default)."
+        >
+          <Shuffle size={11} style={{ marginRight: 4 }} />
+          Rebalance pool
+        </button>
       </div>
 
       {/* Editor */}

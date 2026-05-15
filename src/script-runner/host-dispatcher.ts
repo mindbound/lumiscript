@@ -148,8 +148,26 @@ export function setSendToFrontend(send: SendToFrontend): void {
 
 // ─── Configuration ──────────────────────────────────────────────────────────
 
+/**
+ * Identifier for a script-runner worker instance.
+ *
+ * Phase A (v1.0 runtime-isolation refactor — see
+ * notes/v1.0-runtime-isolation-and-hot-reload.md): always
+ * `DEFAULT_WORKER_KEY` (`'main'`). Phase B+ pool mode uses distinct values
+ * like `'worker-1'`, `'worker-2'`, ... — one per pool member.
+ */
+export type ScriptRunnerWorkerKey = string;
+
 const SCRIPT_RUNNER_KIND  = 'lumiscript-script-runner';
-const SCRIPT_RUNNER_KEY   = 'main';
+// v1.0 runtime-isolation refactor (Phase C1): renamed from 'main' to
+// 'worker-1' for symmetry with the multi-worker pool keys ('worker-2',
+// 'worker-3', ...). On upgrade-in-place from pre-v1.0, an old 'main'-keyed
+// process may briefly orphan until extension reload — bounded, no data
+// loss, fully GCed on host restart.
+//
+// Exported so tests can reference it without depending on the literal
+// value (which may change in future phases).
+export const DEFAULT_WORKER_KEY: ScriptRunnerWorkerKey = 'worker-1';
 const SCRIPT_RUNNER_ENTRY = 'dist/script-runner.js';
 
 /** Generous startup timeout — the child has to load its bundle, set up handlers, call ready(). */
@@ -167,10 +185,50 @@ const STARTUP_TIMEOUT_MS = 3_000;
 const HEARTBEAT_TIMEOUT_MS_DEFAULT = 65_000;
 
 // ─── Module state ───────────────────────────────────────────────────────────
+//
+// v1.0 runtime-isolation refactor (Phase A) — `childHandles` is keyed by
+// `ScriptRunnerWorkerKey` so Phase B can extend to multiple concurrent
+// workers without further state changes here. Phase A uses only the
+// `DEFAULT_WORKER_KEY` entry; functionally equivalent to the pre-refactor
+// `let childHandle: BackendProcessHandle | null` global.
 
-let childHandle:    BackendProcessHandle | null = null;
-let messageUnsub:   (() => void)         | null = null;
-let lifecycleUnsub: (() => void)         | null = null;
+const childHandles = new Map<ScriptRunnerWorkerKey, BackendProcessHandle>();
+
+/**
+ * Look up the BackendProcessHandle for a specific worker.
+ * Returns null if that worker isn't currently spawned.
+ *
+ * Phase A callers omit the key argument and operate on the default worker.
+ */
+function getChildHandle(
+  key: ScriptRunnerWorkerKey = DEFAULT_WORKER_KEY,
+): BackendProcessHandle | null {
+  return childHandles.get(key) ?? null;
+}
+
+/** Register a spawned BackendProcessHandle against a worker key. */
+function setChildHandle(
+  key: ScriptRunnerWorkerKey,
+  handle: BackendProcessHandle,
+): void {
+  childHandles.set(key, handle);
+  // Phase E — initial activity timestamp; the spawn itself counts as
+  // activity so a freshly-spawned worker isn't immediately idle-evictable.
+  workerLastActivity.set(key, Date.now());
+}
+
+/** Drop the registration for a worker key. Returns `true` if an entry existed. */
+function deleteChildHandle(key: ScriptRunnerWorkerKey): boolean {
+  return childHandles.delete(key);
+}
+
+/** True if at least one worker is currently spawned. */
+function hasAnyChildHandle(): boolean {
+  return childHandles.size > 0;
+}
+
+let messageUnsub:   (() => void) | null = null;
+let lifecycleUnsub: (() => void) | null = null;
 
 // ─── Restart logic state (Phase 10) ─────────────────────────────────────────
 //
@@ -211,10 +269,275 @@ function getStabilityThresholdMs(): number {
   return stabilityThresholdOverride ?? STABILITY_THRESHOLD_MS;
 }
 
-let cachedUserId:    string | null                        = null;
-let restartAttempts: number                               = 0;
-let restartTimer:    ReturnType<typeof setTimeout> | null = null;
-let stabilityTimer:  ReturnType<typeof setTimeout> | null = null;
+// `cachedUserId` stays a module-scope singleton — all workers spawn under
+// the same userId (LumiScript is operator-scoped; one userId per extension
+// instance).
+let cachedUserId: string | null = null;
+
+// v1.0 runtime-isolation refactor (Phase B) — restart bookkeeping is
+// per-worker, keyed by `ScriptRunnerWorkerKey`. With single-worker default
+// (Phase B effective pool size = 1), only the `DEFAULT_WORKER_KEY` entry
+// exists. Phase D promotes the configurable default to >1.
+const restartAttempts = new Map<ScriptRunnerWorkerKey, number>();
+const restartTimers   = new Map<ScriptRunnerWorkerKey, ReturnType<typeof setTimeout>>();
+const stabilityTimers = new Map<ScriptRunnerWorkerKey, ReturnType<typeof setTimeout>>();
+
+function getRestartAttempts(key: ScriptRunnerWorkerKey): number {
+  return restartAttempts.get(key) ?? 0;
+}
+function incrementRestartAttempts(key: ScriptRunnerWorkerKey): number {
+  const next = getRestartAttempts(key) + 1;
+  restartAttempts.set(key, next);
+  return next;
+}
+function resetRestartAttempts(key: ScriptRunnerWorkerKey): void {
+  restartAttempts.delete(key);
+}
+
+function getRestartTimer(key: ScriptRunnerWorkerKey): ReturnType<typeof setTimeout> | null {
+  return restartTimers.get(key) ?? null;
+}
+function setRestartTimer(
+  key:   ScriptRunnerWorkerKey,
+  timer: ReturnType<typeof setTimeout>,
+): void {
+  restartTimers.set(key, timer);
+}
+function clearRestartTimer(key: ScriptRunnerWorkerKey): void {
+  const t = restartTimers.get(key);
+  if (t !== undefined) {
+    clearTimeout(t);
+    restartTimers.delete(key);
+  }
+}
+
+function getStabilityTimer(key: ScriptRunnerWorkerKey): ReturnType<typeof setTimeout> | null {
+  return stabilityTimers.get(key) ?? null;
+}
+function setStabilityTimer(
+  key:   ScriptRunnerWorkerKey,
+  timer: ReturnType<typeof setTimeout>,
+): void {
+  stabilityTimers.set(key, timer);
+}
+function clearStabilityTimer(key: ScriptRunnerWorkerKey): void {
+  const t = stabilityTimers.get(key);
+  if (t !== undefined) {
+    clearTimeout(t);
+    stabilityTimers.delete(key);
+  }
+}
+
+/**
+ * True if `processId` belongs to any of our currently-spawned workers.
+ * Used by the global `onMessage` subscription to filter events for
+ * processes we own across all pool members.
+ */
+function isOwnedProcessId(processId: string): boolean {
+  for (const handle of childHandles.values()) {
+    if (handle.processId === processId) return true;
+  }
+  return false;
+}
+
+/**
+ * Reverse-lookup: find the workerKey for a given processId. Returns null
+ * if no spawned worker matches. Used by `handleChildMessage` to attribute
+ * inbound activity to the right worker for idle-eviction tracking (Phase
+ * E). O(N) over `childHandles` (≤16 entries).
+ */
+function processIdToWorkerKey(processId: string): ScriptRunnerWorkerKey | null {
+  for (const [key, handle] of childHandles) {
+    if (handle.processId === processId) return key;
+  }
+  return null;
+}
+
+// ─── Worker assignment (Phase C1 / C2) ─────────────────────────────────────
+//
+// v1.0 runtime-isolation refactor — maps each enabled trigger script to
+// the worker pool member that hosts it. Phase C2 promotes the C1 stub to
+// actual least-loaded distribution across the pool configured via the
+// `workerCount` setting.
+//
+// Assignment is in-memory only — on extension restart, all scripts get
+// re-assigned via the same algorithm. No cross-session affinity guarantee.
+//
+// Stickiness: an existing assignment is preserved across pool-size
+// changes (a script on `worker-2` stays on `worker-2` even if user grows
+// the pool from 2 to 4). New assignments distribute across the new pool.
+// A manual "Rebalance pool" UI action (Phase F) will provide explicit
+// redistribution. A pool-size *decrease* triggers auto-rebalance off the
+// over-cap workers (`rebalanceWorkerPool`) since those workers are being
+// phased out.
+
+const scriptWorkerAssignments = new Map<string, ScriptRunnerWorkerKey>();
+
+// Phase C2 — `workerCount` setting reader. Wired by `backend.ts` cold-start
+// init (see `setWorkerCountReader`) to pull live values from the settings
+// store. Default returns 1 if backend forgets to wire — keeps single-worker
+// behaviour as the safe fallback.
+type WorkerCountReader = () => number;
+let workerCountReader: WorkerCountReader = () => 1;
+
+/**
+ * Wire the workerCount reader. Called once during `backend.ts` cold-start
+ * init alongside `setScriptResolver` + `setSendToFrontend`. Idempotent:
+ * re-calling replaces the reader.
+ */
+export function setWorkerCountReader(fn: WorkerCountReader): void {
+  workerCountReader = fn;
+}
+
+/**
+ * Returns the workerKey hosting `scriptId`. Assigns lazily on first lookup
+ * via least-loaded distribution across the configured pool. Sticky:
+ * subsequent lookups return the same assignment until
+ * `releaseScriptFromWorker` clears it.
+ *
+ * Ties on count are broken by lower index in the pool, so `worker-1` wins
+ * over `worker-2` when both are equally loaded.
+ */
+function getWorkerForScript(scriptId: string): ScriptRunnerWorkerKey {
+  const existing = scriptWorkerAssignments.get(scriptId);
+  if (existing !== undefined) return existing;
+
+  const known  = getKnownWorkerKeys();
+  const counts = new Map<ScriptRunnerWorkerKey, number>(known.map(k => [k, 0]));
+  for (const w of scriptWorkerAssignments.values()) {
+    counts.set(w, (counts.get(w) ?? 0) + 1);
+  }
+  let assigned = known[0]!;
+  let min      = counts.get(assigned) ?? 0;
+  for (let i = 1; i < known.length; i++) {
+    const k = known[i]!;
+    const c = counts.get(k) ?? 0;
+    if (c < min) { min = c; assigned = k; }
+  }
+  scriptWorkerAssignments.set(scriptId, assigned);
+  return assigned;
+}
+
+/**
+ * Drop the assignment for a script — call when the script is disabled or
+ * deleted so its slot frees up for future least-loaded calculations.
+ */
+function releaseScriptFromWorker(scriptId: string): void {
+  scriptWorkerAssignments.delete(scriptId);
+}
+
+/**
+ * The set of worker keys the extension is *configured* to know about —
+ * the pool of assignable workers. Driven by the `workerCount` setting,
+ * clamped to `[1, 16]` (host enforces a 16-process cap per extension via
+ * Spindle's `MAX_BACKEND_PROCESSES`).
+ *
+ * Used by:
+ *   - `getWorkerForScript` least-loaded assignment (over THIS set).
+ *   - `rebalanceWorkerPool` decrease handler (anything spawned not in this
+ *     set is over-cap and a rebalance candidate).
+ *
+ * NOTE: The lifecycle filter uses `isActiveWorkerKey(key)` which checks
+ * the union of this set + currently-spawned workers, to keep transitional
+ * over-cap workers supervised during a pool-size-decrease rebalance.
+ */
+function getKnownWorkerKeys(): ScriptRunnerWorkerKey[] {
+  const raw = workerCountReader();
+  const n   = Math.max(1, Math.min(16, Math.floor(raw)));
+  return Array.from({ length: n }, (_, i) => `worker-${i + 1}`);
+}
+
+/**
+ * Whether `key` is currently a worker we recognise — either configured in
+ * the pool OR currently spawned (for transitional over-cap workers during
+ * a `workerCount` decrease). Used by `handleLifecycle` to filter events.
+ *
+ * The union view ensures lifecycle events for over-cap workers (in-flight
+ * shutdown after a pool decrease) still flow through cleanup logic
+ * rather than being silently dropped.
+ */
+function isActiveWorkerKey(key: ScriptRunnerWorkerKey): boolean {
+  if (getKnownWorkerKeys().includes(key)) return true;
+  return childHandles.has(key) || spawnInFlights.has(key);
+}
+
+// ─── Eviction (Phase E) ────────────────────────────────────────────────────
+//
+// Per-worker last-activity timestamps drive idle eviction; per-worker
+// memory usage drives memory-ceiling eviction. The sweep runs on a
+// periodic interval (60 s) and applies both policies. Workers with active
+// trigger runs are exempt; the sweep always keeps at least
+// `MIN_WARM_WORKERS` alive while any scripts are enabled.
+
+/**
+ * Sweep cadence — how often the eviction sweep runs. Bounded enough to
+ * respond to memory pressure within a minute without flooding the
+ * `diagnostic-stats-request` IPC channel (one query per spawned worker
+ * per cycle).
+ */
+const EVICTION_SWEEP_INTERVAL_MS = 60_000;
+
+/**
+ * Per-worker memory-query timeout. Generous; the child usually responds
+ * to `diagnostic-stats-request` in a few ms. A worker that's hung past
+ * this is probably the *cause* of memory pressure, so a null reading
+ * shouldn't block the sweep — the sweep just skips that worker's
+ * contribution for this cycle.
+ */
+const EVICTION_MEMORY_QUERY_TIMEOUT_MS = 2_000;
+
+/**
+ * Hard-coded minimum warm workers — never evict below this count while
+ * any scripts are enabled. Phase F may expose a configurable knob.
+ */
+const MIN_WARM_WORKERS = 1;
+
+/**
+ * Eviction policy values — read from the live settings via a wired
+ * reader (see `setEvictionConfigReader`). The sweep reads fresh on
+ * every cycle so settings changes take effect at the next sweep without
+ * an explicit "reconfigure" call.
+ */
+export interface EvictionConfig {
+  /** Idle window in ms; workers idle past this are eligible for eviction. */
+  idleTimeoutMs:      number;
+  /** Total memory ceiling in bytes; sum across all workers' RSS. */
+  memoryCeilingBytes: number;
+}
+
+type EvictionConfigReader = () => EvictionConfig;
+let evictionConfigReader: EvictionConfigReader = () => ({
+  idleTimeoutMs:      30 * 60 * 1000,
+  memoryCeilingBytes: 512 * 1024 * 1024,
+});
+
+/**
+ * Wire the eviction config reader. Called once during `backend.ts` cold-
+ * start init alongside `setWorkerCountReader`. Idempotent.
+ */
+export function setEvictionConfigReader(fn: EvictionConfigReader): void {
+  evictionConfigReader = fn;
+}
+
+/**
+ * Per-worker last-activity timestamps (ms since epoch). Bumped at every
+ * dispatch site that sends to a worker AND at every inbound message
+ * receive (except internal stats responses, which would self-bump every
+ * sweep cycle). Used by the idle-eviction policy.
+ */
+const workerLastActivity = new Map<ScriptRunnerWorkerKey, number>();
+
+/**
+ * Bump a worker's last-activity timestamp. Called from dispatch + receive
+ * paths. Cheap (one Map.set); negligible overhead at any realistic IPC
+ * volume.
+ */
+function bumpWorkerActivity(workerKey: ScriptRunnerWorkerKey): void {
+  workerLastActivity.set(workerKey, Date.now());
+}
+
+// Sweep timer state.
+let evictionSweepTimer: ReturnType<typeof setInterval> | null = null;
 
 // v0.28.0+ — Diagnostics-only counters. Separate from `restartAttempts`
 // (which is the *current backoff index* and resets to 0 after a stable
@@ -240,7 +563,7 @@ let nextDiagnosticRequestSeq = 1;
 /**
  * Phase 9c concurrency: when multiple callers race to spawn the child
  * (e.g. several ls:startup scripts firing fire-and-forget at activation
- * time), the first reads `childHandle === null` and starts spawning;
+ * time), the first reads `!hasAnyChildHandle()` and starts spawning;
  * any concurrent caller that arrives BEFORE the first's `await` resolves
  * also reads null and would spawn a second time — the host's
  * `replaceExisting: true` would then kill the first child mid-flight,
@@ -249,8 +572,12 @@ let nextDiagnosticRequestSeq = 1;
  * Coalescing: stash the in-flight spawn promise here so concurrent
  * callers await the SAME promise. Cleared on resolve/reject so a future
  * spawn (after a crash + Phase-10 restart) can fire fresh.
+ *
+ * Phase B (v1.0 runtime-isolation) — keyed by `ScriptRunnerWorkerKey` so
+ * concurrent spawns of different workers don't conflict; a single worker's
+ * coalescing semantics are unchanged.
  */
-let spawnInFlight: Promise<BackendProcessHandle> | null = null;
+const spawnInFlights = new Map<ScriptRunnerWorkerKey, Promise<BackendProcessHandle>>();
 
 interface PendingRun {
   resolve: (result: RunScriptResult) => void;
@@ -272,6 +599,12 @@ interface ActiveRun {
   scriptId:   string;
   scriptName: string;
   startedAt:  number;
+  /**
+   * The worker hosting this run. Phase C1: always `DEFAULT_WORKER_KEY`.
+   * Phase C2 routes handler IPCs back through this key when multiple
+   * workers are concurrently active.
+   */
+  workerKey:  ScriptRunnerWorkerKey;
   /** The host-side LumiScriptAPI for this run — used by the api-proxy dispatcher. */
   api:        LumiScriptAPI;
   /** Transient handle table — dropped on run completion. */
@@ -427,9 +760,14 @@ async function sendRunHandlerRequest(
   args:      unknown[],
   timeoutMs: number,
 ): Promise<HandlerResult> {
-  if (!childHandle) {
-    throw new Error('[script-runner] handler fire: child not running');
+  // Phase C1 — route to the worker that hosts this script. C1 always
+  // resolves to DEFAULT_WORKER_KEY; C2 distributes per-script.
+  const workerKey = getWorkerForScript(scriptId);
+  if (!getChildHandle(workerKey)) {
+    throw new Error(`[script-runner] handler fire: worker '${workerKey}' for script ${scriptId} not running`);
   }
+  // Phase E — bump activity; handler invocations count as work.
+  bumpWorkerActivity(workerKey);
   const snapshot = lastDispatchByScript.get(scriptId);
   if (!snapshot) {
     // No run has fired for this script since process start (rare —
@@ -457,6 +795,7 @@ async function sendRunHandlerRequest(
     scriptId,
     scriptName: snapshot.script.name,
     startedAt:  Date.now(),
+    workerKey,
     api,
     handles:    new Map(),
   });
@@ -474,7 +813,7 @@ async function sendRunHandlerRequest(
   return new Promise<HandlerResult>((resolve, reject) => {
     pendingHandlerCalls.set(runId, { resolve, reject });
     try {
-      childHandle!.send(msg);
+      getChildHandle(workerKey)!.send(msg);
     } catch (err) {
       pendingHandlerCalls.delete(runId);
       activeRuns.delete(runId);
@@ -944,16 +1283,34 @@ function dropPendingDrawerTab(scriptId: string, tabId: string): void {
  * accurate via this notice from then on.
  */
 export function sendFloatWidgetPositionNotice(widgetId: string, x: number, y: number): void {
-  if (!childHandle) return;
+  // Phase C2 — route the notice to the worker hosting the widget's owning
+  // script. The widget is registered under its owner's `scriptId` in
+  // `pendingFloatWidgets`; we walk the (small) map to find it. O(N) over
+  // total widget count — drag-end is user-paced, not perf-critical.
+  let ownerScriptId: string | null = null;
+  for (const [scriptId, widgets] of pendingFloatWidgets) {
+    if (widgets.has(widgetId)) {
+      ownerScriptId = scriptId;
+      break;
+    }
+  }
+  if (ownerScriptId === null) return;  // widget not registered (already torn down)
+
+  const workerKey = getWorkerForScript(ownerScriptId);
+  const handle    = getChildHandle(workerKey);
+  if (!handle) return;
+  // Phase E — fire-and-forget; bump activity.
+  bumpWorkerActivity(workerKey);
+
   const notice: FloatWidgetPositionNotice = {
     type:     'float-widget-position',
     widgetId,
     x,
     y,
   };
-  try { childHandle.send(notice); } catch (err) {
+  try { handle.send(notice); } catch (err) {
     spindle.log.warn(
-      `[script-runner] float-widget-position send failed for ${widgetId}: ${String(err)}`,
+      `[script-runner] float-widget-position send to worker '${workerKey}' failed for ${widgetId}: ${String(err)}`,
     );
   }
 }
@@ -1347,7 +1704,7 @@ function logLateRegisterSkip(msg: RegisterHandler): void {
 
 // ─── Inbound message routing ────────────────────────────────────────────────
 
-function handleChildMessage(payload: unknown): void {
+function handleChildMessage(payload: unknown, processId: string): void {
   // Defensive: validate shape before narrowing — payloads cross IPC and
   // could in principle be corrupted or malformed.
   if (
@@ -1359,6 +1716,16 @@ function handleChildMessage(payload: unknown): void {
     return;
   }
   const msg = payload as ChildToParentMessage;
+
+  // Phase E — bump activity for the sending worker, EXCEPT for our own
+  // internal `diagnostic-stats-response`. The sweep queries memory via
+  // `diagnostic-stats-request`; if we bumped on the response, every
+  // sweep cycle would self-bump every worker and idle eviction could
+  // never fire.
+  if (msg.type !== 'diagnostic-stats-response') {
+    const workerKey = processIdToWorkerKey(processId);
+    if (workerKey !== null) bumpWorkerActivity(workerKey);
+  }
 
   switch (msg.type) {
     case 'run-result': {
@@ -2257,11 +2624,19 @@ function handleBroadcastUnsubscribe(msg: BroadcastUnsubscribeMessage): void {
 }
 
 function sendBroadcastFireToChild(msg: BroadcastFireMessage): void {
-  if (!childHandle) return;
+  // Phase C2 — route to the subscribing script's worker. Broadcast emission
+  // already fans out per-subscriber via the bus (see `busEmit`); each
+  // forwarder calls this with the subscriber's `scriptId` baked into `msg`.
+  const workerKey = getWorkerForScript(msg.scriptId);
+  const handle    = getChildHandle(workerKey);
+  if (!handle) return;
+  // Phase E — fire-and-forget IPC; bump explicitly since handleChildMessage
+  // won't see a response if the handler runs silently (no api calls).
+  bumpWorkerActivity(workerKey);
   try {
-    childHandle.send(msg);
+    handle.send(msg);
   } catch (err) {
-    spindle.log.warn(`[script-runner] broadcast-fire send failed: ${String(err)}`);
+    spindle.log.warn(`[script-runner] broadcast-fire send to worker '${workerKey}' failed: ${String(err)}`);
   }
 }
 
@@ -2916,11 +3291,16 @@ async function handleShowAdvancedModalRequest(
         modalId: handle.modalId,
         reason,
       };
+      // Phase C2 — route to the modal-owning script's worker. `active` is
+      // the originating ActiveRun, so `active.workerKey` already names the
+      // right destination (no scriptId-lookup needed).
+      // Phase E — fire-and-forget; bump activity.
+      bumpWorkerActivity(active.workerKey);
       try {
-        if (childHandle) childHandle.send(notice);
+        getChildHandle(active.workerKey)?.send(notice);
       } catch (err) {
         spindle.log.warn(
-          `[script-runner] advanced-modal-dismissed send failed for ${handle.modalId}: ${String(err)}`,
+          `[script-runner] advanced-modal-dismissed send to worker '${active.workerKey}' failed for ${handle.modalId}: ${String(err)}`,
         );
       }
       // Drop both per-script tables now that the modal is gone. The
@@ -2958,13 +3338,16 @@ async function handleShowAdvancedModalRequest(
       // listeners get the right signal.
       const exists = lookupPendingAdvancedModal(active.scriptId, handle.modalId);
       if (exists) {
-        // Synthesize teardown dismissal for the timeout path.
+        // Synthesize teardown dismissal for the timeout path. Phase C2 —
+        // route to the originating run's worker via `active.workerKey`.
         const notice: AdvancedModalDismissedNotice = {
           type:    'advanced-modal-dismissed',
           modalId: handle.modalId,
           reason:  'teardown',
         };
-        try { if (childHandle) childHandle.send(notice); }
+        // Phase E — bump activity for the teardown send too.
+        bumpWorkerActivity(active.workerKey);
+        try { getChildHandle(active.workerKey)?.send(notice); }
         catch { /* channel down */ }
         dropPendingAdvancedModal(active.scriptId, handle.modalId);
         dropPendingDomHandle(active.scriptId, handle.root.id);
@@ -3804,24 +4187,35 @@ async function handleInternalAdvancedModalRequest(
 }
 
 function sendApiResponse(_requestId: string, response: ApiProxyResponse): void {
-  if (!childHandle) {
+  if (!getChildHandle()) {
     // Child died between request arrival and response dispatch — nothing
     // we can do; the lifecycle handler will reject pending runs anyway.
     return;
   }
   try {
-    childHandle.send(response);
+    getChildHandle()!.send(response);
   } catch (err) {
     spindle.log.warn(`[script-runner] api-response send failed: ${String(err)}`);
   }
 }
 
 function handleLifecycle(event: BackendProcessLifecycleEventDTO): void {
-  // Filter to our specific child — the host dispatches lifecycle events
+  // Filter to our specific kind — the host dispatches lifecycle events
   // for ALL backend processes the extension owns, not just ours.
-  if (event.kind !== SCRIPT_RUNNER_KIND || event.key !== SCRIPT_RUNNER_KEY) {
+  if (event.kind !== SCRIPT_RUNNER_KIND) {
     return;
   }
+  // Phase B (v1.0 runtime-isolation): events carry the worker key under
+  // which they were spawned. `event.key` is `string | undefined` (key is
+  // optional in the spawn API); we always pass an explicit key so undefined
+  // means "not ours". Phase C2: filter accepts both configured pool
+  // members AND currently-spawned over-cap workers (during pool-size
+  // decrease transitions) via `isActiveWorkerKey` — see its JSDoc for the
+  // union-view rationale.
+  if (event.key === undefined || !isActiveWorkerKey(event.key)) {
+    return;
+  }
+  const workerKey: ScriptRunnerWorkerKey = event.key;
 
   switch (event.state) {
     case 'timed_out':
@@ -3869,12 +4263,9 @@ function handleLifecycle(event: BackendProcessLifecycleEventDTO): void {
       // Clear stability timer for the dead child — it was scheduled
       // against this now-deceased instance and would erroneously reset
       // restartAttempts to 0 mid-backoff if it fires.
-      if (stabilityTimer !== null) {
-        clearTimeout(stabilityTimer);
-        stabilityTimer = null;
-      }
+      clearStabilityTimer(workerKey);
 
-      childHandle = null;
+      deleteChildHandle(workerKey);
 
       // Phase 10 — schedule a respawn with exponential backoff. After the
       // new child is alive, prior user-script handler closures (macros,
@@ -3884,13 +4275,13 @@ function handleLifecycle(event: BackendProcessLifecycleEventDTO): void {
       // Surface this to the operator via a warning so they know to
       // disable+reenable affected scripts to restore handler functionality.
       spindle.log.warn(
-        `[script-runner] child respawn scheduled after ${event.state}. ` +
+        `[script-runner] worker '${workerKey}' respawn scheduled after ${event.state}. ` +
         `Note: user-script handler closures (macros, tools, interceptors, etc.) ` +
         `registered before the kill are now orphaned — the parent's wrappers ` +
         `point at child handlerIds that no longer exist. To restore those, ` +
         `disable+reenable any affected scripts (or reload the extension).`,
       );
-      scheduleRespawn(`child ${event.state}: ${reason}`);
+      scheduleRespawn(workerKey, `child ${event.state}: ${reason}`);
       break;
     }
 
@@ -3901,17 +4292,11 @@ function handleLifecycle(event: BackendProcessLifecycleEventDTO): void {
       // received their results, but if any remain, they'll get a generic
       // rejection on the next dispatch attempt.
       //
-      // Cancel any pending respawn — graceful exit means LumiScript is
-      // tearing down, not that we should respawn.
-      if (restartTimer !== null) {
-        clearTimeout(restartTimer);
-        restartTimer = null;
-      }
-      if (stabilityTimer !== null) {
-        clearTimeout(stabilityTimer);
-        stabilityTimer = null;
-      }
-      childHandle = null;
+      // Cancel any pending respawn for THIS worker — graceful exit means
+      // this worker is tearing down, not that we should respawn it.
+      clearRestartTimer(workerKey);
+      clearStabilityTimer(workerKey);
+      deleteChildHandle(workerKey);
       break;
 
     default:
@@ -3935,32 +4320,35 @@ function handleLifecycle(event: BackendProcessLifecycleEventDTO): void {
  * Idempotent on existing schedule: if a respawn is already scheduled,
  * the duplicate trigger is logged + skipped.
  */
-function scheduleRespawn(reason: string): void {
+function scheduleRespawn(workerKey: ScriptRunnerWorkerKey, reason: string): void {
   if (cachedUserId === null) {
     spindle.log.warn(
-      `[script-runner] cannot schedule respawn: userId not yet cached ` +
+      `[script-runner] cannot schedule respawn for worker '${workerKey}': userId not yet cached ` +
       `(respawn before first cold-start spawn?)`,
     );
     return;
   }
-  if (restartTimer !== null) {
+  if (getRestartTimer(workerKey) !== null) {
     spindle.log.warn(
-      `[script-runner] respawn already scheduled; ignoring duplicate trigger (reason: ${reason})`,
+      `[script-runner] respawn already scheduled for worker '${workerKey}'; ignoring duplicate trigger (reason: ${reason})`,
     );
     return;
   }
 
-  const backoffMs = getRestartBackoffMs();
-  const idx       = Math.min(restartAttempts, backoffMs.length - 1);
-  const delay     = backoffMs[idx]!;
+  const backoffMs     = getRestartBackoffMs();
+  const attemptsSoFar = getRestartAttempts(workerKey);
+  const idx           = Math.min(attemptsSoFar, backoffMs.length - 1);
+  const delay         = backoffMs[idx]!;
   spindle.log.warn(
-    `[script-runner] scheduling respawn in ${delay}ms ` +
-    `(attempt #${restartAttempts + 1}; reason: ${reason})`,
+    `[script-runner] scheduling respawn for worker '${workerKey}' in ${delay}ms ` +
+    `(attempt #${attemptsSoFar + 1}; reason: ${reason})`,
   );
 
-  restartTimer = setTimeout(() => {
-    restartTimer = null;
-    restartAttempts++;
+  const timer = setTimeout(() => {
+    // Timer fired — drop the Map entry directly; `clearRestartTimer` would
+    // also clearTimeout() the same handle, which is harmless but redundant.
+    restartTimers.delete(workerKey);
+    const newAttempts = incrementRestartAttempts(workerKey);
     // v0.28.0+ — preserve the originating crash reason for the
     // diagnostics panel. `scheduleRespawn` is called recursively from
     // the `.catch` branch below with `respawn-attempt-N-failed` as the
@@ -3972,9 +4360,9 @@ function scheduleRespawn(reason: string): void {
       lastRestartReason = reason;
     }
     spindle.log.info(
-      `[script-runner] firing respawn attempt #${restartAttempts}`,
+      `[script-runner] firing respawn attempt #${newAttempts} for worker '${workerKey}'`,
     );
-    void spawnScriptRunner(cachedUserId!)
+    void spawnScriptRunner(cachedUserId!, workerKey)
       .then(() => {
         // v0.28.0+ — only count a respawn as a "restart" once it
         // succeeds. A crash that takes three retries to recover from
@@ -3985,52 +4373,64 @@ function scheduleRespawn(reason: string): void {
       })
       .catch((err) => {
         spindle.log.error(
-          `[script-runner] respawn attempt #${restartAttempts} failed: ` +
+          `[script-runner] respawn attempt #${newAttempts} for worker '${workerKey}' failed: ` +
           `${err instanceof Error ? err.message : String(err)}`,
         );
         // Reschedule with longer backoff (attempts already incremented above).
-        scheduleRespawn(`respawn-attempt-${restartAttempts}-failed`);
+        scheduleRespawn(workerKey, `respawn-attempt-${newAttempts}-failed`);
       });
   }, delay);
+  setRestartTimer(workerKey, timer);
 }
 
 // ─── Public API ─────────────────────────────────────────────────────────────
 
 /**
- * Spawn the script-runner child if not already running. Idempotent — calling
- * this when the child is alive returns the existing handle.
+ * Spawn the script-runner child for a specific worker if not already
+ * running. Idempotent per-worker — calling this when the worker is alive
+ * returns its existing handle.
  *
  * Resolves once the child has called `process.ready()`. Rejects if the
  * spawn fails or the startup timeout fires.
  *
- * @param userId  Active user ID. LumiScript is an operator-scoped extension
- *                (see Lumiverse extension manager badge), so `userId` is
- *                required by the host on every spawn — it identifies which
- *                user's context the spawned subprocess will act on. Caller
- *                should pass the live `activeUserId` (LumiScript tracks
- *                this on every frontend message arrival; cold-start callers
- *                must defer the spawn until after the first frontend_ready
- *                handler has populated `activeUserId`).
+ * @param userId    Active user ID. LumiScript is an operator-scoped extension
+ *                  (see Lumiverse extension manager badge), so `userId` is
+ *                  required by the host on every spawn — it identifies which
+ *                  user's context the spawned subprocess will act on. Caller
+ *                  should pass the live `activeUserId` (LumiScript tracks
+ *                  this on every frontend message arrival; cold-start callers
+ *                  must defer the spawn until after the first frontend_ready
+ *                  handler has populated `activeUserId`).
+ * @param workerKey Pool member to spawn. Phase B (default `DEFAULT_WORKER_KEY`):
+ *                  effectively single-worker. Phase C+ callers pass per-pool-
+ *                  member keys to spawn distinct workers.
  */
-export function spawnScriptRunner(userId: string): Promise<BackendProcessHandle> {
+export function spawnScriptRunner(
+  userId:    string,
+  workerKey: ScriptRunnerWorkerKey = DEFAULT_WORKER_KEY,
+): Promise<BackendProcessHandle> {
   // Phase 10 — stash userId for use by the lifecycle-driven respawn path.
   // Single-user mode keeps this stable; if it ever changes (multi-user
   // operator mode), the most-recent caller's userId wins for respawns.
   cachedUserId = userId;
 
-  if (childHandle) return Promise.resolve(childHandle);
-  if (spawnInFlight) return spawnInFlight;
+  const existing = getChildHandle(workerKey);
+  if (existing) return Promise.resolve(existing);
 
-  spawnInFlight = (async () => {
+  const inFlight = spawnInFlights.get(workerKey);
+  if (inFlight) return inFlight;
+
+  const promise = (async () => {
     // Wire up subscriptions before spawning so we don't miss any early
     // lifecycle events. They're idempotent — registering a no-op handler
     // before spawn is harmless.
     if (messageUnsub === null) {
       messageUnsub = spindle.backendProcesses.onMessage((event) => {
         // The onMessage handler fires for every backend process the
-        // extension owns. We filter by processId to scope to our child.
-        if (event.processId !== childHandle?.processId) return;
-        handleChildMessage(event.payload);
+        // extension owns. We filter by processId to scope to our workers
+        // (Phase B: any pool member's process counts as ours).
+        if (!isOwnedProcessId(event.processId)) return;
+        handleChildMessage(event.payload, event.processId);
       });
     }
     if (lifecycleUnsub === null) {
@@ -4041,50 +4441,55 @@ export function spawnScriptRunner(userId: string): Promise<BackendProcessHandle>
     const handle = await spindle.backendProcesses.spawn({
       entry:               SCRIPT_RUNNER_ENTRY,
       kind:                SCRIPT_RUNNER_KIND,
-      key:                 SCRIPT_RUNNER_KEY,
+      key:                 workerKey,
       userId,               // Required by the host; see param JSDoc above
       payload:             {},  // Phase 9+ may pass settings (scriptTimeoutMs etc.) through here
       startupTimeoutMs:    STARTUP_TIMEOUT_MS,
       heartbeatTimeoutMs:  HEARTBEAT_TIMEOUT_MS_DEFAULT,
       replaceExisting:     true,  // if a stale instance is around (e.g. previous LumiScript run), replace it
     });
-    childHandle = handle;
+    setChildHandle(workerKey, handle);
 
     spindle.log.info(
-      `[script-runner] spawned in ${Date.now() - spawnedAt}ms ` +
+      `[script-runner] spawned worker '${workerKey}' in ${Date.now() - spawnedAt}ms ` +
       `(processId=${handle.processId})`,
     );
 
-    // Phase 10 — schedule the stability reset. If the new child stays
-    // alive for STABILITY_THRESHOLD_MS, the restart-attempts counter
-    // resets to 0 so a long-running session that hits ONE bad script
-    // doesn't accumulate permanent backoff debt.
+    // Phase 10 — schedule the stability reset for THIS worker. If the new
+    // child stays alive for STABILITY_THRESHOLD_MS, the restart-attempts
+    // counter resets to 0 so a long-running session that hits ONE bad
+    // script doesn't accumulate permanent backoff debt.
     //
-    // The timer is cleared on death (in handleLifecycle) and on the
-    // next spawn (so a respawn doesn't double-schedule).
-    if (stabilityTimer !== null) clearTimeout(stabilityTimer);
+    // The timer is cleared on death (in handleLifecycle) and on the next
+    // spawn for this worker (so a respawn doesn't double-schedule).
+    clearStabilityTimer(workerKey);
     const stabilityMs = getStabilityThresholdMs();
-    stabilityTimer = setTimeout(() => {
-      if (restartAttempts > 0) {
+    const timer = setTimeout(() => {
+      const attempts = getRestartAttempts(workerKey);
+      if (attempts > 0) {
         spindle.log.info(
-          `[script-runner] child has been stable for ${stabilityMs / 1000}s; ` +
-          `restart-attempts counter reset (was ${restartAttempts})`,
+          `[script-runner] worker '${workerKey}' has been stable for ${stabilityMs / 1000}s; ` +
+          `restart-attempts counter reset (was ${attempts})`,
         );
-        restartAttempts = 0;
+        resetRestartAttempts(workerKey);
       }
-      stabilityTimer = null;
+      stabilityTimers.delete(workerKey);
     }, stabilityMs);
+    setStabilityTimer(workerKey, timer);
 
     return handle;
   })();
 
-  // Clear the in-flight slot whether spawn succeeded or failed. On success,
-  // future calls hit the `if (childHandle)` short-circuit. On failure, the
-  // slot opens for a fresh retry, which the lifecycle-driven respawn path
-  // (Phase 10's `scheduleRespawn`) makes use of.
-  spawnInFlight.finally(() => { spawnInFlight = null; }).catch(() => { /* swallow — caller already handled */ });
+  spawnInFlights.set(workerKey, promise);
 
-  return spawnInFlight;
+  // Clear the in-flight slot whether spawn succeeded or failed. On success,
+  // future calls hit the `if (getChildHandle(workerKey))` short-circuit. On
+  // failure, the slot opens for a fresh retry, which the lifecycle-driven
+  // respawn path (Phase 10's `scheduleRespawn`) makes use of.
+  promise.finally(() => { spawnInFlights.delete(workerKey); })
+         .catch(() => { /* swallow — caller already handled */ });
+
+  return promise;
 }
 
 /**
@@ -4197,11 +4602,19 @@ export function dispatchRunScript(
   request: DispatchRunScriptRequest,
   opts:    DispatchRunScriptOpts = {},
 ): Promise<RunScriptResult> {
-  if (!childHandle) {
+  // Phase C1 — derive the worker hosting this script. C1 always returns
+  // DEFAULT_WORKER_KEY (single-worker behaviour preserved); C2 promotes to
+  // least-loaded distribution. Caller (`runScriptViaChild`) is responsible
+  // for ensuring the worker is spawned before dispatch.
+  const workerKey = getWorkerForScript(script.id);
+
+  if (!getChildHandle(workerKey)) {
     return Promise.reject(
-      new Error('[script-runner] dispatchRunScript called before child was spawned'),
+      new Error(`[script-runner] dispatchRunScript: worker '${workerKey}' not spawned`),
     );
   }
+  // Phase E — bump activity for the dispatched worker.
+  bumpWorkerActivity(workerKey);
 
   const runId = generateRunId();
 
@@ -4283,15 +4696,15 @@ export function dispatchRunScript(
   // handler registry) so all sides agree.
   busClearByScriptId(script.id);
   broadcastForwarders.delete(script.id);
-  if (childHandle) {
+  if (getChildHandle(workerKey)) {
     const clearMsg: BroadcastClearMessage = {
       type:     'broadcast-clear',
       scriptId: script.id,
     };
     try {
-      childHandle.send(clearMsg);
+      getChildHandle(workerKey)!.send(clearMsg);
     } catch (err) {
-      spindle.log.warn(`[script-runner] broadcast-clear send failed: ${String(err)}`);
+      spindle.log.warn(`[script-runner] broadcast-clear send to worker '${workerKey}' failed: ${String(err)}`);
     }
   }
 
@@ -4313,6 +4726,7 @@ export function dispatchRunScript(
       scriptId:   script.id,
       scriptName: script.name,
       startedAt:  Date.now(),
+      workerKey,
       api,
       handles:    new Map(),  // transient handles for this run (dropped on script-body lifecycle drop)
       onConsole:  opts.onConsole,
@@ -4332,7 +4746,7 @@ export function dispatchRunScript(
     });
     enforceTrackingSetsCap();
     try {
-      childHandle!.send(fullRequest);
+      getChildHandle(workerKey)!.send(fullRequest);
     } catch (err) {
       pendingRuns.delete(runId);
       activeRuns.delete(runId);
@@ -4375,15 +4789,23 @@ export function unregisterScriptFromChild(scriptId: string): void {
   // Send IPC first so the child can process its own cleanup before any
   // late api-requests it might still have queued reach the parent and
   // hit our about-to-be-cleared lookup tables.
-  if (childHandle) {
+  //
+  // Phase C2 — route to the script's worker. The assignment is still in
+  // `scriptWorkerAssignments` at this point (the `releaseScriptFromWorker`
+  // call at the end of this function is what drops it).
+  const workerKey = getWorkerForScript(scriptId);
+  const handle    = getChildHandle(workerKey);
+  if (handle) {
+    // Phase E — bump activity; unregister is real worker-bound work.
+    bumpWorkerActivity(workerKey);
     const msg: ScriptUnregisterMessage = {
       type: 'script-unregister',
       scriptId,
     };
-    try { childHandle.send(msg); }
+    try { handle.send(msg); }
     catch (err) {
       spindle.log.warn(
-        `[script-runner] script-unregister send failed for ${scriptId}: ${String(err)}`,
+        `[script-runner] script-unregister send to worker '${workerKey}' failed for ${scriptId}: ${String(err)}`,
       );
     }
   }
@@ -4464,19 +4886,30 @@ export function unregisterScriptFromChild(scriptId: string): void {
   // time out naturally. Acceptable: the open IPC's client-side openAck
   // will eventually reject after OPEN_AWAIT_TIMEOUT_MS (3s); user code's
   // setTitle/dismiss/etc. dispatches no-op via destroyedRef thereafter.
+
+  // Phase C1 — drop the worker assignment so this scriptId's slot frees
+  // up for future least-loaded calculations. C1: harmless (always assigns
+  // to DEFAULT_WORKER_KEY anyway). C2: meaningful for re-balancing.
+  releaseScriptFromWorker(scriptId);
 }
 
 /**
- * Graceful shutdown. Sends `ShutdownRequest` to the child, then awaits
- * the host's `stop()` to confirm the subprocess is gone. Idempotent.
+ * Graceful shutdown of a single worker. Sends `ShutdownRequest`, awaits
+ * the host's `stop()`, drops our local handle + restart-state for that
+ * worker. Idempotent on missing or already-stopping workers.
  *
- * Called during LumiScript teardown (extension disable / unload). Hard
- * kills come through the host's lifecycle path and don't go through here.
+ * Phase C2 — used by `shutdownScriptRunner` (iterates all workers) and
+ * by `rebalanceWorkerPool` (shuts down over-cap workers after a
+ * `workerCount` decrease).
  */
-export async function shutdownScriptRunner(): Promise<void> {
-  if (!childHandle) return;
-  const handle = childHandle;
-  childHandle = null;
+async function shutdownWorker(workerKey: ScriptRunnerWorkerKey): Promise<void> {
+  const handle = getChildHandle(workerKey);
+  if (!handle) return;
+  deleteChildHandle(workerKey);
+  // Cancel any pending restart for this worker — we're tearing it down
+  // intentionally, not recovering from a crash.
+  clearRestartTimer(workerKey);
+  clearStabilityTimer(workerKey);
 
   // Send graceful shutdown signal first; the child responds by calling
   // `process.complete()` which the host translates into a `completed`
@@ -4491,13 +4924,309 @@ export async function shutdownScriptRunner(): Promise<void> {
   try {
     await handle.stop({ reason: 'lumiscript_shutdown' });
   } catch (err) {
-    spindle.log.warn(`[script-runner] graceful stop failed: ${String(err)}`);
+    spindle.log.warn(`[script-runner] worker '${workerKey}' graceful stop failed: ${String(err)}`);
   }
+}
+
+/**
+ * Phase F — manual full redistribution of all script assignments. Clears
+ * every entry in `scriptWorkerAssignments` so each script's next fire
+ * triggers a fresh least-loaded lookup over the current pool.
+ *
+ * Use case: after a user bumps `workerCount` (e.g. 1 → 4), the existing
+ * sticky-assignment behavior keeps scripts on their pre-change worker.
+ * This action redistributes them across the new larger pool.
+ *
+ * Workers themselves are NOT shut down. Workers that end up idle after
+ * redistribution will be reclaimed naturally by the eviction sweep.
+ * Workers that pick up new scripts spawn-on-demand via the next dispatch.
+ */
+export function redistributeAllAssignments(): void {
+  const count = scriptWorkerAssignments.size;
+  scriptWorkerAssignments.clear();
+  spindle.log.info(
+    `[script-runner] manual rebalance: cleared ${count} script→worker assignment(s); next fires will redistribute via least-loaded`,
+  );
+}
+
+/**
+ * Phase C2 — rebalance the worker pool after a `workerCount` setting
+ * change. Called from `backend.ts`'s `update_settings` handler whenever
+ * workerCount may have shifted.
+ *
+ * Soft-decrease (Option C from the Phase C design discussion):
+ *   1. Compute the configured pool from the current `workerCount`.
+ *   2. Find spawned workers (or in-flight spawns) outside that pool —
+ *      these are over-cap workers being phased out.
+ *   3. Release all assignments on over-cap workers; affected scripts will
+ *      re-assign to in-pool workers via `getWorkerForScript` on their
+ *      next fire (least-loaded picks from the new, smaller pool).
+ *   4. Shutdown the over-cap workers in parallel.
+ *
+ * Mid-flight runs on a doomed worker complete normally — `handle.stop()`
+ * sends the graceful shutdown signal and awaits the host's stopped
+ * lifecycle event. In-process state on the doomed worker (closures,
+ * module-scope `globalThis` cache, persistent handles) is lost — same
+ * trade-off as worker crash recovery (Phase 10's known limitation).
+ *
+ * Idempotent: if no over-cap workers exist (no decrease happened, or
+ * decrease already processed), this is a no-op.
+ */
+export async function rebalanceWorkerPool(): Promise<void> {
+  const configured = new Set(getKnownWorkerKeys());
+  const overCap: ScriptRunnerWorkerKey[] = [];
+  for (const key of childHandles.keys()) {
+    if (!configured.has(key)) overCap.push(key);
+  }
+  for (const key of spawnInFlights.keys()) {
+    if (!configured.has(key) && !overCap.includes(key)) overCap.push(key);
+  }
+  if (overCap.length === 0) return;
+
+  // Release assignments on over-cap workers FIRST so affected scripts
+  // re-assign to in-pool workers on next fire / handler invocation.
+  const releasedCount = new Map<ScriptRunnerWorkerKey, number>();
+  for (const [scriptId, assigned] of scriptWorkerAssignments) {
+    if (overCap.includes(assigned)) {
+      releaseScriptFromWorker(scriptId);
+      releasedCount.set(assigned, (releasedCount.get(assigned) ?? 0) + 1);
+    }
+  }
+  for (const [key, count] of releasedCount) {
+    spindle.log.info(
+      `[script-runner] rebalance: released ${count} script(s) from over-cap worker '${key}'`,
+    );
+  }
+
+  // Shutdown the over-cap workers in parallel.
+  await Promise.all(overCap.map((k) => shutdownWorker(k)));
+
+  spindle.log.info(
+    `[script-runner] rebalance complete — shut down ${overCap.length} over-cap worker(s): ${overCap.join(', ')}`,
+  );
+}
+
+/**
+ * Graceful shutdown. Sends `ShutdownRequest` to every spawned worker,
+ * then awaits each `stop()`. Idempotent.
+ *
+ * Called during LumiScript teardown (extension disable / unload). Hard
+ * kills come through the host's lifecycle path and don't go through here.
+ *
+ * Phase C2 — iterates all currently-spawned workers (was: just the
+ * default child). The shared `messageUnsub` / `lifecycleUnsub` global
+ * subscriptions are dropped only AFTER all workers are gone.
+ */
+export async function shutdownScriptRunner(): Promise<void> {
+  // Phase E — stop the eviction sweep before tearing down workers, so a
+  // mid-shutdown sweep doesn't try to evict workers we're already
+  // stopping (harmless thanks to idempotent shutdownWorker, but tidier).
+  stopEvictionSweep();
+  const keys = [...childHandles.keys()];
+  await Promise.all(keys.map((k) => shutdownWorker(k)));
 
   messageUnsub?.();
   lifecycleUnsub?.();
   messageUnsub   = null;
   lifecycleUnsub = null;
+}
+
+// ─── Eviction sweep machinery (Phase E) ───────────────────────────────────
+
+/**
+ * Query a specific worker's resident-set-size in bytes via the existing
+ * `diagnostic-stats-request` IPC. Returns null if the worker isn't
+ * spawned, the IPC send fails, or the worker doesn't respond within
+ * `EVICTION_MEMORY_QUERY_TIMEOUT_MS`.
+ *
+ * Internal — used only by the eviction sweep. Does NOT bump the
+ * target worker's activity (would defeat idle-eviction tracking).
+ */
+async function queryWorkerMemoryBytes(workerKey: ScriptRunnerWorkerKey): Promise<number | null> {
+  const handle = getChildHandle(workerKey);
+  if (!handle) return null;
+
+  const requestId = `eviction-mem-${nextDiagnosticRequestSeq++}`;
+
+  return new Promise<number | null>((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      pendingDiagnosticStats.delete(requestId);
+      resolve(null);
+    }, EVICTION_MEMORY_QUERY_TIMEOUT_MS);
+
+    pendingDiagnosticStats.set(requestId, (stats) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      pendingDiagnosticStats.delete(requestId);
+      resolve(stats?.rss ?? null);
+    });
+
+    try {
+      handle.send({ type: 'diagnostic-stats-request', requestId });
+    } catch (err) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      pendingDiagnosticStats.delete(requestId);
+      spindle.log.warn(
+        `[script-runner] eviction memory query send to worker '${workerKey}' failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      resolve(null);
+    }
+  });
+}
+
+/**
+ * True if `workerKey` has any active run (a real trigger fire OR an
+ * in-flight handler invocation) — i.e. is currently doing work and should
+ * be exempt from eviction. Uses `ActiveRun.workerKey` (Phase C1 field).
+ */
+function workerHasActiveRun(workerKey: ScriptRunnerWorkerKey): boolean {
+  for (const run of activeRuns.values()) {
+    if (run.workerKey === workerKey) return true;
+  }
+  return false;
+}
+
+/**
+ * Evict a single worker. Race-checked: re-verifies "no active runs" just
+ * before shutdown, since the snapshot the sweep took may be stale by the
+ * time we reach this call (memory queries are async). If a run started
+ * during the sweep window, the eviction is aborted with a log; the next
+ * sweep will reconsider.
+ *
+ * Releases all script assignments on the worker BEFORE shutdown so the
+ * affected scripts re-assign to in-pool workers on their next fire.
+ */
+async function evictWorker(workerKey: ScriptRunnerWorkerKey, reason: string): Promise<void> {
+  if (workerHasActiveRun(workerKey)) {
+    spindle.log.info(
+      `[script-runner] eviction skipped for worker '${workerKey}' (active run started during sweep; reason was: ${reason})`,
+    );
+    return;
+  }
+
+  // Release assignments on this worker so affected scripts re-assign on
+  // next fire via least-loaded over the remaining pool.
+  const releasedCount: string[] = [];
+  for (const [scriptId, assigned] of scriptWorkerAssignments) {
+    if (assigned === workerKey) {
+      releaseScriptFromWorker(scriptId);
+      releasedCount.push(scriptId);
+    }
+  }
+
+  // Also drop the activity timestamp — fresh worker on respawn starts
+  // with whatever timestamp `setChildHandle` writes.
+  workerLastActivity.delete(workerKey);
+
+  spindle.log.info(
+    `[script-runner] evicting worker '${workerKey}' (${reason}); released ${releasedCount.length} script assignment(s)`,
+  );
+
+  await shutdownWorker(workerKey);
+}
+
+/**
+ * One pass of the eviction sweep. Applies idle eviction first (no
+ * memory queries needed), then memory eviction (queries each remaining
+ * worker, sums totals, LRU-evicts until under ceiling). Workers with
+ * active runs are exempt; the sweep keeps at least `MIN_WARM_WORKERS`
+ * alive (counted across spawned workers, not configured pool size).
+ *
+ * Exported for tests to trigger manually without waiting for the
+ * interval.
+ */
+export async function evictionSweep(): Promise<void> {
+  const config = evictionConfigReader();
+  const now    = Date.now();
+
+  // Snapshot the spawned workers; the set may change during async memory
+  // queries, but evictWorker re-checks eligibility just before shutdown.
+  const spawned = [...childHandles.keys()];
+  if (spawned.length <= MIN_WARM_WORKERS) {
+    // Pool is at or below the warm floor — nothing to evict.
+    return;
+  }
+
+  // ── Idle eviction pass ───────────────────────────────────────────────
+  // Sort by ascending lastActivity (oldest first); evict any idle-past-
+  // threshold workers while staying above the warm floor.
+  const idleCandidates = spawned
+    .filter((k) => !workerHasActiveRun(k))
+    .map((k) => ({ key: k, lastActivity: workerLastActivity.get(k) ?? now }))
+    .sort((a, b) => a.lastActivity - b.lastActivity);
+
+  let spawnedAfterIdle = spawned.length;
+  for (const c of idleCandidates) {
+    if (spawnedAfterIdle <= MIN_WARM_WORKERS) break;
+    if (now - c.lastActivity <= config.idleTimeoutMs) break;  // sorted; rest are younger
+    await evictWorker(c.key, `idle > ${Math.round(config.idleTimeoutMs / 1000)}s`);
+    spawnedAfterIdle--;
+  }
+
+  // ── Memory eviction pass ─────────────────────────────────────────────
+  const remaining = [...childHandles.keys()];
+  if (remaining.length <= MIN_WARM_WORKERS) return;
+
+  // Query memory for each remaining worker in parallel.
+  const memReadings = await Promise.all(
+    remaining.map(async (k) => ({ key: k, bytes: await queryWorkerMemoryBytes(k) })),
+  );
+  let totalBytes = 0;
+  for (const r of memReadings) {
+    if (r.bytes !== null) totalBytes += r.bytes;
+  }
+  if (totalBytes <= config.memoryCeilingBytes) return;
+
+  // Over ceiling — LRU-evict eligible workers until we drop under it.
+  // "Eligible" = no active run, above warm floor.
+  const lruCandidates = memReadings
+    .filter((r) => !workerHasActiveRun(r.key))
+    .map((r) => ({ ...r, lastActivity: workerLastActivity.get(r.key) ?? now }))
+    .sort((a, b) => a.lastActivity - b.lastActivity);
+
+  let runningTotal = totalBytes;
+  let spawnedAfterMem = remaining.length;
+  for (const c of lruCandidates) {
+    if (runningTotal <= config.memoryCeilingBytes) break;
+    if (spawnedAfterMem <= MIN_WARM_WORKERS) break;
+    const reason = `memory ceiling exceeded (total ${Math.round(runningTotal / 1024 / 1024)} MB > ${Math.round(config.memoryCeilingBytes / 1024 / 1024)} MB)`;
+    await evictWorker(c.key, reason);
+    runningTotal -= c.bytes ?? 0;
+    spawnedAfterMem--;
+  }
+}
+
+/**
+ * Start the periodic eviction sweep. Idempotent (re-calling clears the
+ * existing timer and starts fresh). Called from `backend.ts` cold-start
+ * after settings load.
+ */
+export function startEvictionSweep(): void {
+  if (evictionSweepTimer !== null) clearInterval(evictionSweepTimer);
+  evictionSweepTimer = setInterval(() => {
+    void evictionSweep().catch((err) => {
+      spindle.log.warn(
+        `[script-runner] eviction sweep failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  }, EVICTION_SWEEP_INTERVAL_MS);
+}
+
+/**
+ * Stop the periodic eviction sweep. Idempotent. Called by
+ * `shutdownScriptRunner` during teardown.
+ */
+export function stopEvictionSweep(): void {
+  if (evictionSweepTimer !== null) {
+    clearInterval(evictionSweepTimer);
+    evictionSweepTimer = null;
+  }
 }
 
 /**
@@ -4511,8 +5240,8 @@ export function getScriptRunnerStatus(): {
   activeScripts:  string[];
 } {
   return {
-    spawned:       childHandle !== null,
-    processId:     childHandle?.processId ?? null,
+    spawned:       hasAnyChildHandle(),
+    processId:     getChildHandle()?.processId ?? null,
     inFlightRuns:  pendingRuns.size,
     activeScripts: Array.from(activeRuns.values()).map((a) => a.scriptName),
   };
@@ -4556,23 +5285,72 @@ export function __getCachedUserIdForTests(): string | null {
 }
 
 /** @internal */
-export function __getRestartAttemptsForTests(): number {
-  return restartAttempts;
+export function __getRestartAttemptsForTests(
+  workerKey: ScriptRunnerWorkerKey = DEFAULT_WORKER_KEY,
+): number {
+  return getRestartAttempts(workerKey);
 }
 
 /** @internal */
-export function __isRestartTimerScheduledForTests(): boolean {
-  return restartTimer !== null;
+export function __isRestartTimerScheduledForTests(
+  workerKey: ScriptRunnerWorkerKey = DEFAULT_WORKER_KEY,
+): boolean {
+  return getRestartTimer(workerKey) !== null;
 }
 
 /** @internal */
-export function __isStabilityTimerScheduledForTests(): boolean {
-  return stabilityTimer !== null;
+export function __isStabilityTimerScheduledForTests(
+  workerKey: ScriptRunnerWorkerKey = DEFAULT_WORKER_KEY,
+): boolean {
+  return getStabilityTimer(workerKey) !== null;
 }
 
 /** @internal */
 export function __getChildHandlePresentForTests(): boolean {
-  return childHandle !== null;
+  return hasAnyChildHandle();
+}
+
+// ─── Phase C1 worker-assignment inspectors ─────────────────────────────────
+
+/** @internal */
+export function __getWorkerForScriptForTests(scriptId: string): ScriptRunnerWorkerKey {
+  return getWorkerForScript(scriptId);
+}
+
+/** @internal */
+export function __releaseScriptFromWorkerForTests(scriptId: string): void {
+  releaseScriptFromWorker(scriptId);
+}
+
+/** @internal */
+export function __getKnownWorkerKeysForTests(): ScriptRunnerWorkerKey[] {
+  return getKnownWorkerKeys();
+}
+
+/** @internal */
+export function __getAssignedScriptCountForTests(): number {
+  return scriptWorkerAssignments.size;
+}
+
+// ─── Phase E eviction inspectors ──────────────────────────────────────────
+
+/**
+ * Set a worker's last-activity timestamp manually. Tests use this to
+ * simulate "worker has been idle for N ms" without waiting wall-clock time.
+ * @internal
+ */
+export function __setWorkerLastActivityForTests(
+  workerKey: ScriptRunnerWorkerKey,
+  timestamp: number,
+): void {
+  workerLastActivity.set(workerKey, timestamp);
+}
+
+/** @internal */
+export function __getWorkerLastActivityForTests(
+  workerKey: ScriptRunnerWorkerKey,
+): number | null {
+  return workerLastActivity.get(workerKey) ?? null;
 }
 
 // ─── Test-only awaiter installers + inspectors (Phase 11.B.2) ───────────────
@@ -4694,6 +5472,18 @@ export function __sendRunHandlerRequestForTests(
 }
 
 /**
+ * Phase C2-polish — invoke the private `sendBroadcastFireToChild` for
+ * cross-worker routing tests. Lets tests verify a `broadcast-fire` IPC
+ * routes to the subscribing script's worker (per Phase C2 routing logic)
+ * without bringing up the full bus + subscribe machinery.
+ *
+ * @internal
+ */
+export function __sendBroadcastFireToChildForTests(msg: BroadcastFireMessage): void {
+  sendBroadcastFireToChild(msg);
+}
+
+/**
  * True iff `lastDispatchByScript` has a snapshot for the given scriptId.
  * Snapshot is installed on every `dispatchRunScript` and used by
  * `sendRunHandlerRequest` to source `(Script, grantedPermissions, userId)`
@@ -4770,9 +5560,9 @@ export function getRunnerHealth(): ScriptRunnerHealthSnapshot {
   return {
     totalRestartCount,
     lastRestartReason,
-    currentBackoffAttempts: restartAttempts,
-    childAlive:             childHandle !== null,
-    processId:              childHandle?.processId ?? null,
+    currentBackoffAttempts: getRestartAttempts(DEFAULT_WORKER_KEY),
+    childAlive:             hasAnyChildHandle(),
+    processId:              getChildHandle()?.processId ?? null,
   };
 }
 
@@ -4793,7 +5583,7 @@ export function getRunnerHealth(): ScriptRunnerHealthSnapshot {
 export async function queryRunnerStats(
   timeoutMs = 2_000,
 ): Promise<import('../types/script-runner-ipc.js').DiagnosticStatsResponse | null> {
-  if (childHandle === null) return null;
+  if (!hasAnyChildHandle()) return null;
 
   const requestId = `diag-${nextDiagnosticRequestSeq++}`;
 
@@ -4814,7 +5604,7 @@ export async function queryRunnerStats(
     });
 
     try {
-      childHandle?.send({ type: 'diagnostic-stats-request', requestId });
+      getChildHandle()?.send({ type: 'diagnostic-stats-request', requestId });
     } catch (err) {
       // Child died between the null check and the send — clean up the
       // pending entry and resolve with null. The lifecycle handler will
@@ -4835,16 +5625,38 @@ export async function queryRunnerStats(
 export function __resetForTests(): void {
   // Singletons / scalars
   scriptResolver           = null;
-  childHandle              = null;
+  childHandles.clear();
   messageUnsub             = null;
   lifecycleUnsub           = null;
   cachedUserId             = null;
-  restartAttempts          = 0;
   totalRestartCount        = 0;
   lastRestartReason        = null;
-  if (restartTimer  !== null) { clearTimeout(restartTimer);  restartTimer  = null; }
-  if (stabilityTimer !== null) { clearTimeout(stabilityTimer); stabilityTimer = null; }
-  spawnInFlight              = null;
+  // Phase B (v1.0 runtime-isolation) — per-worker Maps. Clear all timers
+  // before dropping the Map entries so no stale callbacks fire post-reset.
+  for (const t of restartTimers.values())   clearTimeout(t);
+  for (const t of stabilityTimers.values()) clearTimeout(t);
+  restartAttempts.clear();
+  restartTimers.clear();
+  stabilityTimers.clear();
+  spawnInFlights.clear();
+  // Phase C1 — worker assignment Map.
+  scriptWorkerAssignments.clear();
+  // Phase C2 — restore the workerCount reader's safe default. Without
+  // this, a test that sets `setWorkerCountReader(() => N)` would leak the
+  // configured N into other test files that just call `__resetForTests`.
+  workerCountReader = () => 1;
+  // Phase E — eviction state. Clear last-activity timestamps + restore
+  // the eviction-config reader's safe default; stop any in-flight sweep
+  // timer so tests don't see surprise eviction during their own setup.
+  workerLastActivity.clear();
+  evictionConfigReader = () => ({
+    idleTimeoutMs:      30 * 60 * 1000,
+    memoryCeilingBytes: 512 * 1024 * 1024,
+  });
+  if (evictionSweepTimer !== null) {
+    clearInterval(evictionSweepTimer);
+    evictionSweepTimer = null;
+  }
   openAwaitTimeoutOverride   = null;
   restartBackoffOverride     = null;
   stabilityThresholdOverride = null;

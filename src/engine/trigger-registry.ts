@@ -184,6 +184,78 @@ const LS_TEARDOWN = 'ls:teardown';
  *  must not stall disable/delete. */
 const LS_TEARDOWN_TIMEOUT_MS = 10_000;
 
+/**
+ * `ls:reload` is a synthetic trigger event for hot-reload-on-edit (v1.0
+ * Phase D — see notes/v1.0-runtime-isolation-and-hot-reload.md).
+ *
+ * Fires automatically after a code-only `update_script` IPC (debounced
+ * by ~500ms on the backend side) for enabled trigger scripts whose new
+ * code is byte-different from the prior version. The script's body
+ * re-runs end-to-end within its existing worker, so registrations
+ * (broadcasts, commands, macros, tools, interceptors) get refreshed
+ * closures pointing at the new code.
+ *
+ * Semantics:
+ *   - Fires once per code change (debounce-coalesced). Multiple rapid
+ *     patches collapse to one fire.
+ *   - Deferred while a real trigger run for the script is in flight;
+ *     drains once the running count hits 0.
+ *   - Skipped entirely if the script's code contains a
+ *     `// @no-reload-on-edit` directive at line start (opt-out path).
+ *   - Body branches on `data.__event === 'ls:reload'` if it wants to
+ *     distinguish a hot-reload from a fresh boot (`ls:startup`).
+ *   - Not dispatched through Spindle's event bus (synthetic, LS-internal).
+ *   - Same routing as any other body run — uses the script's assigned
+ *     worker (Phase C2).
+ */
+const LS_RELOAD = 'ls:reload';
+
+/**
+ * Line-anchored regex matching the `@no-reload-on-edit` opt-out directive.
+ * Detects `// @no-reload-on-edit` at the start of any line in the script's
+ * code (after optional leading whitespace), followed by end-of-line or
+ * whitespace. Detected at `update_script` time — no persistence, no
+ * schema change.
+ *
+ * The `(?:\s|$)` lookahead-style guard rejects extended tokens like
+ * `// @no-reload-on-edit-disabled` or `// @no-reload-on-edit2` — these
+ * are clearly NOT the directive and shouldn't trigger opt-out. (A bare
+ * `\b` word boundary would match between `edit` and `-`, since `-` is
+ * a non-word character.)
+ */
+const NO_RELOAD_DIRECTIVE_REGEX = /^\s*\/\/\s*@no-reload-on-edit(?:\s|$)/m;
+
+/**
+ * True if `code` opts out of hot-reload-on-edit via the
+ * `// @no-reload-on-edit` directive.
+ *
+ * Exported for use by `backend.ts`'s `update_script` eligibility check —
+ * the autosave path skips the auto-fire when the directive is present.
+ * Manual reload (via the future "Reload script S" palette action — Phase
+ * F) calls `fireReload` directly and is NOT gated by this check.
+ */
+export function hasNoReloadDirective(code: string): boolean {
+  return NO_RELOAD_DIRECTIVE_REGEX.test(code);
+}
+
+/**
+ * Payload threaded into the `ls:reload` event's `data` object. Public so
+ * `backend.ts`'s eligibility/debounce caller can construct it from the
+ * pre-update + post-update script state.
+ */
+export interface LsReloadPayload {
+  /** What triggered the reload. `'autosave'` from code-patch IPC, `'manual'` from a palette command. */
+  reason:           'autosave' | 'manual';
+  /** Short hash of the previous code (first 16 hex chars of sha256). */
+  previousCodeHash: string;
+  /** Short hash of the current code (first 16 hex chars of sha256). */
+  currentCodeHash:  string;
+  /** Length of the previous code. */
+  previousLength:   number;
+  /** Length of the current code. */
+  currentLength:    number;
+}
+
 export class TriggerRegistry {
   /** scriptId → { unsubs, events } — tracks live spindle.on() subscriptions */
   private cleanups = new Map<string, { unsubs: Array<() => void>; events: string[] }>();
@@ -218,6 +290,15 @@ export class TriggerRegistry {
   private startupFired   = new Set<string>();
   /** Scripts whose `ls:startup` was deferred because bindings weren't satisfied. */
   private startupPending = new Set<string>();
+
+  /**
+   * Phase D — scripts whose `ls:reload` fire was deferred because a real
+   * run for the same script was in flight. The pending payload fires once
+   * the running count drains to 0 (see the `remaining === 0` branch in
+   * the event-handler path). Coalesces multiple rapid edits to one fire
+   * (a later edit's payload overwrites the earlier pending entry).
+   */
+  private pendingReload  = new Map<string, LsReloadPayload>();
 
   constructor(
     private readonly getDeps: () => TriggerDeps,
@@ -456,6 +537,20 @@ export class TriggerRegistry {
               title: `LumiScript — ${currentScript.name}`,
               duration: 10_000,
             });
+          }
+
+          // Phase D — drain any pending hot-reload for this script. A code
+          // edit during this run's lifetime queued a reload payload via
+          // `fireReload`; now that the run is fully drained, fire it.
+          const pending = this.pendingReload.get(currentScript.id);
+          if (pending !== undefined) {
+            this.pendingReload.delete(currentScript.id);
+            // Re-read the latest script from storage — code may have
+            // changed again between the queue and the drain.
+            const latest = this.getDeps().scriptStorage.getScript(currentScript.id);
+            if (latest && latest.enabled && latest.type === 'trigger') {
+              void this.fireReload(latest, pending);
+            }
           }
         }
       });
@@ -789,6 +884,140 @@ export class TriggerRegistry {
       duration: result.duration,
       error: result.error?.message,
     });
+  }
+
+  // ─── ls:reload dispatch (Phase D) ─────────────────────────────────────────
+
+  /**
+   * Phase D — fire the synthetic `ls:reload` event for a script after its
+   * code changed. The body re-runs end-to-end within its existing worker;
+   * broadcasts + command handlers are wiped at fire-start and re-
+   * registered by the body; macros/tools/interceptors/RPC endpoints are
+   * idempotently overwritten by name; stale-diff cleanup drops any not
+   * re-registered.
+   *
+   * Idempotent + deferred semantics:
+   *   - If a real trigger run for this script is currently in-flight,
+   *     stash `payload` in `pendingReload` and return; the drain branch
+   *     in the event-handler path fires it once `runningCounts` reaches 0.
+   *   - Multiple rapid edits during an in-flight run coalesce to one fire
+   *     (each new pending entry overwrites the previous).
+   *
+   * Caller (`backend.ts`'s `update_script` handler) is responsible for the
+   * eligibility check (byte-different code, enabled trigger, directive
+   * absent, debounce). Manual reload (Phase F palette command) calls this
+   * directly with `reason: 'manual'` and bypasses the directive opt-out.
+   */
+  async fireReload(script: Script, payload: LsReloadPayload): Promise<void> {
+    // Defer while a real run is in flight. The drain branch in the
+    // event-handler path fires the queued payload when running count
+    // reaches 0.
+    if ((this.runningCounts.get(script.id) ?? 0) > 0) {
+      this.pendingReload.set(script.id, payload);
+      return;
+    }
+
+    const { grantedPermissions, userId, scriptStorage, onToolsChanged, onInjectionsChanged, scriptTimeoutMs } = this.getDeps();
+    const runId = generateUUID();
+
+    executionStatusStore.markRunning(script.id);
+    this.sendToFrontend({
+      type: 'execution_started',
+      scriptId: script.id,
+      scriptName: script.name,
+      runId,
+    });
+
+    clearBroadcastByScriptId(script.id);
+    clearCommandHandlerByScriptId(script.id);
+
+    const preRunToolNames                    = toolNamesByScript(script.id);
+    const preRunMacroNames                   = macroNamesByScript(script.id);
+    const preRunMacroInterceptorIds          = macroInterceptorIdsByScript(script.id);
+    const preRunContentProcessorIds          = contentProcessorIdsByScript(script.id);
+    const preRunRpcEndpoints                 = rpcEndpointsByScript(script.id);
+    const toolsRegisteredThisRun             = new Set<string>();
+    const macrosRegisteredThisRun            = new Set<string>();
+    const macroInterceptorsRegisteredThisRun = new Set<string>();
+    const contentProcessorsRegisteredThisRun = new Set<string>();
+    const rpcEndpointsRegisteredThisRun      = new Set<string>();
+
+    void scriptStorage;
+    const result = await this.runScript(
+      script,
+      {
+        data: {
+          __event:          LS_RELOAD,
+          reason:           payload.reason,
+          previousCodeHash: payload.previousCodeHash,
+          currentCodeHash:  payload.currentCodeHash,
+          previousLength:   payload.previousLength,
+          currentLength:    payload.currentLength,
+          triggeredAt:      Date.now(),
+        },
+        timeoutMs:          scriptTimeoutMs ?? SCRIPT_TIMEOUT_MS,
+        grantedPermissions,
+        userId,
+      },
+      {
+        onConsole: (entry) =>
+          this.sendToFrontend({ type: 'console_entry', scriptId: script.id, runId, entry }),
+        onToolsChanged,
+        onInjectionsChanged,
+        toolsRegisteredThisRun,
+        macrosRegisteredThisRun,
+        macroInterceptorsRegisteredThisRun,
+        contentProcessorsRegisteredThisRun,
+        rpcEndpointsRegisteredThisRun,
+      },
+    );
+
+    // Stale-diff cleanup — mirrors fireStartup's pattern.
+    const staleTools = diffAndCleanStaleTools(script.id, preRunToolNames, toolsRegisteredThisRun);
+    for (const name of staleTools) {
+      try { spindle.unregisterTool(name); } catch { /* swallow */ }
+    }
+    const staleMacros = diffAndCleanStaleMacros(script.id, preRunMacroNames, macrosRegisteredThisRun);
+    for (const name of staleMacros) {
+      try { spindle.unregisterMacro(name); } catch { /* swallow */ }
+    }
+    diffAndCleanStaleMacroInterceptors(
+      script.id, preRunMacroInterceptorIds, macroInterceptorsRegisteredThisRun,
+    );
+    diffAndCleanStaleContentProcessors(
+      script.id, preRunContentProcessorIds, contentProcessorsRegisteredThisRun,
+    );
+    const staleRpcEndpoints = diffAndCleanStaleEndpoints(
+      script.id, preRunRpcEndpoints, rpcEndpointsRegisteredThisRun,
+    );
+    for (const endpoint of staleRpcEndpoints) {
+      try { spindle.rpcPool.unregister(endpoint); } catch { /* swallow */ }
+    }
+    logCleanup('tool',  'stale after re-run', script.name, staleTools);
+    logCleanup('macro', 'stale after re-run', script.name, staleMacros);
+    logCleanup('rpc',   'stale after re-run', script.name, staleRpcEndpoints);
+
+    if (result.success) {
+      executionStatusStore.markSuccess(script.id, result.duration);
+    } else {
+      executionStatusStore.markError(script.id, result.duration, result.error?.message ?? 'Unknown error');
+    }
+
+    this.sendToFrontend({
+      type: 'execution_ended',
+      scriptId: script.id,
+      runId,
+      success:  result.success,
+      duration: result.duration,
+      error:    result.error?.message,
+    });
+
+    if (!result.success) {
+      spindle.toast.error(result.error?.message ?? 'Unknown error', {
+        title:    `LumiScript — ${script.name} (reload)`,
+        duration: 10_000,
+      });
+    }
   }
 
   // ─── Diagnostics ──────────────────────────────────────────────────────────

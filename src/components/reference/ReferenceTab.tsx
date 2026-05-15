@@ -62,6 +62,7 @@ export interface EventRow { name: string; group: string; payload: string; fires?
 export const EVENTS: EventRow[] = [
   { group: 'LumiScript', name: 'ls:startup',                 payload: '{ __event: "ls:startup" }', fires: 'Once per LumiScript boot (extension enable / app start). Use for one-shot setup work.' },
   { group: 'LumiScript', name: 'ls:teardown',                payload: "{ reason: 'disabled' | 'deleted', scriptId, scriptName }", fires: 'Per-script when the script is disabled or deleted. Use for cleanup.' },
+  { group: 'LumiScript', name: 'ls:reload',                  payload: "{ reason: 'autosave' | 'manual', previousCodeHash, currentCodeHash, previousLength, currentLength, triggeredAt }", fires: 'Automatically when the script\'s code changes (after a ~500ms debounce). Body re-runs in its existing worker so registered handlers refresh their closures. Opt out with `// @no-reload-on-edit` at line start. Branch on `data.__event === "ls:reload"` to detect.' },
   { group: 'Chat',       name: 'MESSAGE_SENT',               payload: '{ chatId, message }', fires: 'Once per **user**-initiated send. Does NOT fire for assistant-side messages — use `GENERATION_ENDED` for those.' },
   { group: 'Chat',       name: 'MESSAGE_EDITED',             payload: '{ chatId, message }' },
   { group: 'Chat',       name: 'MESSAGE_DELETED',            payload: '{ chatId, messageId }' },

@@ -1,6 +1,6 @@
 import { FC, useRef, useState, useEffect, useCallback } from 'react';
 import Editor, { type OnMount } from '@monaco-editor/react';
-import { Play, Loader2, Shield, ShieldAlert, Clock, Calendar, Code2, BookOpen, Copy, Check, FolderOpen, MessageCircle } from 'lucide-react';
+import { Play, Loader2, Shield, ShieldAlert, Clock, Calendar, Code2, BookOpen, Copy, Check, FolderOpen, MessageCircle, RotateCcw } from 'lucide-react';
 import type { Script, ScriptBindingEntry, ConsoleEntry } from '../../types/script.js';
 import type { FrontendToBackend } from '../../types/messages.js';
 import { ScriptConsole } from './ScriptConsole.js';
@@ -384,6 +384,33 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
         >
           <MessageCircle size={15} />
         </button>
+
+        {/* v1.0 Phase F — manual "Reload script" affordance. Sends
+            `reload_script` IPC; the backend fires the synthetic ls:reload
+            event (manual reloads bypass the `@no-reload-on-edit`
+            directive — opt-out only gates the autosave-driven path).
+            Trigger-only (libraries have no body to re-fire). Square
+            icon-only treatment matches the Lisa button — see comment on
+            that button above for the styling rationale. */}
+        {script.type !== 'library' && (
+          <button
+            type="button"
+            className="ls-btn"
+            style={{
+              alignSelf: 'stretch',
+              aspectRatio: '1',
+              padding: 0,
+              justifyContent: 'center',
+              boxSizing: 'border-box',
+              borderColor: 'var(--lumiverse-accent)',
+            }}
+            onClick={() => sendToBackend({ type: 'reload_script', id: script.id })}
+            title="Reload script — re-fire the body to refresh handler closures. Works even for scripts with `// @no-reload-on-edit`."
+            aria-label="Reload script"
+          >
+            <RotateCcw size={15} />
+          </button>
+        )}
 
         {script.type !== 'library' && (
           <button className={`ls-btn${isRunning ? '' : ' ls-accent'}`} onClick={handleRun} disabled={isRunning}>

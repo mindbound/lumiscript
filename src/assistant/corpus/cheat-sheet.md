@@ -465,6 +465,7 @@ Lumiverse + LumiScript lifecycle events. Scripts react to these by being **wired
 |---|---|---|
 | `ls:startup` | { __event: "ls:startup" } | Once per LumiScript boot (extension enable / app start). Use for one-shot setup work. |
 | `ls:teardown` | { reason: 'disabled' \| 'deleted', scriptId, scriptName } | Per-script when the script is disabled or deleted. Use for cleanup. |
+| `ls:reload` | { reason: 'autosave' \| 'manual', previousCodeHash, currentCodeHash, previousLength, currentLength, triggeredAt } | Automatically when the script's code changes (after a ~500ms debounce). Body re-runs in its existing worker so registered handlers refresh their closures. Opt out with `// @no-reload-on-edit` at line start. Branch on `data.__event === "ls:reload"` to detect. |
 | `MESSAGE_SENT` | { chatId, message } | Once per **user**-initiated send. Does NOT fire for assistant-side messages — use `GENERATION_ENDED` for those. |
 | `MESSAGE_EDITED` | { chatId, message } |  |
 | `MESSAGE_DELETED` | { chatId, messageId } |  |

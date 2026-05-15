@@ -97,6 +97,28 @@ export type FrontendToBackend =
       id: string;
     }
   | {
+      /**
+       * Phase F (v1.0 runtime-isolation) — manual "Reload script" action
+       * from the script editor topbar. Bypasses the
+       * `// @no-reload-on-edit` directive opt-out (manual reloads always
+       * fire). Library scripts are silently ignored (no body to re-run;
+       * libraries are loaded on demand via `script.require()`).
+       */
+      type: 'reload_script';
+      id: string;
+    }
+  | {
+      /**
+       * Phase F (v1.0 runtime-isolation) — manual "Rebalance pool" action
+       * from the settings panel. Forces every assigned script to release
+       * its current worker; subsequent fires re-assign via least-loaded
+       * over the configured pool. Useful after increasing `workerCount`
+       * to redistribute scripts onto the new workers (sticky-assignment
+       * means existing scripts otherwise stay on their original worker).
+       */
+      type: 'rebalance_pool';
+    }
+  | {
       type: 'update_settings';
       patch: Partial<LumiScriptSettings>;
     }

@@ -280,7 +280,9 @@ describe('host-dispatcher: script-body activeRun lifetime', () => {
     // No setup() — child is not spawned.
     const script = makeScript('script-A');
     await expect(dispatchRunScript(script, makeRequest()))
-      .rejects.toThrow(/called before child was spawned/);
+      // Phase C1 (v1.0 runtime-isolation): error message now names the
+      // worker that wasn't spawned.
+      .rejects.toThrow(/worker '.*' not spawned/);
   });
 
   test('send failure rolls back the per-script tracker entry', async () => {

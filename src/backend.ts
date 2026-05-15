@@ -12,7 +12,13 @@ import { setActiveContext, getActiveContext, getActiveChatId } from './engine/bi
 // for the `inProcessRunner` test fixture only — it's not on any production
 // path. See `engine/executor.ts`'s file-level JSDoc for status.
 import { registerLumiScriptMacros, updateLumiScriptActiveMacro } from './macros.js';
-import { TriggerRegistry, runScriptViaChild } from './engine/trigger-registry.js';
+import {
+  TriggerRegistry,
+  runScriptViaChild,
+  hasNoReloadDirective,
+  type LsReloadPayload,
+} from './engine/trigger-registry.js';
+import { createHash } from 'node:crypto';
 import { generateUUID } from './utils/uuid.js';
 import { listByMode, listAll, clearEphemeral, clearByScriptId, type InjectionEntry } from './engine/injection-store.js';
 import { applyLumiScriptInjections } from './engine/interceptor-pipeline.js';
@@ -102,6 +108,11 @@ import {
   notifyDrawerTabRegistered,
   setScriptResolver,
   setSendToFrontend,
+  setWorkerCountReader,
+  setEvictionConfigReader,
+  startEvictionSweep,
+  rebalanceWorkerPool,
+  redistributeAllAssignments,
   unregisterScriptFromChild,
   getRunnerHealth,
   queryRunnerStats,
@@ -280,6 +291,29 @@ function send(msg: import('./types/messages.js').BackendToFrontend): void {
 // lifecycle messages reach the sidebar status indicator. Mirror of the
 // `setScriptResolver` wiring above.
 setSendToFrontend((msg) => send(msg as import('./types/messages.js').BackendToFrontend));
+
+// Phase C2 (v1.0 runtime-isolation) — wire the workerCount reader so the
+// dispatcher can size its pool from the live settings. Default fallback
+// 1 keeps single-worker behaviour if `settingsStore.get()` returns an
+// older settings shape (pre-Phase-C1 persisted JSON without workerCount).
+setWorkerCountReader(() => settingsStore.get().workerCount ?? 1);
+
+// Phase E (v1.0 runtime-isolation) — wire the eviction config reader so
+// the dispatcher's sweep reads live thresholds. Fallback defaults match
+// `DEFAULT_SETTINGS` (30-min idle, 512 MB memory ceiling) to handle older
+// persisted settings JSON without these fields.
+setEvictionConfigReader(() => {
+  const s = settingsStore.get();
+  return {
+    idleTimeoutMs:      s.workerIdleTimeoutMs   ?? 30 * 60 * 1000,
+    memoryCeilingBytes: (s.workerMemoryCeilingMb ?? 512) * 1024 * 1024,
+  };
+});
+// Start the periodic eviction sweep. Idempotent — safe to call any time
+// after the dispatcher module loads. The sweep is a no-op when no
+// workers are spawned, so starting it before the first user-script fire
+// has zero cost.
+startEvictionSweep();
 
 function pushScripts(): void {
   send({ type: 'scripts_updated', scripts: scriptStorage.getScripts() });
@@ -640,6 +674,70 @@ const triggerRegistry = new TriggerRegistry(
   }),
   send,
 );
+
+// ─── Hot-reload-on-edit (Phase D / v1.0 runtime-isolation) ────────────────────
+//
+// Code-only `update_script` patches that change an enabled trigger script's
+// body fire a synthetic `ls:reload` event after a short debounce. The
+// script's body re-runs end-to-end within its existing worker (Phase C2
+// routing), refreshing closures captured by registered handlers
+// (broadcasts, commands, macros, tools, interceptors, etc.).
+//
+// Debounce coalesces typing bursts that survive the FE's autosave debounce
+// (default 1200ms) — usually 1-2 patches arrive at the backend in rapid
+// succession when a user pauses then resumes typing.
+
+const HOT_RELOAD_DEBOUNCE_MS = 500;
+
+/** Per-script pending reload timers, keyed by scriptId. */
+const hotReloadTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+/**
+ * Short hash (16 hex chars of sha256) of the given string. Used by
+ * `ls:reload` event payloads to give scripts a "did code change from X to
+ * Y" diagnostic signal without shipping the full code through the event.
+ */
+function shortCodeHash(code: string): string {
+  return createHash('sha256').update(code).digest('hex').slice(0, 16);
+}
+
+/**
+ * Debounced scheduler for hot-reload-on-edit. Coalesces multiple rapid
+ * code patches for the same script into one `fireReload` call after the
+ * debounce window expires. Re-reads the latest script from storage at
+ * fire time — code may have changed again since the timer armed.
+ *
+ * Eligibility checks (enabled, type, directive) are re-evaluated at fire
+ * time to catch settings/code changes that landed during the debounce
+ * window.
+ */
+function scheduleHotReload(scriptId: string, previousCode: string): void {
+  const existing = hotReloadTimers.get(scriptId);
+  if (existing !== undefined) clearTimeout(existing);
+
+  const timer = setTimeout(() => {
+    hotReloadTimers.delete(scriptId);
+    const latest = scriptStorage.getScript(scriptId);
+    if (!latest || !latest.enabled || latest.type !== 'trigger') return;
+    if (hasNoReloadDirective(latest.code)) return;
+
+    const payload: LsReloadPayload = {
+      reason:           'autosave',
+      previousCodeHash: shortCodeHash(previousCode),
+      currentCodeHash:  shortCodeHash(latest.code),
+      previousLength:   previousCode.length,
+      currentLength:    latest.code.length,
+    };
+    void triggerRegistry.fireReload(latest, payload).catch((err) => {
+      spindle.log.error(
+        `[LumiScript] hot-reload fire for "${latest.name}" failed: ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  }, HOT_RELOAD_DEBOUNCE_MS);
+
+  hotReloadTimers.set(scriptId, timer);
+}
 
 /**
  * Synchronise the trigger registry with the current settings + scripts.
@@ -1667,6 +1765,15 @@ spindle.onFrontendMessage(async (raw, userId) => {
           `[LumiScript] update_script: id=${msg.id}, keys=[${patchKeys}]` +
           (codeLen >= 0 ? `, codeLen=${codeLen}` : ''),
         );
+        // Phase D — capture the pre-update code so the hot-reload eligibility
+        // check can detect byte-different patches. Skipped when the patch
+        // doesn't touch code (purely cosmetic and avoids a storage read for
+        // common non-code patches like enabled/name).
+        const previousCodeForReload =
+          'code' in msg.patch
+            ? scriptStorage.getScript(msg.id)?.code ?? ''
+            : null;
+
         let updated;
         try {
           updated = await scriptStorage.updateScript(msg.id, msg.patch);
@@ -1688,6 +1795,21 @@ spindle.onFrontendMessage(async (raw, userId) => {
           pushScript(updated);
         } else {
           pushScripts();
+        }
+        // Phase D — schedule a hot-reload-on-edit if the patch touched
+        // code, the script is an enabled trigger, the code is byte-
+        // different, and there's no `@no-reload-on-edit` directive.
+        // Debounce coalesces typing bursts; eligibility is re-checked at
+        // fire time to handle settings/code changes during the debounce.
+        if (
+          previousCodeForReload !== null &&
+          updated &&
+          updated.enabled &&
+          updated.type === 'trigger' &&
+          updated.code !== previousCodeForReload &&
+          !hasNoReloadDirective(updated.code)
+        ) {
+          scheduleHotReload(updated.id, previousCodeForReload);
         }
         // Only re-register when subscriptions need to change.
         // Code / name / metadata / bindings take effect at the next invocation
@@ -2084,6 +2206,14 @@ spindle.onFrontendMessage(async (raw, userId) => {
         void syncTriggers(); // handles the master enabled/disabled toggle
         // Keep {{lumiScriptActive}} macro in sync with the master toggle.
         updateLumiScriptActiveMacro(settingsStore.get().enabled);
+        // Phase C2 (v1.0 runtime-isolation) — if `workerCount` may have
+        // shifted, rebalance the worker pool (soft-decrease + auto-shutdown
+        // of over-cap workers; in-pool spawns happen lazily via the
+        // existing dispatch path). Fire-and-forget; the rebalance is
+        // self-contained and any failure surfaces via the spindle log.
+        if (msg.patch && Object.prototype.hasOwnProperty.call(msg.patch, 'workerCount')) {
+          void rebalanceWorkerPool();
+        }
         break;
       }
 
@@ -2269,6 +2399,50 @@ spindle.onFrontendMessage(async (raw, userId) => {
         pushInjections();
         pushTools();
 
+        break;
+      }
+
+      // ── Phase F (v1.0 runtime-isolation) ───────────────────────────────
+      case 'reload_script': {
+        // Manual "Reload script" action — fires `ls:reload` for the given
+        // script regardless of the `@no-reload-on-edit` directive (the
+        // directive only gates the autosave-driven path; manual reloads
+        // always fire). Library scripts are silently skipped — there's no
+        // body to re-run.
+        const script = scriptStorage.getScript(msg.id);
+        if (!script) {
+          send({ type: 'error', message: `Script not found: ${msg.id}` });
+          break;
+        }
+        if (!script.enabled || script.type !== 'trigger') {
+          spindle.log.info(
+            `[LumiScript] reload_script: skipped (script disabled or not a trigger): ${msg.id}`,
+          );
+          break;
+        }
+        const codeHash = shortCodeHash(script.code);
+        const payload: LsReloadPayload = {
+          reason:           'manual',
+          previousCodeHash: codeHash,
+          currentCodeHash:  codeHash,
+          previousLength:   script.code.length,
+          currentLength:    script.code.length,
+        };
+        void triggerRegistry.fireReload(script, payload).catch((err) => {
+          spindle.log.error(
+            `[LumiScript] reload_script: fireReload failed for "${script.name}": ` +
+            `${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
+        break;
+      }
+
+      case 'rebalance_pool': {
+        // Manual rebalance — release ALL script→worker assignments so
+        // each script's next fire triggers a fresh least-loaded lookup
+        // over the current pool. Useful after bumping `workerCount` to
+        // redistribute scripts onto newly-available workers.
+        redistributeAllAssignments();
         break;
       }
     }
