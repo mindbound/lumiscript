@@ -59,8 +59,28 @@ export interface DiagnosticCheck {
   label: string;
   /** Status badge — drives the summary count + colour in the FE modal. */
   status: DiagnosticStatus;
-  /** One-line human-readable message. */
+  /**
+   * One-line human-readable message. Always present so renderers that
+   * don't (or can't) consume `table` still have something to show.
+   *
+   * When `table` is also set, this should be a compact one-liner that
+   * conveys the same info in summary form — e.g. a bullet-separated
+   * row listing. The FE modal prefers `table` when both are set; the
+   * Markdown export (`serialize-markdown.ts`) uses `message` only,
+   * since Discord paste targets benefit from one-line-per-check.
+   */
   message: string;
+  /**
+   * Optional structured table for rich rendering of multi-row data
+   * (e.g. per-worker stats). Strings only — must be JSON-serializable
+   * for the FE→BE wire. Renderers that support tables (the FE modal)
+   * format it as an HTML table; renderers that don't fall back to
+   * `message`.
+   */
+  table?: {
+    headers: string[];
+    rows:    string[][];
+  };
   /**
    * Optional structured details. Must be JSON-serializable — gets wired
    * across the FE→BE boundary verbatim and also serialized into the
@@ -176,6 +196,35 @@ export interface ScriptRunnerProbeResult {
     cpuSystemUs: number;
     uptimeSec:   number;
   } | null;
+  /**
+   * Phase F — worker-pool snapshot (sync state from
+   * `getWorkerPoolDiagnostics()` + async per-worker memory from parallel
+   * `queryWorkerMemoryBytes()` calls). Optional so unit tests can pass a
+   * minimal probe without exercising the pool surface; in production this
+   * is always present.
+   */
+  pool?: {
+    configuredWorkerCount: number;
+    workers: Array<{
+      workerKey:           string;
+      processId:           string;
+      lastActivityMs:      number;
+      assignedScriptCount: number;
+      restartAttempts:     number;
+      /** Async-collected RSS for this worker. Null if the per-worker query timed out or failed. */
+      rss:                 number | null;
+    }>;
+    totalAssignedScripts: number;
+    evictionTelemetry: {
+      totalEvictions:     number;
+      lastEvictionAt:     number | null;
+      lastEvictionReason: string | null;
+    };
+    settings: {
+      idleTimeoutMs:      number;
+      memoryCeilingBytes: number;
+    };
+  };
 }
 
 /**
@@ -357,7 +406,106 @@ function buildScriptRunnerSection(deps: DiagnosticsCollectorDeps): DiagnosticSec
     });
   }
 
+  // ── Worker pool (Phase F — v1.0 runtime-isolation) ─────────────────────
+  // Optional `pool` field. Older callers (or unit tests with minimal probes)
+  // omit it; the section then matches its pre-v1.0 shape exactly.
+  if (probe.pool !== undefined) {
+    const p = probe.pool;
+
+    // Pool config recap. `info` status — these are knobs, not health signals.
+    checks.push({
+      label:   'Worker pool config',
+      status:  'info',
+      message:
+        `${p.configuredWorkerCount} configured` +
+        `, ${p.workers.length} spawned` +
+        `, idle timeout ${Math.round(p.settings.idleTimeoutMs / 60_000)} min` +
+        `, memory ceiling ${Math.round(p.settings.memoryCeilingBytes / 1024 / 1024)} MB`,
+      details: {
+        configuredWorkerCount: p.configuredWorkerCount,
+        spawnedWorkerCount:    p.workers.length,
+        idleTimeoutMs:         p.settings.idleTimeoutMs,
+        memoryCeilingBytes:    p.settings.memoryCeilingBytes,
+      },
+    });
+
+    // Per-worker rows. Surfaced two ways:
+    //   - `message`: bullet-separated single-line summary, used by the
+    //     Markdown export (Discord-friendly compact paste) and as the
+    //     fallback for any renderer that doesn't consume `table`. Pre-fix
+    //     this was `\n`-joined which the FE modal's <div> rendering
+    //     collapsed to spaces — the rows ran together as a single line.
+    //   - `table`: structured per-worker rows, rendered as an HTML table
+    //     in the FE modal. Scales to 16 workers (the host's
+    //     `MAX_BACKEND_PROCESSES` cap) without becoming illegible.
+    // `details` continues to carry the raw per-worker objects for
+    // programmatic consumers (parsing support reports etc.).
+    if (p.workers.length > 0) {
+      const now = Date.now();
+      const summarised = p.workers.map((w) => {
+        const idleSec = Math.max(0, Math.round((now - w.lastActivityMs) / 1_000));
+        const rssMb   = w.rss !== null ? `${Math.round(w.rss / 1024 / 1024)} MB` : '? MB';
+        return {
+          workerKey:   w.workerKey,
+          pidShort:    w.processId.slice(0, 8),
+          idle:        formatIdle(idleSec),
+          scripts:     String(w.assignedScriptCount),
+          memory:      rssMb,
+          restarts:    String(w.restartAttempts),
+        };
+      });
+      const messageLines = summarised.map((s) =>
+        `${s.workerKey}: pid ${s.pidShort}, idle ${s.idle}, ${s.scripts} script(s), ${s.memory}` +
+        (s.restarts !== '0' ? `, restart-attempts ${s.restarts}` : ''),
+      );
+      checks.push({
+        label:   'Workers',
+        status:  'info',
+        message: messageLines.join(' · '),
+        table: {
+          headers: ['Worker', 'PID', 'Idle', 'Scripts', 'Memory', 'Restarts'],
+          rows:    summarised.map((s) => [
+            s.workerKey, s.pidShort, s.idle, s.scripts, s.memory, s.restarts,
+          ]),
+        },
+        details: { workers: p.workers },
+      });
+    }
+
+    // Total assignments — separate row so it shows even at 0 spawned.
+    checks.push({
+      label:   'Total script assignments',
+      status:  'info',
+      message: `${p.totalAssignedScripts} script(s) assigned across the pool`,
+      details: { totalAssignedScripts: p.totalAssignedScripts },
+    });
+
+    // Eviction telemetry. `info` at 0; `info` with detail at higher counts —
+    // not a health signal per se (eviction is the desired behaviour), so
+    // we don't escalate the status.
+    const ev = p.evictionTelemetry;
+    checks.push({
+      label:   'Evictions (this session)',
+      status:  'info',
+      message: ev.totalEvictions === 0
+        ? 'No evictions since LumiScript loaded'
+        : `${ev.totalEvictions} eviction(s)${ev.lastEvictionReason ? ` — last reason: ${ev.lastEvictionReason}` : ''}`,
+      details: {
+        totalEvictions:     ev.totalEvictions,
+        lastEvictionAt:     ev.lastEvictionAt,
+        lastEvictionReason: ev.lastEvictionReason,
+      },
+    });
+  }
+
   return { id: 'scriptRunner', name: 'Script-runner subprocess', checks };
+}
+
+/** Format a duration in seconds as a brief human-readable string. */
+function formatIdle(seconds: number): string {
+  if (seconds < 60)   return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
 }
 
 // Format helpers for Section B. Local — not exported because they're

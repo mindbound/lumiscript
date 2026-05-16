@@ -235,13 +235,41 @@ interface CheckRowProps {
   check: DiagnosticCheck;
 }
 
-/** Single check row — status badge + label + message. */
+/**
+ * Single check row — status badge + label + message (or table).
+ *
+ * When `check.table` is set, the row renders an HTML table instead of
+ * the plain message string. The Workers row uses this for per-worker
+ * stats (scales cleanly to the 16-worker pool cap). All other current
+ * checks use the message-only path.
+ */
 const CheckRow: FC<CheckRowProps> = ({ check }) => (
   <div className="ls-diag-check">
     <StatusBadge status={check.status} />
     <div className="ls-diag-check-body">
       <div className="ls-diag-check-label">{check.label}</div>
-      <div className="ls-diag-check-message">{check.message}</div>
+      {check.table ? (
+        <table className="ls-diag-check-table">
+          <thead>
+            <tr>
+              {check.table.headers.map((h) => (
+                <th key={h}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {check.table.rows.map((row, rowIdx) => (
+              <tr key={rowIdx}>
+                {row.map((cell, cellIdx) => (
+                  <td key={cellIdx}>{cell}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        <div className="ls-diag-check-message">{check.message}</div>
+      )}
     </div>
   </div>
 );

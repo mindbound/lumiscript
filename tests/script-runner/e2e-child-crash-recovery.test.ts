@@ -113,7 +113,9 @@ describe('e2e: child crash recovery', () => {
 
     const err = await errSink;
     expect(err).toBeInstanceOf(Error);
-    expect((err as Error).message).toMatch(/child failed.*killed during run/);
+    // v1.0 multi-worker: error message names the specific worker. Pre-fix
+    // this matched `/child failed.*killed during run/`.
+    expect((err as Error).message).toMatch(/worker '.*' failed.*killed during run/);
   });
 
   test('crash schedules a respawn (restartTimer set, attempts increments after fire)', async () => {

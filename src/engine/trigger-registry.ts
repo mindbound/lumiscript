@@ -26,6 +26,7 @@ import { SCRIPT_TIMEOUT_MS } from './executor.js';
 import {
   spawnScriptRunner,
   dispatchRunScript,
+  scriptHasActiveDispatch,
   type DispatchRunScriptOpts,
   type DispatchRunScriptRequest,
 } from '../script-runner/host-dispatcher.js';
@@ -147,17 +148,35 @@ export const runScriptViaChild: ScriptRunner = async (script, request, opts) => 
 // ─── Synthetic event constants ────────────────────────────────────────────────
 
 /**
- * `ls:startup` is a synthetic trigger event. It is NOT dispatched through
- * Spindle's event bus (Spindle silently no-ops unknown event subscriptions).
- * Instead, the TriggerRegistry fires it directly via `executeScript()` during
- * the `register()` call.
+ * `ls:startup` is a synthetic trigger event marking the script entering its
+ * "active" state. Symmetric partner to `ls:teardown` (which fires when the
+ * script EXITS the active state). NOT dispatched through Spindle's event
+ * bus — the TriggerRegistry fires it directly via `executeScript()`.
  *
- * Semantics:
- *   - Fires once per session for each enabled script that declares it.
- *   - Does NOT re-fire on `reloadAll()` (startupFired set is preserved).
- *   - Re-fires after a full teardown (master toggle off → on clears the set).
- *   - Scripts whose bindings are unsatisfied at boot are deferred into
- *     `startupPending` and retried on context change (chat open).
+ * Fires on:
+ *   - LumiScript boot for each enabled script that declares it.
+ *   - The disabled→enabled transition (user toggles the script back on)
+ *     for each script that declares it — symmetric with `ls:teardown` on
+ *     the enabled→disabled side. This is what lets scripts re-establish
+ *     state that disable's cleanup wiped (most importantly bottom-of-body
+ *     `api.broadcast.on(...)` registrations).
+ *
+ * Does NOT fire on:
+ *   - Triggers-only edits (no transition into the active state).
+ *   - Script creation, even when enabled at creation time (the contract
+ *     is "explicit user transition into active state"; brand-new scripts
+ *     usually have no body anyway).
+ *   - `reloadAll()` cascades (the boot-side `startupFired` set is
+ *     preserved across syncTriggers churn).
+ *
+ * Scripts whose bindings are unsatisfied at boot are deferred into
+ * `startupPending` and retried on context change (chat open).
+ *
+ * Use for tool registration, cache pre-warming, broadcast subscription
+ * setup, and other init that needs to run whenever the script enters the
+ * running state. After a disable→enable round-trip, anything from the
+ * previous run was wiped by `ls:teardown`, so re-running startup is
+ * exactly what restores the script to a working state.
  */
 const LS_STARTUP = 'ls:startup';
 
@@ -189,53 +208,70 @@ const LS_TEARDOWN_TIMEOUT_MS = 10_000;
  * Phase D — see notes/v1.0-runtime-isolation-and-hot-reload.md).
  *
  * Fires automatically after a code-only `update_script` IPC (debounced
- * by ~500ms on the backend side) for enabled trigger scripts whose new
+ * by ~500ms on the backend side) for enabled trigger scripts that have
+ * **opted in** via the `// @ls:reload-on-edit` directive and whose new
  * code is byte-different from the prior version. The script's body
  * re-runs end-to-end within its existing worker, so registrations
  * (broadcasts, commands, macros, tools, interceptors) get refreshed
  * closures pointing at the new code.
+ *
+ * Auto-reload is **opt-in by default** (post-design re-evaluation): the
+ * failure mode of opt-out + forgotten directive (burned API quota,
+ * duplicated DB rows, leaked timers) is too costly to make the default.
+ * Scripts that benefit from auto-reload (UI scripts, idempotent
+ * observers like trackers) add the directive explicitly; scripts with
+ * non-idempotent module-scope work are protected by default.
  *
  * Semantics:
  *   - Fires once per code change (debounce-coalesced). Multiple rapid
  *     patches collapse to one fire.
  *   - Deferred while a real trigger run for the script is in flight;
  *     drains once the running count hits 0.
- *   - Skipped entirely if the script's code contains a
- *     `// @no-reload-on-edit` directive at line start (opt-out path).
+ *   - Skipped entirely if the script's code lacks the
+ *     `// @ls:reload-on-edit` directive (the default — opt-in path).
  *   - Body branches on `data.__event === 'ls:reload'` if it wants to
  *     distinguish a hot-reload from a fresh boot (`ls:startup`).
  *   - Not dispatched through Spindle's event bus (synthetic, LS-internal).
  *   - Same routing as any other body run — uses the script's assigned
  *     worker (Phase C2).
+ *
+ * The manual "Reload script" palette/editor action always fires
+ * (bypasses the directive check) — see `backend.ts`'s `reload_script`
+ * IPC handler.
  */
 const LS_RELOAD = 'ls:reload';
 
 /**
- * Line-anchored regex matching the `@no-reload-on-edit` opt-out directive.
- * Detects `// @no-reload-on-edit` at the start of any line in the script's
- * code (after optional leading whitespace), followed by end-of-line or
- * whitespace. Detected at `update_script` time — no persistence, no
- * schema change.
+ * Line-anchored regex matching the `@ls:reload-on-edit` opt-in directive.
+ * Detects `// @ls:reload-on-edit` at the start of any line in the
+ * script's code (after optional leading whitespace), followed by
+ * end-of-line or whitespace. Detected at `update_script` time — no
+ * persistence, no schema change.
  *
  * The `(?:\s|$)` lookahead-style guard rejects extended tokens like
- * `// @no-reload-on-edit-disabled` or `// @no-reload-on-edit2` — these
- * are clearly NOT the directive and shouldn't trigger opt-out. (A bare
+ * `// @ls:reload-on-edit-disabled` or `// @ls:reload-on-edit2` — these
+ * are clearly NOT the directive and shouldn't trigger opt-in. (A bare
  * `\b` word boundary would match between `edit` and `-`, since `-` is
  * a non-word character.)
+ *
+ * The `@ls:` prefix is the runtime-directive namespace — distinguishes
+ * runtime-active directives from passive frontmatter tags like
+ * `@description`, `@author`, `@version`, `@tags`. See
+ * `notes/v1.0-user-facing-changes.md` § Runtime directives.
  */
-const NO_RELOAD_DIRECTIVE_REGEX = /^\s*\/\/\s*@no-reload-on-edit(?:\s|$)/m;
+const RELOAD_ON_EDIT_DIRECTIVE_REGEX = /^\s*\/\/\s*@ls:reload-on-edit(?:\s|$)/m;
 
 /**
- * True if `code` opts out of hot-reload-on-edit via the
- * `// @no-reload-on-edit` directive.
+ * True if `code` opts IN to hot-reload-on-edit via the
+ * `// @ls:reload-on-edit` directive.
  *
  * Exported for use by `backend.ts`'s `update_script` eligibility check —
- * the autosave path skips the auto-fire when the directive is present.
- * Manual reload (via the future "Reload script S" palette action — Phase
- * F) calls `fireReload` directly and is NOT gated by this check.
+ * the autosave path fires the auto-reload only when the directive is
+ * present. Manual reload (via the "Reload script" palette action) calls
+ * `fireReload` directly and is NOT gated by this check.
  */
-export function hasNoReloadDirective(code: string): boolean {
-  return NO_RELOAD_DIRECTIVE_REGEX.test(code);
+export function hasReloadOnEditDirective(code: string): boolean {
+  return RELOAD_ON_EDIT_DIRECTIVE_REGEX.test(code);
 }
 
 /**
@@ -292,13 +328,39 @@ export class TriggerRegistry {
   private startupPending = new Set<string>();
 
   /**
-   * Phase D — scripts whose `ls:reload` fire was deferred because a real
-   * run for the same script was in flight. The pending payload fires once
-   * the running count drains to 0 (see the `remaining === 0` branch in
-   * the event-handler path). Coalesces multiple rapid edits to one fire
-   * (a later edit's payload overwrites the earlier pending entry).
+   * Phase D — scripts whose **manual** `ls:reload` fire was deferred because
+   * work for the same script was in flight. The pending payload fires once
+   * the script becomes idle, either via:
+   *   1. The event-handler completion drain (`remaining === 0` branch
+   *      in the Spindle event handler), for the case where the in-flight
+   *      work IS a real trigger event; OR
+   *   2. The polling drain (`pendingReloadPollTimers` below), for the
+   *      case where the in-flight work is a handler invocation
+   *      (broadcast / macro / tool / RPC) — those don't bump
+   *      `runningCounts`, so they don't trigger drain path 1.
+   *
+   * Coalesces multiple rapid manual reloads to one fire (a later press's
+   * payload overwrites the earlier pending entry).
+   *
+   * **Only the manual path queues.** Autosave-driven reloads
+   * (`reason: 'autosave'`) drop outright when a run is in flight — the next
+   * real trigger event will re-execute the body with the new code, so a
+   * queued reload would be redundant + out-of-order vs. the user's
+   * expectation that "I edited, the in-flight run keeps doing its thing,
+   * normal events resume with the new code." Manual reloads
+   * (`reason: 'manual'`) preserve queue-then-fire semantics because the
+   * user explicitly requested the body re-run.
    */
   private pendingReload  = new Map<string, LsReloadPayload>();
+
+  /**
+   * Phase F follow-up — per-script setInterval timers polling for the
+   * "in-flight work cleared" condition. Armed when `fireReload` defers a
+   * **manual** reload because of an in-flight handler invocation (not a
+   * real trigger). Cleared when the poll drain fires OR when an event-
+   * handler completion drain fires first (whichever comes first wins).
+   */
+  private pendingReloadPollTimers = new Map<string, ReturnType<typeof setInterval>>();
 
   constructor(
     private readonly getDeps: () => TriggerDeps,
@@ -322,7 +384,22 @@ export class TriggerRegistry {
    * that code / bindings / enabled changes take effect without re-registration.
    */
   async register(script: Script): Promise<void> {
-    this.unregister(script.id);
+    // Drop ONLY this script's Spindle event subs (`cleanups` entry) —
+    // not its broadcast subscriptions, command handlers, or pending-reload
+    // state. This is a trigger-config refresh, not a teardown.
+    //
+    // The reason this is gated: `register()` runs for EVERY enabled
+    // script during a `syncTriggers` / `reloadAll` cycle, which is
+    // triggered by ANY script's `enabled` or `triggers` change. Wiping
+    // lifecycle subs here causes a "sibling script gets disabled →
+    // every other enabled script loses its broadcasts" cascade, with
+    // bodies not re-firing to re-register them. See `unregister`'s
+    // JSDoc for the canonical bug (tracker / tracker-ui rerun spinner).
+    //
+    // True teardown paths (master toggle off via `unregisterAll`,
+    // backend.ts disable / delete branches with explicit cleanup) keep
+    // the default lifecycle-clear behaviour.
+    this.unregister(script.id, { clearLifecycleSubs: false });
     if (!script.enabled || script.type !== 'trigger') return;
 
     const events = script.triggers ?? [];
@@ -542,9 +619,13 @@ export class TriggerRegistry {
           // Phase D — drain any pending hot-reload for this script. A code
           // edit during this run's lifetime queued a reload payload via
           // `fireReload`; now that the run is fully drained, fire it.
+          // Phase F follow-up — also cancel the polling drain (if armed)
+          // so we don't have two drain paths racing; this event-handler
+          // path wins for the trigger-event case.
           const pending = this.pendingReload.get(currentScript.id);
           if (pending !== undefined) {
             this.pendingReload.delete(currentScript.id);
+            this.clearPendingReloadPoll(currentScript.id);
             // Re-read the latest script from storage — code may have
             // changed again between the queue and the drain.
             const latest = this.getDeps().scriptStorage.getScript(currentScript.id);
@@ -578,30 +659,102 @@ export class TriggerRegistry {
     }
   }
 
-  /** Remove all spindle.on() subscriptions for a specific script. */
-  unregister(scriptId: string): void {
+  /**
+   * Remove all spindle.on() subscriptions for a specific script.
+   *
+   * `opts.clearLifecycleSubs` (default `true`) controls whether the
+   * script's "lifecycle" registrations are also cleared:
+   *
+   *   - **broadcast subscriptions** owned by the script (the script's own
+   *     `api.broadcast.on(...)` handlers — but NOT other scripts'
+   *     subscriptions to events this script emits)
+   *   - **command handlers** owned by the script (`api.commands.register`)
+   *   - **pending hot-reload** state for this script
+   *
+   * Set to `false` when called from `register()`'s "drop and re-add Spindle
+   * event subs" path (the syncTriggers / reloadAll cycle). That path is a
+   * trigger-config refresh, NOT a teardown — wiping broadcast/command
+   * subs there has a serious side effect: when ANY script's `enabled` or
+   * `triggers` changes, syncTriggers re-registers EVERY enabled script,
+   * each going through `unregister()` first. That means a sibling
+   * script's disable wipes THIS script's broadcast subs as a side effect
+   * — bodies don't re-fire to re-register them, so the subs vanish until
+   * the next real trigger event for each script. Canonical bug:
+   * disabling tracker mid-rerun caused tracker-ui's `tracker:rerun-state-
+   * changed` subscription to be wiped before tracker's `ls:teardown`
+   * emit could reach it, leaving tracker-ui's spinner stuck.
+   *
+   * Callers that need true teardown (master toggle off via `unregisterAll`,
+   * or backend.ts's explicit per-script cleanup on disable / delete) keep
+   * the default `true`.
+   */
+  unregister(scriptId: string, opts: { clearLifecycleSubs?: boolean } = {}): void {
+    const { clearLifecycleSubs = true } = opts;
+
     const entry = this.cleanups.get(scriptId);
     if (entry) {
       for (const u of entry.unsubs) u();
       this.cleanups.delete(scriptId);
     }
-    // Remove any broadcast subscriptions and command handlers owned by this script.
-    clearBroadcastByScriptId(scriptId);
-    clearCommandHandlerByScriptId(scriptId);
+
+    if (clearLifecycleSubs) {
+      // Remove any broadcast subscriptions and command handlers owned by
+      // this script. See the JSDoc above for why this is gated.
+      clearBroadcastByScriptId(scriptId);
+      clearCommandHandlerByScriptId(scriptId);
+      // Phase F follow-up — drop any pending-reload state for this script
+      // (the script is going away; the deferred reload is moot).
+      this.pendingReload.delete(scriptId);
+      this.clearPendingReloadPoll(scriptId);
+    }
   }
 
   /**
    * Remove all registered subscriptions (all scripts).
-   * Clears startup tracking — a subsequent `reloadAll()` will re-fire
-   * `ls:startup` for all eligible scripts. This gives "full teardown"
-   * semantics: master toggle off → on restarts everything.
+   *
+   * `opts.clearLifecycleSubs` (default `true`) is forwarded to per-script
+   * `unregister()` calls. Same gating semantics — see `unregister()`'s
+   * JSDoc for full reasoning.
+   *
+   * Default `true` (true teardown — used by master-toggle-off path):
+   * clears Spindle event subs AND each script's broadcast subs, command
+   * handlers, and pending-reload state.
+   *
+   * `false` (used by `reloadAll()` as the "drop everything before
+   * rebuild" prep): clears Spindle event subs ONLY, preserves broadcast
+   * subs / command handlers / pending-reload state. Critical for
+   * `syncTriggers()`-driven re-registration cycles — without it, ANY
+   * script's `enabled` or `triggers` change wipes EVERY enabled script's
+   * lifecycle subs as a side effect, and bodies don't re-fire to
+   * re-register them. Canonical bug: tracker / tracker-ui rerun spinner
+   * stuck after disable, because tracker-ui's `tracker:rerun-state-changed`
+   * subscription got wiped before tracker's `ls:teardown` emit could
+   * reach it.
+   *
+   * Always clears `startupFired` / `startupPending` regardless of opt —
+   * a subsequent `reloadAll()` will re-fire `ls:startup` for all eligible
+   * scripts (and `register()`'s startup-fired guard is what prevents
+   * re-firing for scripts that already ran this session, sourced from
+   * the saved/restored sets in `reloadAll`).
    */
-  unregisterAll(): void {
+  unregisterAll(opts: { clearLifecycleSubs?: boolean } = {}): void {
+    const { clearLifecycleSubs = true } = opts;
     for (const [id] of [...this.cleanups]) {
-      this.unregister(id);
+      this.unregister(id, { clearLifecycleSubs });
     }
     this.startupFired.clear();
     this.startupPending.clear();
+    if (clearLifecycleSubs) {
+      // Phase F follow-up — clear any pending reloads + their poll timers.
+      // `unregister(id)` above already drops the per-script entries for
+      // scripts that had subscriptions, but any leftover entries for scripts
+      // that were already mid-deletion get swept here. Skipped on the
+      // rebuild path (reloadAll) so deferred manual reloads survive a
+      // syncTriggers cycle.
+      this.pendingReload.clear();
+      for (const t of this.pendingReloadPollTimers.values()) clearInterval(t);
+      this.pendingReloadPollTimers.clear();
+    }
   }
 
   /**
@@ -618,7 +771,14 @@ export class TriggerRegistry {
   async reloadAll(scripts: Script[]): Promise<void> {
     const savedFired   = new Set(this.startupFired);
     const savedPending = new Set(this.startupPending);
-    this.unregisterAll();
+    // Rebuild prep — clear Spindle event subs only. Preserves broadcast
+    // subs, command handlers, and pending-reload state across the
+    // unregister/re-register cycle. Without this, every `syncTriggers()`
+    // call (any script's enabled/triggers change) would wipe every
+    // enabled script's lifecycle subs as a side effect — bodies don't
+    // re-fire here to re-register them. See `unregister()`'s JSDoc for
+    // the canonical bug story.
+    this.unregisterAll({ clearLifecycleSubs: false });
     this.startupFired   = savedFired;
     this.startupPending = savedPending;
 
@@ -656,10 +816,26 @@ export class TriggerRegistry {
   /**
    * Execute a script's body for `ls:startup`. Mirrors the event-handler
    * execution path (watchdog, auto-cleanup, frontend notifications, toast on
-   * error) but without batch-aggregation — startup fires once, not
-   * concurrently.
+   * error) but without batch-aggregation — startup fires once per state
+   * transition, not concurrently.
+   *
+   * Called from two paths:
+   *   - Internal: `registerAll()` / `retryPendingStartups()` at LumiScript
+   *     boot, after gating on `hasStartup` + `startupFired` + binding
+   *     satisfaction. The internal trigger-list gate below is redundant on
+   *     this path but harmless.
+   *   - External: `backend.ts`'s `update_script` handler on the false→true
+   *     `enabled` transition, fire-and-forget. The internal trigger-list
+   *     gate is what enforces opt-in on this path (same shape as
+   *     `fireTeardown`).
+   *
+   * Errors are logged via `executionStatusStore.markError`; no toast (this
+   * fires on user-controlled lifecycle events, not on chat activity, so
+   * the editor's status dot is the right surface).
    */
-  private async fireStartup(script: Script): Promise<void> {
+  async fireStartup(script: Script): Promise<void> {
+    if (!(script.triggers ?? []).includes(LS_STARTUP)) return;
+
     const { grantedPermissions, userId, scriptStorage, onToolsChanged, onInjectionsChanged, scriptTimeoutMs } = this.getDeps();
     const runId = generateUUID();
 
@@ -896,24 +1072,53 @@ export class TriggerRegistry {
    * idempotently overwritten by name; stale-diff cleanup drops any not
    * re-registered.
    *
-   * Idempotent + deferred semantics:
-   *   - If a real trigger run for this script is currently in-flight,
-   *     stash `payload` in `pendingReload` and return; the drain branch
-   *     in the event-handler path fires it once `runningCounts` reaches 0.
-   *   - Multiple rapid edits during an in-flight run coalesce to one fire
-   *     (each new pending entry overwrites the previous).
+   * In-flight semantics depend on `payload.reason`:
    *
-   * Caller (`backend.ts`'s `update_script` handler) is responsible for the
+   *   - **`'autosave'` + in-flight → DROP.** The autosave-driven reload is
+   *     a "courtesy refresh" — its job is to make the live closures match
+   *     the code on disk. When a real trigger run is mid-flight (or a
+   *     long-running handler invocation like a broadcast LLM-extractor
+   *     loop), the in-flight work is happily executing the body the user
+   *     started — interrupting it with a queued reload to fire on idle
+   *     just produces a redundant second run with stale `data` (the
+   *     in-flight event has already been consumed). The NEXT real trigger
+   *     for the script will pick up the new code naturally. So we just
+   *     drop the autosave reload and let the world unfold.
+   *
+   *   - **`'manual'` + in-flight → DEFER.** Manual reload (Reload button)
+   *     is an explicit user request. Dropping it would be confusing
+   *     ("I pressed Reload, nothing happened"). Queue it in
+   *     `pendingReload` and arm a polling drain; it fires once
+   *     `runningCounts === 0` AND no handler invocations are in flight.
+   *     Coalesces multiple rapid presses to one fire.
+   *
+   *   - **Either + idle → FIRE immediately.**
+   *
+   * "In flight" = real-trigger run (`runningCounts > 0`) OR
+   * handler-call/script-body with a pending IPC await
+   * (`scriptHasActiveDispatch`). Broadcast handlers in particular can run
+   * for many seconds without bumping `runningCounts`; `scriptHasActiveDispatch`
+   * covers those.
+   *
+   * Caller (`backend.ts`'s `update_script` handler for autosave;
+   * `reload_script` IPC handler for manual) is responsible for the
    * eligibility check (byte-different code, enabled trigger, directive
-   * absent, debounce). Manual reload (Phase F palette command) calls this
-   * directly with `reason: 'manual'` and bypasses the directive opt-out.
+   * absent, debounce). Manual reload bypasses the directive opt-out.
    */
   async fireReload(script: Script, payload: LsReloadPayload): Promise<void> {
-    // Defer while a real run is in flight. The drain branch in the
-    // event-handler path fires the queued payload when running count
-    // reaches 0.
-    if ((this.runningCounts.get(script.id) ?? 0) > 0) {
+    const inFlight = (this.runningCounts.get(script.id) ?? 0) > 0
+                     || scriptHasActiveDispatch(script.id);
+    if (inFlight) {
+      if (payload.reason === 'autosave') {
+        // Drop — the next real trigger will pick up the new code. See
+        // JSDoc above for the full reasoning.
+        return;
+      }
+      // Manual reload — queue + arm polling drain. Idempotent on both:
+      // `pendingReload.set` overwrites a prior queued payload (coalesce);
+      // `schedulePendingReloadPoll` is a no-op if a poll is already armed.
       this.pendingReload.set(script.id, payload);
+      this.schedulePendingReloadPoll(script.id);
       return;
     }
 
@@ -1017,6 +1222,46 @@ export class TriggerRegistry {
         title:    `LumiScript — ${script.name} (reload)`,
         duration: 10_000,
       });
+    }
+  }
+
+  /**
+   * Phase F follow-up — armed by `fireReload` when a reload is deferred.
+   * Polls every 1 s for the "script idle" condition (both `runningCounts`
+   * cleared AND no entries in host-dispatcher's `activeRuns` for this
+   * scriptId). When idle, drains `pendingReload`. Idempotent — calling
+   * while a poll is already armed is a no-op (the existing timer keeps
+   * running). Cleared on successful drain OR on the event-handler
+   * completion drain path (whichever wins).
+   */
+  private schedulePendingReloadPoll(scriptId: string): void {
+    if (this.pendingReloadPollTimers.has(scriptId)) return;
+
+    const timer = setInterval(() => {
+      // Still in flight? Keep polling.
+      const stillInFlight = (this.runningCounts.get(scriptId) ?? 0) > 0
+                            || scriptHasActiveDispatch(scriptId);
+      if (stillInFlight) return;
+
+      // Idle now — stop polling + drain.
+      this.clearPendingReloadPoll(scriptId);
+      const pending = this.pendingReload.get(scriptId);
+      if (pending === undefined) return;
+      this.pendingReload.delete(scriptId);
+      const latest = this.getDeps().scriptStorage.getScript(scriptId);
+      if (latest && latest.enabled && latest.type === 'trigger') {
+        void this.fireReload(latest, pending);
+      }
+    }, 1_000);
+    this.pendingReloadPollTimers.set(scriptId, timer);
+  }
+
+  /** Clear any pending-reload poll timer for `scriptId`. Idempotent. */
+  private clearPendingReloadPoll(scriptId: string): void {
+    const t = this.pendingReloadPollTimers.get(scriptId);
+    if (t !== undefined) {
+      clearInterval(t);
+      this.pendingReloadPollTimers.delete(scriptId);
     }
   }
 

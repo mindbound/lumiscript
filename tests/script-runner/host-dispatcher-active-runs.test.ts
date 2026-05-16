@@ -17,7 +17,9 @@
  *      AND clears the per-script tracker entry.
  *   6. Child-crash lifecycle (`failed` / `timed_out`) clears ALL activeRuns
  *      and ALL per-script tracker entries.
- *   7. `dispatchRunScript` before spawn rejects cleanly.
+ *   7. `dispatchRunScript` lazy-spawns the assigned worker on demand (and
+ *      rejects cleanly when its prerequisites — `userId` for the spawn —
+ *      aren't met).
  *   8. Send-failure path rolls back the per-script tracker entry.
  */
 
@@ -276,13 +278,27 @@ describe('host-dispatcher: script-body activeRun lifetime', () => {
     expect(__getScriptBodyRunIdForTests('script-A')).toBeUndefined();
   });
 
-  test('dispatchRunScript before spawn rejects with a clear error', async () => {
-    // No setup() — child is not spawned.
+  test('dispatchRunScript without userId on first dispatch rejects with a clear error', async () => {
+    // No setup() — the assigned worker isn't spawned. With v1.0's lazy-
+    // spawn semantics (multi-worker fanout: workers other than
+    // DEFAULT_WORKER_KEY only spawn when a script first gets assigned to
+    // them), `dispatchRunScript` would normally invoke `spawnScriptRunner`
+    // on-demand. That path requires `request.userId` — without it, the
+    // dispatch rejects with a clear error rather than spawning blind.
+    //
+    // Production callers (`runScriptViaChild`) gate on `userId !== null`
+    // before calling `dispatchRunScript`, so this branch is defensive
+    // belt-and-braces: a misuse outside the canonical caller surfaces
+    // immediately instead of producing a half-spawned mystery.
     const script = makeScript('script-A');
-    await expect(dispatchRunScript(script, makeRequest()))
-      // Phase C1 (v1.0 runtime-isolation): error message now names the
-      // worker that wasn't spawned.
-      .rejects.toThrow(/worker '.*' not spawned/);
+    const requestWithoutUserId = {
+      data:               { __event: 'ls:startup' as const },
+      timeoutMs:          5_000,
+      grantedPermissions: new Set<string>(),
+      // userId deliberately omitted
+    };
+    await expect(dispatchRunScript(script, requestWithoutUserId))
+      .rejects.toThrow(/cannot lazy-spawn worker .* request\.userId is missing/);
   });
 
   test('send failure rolls back the per-script tracker entry', async () => {

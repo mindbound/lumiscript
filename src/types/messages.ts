@@ -538,6 +538,19 @@ export type BackendToFrontend =
       success: boolean;
       duration: number;
       error?: string;
+      /**
+       * v1.0 — when set to `true`, the FE resets the script's status dot
+       * to `'idle'` (grey) instead of inferring `'success'`/`'error'`
+       * from the `success` flag. Used by the synthetic `execution_ended`
+       * the backend sends when a script is disabled mid-flight: the
+       * script didn't really succeed or fail, it was forcibly stopped,
+       * and 'idle' communicates that more truthfully than green-success.
+       *
+       * Optional + defaults to false → backward-compatible; old senders
+       * (and all real run-end paths) keep producing the standard
+       * success/error dot.
+       */
+      idleAfter?: boolean;
     }
   | {
       type: 'console_entry';

@@ -463,9 +463,9 @@ Lumiverse + LumiScript lifecycle events. Scripts react to these by being **wired
 
 | Event | Payload | Fires |
 |---|---|---|
-| `ls:startup` | { __event: "ls:startup" } | Once per LumiScript boot (extension enable / app start). Use for one-shot setup work. |
+| `ls:startup` | { __event: "ls:startup" } | Per-script when the script enters the active state: at LumiScript boot (extension enable / app start) AND after the user toggles the script from disabled→enabled. Symmetric partner to `ls:teardown`. Use for tool registration, cache pre-warm, broadcast subscription setup, and other init that should run whenever the script becomes runnable. On re-enable the case body re-runs in full — bottom-of-body `api.broadcast.on(...)` calls also re-execute, re-registering the subscriptions disable's cleanup wiped, so the case body itself can be empty if all you need is the body firing. |
 | `ls:teardown` | { reason: 'disabled' \| 'deleted', scriptId, scriptName } | Per-script when the script is disabled or deleted. Use for cleanup. |
-| `ls:reload` | { reason: 'autosave' \| 'manual', previousCodeHash, currentCodeHash, previousLength, currentLength, triggeredAt } | Automatically when the script's code changes (after a ~500ms debounce). Body re-runs in its existing worker so registered handlers refresh their closures. Opt out with `// @no-reload-on-edit` at line start. Branch on `data.__event === "ls:reload"` to detect. |
+| `ls:reload` | { reason: 'autosave' \| 'manual', previousCodeHash, currentCodeHash, previousLength, currentLength, triggeredAt } | After a code edit IF the script opts in via the `// @ls:reload-on-edit` directive (~500ms debounce). Body re-runs in its existing worker so registered handlers refresh their closures. Also fires on click of the editor topbar Reload button (manual — bypasses the directive check). Branch on `data.__event === "ls:reload"` to detect. |
 | `MESSAGE_SENT` | { chatId, message } | Once per **user**-initiated send. Does NOT fire for assistant-side messages — use `GENERATION_ENDED` for those. |
 | `MESSAGE_EDITED` | { chatId, message } |  |
 | `MESSAGE_DELETED` | { chatId, messageId } |  |
@@ -508,6 +508,14 @@ Emitted on the broadcast bus (`api.broadcast.on(event, handler)`). Built-in even
 | `ls:collection:updated` | { name, scope, scriptId, count, filterKind: 'all' \| 'object' \| 'fn' } | collection.update() (only when count > 0) |
 | `ls:collection:deleted` | { name, scope, scriptId, count, filterKind } | collection.delete() / clear() (clear emits count=-1) |
 | `ls:collection:size-warning` | { name, scope, scriptId, bytes } | auto — collection exceeds 10 MB soft threshold |
+
+## Runtime directives
+
+LumiScript **runtime directives** are special comments that change how the runtime treats your script. They live anywhere at line start in the script source and follow the form `// @ls:<directive-name>`. The `@ls:` prefix distinguishes runtime-active directives from passive frontmatter tags like `@description`, `@author`, `@version`, `@tags` — those are read by humans and the pack import/export tooling but don't affect runtime behavior. Detection happens at `update_script` time (each code save); no persistence, no schema change.
+
+| Directive | Applies to | What it does |
+|---|---|---|
+| `// @ls:reload-on-edit` | Enabled trigger scripts (libraries are loaded on-demand and ignore the directive). | Opts the script INTO automatic hot-reload after a code save. Without this directive, the script's closures stay stale until the next real trigger fire or until the user clicks the Reload button on the editor topbar. Add the directive to scripts whose module-scope code is idempotent and cheap (no expensive LLM calls, no duplicate DB writes, no leaked timers). The body re-runs end-to-end on each edit ~500ms after the autosave settles. |
 
 ## Macros
 

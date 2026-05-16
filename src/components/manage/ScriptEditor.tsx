@@ -387,11 +387,11 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
 
         {/* v1.0 Phase F — manual "Reload script" affordance. Sends
             `reload_script` IPC; the backend fires the synthetic ls:reload
-            event (manual reloads bypass the `@no-reload-on-edit`
-            directive — opt-out only gates the autosave-driven path).
-            Trigger-only (libraries have no body to re-fire). Square
-            icon-only treatment matches the Lisa button — see comment on
-            that button above for the styling rationale. */}
+            event. Always fires (the `@ls:reload-on-edit` directive gates
+            only the autosave-driven path — manual reload works
+            unconditionally). Trigger-only (libraries have no body to
+            re-fire). Square icon-only treatment matches the Lisa button
+            — see comment on that button above for the styling rationale. */}
         {script.type !== 'library' && (
           <button
             type="button"
@@ -405,7 +405,7 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
               borderColor: 'var(--lumiverse-accent)',
             }}
             onClick={() => sendToBackend({ type: 'reload_script', id: script.id })}
-            title="Reload script — re-fire the body to refresh handler closures. Works even for scripts with `// @no-reload-on-edit`."
+            title="Reload script — re-fire the body to refresh handler closures. Works for any enabled trigger script regardless of directives."
             aria-label="Reload script"
           >
             <RotateCcw size={15} />

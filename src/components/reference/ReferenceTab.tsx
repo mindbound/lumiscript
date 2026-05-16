@@ -1,5 +1,5 @@
 import { FC, useState } from 'react';
-import { Zap, Lock, Radio, List, Braces, Hash, Package, Blocks, Download, ChevronDown, ChevronRight } from 'lucide-react';
+import { Zap, Lock, Radio, List, Braces, Hash, Package, Blocks, Download, ChevronDown, ChevronRight, AtSign } from 'lucide-react';
 import { downloadReferenceMarkdown } from './markdown-export.js';
 
 // ─── Section accordion ────────────────────────────────────────────────────────
@@ -60,9 +60,9 @@ const GroupHeader: FC<{ label: React.ReactNode; cols: number }> = ({ label, cols
 export interface EventRow { name: string; group: string; payload: string; fires?: string }
 
 export const EVENTS: EventRow[] = [
-  { group: 'LumiScript', name: 'ls:startup',                 payload: '{ __event: "ls:startup" }', fires: 'Once per LumiScript boot (extension enable / app start). Use for one-shot setup work.' },
+  { group: 'LumiScript', name: 'ls:startup',                 payload: '{ __event: "ls:startup" }', fires: 'Per-script when the script enters the active state: at LumiScript boot (extension enable / app start) AND after the user toggles the script from disabled→enabled. Symmetric partner to `ls:teardown`. Use for tool registration, cache pre-warm, broadcast subscription setup, and other init that should run whenever the script becomes runnable. On re-enable the case body re-runs in full — bottom-of-body `api.broadcast.on(...)` calls also re-execute, re-registering the subscriptions disable\'s cleanup wiped, so the case body itself can be empty if all you need is the body firing.' },
   { group: 'LumiScript', name: 'ls:teardown',                payload: "{ reason: 'disabled' | 'deleted', scriptId, scriptName }", fires: 'Per-script when the script is disabled or deleted. Use for cleanup.' },
-  { group: 'LumiScript', name: 'ls:reload',                  payload: "{ reason: 'autosave' | 'manual', previousCodeHash, currentCodeHash, previousLength, currentLength, triggeredAt }", fires: 'Automatically when the script\'s code changes (after a ~500ms debounce). Body re-runs in its existing worker so registered handlers refresh their closures. Opt out with `// @no-reload-on-edit` at line start. Branch on `data.__event === "ls:reload"` to detect.' },
+  { group: 'LumiScript', name: 'ls:reload',                  payload: "{ reason: 'autosave' | 'manual', previousCodeHash, currentCodeHash, previousLength, currentLength, triggeredAt }", fires: 'After a code edit IF the script opts in via the `// @ls:reload-on-edit` directive (~500ms debounce). Body re-runs in its existing worker so registered handlers refresh their closures. Also fires on click of the editor topbar Reload button (manual — bypasses the directive check). Branch on `data.__event === "ls:reload"` to detect.' },
   { group: 'Chat',       name: 'MESSAGE_SENT',               payload: '{ chatId, message }', fires: 'Once per **user**-initiated send. Does NOT fire for assistant-side messages — use `GENERATION_ENDED` for those.' },
   { group: 'Chat',       name: 'MESSAGE_EDITED',             payload: '{ chatId, message }' },
   { group: 'Chat',       name: 'MESSAGE_DELETED',            payload: '{ chatId, messageId }' },
@@ -340,6 +340,71 @@ const BroadcastTable: FC = () => (
           <td><Code>{row.name}</Code></td>
           <td><span className="ls-ref-muted">{row.payload}</span></td>
           <td><span className="ls-ref-muted">{row.emittedBy}</span></td>
+        </tr>
+      ))}
+    </tbody>
+  </table>
+);
+
+// ─── Runtime directives ───────────────────────────────────────────────────────
+//
+// v1.0 — first parsed directive (`@ls:reload-on-edit`). The `@ls:` prefix
+// is the runtime-directive namespace, distinguishing runtime-active
+// comments from passive frontmatter tags (`@description`, `@author`, etc.).
+// New runtime directives go here; they're picked up by the assistant
+// corpus generator + the Markdown export.
+
+export interface DirectiveRow {
+  /** Directive form as written in code (without the leading `// `). */
+  directive:   string;
+  /** Brief description of what enabling the directive does. */
+  description: string;
+  /** Restrictions on where the directive applies. */
+  appliesTo:   string;
+}
+
+export const DIRECTIVES_INTRO: string =
+  'LumiScript **runtime directives** are special comments that change how the ' +
+  'runtime treats your script. They live anywhere at line start in the script ' +
+  'source and follow the form `// @ls:<directive-name>`. The `@ls:` prefix ' +
+  'distinguishes runtime-active directives from passive frontmatter tags like ' +
+  '`@description`, `@author`, `@version`, `@tags` — those are read by humans ' +
+  'and the pack import/export tooling but don\'t affect runtime behavior. ' +
+  'Detection happens at `update_script` time (each code save); no persistence, ' +
+  'no schema change.';
+
+export const DIRECTIVES: DirectiveRow[] = [
+  {
+    directive:   '@ls:reload-on-edit',
+    description:
+      'Opts the script INTO automatic hot-reload after a code save. Without ' +
+      'this directive, the script\'s closures stay stale until the next real ' +
+      'trigger fire or until the user clicks the Reload button on the editor ' +
+      'topbar. Add the directive to scripts whose module-scope code is ' +
+      'idempotent and cheap (no expensive LLM calls, no duplicate DB writes, ' +
+      'no leaked timers). The body re-runs end-to-end on each edit ~500ms ' +
+      'after the autosave settles.',
+    appliesTo:
+      'Enabled trigger scripts (libraries are loaded on-demand and ignore ' +
+      'the directive).',
+  },
+];
+
+const DirectivesTable: FC = () => (
+  <table className="ls-ref-table">
+    <thead>
+      <tr>
+        <th>Directive</th>
+        <th>Applies to</th>
+        <th>What it does</th>
+      </tr>
+    </thead>
+    <tbody>
+      {DIRECTIVES.map(row => (
+        <tr key={row.directive}>
+          <td><Code>{`// ${row.directive}`}</Code></td>
+          <td><span className="ls-ref-muted">{row.appliesTo}</span></td>
+          <td><span className="ls-ref-muted">{row.description}</span></td>
         </tr>
       ))}
     </tbody>
@@ -2726,6 +2791,17 @@ export const ReferenceTab: FC = () => (
         The <Code>ls:</Code> prefix is reserved for LumiScript engine events.
         Use any other name for custom events between scripts.
       </p>
+    </Section>
+
+    <Section icon={<AtSign size={11} />} title="Directives">
+      <p className="ls-ref-muted" style={{ marginBottom: 8 }}>
+        Runtime directives are special <Code>// @ls:&lt;name&gt;</Code> comments that
+        change how the runtime treats your script. The <Code>@ls:</Code> prefix
+        distinguishes them from passive frontmatter tags like <Code>@description</Code>
+        or <Code>@author</Code> (read by humans + pack tooling but inert at runtime).
+        Place anywhere at line start in the script source.
+      </p>
+      <DirectivesTable />
     </Section>
 
     <Section icon={<Hash size={11} />} title="LumiScript Macros">

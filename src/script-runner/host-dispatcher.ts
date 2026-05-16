@@ -415,6 +415,18 @@ function getWorkerForScript(scriptId: string): ScriptRunnerWorkerKey {
     if (c < min) { min = c; assigned = k; }
   }
   scriptWorkerAssignments.set(scriptId, assigned);
+  // Fires once per script's first dispatch — sticky-cache hits at line 403
+  // return early before reaching here. Single log line per script-lifetime
+  // gives operators a record of where each script landed without per-fire
+  // log spam. Useful for verifying multi-worker distribution during manual
+  // testing (Section 5.1) and for field debugging of cross-worker routing
+  // issues. Counts in `getKnownWorkerKeys().length === 1` ("single-worker
+  // mode") are still logged — harmless and confirms the single-worker
+  // path for the default `workerCount=1` setup.
+  spindle.log.info(
+    `[script-runner] assigned script ${scriptId} to worker '${assigned}' ` +
+    `(pool size: ${known.length})`,
+  );
   return assigned;
 }
 
@@ -538,6 +550,13 @@ function bumpWorkerActivity(workerKey: ScriptRunnerWorkerKey): void {
 
 // Sweep timer state.
 let evictionSweepTimer: ReturnType<typeof setInterval> | null = null;
+
+// Phase E telemetry — monotonic counter + last-eviction snapshot for the
+// diagnostics panel. Bumped in `evictWorker`. Reset only by
+// `__resetForTests` (session-lifetime otherwise).
+let totalEvictions:     number        = 0;
+let lastEvictionAt:     number | null = null;
+let lastEvictionReason: string | null = null;
 
 // v0.28.0+ — Diagnostics-only counters. Separate from `restartAttempts`
 // (which is the *current backoff index* and resets to 0 after a stable
@@ -1414,6 +1433,59 @@ const activeRuns  = new Map<string, ActiveRun>();
 // and shouldn't outlive the fire.
 const scriptBodyActiveRunByScript = new Map<string, string>();
 
+/**
+ * Per-script "fallback" onConsole. Populated at every script-body dispatch
+ * (`dispatchRunScript`) when the caller provides an `onConsole` option;
+ * read by `handleConsoleEntry` when the runId-keyed `activeRuns` lookup
+ * misses OR when the activeRun entry doesn't carry `onConsole`.
+ *
+ * Fixes two pre-existing console-routing failures:
+ *
+ *   1. **Orphaned-runId.** Phase 9d.4.x drops the previous script-body
+ *      activeRun when a new `dispatchRunScript` fires for the same script.
+ *      Late `console.log` calls from the orphaned run (`setInterval` ticks,
+ *      long-tail `.then` chains, setTimeout callbacks) hit
+ *      `activeRuns.get(runId)` → `undefined` and previously got silently
+ *      dropped. Now they fall back to the per-script onConsole — same
+ *      editor console panel, same script, so the routing is correct.
+ *
+ *   2. **Handler-call without onConsole.** `dispatchRunHandler` creates an
+ *      activeRun for the handler call but does NOT supply `onConsole` —
+ *      handler invocations have no caller-provided callback.
+ *      `console.log` inside a broadcast / macro / tool / chat-injection /
+ *      world-info / DOM event handler hit `!active.onConsole` and
+ *      previously got silently dropped. Now they fall back to the
+ *      per-script onConsole — visible in the editor console alongside
+ *      the trigger-body output.
+ *
+ * Cleared in `unregisterScriptFromChild` (script disable / delete).
+ */
+const lastOnConsoleByScript = new Map<string, NonNullable<ActiveRun['onConsole']>>();
+
+/**
+ * Per-script counter of async broadcast handler invocations currently in
+ * flight in the child. Bumped by `broadcast-handler-started` IPC,
+ * decremented by `broadcast-handler-finished` (both ok and error arms).
+ *
+ * Used by `scriptHasActiveDispatch` to detect "broadcast handler is doing
+ * async work in the child." Broadcast fires are fire-and-forget from the
+ * parent (`sendBroadcastFireToChild` ships the IPC and returns), so
+ * neither `pendingRuns` nor `pendingHandlerCalls` ever see them — without
+ * this counter, an autosave-driven `ls:reload` would fire while e.g. the
+ * tracker's `tracker:request-rerun` handler is mid-LLM-extraction,
+ * breaking the "drop reload while script is busy" contract for scripts
+ * that use broadcast handlers as long-running background work.
+ *
+ * Sync broadcast handlers don't emit started/finished IPCs (they return
+ * non-thenable values; see `handleBroadcastFire` in child-entry.ts where
+ * the lifecycle messages are only emitted when the user's handler return
+ * value is a thenable). But sync handlers complete within their IPC
+ * dispatch — there's no observable in-flight window worth detecting.
+ *
+ * Cleared in `unregisterScriptFromChild`.
+ */
+const broadcastHandlerInFlight = new Map<string, number>();
+
 // ─── v0.26.1+ — per-run tracking-set registry ────────────────────────────────
 //
 // The trigger-registry passes per-run `Set<string>` instances for tools /
@@ -1698,7 +1770,12 @@ function logLateRegisterSkip(msg: RegisterHandler): void {
     `scriptBodyLatest=${latestRunId ?? 'none'}, ` +
     `latestExists=${latestExists}, ` +
     `activeForScript=[${activeForScript.join(', ')}], ` +
-    `totalActiveRuns=${activeRuns.size})`,
+    // v1.0 multi-worker: this count aggregates across every spawned
+    // worker. The per-script `activeForScript=[…]` list above is the
+    // useful per-worker-relevant signal; this field is "is the runner
+    // busy in general?" context. Made explicit to avoid the operator
+    // misreading it as scoped to the registering worker.
+    `totalActiveRuns=${activeRuns.size} (across all workers))`,
   );
 }
 
@@ -1717,14 +1794,21 @@ function handleChildMessage(payload: unknown, processId: string): void {
   }
   const msg = payload as ChildToParentMessage;
 
+  // Worker-key derived once per inbound message — used both for activity
+  // bumping (Phase E) AND for routing the api-response back to the
+  // originating worker's child (Phase C2 multi-worker fix). Pre-fix,
+  // `sendApiResponse` defaulted to `DEFAULT_WORKER_KEY` (worker-1), so
+  // api responses for scripts on worker-2..N were sent to the wrong child
+  // and the child-side `await api.foo()` hung forever.
+  const sourceWorkerKey = processIdToWorkerKey(processId);
+
   // Phase E — bump activity for the sending worker, EXCEPT for our own
   // internal `diagnostic-stats-response`. The sweep queries memory via
   // `diagnostic-stats-request`; if we bumped on the response, every
   // sweep cycle would self-bump every worker and idle eviction could
   // never fire.
-  if (msg.type !== 'diagnostic-stats-response') {
-    const workerKey = processIdToWorkerKey(processId);
-    if (workerKey !== null) bumpWorkerActivity(workerKey);
+  if (msg.type !== 'diagnostic-stats-response' && sourceWorkerKey !== null) {
+    bumpWorkerActivity(sourceWorkerKey);
   }
 
   switch (msg.type) {
@@ -1760,7 +1844,7 @@ function handleChildMessage(payload: unknown, processId: string): void {
     }
 
     case 'api-request':
-      void handleApiRequest(msg);
+      void handleApiRequest(msg, sourceWorkerKey);
       break;
 
     case 'broadcast-subscribe':
@@ -1780,6 +1864,14 @@ function handleChildMessage(payload: unknown, processId: string): void {
       // `execution_ended` messages (see LumiScriptPanel.tsx), NOT by
       // executionStatusStore directly. Both sides updated here so the
       // host's in-memory state and the live UI stay in sync.
+      // v1.0 diagnostic: log the lifecycle so support reports can
+      // confirm whether broadcast-handler completion IPCs are arriving
+      // (correlate with `…-finished` log line below). Useful for
+      // disable-mid-flight bugs where the FE indicator stays "Running".
+      spindle.log.info(
+        `[script-runner] broadcast-handler-started: scriptId=${msg.scriptId}, ` +
+        `subId=${msg.subId}, event='${msg.event}'`,
+      );
       executionStatusStore.markRunning(msg.scriptId);
       const script = scriptResolver?.(msg.scriptId);
       sendToFrontend?.({
@@ -1791,10 +1883,28 @@ function handleChildMessage(payload: unknown, processId: string): void {
         // don't currently route console entries, so a synthetic id is fine.
         runId:      `broadcast:${msg.scriptId}:${msg.subId}:${Date.now()}`,
       });
+      // Bump the per-script broadcast-in-flight counter so hot-reload
+      // deferral (`scriptHasActiveDispatch`) sees this handler as active.
+      // Counter is decremented in the `finished` arm below.
+      broadcastHandlerInFlight.set(
+        msg.scriptId,
+        (broadcastHandlerInFlight.get(msg.scriptId) ?? 0) + 1,
+      );
       break;
     }
 
     case 'broadcast-handler-finished': {
+      // v1.0 diagnostic: log arrival so support reports can confirm
+      // whether the IPC reached the parent (paired with `…-started`).
+      // If a script's "Running" dot stays lit after disable, this log
+      // tells you whether the cause is "handler hung in child, IPC
+      // never sent" (no log line) vs "IPC arrived but FE update path
+      // dropped it" (log line present).
+      spindle.log.info(
+        `[script-runner] broadcast-handler-finished: scriptId=${msg.scriptId}, ` +
+        `subId=${msg.subId}, ok=${msg.ok}, durationMs=${msg.durationMs}` +
+        (msg.ok ? '' : `, error='${msg.error}'`),
+      );
       if (msg.ok) {
         executionStatusStore.markSuccess(msg.scriptId, msg.durationMs);
       } else {
@@ -1810,6 +1920,17 @@ function handleChildMessage(payload: unknown, processId: string): void {
         duration: msg.durationMs,
         ...(msg.ok ? {} : { error: msg.error }),
       });
+      // Decrement the per-script broadcast-in-flight counter. `Math.max(0, …)`
+      // is a defensive floor against a hypothetical extra `finished` IPC
+      // (channel-down recovery, child restart mid-flight, etc.) that would
+      // otherwise leave the counter negative and break the in-flight check.
+      const prev = broadcastHandlerInFlight.get(msg.scriptId) ?? 0;
+      const next = Math.max(0, prev - 1);
+      if (next === 0) {
+        broadcastHandlerInFlight.delete(msg.scriptId);
+      } else {
+        broadcastHandlerInFlight.set(msg.scriptId, next);
+      }
       break;
     }
 
@@ -2553,17 +2674,31 @@ function handleHandlerResultMessage(msg: HandlerResult): void {
 
 /**
  * Route a console entry from the child to the originating run's
- * `onConsole` callback. Entries for runs that have already completed
- * (rare — would mean a long-tail promise resolved post-result) drop
- * silently. Entries without a registered callback (e.g. legacy callers
- * that didn't supply one) also drop silently — matches the in-process
- * executor's behaviour when `onConsole` is undefined.
+ * `onConsole` callback.
+ *
+ * Two-level lookup:
+ *   1. **Direct (runId-keyed).** `activeRuns.get(msg.runId)` finds the run
+ *      and uses its `onConsole`. Hits the common case (script-body run
+ *      still alive, onConsole supplied at dispatch).
+ *   2. **Fallback (scriptId-keyed).** If the direct lookup misses (the
+ *      run's activeRun was orphaned by a later `dispatchRunScript`, Phase
+ *      9d.4.x) OR the activeRun has no `onConsole` (handler-call activeRuns
+ *      from `dispatchRunHandler` don't carry one), fall back to
+ *      `lastOnConsoleByScript.get(msg.scriptId)`. This routes late console
+ *      output from orphaned runs AND console output from handler callbacks
+ *      (broadcast / macro / tool / chat-injection / world-info / DOM event)
+ *      to the editor console where the user actually sees it.
+ *
+ * Entries for scripts with no registered onConsole anywhere (e.g. internal
+ * dispatcher tests, runs that genuinely don't want output) still drop
+ * silently — matches the in-process executor's behaviour.
  */
 function handleConsoleEntry(msg: ConsoleEntryNotice): void {
-  const active = activeRuns.get(msg.runId);
-  if (!active || !active.onConsole) return;
+  const active    = activeRuns.get(msg.runId);
+  const onConsole = active?.onConsole ?? lastOnConsoleByScript.get(msg.scriptId);
+  if (!onConsole) return;
   try {
-    active.onConsole(msg.entry);
+    onConsole(msg.entry);
   } catch (err) {
     // A misbehaving onConsole shouldn't break the dispatcher. Log once
     // and drop; user-visible diagnostics surface through whatever
@@ -2648,7 +2783,10 @@ function sendBroadcastFireToChild(msg: BroadcastFireMessage): void {
  * rather than throwing here. The child's pending-request map will reject
  * the user-script's awaited promise with the corresponding `Error`.
  */
-async function handleApiRequest(req: ApiProxyRequest): Promise<void> {
+async function handleApiRequest(
+  req:             ApiProxyRequest,
+  sourceWorkerKey: ScriptRunnerWorkerKey | null,
+): Promise<void> {
   // v0.26.1 — unified runId resolution. Direct lookup, falling back to the
   // script's current run when the dispatch's metadata indicates re-routing
   // is safe. Three permitted fallback shapes:
@@ -2668,6 +2806,13 @@ async function handleApiRequest(req: ApiProxyRequest): Promise<void> {
     },
     'api-request',
   );
+
+  // Worker key for routing the response back to the right child. Prefer
+  // the activeRun's `workerKey` (definitive source of truth — that's where
+  // the proxy's pending-map lives, awaiting this requestId), falling back
+  // to the IPC-channel-derived `sourceWorkerKey` when no active run exists
+  // (late-request RunCompletedError path).
+  const responseWorkerKey = active?.workerKey ?? sourceWorkerKey;
   if (!active) {
     // Late request — run already completed (its activeRuns entry was
     // dropped). Send back a clear error so the child's pending-map can
@@ -2690,7 +2835,7 @@ async function handleApiRequest(req: ApiProxyRequest): Promise<void> {
     const sourceSuffix = req._runIdSource
       ? `, runIdSource=${req._runIdSource}`
       : '';
-    sendApiResponse(req.requestId, {
+    sendApiResponse(responseWorkerKey, {
       type:      'api-response',
       requestId: req.requestId,
       ok:        false,
@@ -2877,7 +3022,7 @@ async function handleApiRequest(req: ApiProxyRequest): Promise<void> {
     }
   }
 
-  sendApiResponse(req.requestId, response);
+  sendApiResponse(responseWorkerKey, response);
 }
 
 /**
@@ -4186,16 +4331,114 @@ async function handleInternalAdvancedModalRequest(
   }
 }
 
-function sendApiResponse(_requestId: string, response: ApiProxyResponse): void {
-  if (!getChildHandle()) {
+/**
+ * Send an api-response back to the originating child worker.
+ *
+ * Multi-worker routing: `workerKey` is the worker hosting the run that
+ * issued the api-request. With multiple workers in flight, naive routing
+ * to `DEFAULT_WORKER_KEY` would silently drop the response for any worker
+ * other than `worker-1`, hanging the child-side awaited proxy promise
+ * forever. The caller (`handleApiRequest`) sources `workerKey` from the
+ * activeRun's recorded `workerKey` (which was set at dispatch time), or
+ * from the IPC channel's processId when no activeRun exists (late-request
+ * error path).
+ *
+ * `workerKey === null` indicates "we couldn't determine the source"
+ * (channel torn down between request arrival and response dispatch, or
+ * the message bypassed handleChildMessage's processIdToWorkerKey lookup);
+ * we warn and drop in that case rather than misroute.
+ */
+function sendApiResponse(
+  workerKey: ScriptRunnerWorkerKey | null,
+  response:  ApiProxyResponse,
+): void {
+  if (workerKey === null) {
+    spindle.log.warn(
+      `[script-runner] api-response: workerKey unknown for requestId=${response.requestId}; ` +
+      `dropping (child-side pending-map will time out via heartbeat)`,
+    );
+    return;
+  }
+  const handle = getChildHandle(workerKey);
+  if (!handle) {
     // Child died between request arrival and response dispatch — nothing
     // we can do; the lifecycle handler will reject pending runs anyway.
     return;
   }
   try {
-    getChildHandle()!.send(response);
+    handle.send(response);
   } catch (err) {
-    spindle.log.warn(`[script-runner] api-response send failed: ${String(err)}`);
+    spindle.log.warn(
+      `[script-runner] api-response send to worker '${workerKey}' failed: ${String(err)}`,
+    );
+  }
+}
+
+/**
+ * Scoped per-worker cleanup of in-flight run state. Called from the
+ * lifecycle handler on BOTH the crash arms (`failed` / `timed_out`) and
+ * the graceful-shutdown arms (`stopped` / `completed`).
+ *
+ * Multi-worker invariant: cleanup must be scoped to runs whose
+ * `workerKey` matches the dying worker. A crash/shutdown of one worker
+ * must NOT touch state for runs on other workers — pre-fix the cleanup
+ * was a global `pendingRuns.clear()` / `activeRuns.clear()` / etc.
+ * which silently broke every other worker's outstanding work.
+ *
+ * What's cleaned (all per-worker):
+ *   - `pendingRuns` / `pendingHandlerCalls` for runs on this worker:
+ *     rejected with `rejection`, then dropped. Without this, in-flight
+ *     callers awaiting `dispatchRunScript` / `dispatchRunHandler` for
+ *     runs on the dead worker hang forever.
+ *   - `activeRuns` / `trackingSetsByRunId` for runs on this worker:
+ *     dropped (the scripts are dead; no late IPCs can route through them).
+ *   - `scriptBodyActiveRunByScript` entries pointing at any dropped
+ *     runId — keeping them would map script → dead runId and confuse
+ *     the late-IPC routing helpers (`resolveActiveRun`).
+ *   - `broadcastHandlerInFlight` counters for scripts assigned to this
+ *     worker (their async handlers were running in the now-dead child
+ *     and won't get to fire `broadcast-handler-finished`; leaving the
+ *     counter at >0 would make `scriptHasActiveDispatch` /
+ *     `workerHasActiveRun` erroneously report ongoing work forever).
+ *
+ * What's NOT cleaned (intentional):
+ *   - `scriptWorkerAssignments` — scripts stay "on" this worker; the
+ *     respawned worker (or post-rebalance reassignment) picks them up
+ *     on the next fire via lazy-spawn / least-loaded.
+ *   - `lastDispatchByScript` — survives across worker lifecycles; the
+ *     snapshot is needed for handler invocations after respawn.
+ */
+function cleanupRunsForDeadWorker(
+  workerKey: ScriptRunnerWorkerKey,
+  rejection: Error,
+): void {
+  const runIdsOnDeadWorker = new Set<string>();
+  for (const [runId, run] of activeRuns) {
+    if (run.workerKey === workerKey) runIdsOnDeadWorker.add(runId);
+  }
+  for (const runId of runIdsOnDeadWorker) {
+    const pendingRun = pendingRuns.get(runId);
+    if (pendingRun) {
+      pendingRun.reject(rejection);
+      pendingRuns.delete(runId);
+    }
+    const pendingHandler = pendingHandlerCalls.get(runId);
+    if (pendingHandler) {
+      pendingHandler.reject(rejection);
+      pendingHandlerCalls.delete(runId);
+    }
+    activeRuns.delete(runId);
+    trackingSetsByRunId.delete(runId);
+  }
+  for (const [scriptId, runId] of scriptBodyActiveRunByScript) {
+    if (runIdsOnDeadWorker.has(runId)) {
+      scriptBodyActiveRunByScript.delete(scriptId);
+    }
+  }
+  for (const [scriptId, assignedWorker] of scriptWorkerAssignments) {
+    if (assignedWorker === workerKey) {
+      broadcastHandlerInFlight.delete(scriptId);
+    }
   }
 }
 
@@ -4220,45 +4463,54 @@ function handleLifecycle(event: BackendProcessLifecycleEventDTO): void {
   switch (event.state) {
     case 'timed_out':
     case 'failed': {
-      // Build a diagnostic that names the script(s) currently in flight,
-      // so the operator log can immediately tell which user script
-      // (probably) caused the hang.
-      const offendingScripts = Array.from(activeRuns.values())
-        .map((a) => a.scriptName)
-        .join(', ');
+      // Build a diagnostic that names the script(s) genuinely in flight
+      // on THIS worker, so the operator log immediately tells which user
+      // script (probably) caused the hang.
+      //
+      // Two filters vs. a raw `activeRuns` scan:
+      //   1. `run.workerKey === workerKey` — only scripts on the crashed
+      //      worker. Scripts on other workers are irrelevant to this
+      //      crash; including them implicates innocents.
+      //   2. Intersect with `pendingRuns` / `pendingHandlerCalls` — only
+      //      scripts genuinely awaiting an IPC response. Phase 9d.4.x
+      //      keeps `activeRuns` entries alive past `run-result` for late
+      //      async work routing; those entries are NOT "in flight" in
+      //      the "caused the hang" sense.
+      //   3. Include any script on this worker with an in-flight broadcast
+      //      handler (`broadcastHandlerInFlight > 0`) — those are child-
+      //      side handler invocations that don't touch `pendingRuns` /
+      //      `pendingHandlerCalls` at all.
+      //
+      // Pre-fix the list dumped EVERY script that had ever run on the
+      // worker (including ones idle for hours), making the diagnostic
+      // worse than useless. Same root-cause pattern as the eviction
+      // sweep + hot-reload deferral fixes — `activeRuns` is for ROUTING,
+      // not for "is this entity doing work right now?".
+      const offendingScriptNames = new Set<string>();
+      for (const [runId, run] of activeRuns) {
+        if (run.workerKey !== workerKey) continue;
+        if (pendingRuns.has(runId) || pendingHandlerCalls.has(runId)) {
+          offendingScriptNames.add(run.scriptName);
+        }
+      }
+      for (const [scriptId, assignedWorker] of scriptWorkerAssignments) {
+        if (assignedWorker !== workerKey) continue;
+        if ((broadcastHandlerInFlight.get(scriptId) ?? 0) === 0) continue;
+        const snapshot = lastDispatchByScript.get(scriptId);
+        if (snapshot) offendingScriptNames.add(snapshot.script.name);
+      }
+      const offendingScripts = [...offendingScriptNames].join(', ');
       const reason  = event.error ?? event.exitReason ?? 'unknown';
       const rejection = new Error(
-        `[script-runner] child ${event.state} (${reason})` +
-        (offendingScripts ? `; possibly caused by: ${offendingScripts}` : ''),
+        `[script-runner] worker '${workerKey}' ${event.state} (${reason})` +
+        (offendingScripts ? `; in-flight on this worker: ${offendingScripts}` : ''),
       );
       spindle.log.error(rejection.message);
 
-      // Reject every in-flight caller so they don't hang forever waiting
-      // for a result that will never come.
-      for (const pending of pendingRuns.values()) {
-        pending.reject(rejection);
-      }
-      pendingRuns.clear();
-      activeRuns.clear();
-      // Phase 9d.4.x — script-body activeRun tracking goes with activeRuns.
-      // The new child has no knowledge of the prior runs' runIds; leaving
-      // entries here would cause the next dispatchRunScript for one of those
-      // scripts to attempt `activeRuns.delete(staleRunId)` (harmless no-op,
-      // but tidier to clear).
-      scriptBodyActiveRunByScript.clear();
-      // v0.26.1 — same rationale: those runs' bodies are dead, no late
-      // register-handler IPCs from them will ever arrive.
-      trackingSetsByRunId.clear();
-
-      // Phase 10 — also reject any in-flight handler fires. These are
-      // handler invocations from the parent's macro/tool/etc. wrappers
-      // that send `RunHandlerRequest` and await `HandlerResult`. With
-      // the child dead, the result will never arrive; without rejecting
-      // here, the wrapper's promise would hang forever.
-      for (const pending of pendingHandlerCalls.values()) {
-        pending.reject(rejection);
-      }
-      pendingHandlerCalls.clear();
+      // Reject + drop per-run state for runs on the crashed worker.
+      // See `cleanupRunsForDeadWorker` JSDoc for the full lifecycle
+      // contract.
+      cleanupRunsForDeadWorker(workerKey, rejection);
 
       // Clear stability timer for the dead child — it was scheduled
       // against this now-deceased instance and would erroneously reset
@@ -4286,18 +4538,44 @@ function handleLifecycle(event: BackendProcessLifecycleEventDTO): void {
     }
 
     case 'stopped':
-    case 'completed':
-      // Graceful exit — caller invoked stop() or child called complete().
-      // Clear our cached handle; pending runs (if any) may already have
-      // received their results, but if any remain, they'll get a generic
-      // rejection on the next dispatch attempt.
+    case 'completed': {
+      // Graceful exit — caller invoked `stop()` (eviction sweep,
+      // `rebalanceWorkerPool` shutting down an over-cap worker, full
+      // `shutdownScriptRunner`) or the child called `complete()`.
       //
+      // Multi-worker scoped cleanup. Pre-fix this arm assumed "pending
+      // runs (if any) may already have received their results, but if
+      // any remain, they'll get a generic rejection on the next dispatch
+      // attempt." That assumption was true under single-worker mode (any
+      // next dispatch hit the same dead child and surfaced an error).
+      // Under multi-worker, surviving workers continue dispatching
+      // normally, so runs that were in-flight on the gracefully-stopped
+      // worker keep their `pendingRuns` / `pendingHandlerCalls` /
+      // `activeRuns` / `scriptBodyActiveRunByScript` /
+      // `trackingSetsByRunId` / `broadcastHandlerInFlight` state forever
+      // — Promises never resolve, never reject, state never frees.
+      //
+      // The `rebalanceWorkerPool` path specifically shuts down over-cap
+      // workers without an in-flight gate (eviction has the gate via
+      // `workerHasActiveRun`, rebalance does not), so a `workerCount`
+      // decrease while scripts are running was the worst-case path:
+      // forever-hung Promises on the doomed workers' in-flight runs.
+      //
+      // Same scoped cleanup as the failed/timed_out arm — only state
+      // for runs on THIS worker is touched.
+      const rejection = new Error(
+        `[script-runner] worker '${workerKey}' shut down gracefully ` +
+        `(${event.state}); in-flight runs on this worker rejected`,
+      );
+      cleanupRunsForDeadWorker(workerKey, rejection);
+
       // Cancel any pending respawn for THIS worker — graceful exit means
       // this worker is tearing down, not that we should respawn it.
       clearRestartTimer(workerKey);
       clearStabilityTimer(workerKey);
       deleteChildHandle(workerKey);
       break;
+    }
 
     default:
       // 'starting' / 'running' / 'stopping' — informational only.
@@ -4597,21 +4875,39 @@ export interface DispatchRunScriptOpts {
  * @param opts     Optional parent-side callbacks + tracking sets — see
  *                 `DispatchRunScriptOpts` JSDoc.
  */
-export function dispatchRunScript(
+export async function dispatchRunScript(
   script:  Script,
   request: DispatchRunScriptRequest,
   opts:    DispatchRunScriptOpts = {},
 ): Promise<RunScriptResult> {
   // Phase C1 — derive the worker hosting this script. C1 always returns
   // DEFAULT_WORKER_KEY (single-worker behaviour preserved); C2 promotes to
-  // least-loaded distribution. Caller (`runScriptViaChild`) is responsible
-  // for ensuring the worker is spawned before dispatch.
+  // least-loaded distribution.
   const workerKey = getWorkerForScript(script.id);
 
+  // Lazy-spawn the assigned worker if it isn't running yet. The pool's
+  // members other than DEFAULT_WORKER_KEY are spawned on-demand — at
+  // bootstrap only `runScriptViaChild`'s eager `spawnScriptRunner(userId)`
+  // ensures worker-1 is ready; least-loaded assignment to worker-2..N
+  // arrives here with `getChildHandle(workerKey) === undefined` and needs
+  // a spawn before the IPC dispatch can proceed.
+  //
+  // Same rationale covers the rebalance-pool path (assignments cleared →
+  // next fire re-resolves via least-loaded → may pick a never-yet-spawned
+  // worker) and the worker-count-decrease path (a script previously
+  // assigned to worker-3 finds its sticky assignment dropped, re-resolves
+  // to a still-configured worker, but if least-loaded picks an unspawned
+  // worker the same lazy-spawn closes the gap).
   if (!getChildHandle(workerKey)) {
-    return Promise.reject(
-      new Error(`[script-runner] dispatchRunScript: worker '${workerKey}' not spawned`),
-    );
+    if (request.userId === undefined) {
+      throw new Error(
+        `[script-runner] dispatchRunScript: cannot lazy-spawn worker ` +
+        `'${workerKey}' for script '${script.id}' — request.userId is missing ` +
+        `(spawn requires operator-scoped userId; production callers ` +
+        `(runScriptViaChild) gate on userId !== null before reaching here)`,
+      );
+    }
+    await spawnScriptRunner(request.userId, workerKey);
   }
   // Phase E — bump activity for the dispatched worker.
   bumpWorkerActivity(workerKey);
@@ -4731,6 +5027,13 @@ export function dispatchRunScript(
       handles:    new Map(),  // transient handles for this run (dropped on script-body lifecycle drop)
       onConsole:  opts.onConsole,
     });
+    // Per-script fallback for console routing. Used by `handleConsoleEntry`
+    // when the runId-keyed lookup misses (orphaned by Phase 9d.4.x drop) or
+    // when the activeRun has no onConsole (handler-call activeRuns). See
+    // `lastOnConsoleByScript` JSDoc for the full reasoning.
+    if (opts.onConsole) {
+      lastOnConsoleByScript.set(script.id, opts.onConsole);
+    }
     // v0.26.1 — record per-run tracking sets so the late-register-handler
     // fallback in `handleRegisterHandler` can dual-update both the fallback
     // target's run-set AND the originating run's run-set. See the
@@ -4828,6 +5131,16 @@ export function unregisterScriptFromChild(scriptId: string): void {
   // sweep's "drop everything per-scriptId" shape.
   persistentObjToHandleId.delete(scriptId);
   lastDispatchByScript.delete(scriptId);
+  // Per-script onConsole fallback (used by handleConsoleEntry for orphaned-
+  // runId + handler-call routing). Same lifecycle as lastDispatchByScript:
+  // dropped when the script is disabled / deleted.
+  lastOnConsoleByScript.delete(scriptId);
+  // Per-script broadcast-handler in-flight counter. The script is being
+  // unregistered (disable / delete); any pending broadcast handlers in
+  // the child are about to be torn down by the `script-unregister` IPC
+  // sent above. Drop the counter so it can't strand a phantom in-flight
+  // signal past the script's lifetime.
+  broadcastHandlerInFlight.delete(scriptId);
 
   // Phase 9d.4.x — drop activeRuns owned by this script. With the script-body
   // activeRun lifecycle now extending past `run-result`, full teardown happens
@@ -5042,7 +5355,7 @@ export async function shutdownScriptRunner(): Promise<void> {
  * Internal — used only by the eviction sweep. Does NOT bump the
  * target worker's activity (would defeat idle-eviction tracking).
  */
-async function queryWorkerMemoryBytes(workerKey: ScriptRunnerWorkerKey): Promise<number | null> {
+export async function queryWorkerMemoryBytes(workerKey: ScriptRunnerWorkerKey): Promise<number | null> {
   const handle = getChildHandle(workerKey);
   if (!handle) return null;
 
@@ -5081,13 +5394,98 @@ async function queryWorkerMemoryBytes(workerKey: ScriptRunnerWorkerKey): Promise
 }
 
 /**
- * True if `workerKey` has any active run (a real trigger fire OR an
- * in-flight handler invocation) — i.e. is currently doing work and should
- * be exempt from eviction. Uses `ActiveRun.workerKey` (Phase C1 field).
+ * True if `workerKey` has any active run — i.e. is currently doing work
+ * and should be exempt from eviction.
+ *
+ * "Active run" here mirrors the precise semantics of
+ * `scriptHasActiveDispatch` (per-script equivalent): the worker is doing
+ * IPC-bound work right now. That covers three lifecycle classes:
+ *
+ *   1. A script-body dispatch awaiting `run-result` — `pendingRuns` has
+ *      the runId.
+ *   2. A parent-dispatched handler call awaiting `handler-result`
+ *      (commands.onInvoked, modal callbacks, etc.) — `pendingHandlerCalls`
+ *      has the runId.
+ *   3. A child-side async broadcast handler in flight — tracked via the
+ *      `broadcastHandlerInFlight` counter (the parent's only signal for
+ *      this lifecycle, since broadcast fires are fire-and-forget and
+ *      neither `pendingRuns` nor `pendingHandlerCalls` see them).
+ *
+ * **Why we intersect with `pendingRuns` / `pendingHandlerCalls` rather
+ * than scanning raw `activeRuns`:** Phase 9d.4.x deliberately keeps
+ * `activeRuns` entries alive past `run-result` so the script's late
+ * async work (setTimeout / setInterval / long-tail promise chains) can
+ * keep routing api calls through the run's stored api object. That
+ * survival horizon is for routing, NOT for "the worker is busy."
+ *
+ * Pre-fix: any script that ever ran on a worker left an `activeRuns`
+ * entry behind, and the eviction sweep saw that entry as "active work"
+ * → marked the worker exempt → idle eviction never fired. With the
+ * intersection, only genuinely in-flight IPC counts.
+ *
+ * Note that the design intent (per `v1.0-user-facing-changes.md` § "Long-
+ * lived background work needs to surface activity") is that scripts with
+ * pure-client-side `setInterval` work get evicted along with their
+ * worker. Authors who want to outlive idle eviction must call `api.*`
+ * periodically to keep the worker visible to the host. A dedicated
+ * keep-alive surface may land post-v1.0; for now the design accepts the
+ * trade-off.
  */
 function workerHasActiveRun(workerKey: ScriptRunnerWorkerKey): boolean {
-  for (const run of activeRuns.values()) {
-    if (run.workerKey === workerKey) return true;
+  for (const [runId, run] of activeRuns) {
+    if (run.workerKey !== workerKey) continue;
+    if (pendingRuns.has(runId) || pendingHandlerCalls.has(runId)) return true;
+  }
+  // Broadcast handlers on the child side don't go through activeRuns —
+  // sweep the counter for any script assigned to this worker.
+  for (const [scriptId, assignedWorker] of scriptWorkerAssignments) {
+    if (assignedWorker !== workerKey) continue;
+    if ((broadcastHandlerInFlight.get(scriptId) ?? 0) > 0) return true;
+  }
+  return false;
+}
+
+/**
+ * Phase F follow-up — true if `scriptId` has ANY dispatch in flight,
+ * either a real trigger run OR a handler invocation (macro / tool /
+ * broadcast / RPC endpoint / chat injection / world-info interceptor /
+ * DOM event handler). Used by hot-reload deferral to avoid firing a body
+ * re-run while the script is doing work that's not tracked via
+ * `trigger-registry.runningCounts` (which only sees real trigger
+ * events). Broadcast handlers in particular can run for many seconds
+ * (e.g. tracker's rerun handler invoking the LLM extractor loop)
+ * without ever being in `runningCounts`.
+ *
+ * **Why intersect with `pendingRuns` / `pendingHandlerCalls`:** raw
+ * `activeRuns` is NOT a precise "currently doing work" signal.
+ * Trigger-style script-body entries deliberately persist past
+ * `run-result` (Phase 9d.4.x, see the comment in `handleRunResultMessage`)
+ * so late-async work (`setTimeout` callbacks, `setInterval` ticks,
+ * long-tail `.then` chains) can keep routing api requests through the
+ * run's stored api object. That survival horizon is for ROUTING, not for
+ * "is the script blocking a reload?" detection. A run is genuinely
+ * in-flight only while it's awaiting a response from the child:
+ * `pendingRuns` clears on `run-result`; `pendingHandlerCalls` clears on
+ * `handler-result`. Intersecting `activeRuns` with those two maps gives
+ * the precise "still awaiting child response" set we need.
+ *
+ * Without this intersection, hot-reload defers forever after the first
+ * reload completes — the reload's own `activeRuns` entry persists,
+ * `scriptHasActiveDispatch` keeps returning `true`, the deferred-reload
+ * polling drain never finds idle, and every subsequent edit (and manual
+ * reload button press) gets silently queued behind a never-clearing flag.
+ */
+export function scriptHasActiveDispatch(scriptId: string): boolean {
+  // Async broadcast handler invocations are tracked separately — broadcast
+  // fires are fire-and-forget from the parent (`sendBroadcastFireToChild`),
+  // so they never show up in `pendingRuns` / `pendingHandlerCalls`. The
+  // child emits `broadcast-handler-started` / `broadcast-handler-finished`
+  // IPCs for thenable-returning handlers; this counter tracks them. See
+  // the `broadcastHandlerInFlight` JSDoc for full reasoning.
+  if ((broadcastHandlerInFlight.get(scriptId) ?? 0) > 0) return true;
+  for (const [runId, run] of activeRuns) {
+    if (run.scriptId !== scriptId) continue;
+    if (pendingRuns.has(runId) || pendingHandlerCalls.has(runId)) return true;
   }
   return false;
 }
@@ -5127,6 +5525,12 @@ async function evictWorker(workerKey: ScriptRunnerWorkerKey, reason: string): Pr
   spindle.log.info(
     `[script-runner] evicting worker '${workerKey}' (${reason}); released ${releasedCount.length} script assignment(s)`,
   );
+
+  // Phase E telemetry — bump BEFORE shutdownWorker so the counter reflects
+  // the eviction even if shutdown errors during teardown.
+  totalEvictions++;
+  lastEvictionAt     = Date.now();
+  lastEvictionReason = reason;
 
   await shutdownWorker(workerKey);
 }
@@ -5227,24 +5631,6 @@ export function stopEvictionSweep(): void {
     clearInterval(evictionSweepTimer);
     evictionSweepTimer = null;
   }
-}
-
-/**
- * Diagnostic: returns the current state of the runner. Useful for the
- * Phase 2 startup smoke test and future telemetry / status surfaces.
- */
-export function getScriptRunnerStatus(): {
-  spawned:        boolean;
-  processId:      string | null;
-  inFlightRuns:   number;
-  activeScripts:  string[];
-} {
-  return {
-    spawned:       hasAnyChildHandle(),
-    processId:     getChildHandle()?.processId ?? null,
-    inFlightRuns:  pendingRuns.size,
-    activeScripts: Array.from(activeRuns.values()).map((a) => a.scriptName),
-  };
 }
 
 // ─── Test-only inspectors (Phase 11.A) ─────────────────────────────────────
@@ -5494,6 +5880,37 @@ export function __hasLastDispatchSnapshotForTests(scriptId: string): boolean {
   return lastDispatchByScript.has(scriptId);
 }
 
+/**
+ * Set / clear the `broadcastHandlerInFlight` counter for a script. Used by
+ * `tests/engine/trigger-registry-reload.test.ts` to verify that
+ * `scriptHasActiveDispatch` reports broadcast-handler-in-flight correctly,
+ * which `fireReload` reads to drop autosave reloads + defer manual ones.
+ *
+ * In production this counter is only mutated by the
+ * `broadcast-handler-started` / `broadcast-handler-finished` IPC handlers
+ * (and cleared in `unregisterScriptFromChild`); the test seam exists so
+ * a controllable-runner test can simulate "a broadcast handler is mid-
+ * extraction" without standing up a full child process + bus.
+ * @internal
+ */
+export function __setBroadcastHandlerInFlightForTests(scriptId: string, count: number): void {
+  if (count <= 0) {
+    broadcastHandlerInFlight.delete(scriptId);
+  } else {
+    broadcastHandlerInFlight.set(scriptId, count);
+  }
+}
+
+/**
+ * Read the `broadcastHandlerInFlight` counter for a script. Used by tests
+ * to verify that the counter mutates in the expected direction across
+ * `broadcast-handler-started` / `broadcast-handler-finished` IPC arrivals.
+ * @internal
+ */
+export function __getBroadcastHandlerInFlightCountForTests(scriptId: string): number {
+  return broadcastHandlerInFlight.get(scriptId) ?? 0;
+}
+
 /** @internal — inspector for trackingSetsByRunId (memory-bound testing). */
 export function __getTrackingSetsByRunIdSizeForTests(): number {
   return trackingSetsByRunId.size;
@@ -5557,37 +5974,126 @@ export interface ScriptRunnerHealthSnapshot {
 }
 
 export function getRunnerHealth(): ScriptRunnerHealthSnapshot {
+  // processId: pick any spawned worker's processId. In single-worker mode
+  // this is exactly the one worker; in multi-worker mode it's a
+  // representative (the per-worker breakdown is in the Workers section of
+  // the Diagnostics panel). Pre-fix this read defaulted to
+  // DEFAULT_WORKER_KEY (`worker-1`); when worker-1 was evicted (idle or
+  // memory eviction) but other workers were still spawned, the field
+  // collapsed to `null` and the panel showed "Running (processId: <unknown>)".
+  // Falls back to null only when no workers are spawned at all.
+  const firstWorkerKey = childHandles.keys().next().value as
+    | ScriptRunnerWorkerKey
+    | undefined;
   return {
     totalRestartCount,
     lastRestartReason,
     currentBackoffAttempts: getRestartAttempts(DEFAULT_WORKER_KEY),
     childAlive:             hasAnyChildHandle(),
-    processId:              getChildHandle()?.processId ?? null,
+    processId:              firstWorkerKey
+      ? getChildHandle(firstWorkerKey)?.processId ?? null
+      : null,
   };
 }
 
 /**
- * Async — request a process-stats snapshot from the script-runner child
- * via the `diagnostic-stats-request` IPC. Resolves with the response, or
- * `null` if the request times out or no child is alive.
+ * Worker-pool diagnostics snapshot — synchronous, no IPC. Pairs with the
+ * async `queryWorkerMemoryBytes(key)` per-worker memory reads to produce
+ * the full Section B picture in the diagnostics report.
  *
- * Timeout default 2 seconds — generous; the child's response path is just
- * a `process.memoryUsage()` + `process.cpuUsage()` read, which is sub-
- * millisecond on a healthy subprocess. A timeout signals the child is
- * either hung (sync infinite loop) or recently crashed.
- *
- * Consumed by `backend.ts`'s diagnostic-report handler before invoking
- * `collectBackendDiagnostics`. The diagnostics collector itself stays
- * synchronous; this helper is the async-bridge.
+ * Fields:
+ *   - `configuredWorkerCount` — what the settings reader returns
+ *     (clamped to `[1, 16]`).
+ *   - `workers` — one row per currently-spawned worker.
+ *   - `totalAssignedScripts` — count of entries in
+ *     `scriptWorkerAssignments` (across all workers).
+ *   - `evictionTelemetry` — session-monotonic eviction counter + last
+ *     eviction's timestamp and reason.
+ *   - `settings` — current eviction config (idle timeout + memory
+ *     ceiling) as seen by the dispatcher, for the diagnostics consumer
+ *     to surface alongside the runtime state.
  */
-export async function queryRunnerStats(
+export interface WorkerPoolDiagnostics {
+  configuredWorkerCount: number;
+  workers: Array<{
+    workerKey:           ScriptRunnerWorkerKey;
+    processId:           string;
+    lastActivityMs:      number;
+    assignedScriptCount: number;
+    restartAttempts:     number;
+  }>;
+  totalAssignedScripts: number;
+  evictionTelemetry: {
+    totalEvictions:     number;
+    lastEvictionAt:     number | null;
+    lastEvictionReason: string | null;
+  };
+  settings: {
+    idleTimeoutMs:      number;
+    memoryCeilingBytes: number;
+  };
+}
+
+export function getWorkerPoolDiagnostics(): WorkerPoolDiagnostics {
+  // Per-worker assigned-script counts. Iterate the assignment Map once
+  // rather than scanning per-worker for O(N) vs O(N*M).
+  const assignedByWorker = new Map<ScriptRunnerWorkerKey, number>();
+  for (const w of scriptWorkerAssignments.values()) {
+    assignedByWorker.set(w, (assignedByWorker.get(w) ?? 0) + 1);
+  }
+
+  const workers: WorkerPoolDiagnostics['workers'] = [];
+  for (const [workerKey, handle] of childHandles) {
+    workers.push({
+      workerKey,
+      processId:           handle.processId,
+      lastActivityMs:      workerLastActivity.get(workerKey) ?? 0,
+      assignedScriptCount: assignedByWorker.get(workerKey) ?? 0,
+      restartAttempts:     getRestartAttempts(workerKey),
+    });
+  }
+  // Stable order — alphabetical by workerKey makes the diagnostic output
+  // deterministic across reads even as the Map iteration order drifts.
+  workers.sort((a, b) => a.workerKey.localeCompare(b.workerKey));
+
+  const config = evictionConfigReader();
+
+  return {
+    configuredWorkerCount: workerCountReader(),
+    workers,
+    totalAssignedScripts:  scriptWorkerAssignments.size,
+    evictionTelemetry: {
+      totalEvictions,
+      lastEvictionAt,
+      lastEvictionReason,
+    },
+    settings: {
+      idleTimeoutMs:      config.idleTimeoutMs,
+      memoryCeilingBytes: config.memoryCeilingBytes,
+    },
+  };
+}
+
+/**
+ * Query a single worker's full diagnostic stats (RSS / heap / CPU /
+ * uptime) via the `diagnostic-stats-request` IPC. Resolves with the
+ * response or `null` if the worker isn't spawned, the send fails, or
+ * the response times out (default 2 s).
+ *
+ * Private helper — used by the legacy `queryRunnerStats` aggregator
+ * below. Could be exposed later if per-worker stats become part of the
+ * public Diagnostics surface.
+ */
+async function queryWorkerStats(
+  workerKey: ScriptRunnerWorkerKey,
   timeoutMs = 2_000,
 ): Promise<import('../types/script-runner-ipc.js').DiagnosticStatsResponse | null> {
-  if (!hasAnyChildHandle()) return null;
+  const handle = getChildHandle(workerKey);
+  if (!handle) return null;
 
-  const requestId = `diag-${nextDiagnosticRequestSeq++}`;
+  const requestId = `diag-stats-${nextDiagnosticRequestSeq++}`;
 
-  return new Promise(resolve => {
+  return new Promise((resolve) => {
     let settled = false;
     const timer = setTimeout(() => {
       if (settled) return;
@@ -5596,7 +6102,7 @@ export async function queryRunnerStats(
       resolve(null);
     }, timeoutMs);
 
-    pendingDiagnosticStats.set(requestId, response => {
+    pendingDiagnosticStats.set(requestId, (response) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -5604,21 +6110,72 @@ export async function queryRunnerStats(
     });
 
     try {
-      getChildHandle()?.send({ type: 'diagnostic-stats-request', requestId });
+      handle.send({ type: 'diagnostic-stats-request', requestId });
     } catch (err) {
-      // Child died between the null check and the send — clean up the
-      // pending entry and resolve with null. The lifecycle handler will
-      // eventually retry-spawn but we don't wait for that here.
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       pendingDiagnosticStats.delete(requestId);
       spindle.log.warn(
-        `[script-runner] diagnostic-stats-request send failed: ${err instanceof Error ? err.message : String(err)}`,
+        `[script-runner] diagnostic-stats-request send to worker '${workerKey}' failed: ${err instanceof Error ? err.message : String(err)}`,
       );
       resolve(null);
     }
   });
+}
+
+/**
+ * Async — request an aggregated process-stats snapshot across every
+ * currently-spawned worker. Resolves with the aggregate response, or
+ * `null` if no workers are spawned OR every per-worker query failed or
+ * timed out.
+ *
+ * Aggregation: sums RSS / heap / CPU times across workers (sum is the
+ * meaningful "total LumiScript footprint" reading); takes the max of
+ * `uptimeSec` (the longest-lived worker's uptime is the most useful
+ * "runner uptime" proxy — newly-spawned workers reset the clock).
+ *
+ * Timeout default 2 seconds *per worker* — the queries run in parallel,
+ * so total wall-clock time is bounded by the slowest worker, not the
+ * sum. A worker that times out is omitted from the aggregate rather
+ * than failing the whole call.
+ *
+ * Pre-fix this routed to `getChildHandle()` (default
+ * `DEFAULT_WORKER_KEY` = `worker-1`); when worker-1 was evicted but
+ * others survived, the response never arrived, the request timed out,
+ * and the Diagnostics panel surfaced "Stats request timed out — child
+ * may be hung in a sync block." (False alarm — children were fine,
+ * routing was wrong.)
+ *
+ * Consumed by `backend.ts`'s diagnostic-report handler before invoking
+ * `collectBackendDiagnostics`.
+ */
+export async function queryRunnerStats(
+  timeoutMs = 2_000,
+): Promise<import('../types/script-runner-ipc.js').DiagnosticStatsResponse | null> {
+  const workerKeys = [...childHandles.keys()];
+  if (workerKeys.length === 0) return null;
+
+  const responses = await Promise.all(
+    workerKeys.map((k) => queryWorkerStats(k, timeoutMs)),
+  );
+  const successful = responses.filter(
+    (r): r is import('../types/script-runner-ipc.js').DiagnosticStatsResponse =>
+      r !== null,
+  );
+  if (successful.length === 0) return null;
+
+  return {
+    type:        'diagnostic-stats-response',
+    requestId:   'aggregate',  // synthetic; this response is parent-constructed
+    rss:         successful.reduce((s, r) => s + r.rss,         0),
+    heapTotal:   successful.reduce((s, r) => s + r.heapTotal,   0),
+    heapUsed:    successful.reduce((s, r) => s + r.heapUsed,    0),
+    external:    successful.reduce((s, r) => s + r.external,    0),
+    cpuUserUs:   successful.reduce((s, r) => s + r.cpuUserUs,   0),
+    cpuSystemUs: successful.reduce((s, r) => s + r.cpuSystemUs, 0),
+    uptimeSec:   Math.max(...successful.map((r) => r.uptimeSec)),
+  };
 }
 
 /** @internal */
@@ -5657,6 +6214,10 @@ export function __resetForTests(): void {
     clearInterval(evictionSweepTimer);
     evictionSweepTimer = null;
   }
+  // Eviction telemetry — reset so tests see a clean slate.
+  totalEvictions     = 0;
+  lastEvictionAt     = null;
+  lastEvictionReason = null;
   openAwaitTimeoutOverride   = null;
   restartBackoffOverride     = null;
   stabilityThresholdOverride = null;

@@ -400,6 +400,30 @@ function handleScriptUnregister(msg: ScriptUnregisterMessage): void {
   // Without this, those tables would accumulate entries across the
   // child's lifetime as scripts come and go.
   clearScriptStateOnUnregister(msg.scriptId);
+  // v1.0 — globalThis convention auto-cleanup. User scripts that opt into
+  // the namespace `globalThis.__lumiscript_script_<scriptId>_*` get those
+  // keys swept here when the script is unregistered (disable, delete,
+  // or master-toggle-off cleanup). Scripts using arbitrary `globalThis`
+  // keys are unaffected — their state continues to persist across
+  // disable/re-enable cycles, matching the v0.x behaviour.
+  //
+  // Why this matters: prior to this sweep, a script that stored state
+  // on `globalThis` (e.g. an in-flight-tracking flag, a cache, a counter)
+  // would carry that state across disable + re-enable, leading to
+  // confusing stale-state bugs (canonical example: tracker's
+  // `__lumiscript_tracker_rerun_inflight` flag stuck "true" after a
+  // mid-flight disable, breaking the rerun button on re-enable).
+  //
+  // Convention recommendation in user-facing docs; this is forward-
+  // compatible with a future `api.scriptStorage` API that would use the
+  // same prefix internally for proper auto-scoped per-script state.
+  const scriptStatePrefix = `__lumiscript_script_${msg.scriptId}_`;
+  const globalKeys = Object.keys(globalThis as Record<string, unknown>);
+  for (const key of globalKeys) {
+    if (key.startsWith(scriptStatePrefix)) {
+      delete (globalThis as Record<string, unknown>)[key];
+    }
+  }
 }
 
 // ─── Internal helpers ───────────────────────────────────────────────────────

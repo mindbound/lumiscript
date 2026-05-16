@@ -173,7 +173,10 @@ describe('host-dispatcher: failed / timed_out lifecycle', () => {
 
     fireFailed(ipc, 'kill -9 simulated');
 
-    await expect(runPromise).rejects.toThrow(/child failed.*kill -9 simulated/);
+    // v1.0 multi-worker: error message names the specific worker. Pre-fix
+    // this matched `/child failed.*kill -9 simulated/` — the message used
+    // to say `child failed (...)` regardless of worker.
+    await expect(runPromise).rejects.toThrow(/worker '.*' failed.*kill -9 simulated/);
     expect(__getPendingRunIdsForTests().length).toBe(0);
   });
 

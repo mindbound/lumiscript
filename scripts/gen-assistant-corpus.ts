@@ -49,6 +49,8 @@ import {
   PERMISSION_DESCRIPTIONS,
   TRIGGER_MODEL_INTRO,
   REDIRECTS,
+  DIRECTIVES,
+  DIRECTIVES_INTRO,
 } from '../src/components/reference/ReferenceTab.js';
 import { LUMISCRIPT_DEFS } from '../src/types/editor-lib.js';
 import type {
@@ -426,6 +428,7 @@ console.log(`         · BUILTIN_COMPONENTS       ${BUILTIN_COMPONENTS.length}`)
 console.log(`         · BUILTIN_COUNCIL_PROMPT   ${BUILTIN_COUNCIL_PROMPT.length}`);
 console.log(`         · BUILTIN_ICONS            ${BUILTIN_ICONS.length}`);
 console.log(`         · BUILTIN_TYPES            ${BUILTIN_TYPES.length}`);
+console.log(`         · DIRECTIVES               ${DIRECTIVES.length}`);
 console.log(`         · LUMISCRIPT_DEFS          ${LUMISCRIPT_DEFS.length} chars`);
 
 const apiIndex = buildApiIndex();
@@ -786,6 +789,18 @@ function renderCheatSheet(): string {
   lines.push('|---|---|---|');
   for (const ev of BROADCAST_EVENTS) {
     lines.push(`| \`${ev.name}\` | ${escapeCell(ev.payload)} | ${escapeCell(ev.emittedBy)} |`);
+  }
+  lines.push('');
+
+  // ── Runtime directives ────────────────────────────────────────────────────
+  lines.push('## Runtime directives');
+  lines.push('');
+  lines.push(DIRECTIVES_INTRO);
+  lines.push('');
+  lines.push('| Directive | Applies to | What it does |');
+  lines.push('|---|---|---|');
+  for (const d of DIRECTIVES) {
+    lines.push(`| \`// ${d.directive}\` | ${escapeCell(d.appliesTo)} | ${escapeCell(d.description)} |`);
   }
   lines.push('');
 

@@ -15,6 +15,8 @@
  */
 
 import {
+  DIRECTIVES,
+  DIRECTIVES_INTRO,
   EVENTS,
   PERM_GROUPS,
   BROADCAST_EVENTS,
@@ -146,6 +148,14 @@ function renderLumiScriptEvents(): string {
   return `## LumiScript Events\n\n${body}\n\n*${note}*`;
 }
 
+function renderDirectives(): string {
+  const body = table(
+    ['Directive', 'Applies to', 'What it does'],
+    DIRECTIVES.map(d => [`\`// ${d.directive}\``, d.appliesTo, d.description]),
+  );
+  return `## Directives\n\n${DIRECTIVES_INTRO}\n\n${body}`;
+}
+
 function renderLumiScriptMacros(): string {
   const sections = LS_MACRO_GROUPS.map(group => {
     const body = table(
@@ -253,6 +263,7 @@ export function renderReferenceMarkdown(): string {
     renderLumiverseEvents(),
     renderPermissionMatrix(),
     renderLumiScriptEvents(),
+    renderDirectives(),
     renderLumiScriptMacros(),
     renderKeyTypes(),
     renderApiFunctions(),

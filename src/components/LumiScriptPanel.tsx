@@ -314,9 +314,20 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
             const stickyError = !msg.success
               ? true
               : existingInfo?.stickyError ?? false;
-            const displayDot: ExecutionDot = !msg.success || stickyError
-              ? 'error'
-              : 'success';
+            // v1.0 — `idleAfter: true` overrides the success/error inference
+            // and resets to 'idle' (grey). Used by the synthetic
+            // `execution_ended` the backend sends when a script is
+            // disabled mid-flight: the script didn't really succeed or
+            // fail, it was forcibly stopped. 'idle' communicates that
+            // more truthfully than green-success or red-error. Only the
+            // dot is overridden — sticky-error semantics still apply for
+            // the next REAL run-end (so a prior failure stays sticky
+            // through the disable cleanup).
+            const displayDot: ExecutionDot = msg.idleAfter
+              ? 'idle'
+              : !msg.success || stickyError
+                ? 'error'
+                : 'success';
             // Preserve a meaningful prior duration across trailing no-op
             // batches. The trigger-registry aggregator already reports the
             // correct max duration for any single burst of concurrent fires,

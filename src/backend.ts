@@ -1,7 +1,7 @@
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI
 
 import type { FrontendToBackend } from './types/messages.js';
-import type { LumiScriptSettings } from './types/script.js';
+import type { LumiScriptSettings, Script } from './types/script.js';
 import { DEFAULT_SETTINGS } from './types/script.js';
 import { ScriptStorage } from './storage/script-storage.js';
 import { SettingsStore } from './storage/settings-store.js';
@@ -15,7 +15,7 @@ import { registerLumiScriptMacros, updateLumiScriptActiveMacro } from './macros.
 import {
   TriggerRegistry,
   runScriptViaChild,
-  hasNoReloadDirective,
+  hasReloadOnEditDirective,
   type LsReloadPayload,
 } from './engine/trigger-registry.js';
 import { createHash } from 'node:crypto';
@@ -115,7 +115,9 @@ import {
   redistributeAllAssignments,
   unregisterScriptFromChild,
   getRunnerHealth,
+  getWorkerPoolDiagnostics,
   queryRunnerStats,
+  queryWorkerMemoryBytes,
   // shutdownScriptRunner — Phase 10 will wire this into teardown
 } from './script-runner/host-dispatcher.js';
 import {
@@ -719,7 +721,10 @@ function scheduleHotReload(scriptId: string, previousCode: string): void {
     hotReloadTimers.delete(scriptId);
     const latest = scriptStorage.getScript(scriptId);
     if (!latest || !latest.enabled || latest.type !== 'trigger') return;
-    if (hasNoReloadDirective(latest.code)) return;
+    // Opt-in by default — fire only when the script explicitly declares
+    // the `// @ls:reload-on-edit` directive. See trigger-registry's
+    // `hasReloadOnEditDirective` JSDoc for the cost-asymmetry rationale.
+    if (!hasReloadOnEditDirective(latest.code)) return;
 
     const payload: LsReloadPayload = {
       reason:           'autosave',
@@ -740,15 +745,167 @@ function scheduleHotReload(scriptId: string, previousCode: string): void {
 }
 
 /**
+ * Per-script teardown: fires `ls:teardown`, then clears all per-script
+ * registrations (tools, macros, RPC endpoints, DOM, modals, input bar
+ * actions, float widgets, drawer tabs), unregisters the script from
+ * the script-runner subprocess, and resets the FE execution indicator
+ * to idle.
+ *
+ * Called from two paths:
+ *   - `update_script` with `enabled: false` — single-script disable.
+ *   - `syncTriggers` when the master toggle goes OFF — iterates all
+ *     enabled scripts so per-script registrations don't leak past
+ *     the master toggle (v1.0 fix for the asymmetry where master-
+ *     toggle-off previously only cleared Spindle event subscriptions).
+ *
+ * `disabledScript` is the stored record at `enabled=true`. Pass `null`
+ * only if the script has been deleted from storage between detection
+ * and call — `fireTeardown` is skipped in that case (the handler
+ * couldn't run anyway) but the cleanup proceeds since it's keyed by
+ * `scriptId`.
+ */
+async function teardownDisabledScript(scriptId: string, disabledScript: Script | null): Promise<void> {
+  const disabledName = disabledScript?.name ?? scriptId;
+
+  // Fire ls:teardown BEFORE any state cleanup so the handler can
+  // still access tools/macros/world-info it registered. No-op for
+  // scripts that don't declare the trigger. Handler errors + timeouts
+  // are logged and do NOT block the cleanup that follows.
+  if (disabledScript) {
+    await triggerRegistry.fireTeardown(disabledScript, 'disabled');
+  }
+  clearByScriptId(scriptId);
+  pushInjections();
+  const clearedTools = clearToolsByScriptId(scriptId);
+  for (const name of clearedTools) spindle.unregisterTool(name);
+  pushTools();
+  const clearedMacros = clearMacrosByScriptId(scriptId);
+  for (const name of clearedMacros) {
+    try { spindle.unregisterMacro(name); } catch { /* swallow */ }
+  }
+  // Macro interceptor + message content processor entries owned by
+  // this script. No host-side `unregister` per-entry — LumiScript's
+  // single LS-house registration with the host stays live; dropping
+  // entries from our registry means the next dispatch pass simply
+  // skips them. Idempotent on already-disabled scripts.
+  clearMacroInterceptorsByScriptId(scriptId);
+  clearMessageContentProcessorsByScriptId(scriptId);
+  clearWorldInfoInterceptorsByScriptId(scriptId);
+  // RPC endpoints registered via `api.rpc.sync` / `api.rpc.handle`.
+  // Spindle's auto-cleanup on extension unload tears down every
+  // LumiScript-owned endpoint regardless of which script owns it,
+  // so per-script granularity here lets us preserve other scripts'
+  // endpoints when disabling just one. v0.26.0.
+  const clearedRpcEndpoints = clearRpcEndpointsByScriptId(scriptId);
+  for (const endpoint of clearedRpcEndpoints) {
+    try { spindle.rpcPool.unregister(endpoint); } catch { /* swallow */ }
+  }
+  // v0.26.1 — drop the per-script Collection dedup cache. The
+  // wrappers themselves are then GC-able once the dispatcher's
+  // persistentHandles + persistentObjToHandleId entries clear.
+  clearCollectionHandleCacheByScriptId(scriptId);
+  logCleanup('tool',  'disabled', disabledName, clearedTools);
+  logCleanup('macro', 'disabled', disabledName, clearedMacros);
+  logCleanup('rpc',   'disabled', disabledName, clearedRpcEndpoints);
+  // Dismiss any advanced modals this script still has open. Marking
+  // a pending reason of 'teardown' means the frontend's dismissal
+  // echo (ls_modal_dismissed) will fire the script's onDismiss
+  // handlers with `reason: 'teardown'` — even though the handlers
+  // themselves may have already been collected by ls:teardown.
+  for (const modalId of advancedModalsByScript(scriptId)) {
+    markModalPendingDismissal(modalId, 'teardown');
+    send({ type: 'ls_modal_dismiss', modalId });
+  }
+  // Destroy any input-bar actions this script still has registered.
+  // Unlike modals, there's no dismissal-reason discriminant — input
+  // bar actions are fire-and-forget click surfaces. Emit destroy
+  // messages so the frontend tears down host state, then drop
+  // registry entries in one sweep.
+  for (const actionId of listActionsByScript(scriptId)) {
+    send({ type: 'ls_input_bar_action_destroy', scriptId, actionId });
+  }
+  clearActionsByScript(scriptId);
+  // Destroy any float widgets this script still has open. Same
+  // lifecycle shape as input-bar actions — fire-and-forget
+  // destroy messages, then drop registry entries via the
+  // destroyWidget + dropEntry pair (marking destroyed first so
+  // any in-flight drag-end echoes become harmless no-ops).
+  for (const widgetId of liveWidgetsByScript(scriptId)) {
+    destroyWidgetInRegistry(widgetId);
+    send({ type: 'ls_float_widget_destroy', widgetId });
+    dropWidgetEntry(widgetId);
+  }
+  // Destroy any drawer tabs this script has registered. Simple
+  // lifecycle like input-bar actions — emit destroy messages,
+  // then clear the registry entries.
+  for (const tabId of listTabsByScript(scriptId)) {
+    send({ type: 'ls_drawer_tab_destroy', scriptId, tabId });
+  }
+  clearTabsByScript(scriptId);
+  cleanupDOMScript(scriptId);
+  send({ type: 'dom_cleanup_script', scriptId });
+  // Phase 9f-1 — fully unregister the script from the script-runner
+  // child. Sends `script-unregister` IPC + clears parent-side
+  // per-script tables in host-dispatcher. Mirrors the canonical
+  // teardown that the surrounding clearByScriptId / clearXxxByScript
+  // calls perform for the rest of the registries.
+  unregisterScriptFromChild(scriptId);
+  // v1.0 — force-reset the FE's execution indicator for this
+  // script. Without this the "Running" dot stays lit indefinitely
+  // when a script is disabled mid-flight: the in-flight broadcast
+  // handler / trigger run might eventually settle and emit
+  // `broadcast-handler-finished` / its own `execution_ended`, but
+  // (a) it might genuinely hang if `proxy.cleanup` doesn't unstick
+  // a particular await, and (b) even when it does settle the FE
+  // shouldn't keep showing "Running" for a script the user just
+  // disabled.
+  //
+  // `idleAfter: true` resets the dot to 'idle' (grey) rather than
+  // inferring 'success' (green) from `success: true`. The script
+  // didn't really complete a run — the user forcibly stopped it.
+  // 'idle' communicates that more truthfully than green-success.
+  // A real `execution_ended` arriving later (from a delayed
+  // broadcast-handler-finished IPC) will harmlessly re-update
+  // the dot to success/error per its actual outcome.
+  send({
+    type:       'execution_ended',
+    scriptId,
+    runId:      `disable-cleanup:${scriptId}:${Date.now()}`,
+    success:    true,
+    duration:   0,
+    idleAfter:  true,
+  });
+}
+
+/**
  * Synchronise the trigger registry with the current settings + scripts.
  * Called after any script mutation, settings change, or on first storage load.
  *
- * - If LumiScript is globally disabled: remove all spindle.on() subscriptions.
+ * - If LumiScript is globally disabled: run per-script teardown for every
+ *   enabled script (mirrors what `update_script` with `enabled:false`
+ *   does, for each script), then remove all spindle.on() subscriptions.
  * - Otherwise: rebuild subscriptions for all enabled trigger scripts.
  */
 async function syncTriggers(): Promise<void> {
   if (!settingsStore.isLoaded || !scriptStorage.store.isLoaded) return;
   if (!settingsStore.get().enabled) {
+    // v1.0 — full per-script teardown on master-toggle-off. Previously
+    // this branch only cleared Spindle event subscriptions via
+    // `triggerRegistry.unregisterAll()`; per-script registrations
+    // (tools, macros, RPC endpoints, DOM injections, modals, input
+    // bar actions, float widgets, drawer tabs, etc.) would persist
+    // past the master toggle until the extension fully reloaded.
+    // Iterating enabled scripts and running the same teardown that
+    // `update_script` does for `enabled:false` removes the asymmetry.
+    for (const script of scriptStorage.getScripts()) {
+      if (!script.enabled) continue;
+      await teardownDisabledScript(script.id, script).catch(err => {
+        spindle.log.warn(
+          `[LumiScript] master-toggle teardown failed for "${script.name}": ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+    }
     triggerRegistry.unregisterAll();
     return;
   }
@@ -990,6 +1147,20 @@ spindle.onFrontendMessage(async (raw, userId) => {
         // the child either timed out or wasn't alive.
         const runnerHealth = getRunnerHealth();
         const runnerStats  = await queryRunnerStats();
+        // Phase F (v1.0 runtime-isolation) — worker-pool diagnostics.
+        // Sync state from `getWorkerPoolDiagnostics()` plus async parallel
+        // per-worker memory queries. Total read time bounded by the per-
+        // worker 2 s timeout (parallel — so total ≤ 2 s even with 16 workers).
+        const poolSnapshot = getWorkerPoolDiagnostics();
+        const perWorkerRss = await Promise.all(
+          poolSnapshot.workers.map(async (w) => ({
+            workerKey: w.workerKey,
+            rss:       await queryWorkerMemoryBytes(w.workerKey),
+          })),
+        );
+        const rssByWorker = new Map<string, number | null>(
+          perWorkerRss.map((r) => [r.workerKey, r.rss]),
+        );
         const scriptRunner: ScriptRunnerProbeResult = {
           ...runnerHealth,
           stats: runnerStats === null
@@ -1003,6 +1174,20 @@ spindle.onFrontendMessage(async (raw, userId) => {
                 cpuSystemUs: runnerStats.cpuSystemUs,
                 uptimeSec:   runnerStats.uptimeSec,
               },
+          pool: {
+            configuredWorkerCount: poolSnapshot.configuredWorkerCount,
+            workers: poolSnapshot.workers.map((w) => ({
+              workerKey:           w.workerKey,
+              processId:           w.processId,
+              lastActivityMs:      w.lastActivityMs,
+              assignedScriptCount: w.assignedScriptCount,
+              restartAttempts:     w.restartAttempts,
+              rss:                 rssByWorker.get(w.workerKey) ?? null,
+            })),
+            totalAssignedScripts: poolSnapshot.totalAssignedScripts,
+            evictionTelemetry:    poolSnapshot.evictionTelemetry,
+            settings:             poolSnapshot.settings,
+          },
         };
 
         // Assistant probe — bundles the four checks that drive the
@@ -1773,6 +1958,14 @@ spindle.onFrontendMessage(async (raw, userId) => {
           'code' in msg.patch
             ? scriptStorage.getScript(msg.id)?.code ?? ''
             : null;
+        // v1.0 — capture pre-update enabled state so the `ls:startup`
+        // re-fire below can detect the disabled→enabled transition.
+        // Skipped when the patch doesn't touch `enabled` (no transition
+        // possible).
+        const previousEnabledForStartup =
+          'enabled' in msg.patch
+            ? scriptStorage.getScript(msg.id)?.enabled ?? false
+            : null;
 
         let updated;
         try {
@@ -1798,16 +1991,19 @@ spindle.onFrontendMessage(async (raw, userId) => {
         }
         // Phase D — schedule a hot-reload-on-edit if the patch touched
         // code, the script is an enabled trigger, the code is byte-
-        // different, and there's no `@no-reload-on-edit` directive.
-        // Debounce coalesces typing bursts; eligibility is re-checked at
-        // fire time to handle settings/code changes during the debounce.
+        // different, AND the script opts in via `@ls:reload-on-edit`.
+        // Opt-in by default (post-design re-evaluation — see trigger-
+        // registry's `hasReloadOnEditDirective` JSDoc). Debounce
+        // coalesces typing bursts; eligibility is re-checked at fire
+        // time inside `scheduleHotReload` to handle settings/code
+        // changes during the debounce.
         if (
           previousCodeForReload !== null &&
           updated &&
           updated.enabled &&
           updated.type === 'trigger' &&
           updated.code !== previousCodeForReload &&
-          !hasNoReloadDirective(updated.code)
+          hasReloadOnEditDirective(updated.code)
         ) {
           scheduleHotReload(updated.id, previousCodeForReload);
         }
@@ -1823,96 +2019,45 @@ spindle.onFrontendMessage(async (raw, userId) => {
         ) {
           pushTools();
         }
-        // Clear injections, tools, macros, and DOM when a script is disabled so stale entries don't linger.
+        // v1.0 — re-fire `ls:startup` on the disabled→enabled transition.
+        // Symmetric partner to `ls:teardown` on the enabled→disabled side;
+        // gives scripts a chance to re-establish state that disable's
+        // cleanup wiped (most importantly, the bottom-of-body
+        // `api.broadcast.on(...)` registrations that would otherwise
+        // stay dormant until the next real trigger event refires the
+        // body).
+        //
+        // Gated on:
+        //   - `'enabled' in msg.patch` (only when the patch actually
+        //     touches the enabled flag)
+        //   - `msg.patch.enabled === true` (transitioning TO enabled)
+        //   - `previousEnabledForStartup === false` (was disabled
+        //     before — skips the case where the patch sets enabled:true
+        //     on an already-enabled script, e.g. cosmetic re-saves)
+        //   - `updated` exists (defensive)
+        //
+        // Fire-and-forget — backend.ts doesn't await the body run.
+        // `fireStartup` internally skips scripts that don't declare
+        // `ls:startup` in their triggers list, same as `fireTeardown`.
+        if (
+          'enabled' in msg.patch &&
+          msg.patch.enabled === true &&
+          previousEnabledForStartup === false &&
+          updated
+        ) {
+          void triggerRegistry.fireStartup(updated).catch((err) => {
+            spindle.log.warn(
+              `[LumiScript] fireStartup (re-enable) for "${updated.name}" failed: ` +
+              `${err instanceof Error ? err.message : String(err)}`,
+            );
+          });
+        }
+        // Clear injections, tools, macros, and DOM when a script is
+        // disabled so stale entries don't linger. Extracted into a
+        // helper (`teardownDisabledScript`) since the master-toggle-off
+        // path now runs the same cleanup for every enabled script.
         if ('enabled' in msg.patch && !msg.patch.enabled) {
-          const disabledScript  = scriptStorage.getScript(msg.id);
-          const disabledName    = disabledScript?.name ?? msg.id;
-          // Fire ls:teardown BEFORE any state cleanup so the handler can
-          // still access tools/macros/world-info it registered. No-op for
-          // scripts that don't declare the trigger. Handler errors + timeouts
-          // are logged and do NOT block the cleanup that follows.
-          if (disabledScript) {
-            // The stored record still has enabled=true at this point (we're
-            // about to update it) — fireTeardown's guard expects the current
-            // enabled state, so use the stored record rather than the patch.
-            await triggerRegistry.fireTeardown(disabledScript, 'disabled');
-          }
-          clearByScriptId(msg.id);
-          pushInjections();
-          const clearedTools = clearToolsByScriptId(msg.id);
-          for (const name of clearedTools) spindle.unregisterTool(name);
-          pushTools();
-          const clearedMacros = clearMacrosByScriptId(msg.id);
-          for (const name of clearedMacros) {
-            try { spindle.unregisterMacro(name); } catch { /* swallow */ }
-          }
-          // Macro interceptor + message content processor entries owned by
-          // this script. No host-side `unregister` per-entry — LumiScript's
-          // single LS-house registration with the host stays live; dropping
-          // entries from our registry means the next dispatch pass simply
-          // skips them. Idempotent on already-disabled scripts.
-          clearMacroInterceptorsByScriptId(msg.id);
-          clearMessageContentProcessorsByScriptId(msg.id);
-          clearWorldInfoInterceptorsByScriptId(msg.id);
-          // RPC endpoints registered via `api.rpc.sync` / `api.rpc.handle`.
-          // Spindle's auto-cleanup on extension unload tears down every
-          // LumiScript-owned endpoint regardless of which script owns it,
-          // so per-script granularity here lets us preserve other scripts'
-          // endpoints when disabling just one. v0.26.0.
-          const clearedRpcEndpoints = clearRpcEndpointsByScriptId(msg.id);
-          for (const endpoint of clearedRpcEndpoints) {
-            try { spindle.rpcPool.unregister(endpoint); } catch { /* swallow */ }
-          }
-          // v0.26.1 — drop the per-script Collection dedup cache. The
-          // wrappers themselves are then GC-able once the dispatcher's
-          // persistentHandles + persistentObjToHandleId entries clear.
-          clearCollectionHandleCacheByScriptId(msg.id);
-          logCleanup('tool',  'disabled', disabledName, clearedTools);
-          logCleanup('macro', 'disabled', disabledName, clearedMacros);
-          logCleanup('rpc',   'disabled', disabledName, clearedRpcEndpoints);
-          // Dismiss any advanced modals this script still has open. Marking
-          // a pending reason of 'teardown' means the frontend's dismissal
-          // echo (ls_modal_dismissed) will fire the script's onDismiss
-          // handlers with `reason: 'teardown'` — even though the handlers
-          // themselves may have already been collected by ls:teardown.
-          for (const modalId of advancedModalsByScript(msg.id)) {
-            markModalPendingDismissal(modalId, 'teardown');
-            send({ type: 'ls_modal_dismiss', modalId });
-          }
-          // Destroy any input-bar actions this script still has registered.
-          // Unlike modals, there's no dismissal-reason discriminant — input
-          // bar actions are fire-and-forget click surfaces. Emit destroy
-          // messages so the frontend tears down host state, then drop
-          // registry entries in one sweep.
-          for (const actionId of listActionsByScript(msg.id)) {
-            send({ type: 'ls_input_bar_action_destroy', scriptId: msg.id, actionId });
-          }
-          clearActionsByScript(msg.id);
-          // Destroy any float widgets this script still has open. Same
-          // lifecycle shape as input-bar actions — fire-and-forget
-          // destroy messages, then drop registry entries via the
-          // destroyWidget + dropEntry pair (marking destroyed first so
-          // any in-flight drag-end echoes become harmless no-ops).
-          for (const widgetId of liveWidgetsByScript(msg.id)) {
-            destroyWidgetInRegistry(widgetId);
-            send({ type: 'ls_float_widget_destroy', widgetId });
-            dropWidgetEntry(widgetId);
-          }
-          // Destroy any drawer tabs this script has registered. Simple
-          // lifecycle like input-bar actions — emit destroy messages,
-          // then clear the registry entries.
-          for (const tabId of listTabsByScript(msg.id)) {
-            send({ type: 'ls_drawer_tab_destroy', scriptId: msg.id, tabId });
-          }
-          clearTabsByScript(msg.id);
-          cleanupDOMScript(msg.id);
-          send({ type: 'dom_cleanup_script', scriptId: msg.id });
-          // Phase 9f-1 — fully unregister the script from the script-runner
-          // child. Sends `script-unregister` IPC + clears parent-side
-          // per-script tables in host-dispatcher. Mirrors the canonical
-          // teardown that the surrounding clearByScriptId / clearXxxByScript
-          // calls perform for the rest of the registries.
-          unregisterScriptFromChild(msg.id);
+          await teardownDisabledScript(msg.id, scriptStorage.getScript(msg.id));
         }
         break;
       }

@@ -108,11 +108,14 @@ export interface LumiScriptSettings {
    * Larger values distribute scripts across more processes for better fault
    * isolation (one bad script no longer affects others) at the cost of
    * more memory (~50-100 MB per worker at idle).
-   * Default: 1.  Range: 1 – 16 (host enforces a 16-process cap per
+   * Default: 4.  Range: 1 – 16 (host enforces a 16-process cap per
    * extension via Spindle's `MAX_BACKEND_PROCESSES`).
    *
-   * Phase C1: setting exists but is not yet consumed; runtime always
-   * uses 1 worker. Phase C2 promotes this to actual pool sizing.
+   * v1.0: full multi-worker dispatch via assignment + lazy spawn;
+   * eviction, rebalancing, and cross-worker routing all implemented.
+   * Default 4 ships on by default after Sections 1–8 of the manual
+   * test pass came back clean and the disable-mid-flight cluster
+   * closed.
    */
   workerCount: number;
   /**
@@ -219,10 +222,12 @@ module.exports = {
 export const DEFAULT_SETTINGS: LumiScriptSettings = {
   enabled: true,
   scriptTimeoutMs: 60_000,
-  // Phase C1: defaults are conservative (single worker, 30-min idle).
-  // Phase D will promote `workerCount` default to 4 once multi-worker
-  // is fully validated. Range / consumer logic lives in Phase C2.
-  workerCount: 1,
+  // v1.0 — multi-worker default. Phases A–F shipped; Sections 1–8 of
+  // the manual test pass came back green; the disable-mid-flight bug
+  // cluster closed; tracker pair migrated to the broadcast pattern as
+  // the canonical cross-worker cookbook. Bumping the default from 1
+  // to 4 makes multi-worker fanout the out-of-the-box behaviour.
+  workerCount: 4,
   workerIdleTimeoutMs: 30 * 60 * 1000,
   workerMemoryCeilingMb: 512,
   consoleHistoryLimit: 500,

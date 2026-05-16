@@ -13,7 +13,7 @@ export const TRIGGER_EVENT_GROUPS: EventGroup[] = [
   {
     label: 'LumiScript',
     events: [
-      { name: 'ls:startup', description: 'Fires once at LumiScript boot. Use for tool registration, cache pre-warming, and other one-time init.' },
+      { name: 'ls:startup', description: "Fires when the script enters the active state: at LumiScript boot AND after the user toggles the script from disabled→enabled. Symmetric partner to ls:teardown. Use for tool registration, cache pre-warming, broadcast subscription setup, and other init that should run whenever the script becomes runnable. After a disable→enable round-trip, the case body re-runs in full — bottom-of-body api.broadcast.on(...) calls also re-execute and re-register the subscriptions that disable's cleanup wiped, so the case body itself can be empty if the only thing you need is the body firing." },
       { name: 'ls:teardown', description: "Fires before the script is disabled or deleted. Use for cleanup of external state (dynamic world-book entries, registered tools outside api.tools lifecycle, persistent storage). Handler has full api access and a 10s budget — errors are logged, not toasted. data.reason is 'disabled' | 'deleted'." },
     ],
   },

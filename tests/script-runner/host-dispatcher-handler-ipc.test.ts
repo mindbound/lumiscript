@@ -323,9 +323,11 @@ describe('host-dispatcher: handler-IPC under child crash', () => {
     const errAVal = await errA;
     const errBVal = await errB;
     expect(errAVal).toBeInstanceOf(Error);
-    expect((errAVal as Error).message).toContain('child failed');
+    // v1.0 multi-worker: error message says `worker '<key>' failed (...)`
+    // instead of bare `child failed`. Match the per-worker shape.
+    expect((errAVal as Error).message).toMatch(/worker '.*' failed/);
     expect(errBVal).toBeInstanceOf(Error);
-    expect((errBVal as Error).message).toContain('child failed');
+    expect((errBVal as Error).message).toMatch(/worker '.*' failed/);
     expect(__getPendingHandlerCallIdsForTests().length).toBe(0);
   });
 });

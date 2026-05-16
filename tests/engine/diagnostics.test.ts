@@ -409,6 +409,148 @@ describe('collectBackendDiagnostics — Section B (script-runner)', () => {
       .checks.find(c => c.label === 'Total restarts (this session)')!;
     expect(check.message).toContain('heartbeat-timeout');
   });
+
+  // ── Phase F — Worker pool diagnostics ────────────────────────────────────
+
+  test('pool omitted → no worker-pool checks appear (backward compat)', () => {
+    const section = collectBackendDiagnostics(makeDeps({
+      scriptRunner: {
+        totalRestartCount:      0,
+        lastRestartReason:      null,
+        currentBackoffAttempts: 0,
+        childAlive:             true,
+        processId:              'p',
+        stats:                  null,
+        // pool: omitted
+      },
+    })).sections.find(s => s.id === 'scriptRunner')!;
+
+    expect(section.checks.find(c => c.label === 'Worker pool config')).toBeUndefined();
+    expect(section.checks.find(c => c.label === 'Workers')).toBeUndefined();
+    expect(section.checks.find(c => c.label === 'Total script assignments')).toBeUndefined();
+    expect(section.checks.find(c => c.label === 'Evictions (this session)')).toBeUndefined();
+  });
+
+  test('pool provided → config recap check with workerCount + idle + memory', () => {
+    const section = collectBackendDiagnostics(makeDeps({
+      scriptRunner: {
+        totalRestartCount:      0,
+        lastRestartReason:      null,
+        currentBackoffAttempts: 0,
+        childAlive:             true,
+        processId:              'p',
+        stats:                  null,
+        pool: {
+          configuredWorkerCount: 4,
+          workers:               [],
+          totalAssignedScripts:  0,
+          evictionTelemetry:     { totalEvictions: 0, lastEvictionAt: null, lastEvictionReason: null },
+          settings:              { idleTimeoutMs: 30 * 60_000, memoryCeilingBytes: 512 * 1024 * 1024 },
+        },
+      },
+    })).sections.find(s => s.id === 'scriptRunner')!;
+
+    const config = section.checks.find(c => c.label === 'Worker pool config')!;
+    expect(config.status).toBe('info');
+    expect(config.message).toContain('4 configured');
+    expect(config.message).toContain('0 spawned');
+    expect(config.message).toContain('30 min');
+    expect(config.message).toContain('512 MB');
+  });
+
+  test('pool with spawned workers → per-worker rows + total assignments', () => {
+    const section = collectBackendDiagnostics(makeDeps({
+      scriptRunner: {
+        totalRestartCount:      0,
+        lastRestartReason:      null,
+        currentBackoffAttempts: 0,
+        childAlive:             true,
+        processId:              'p',
+        stats:                  null,
+        pool: {
+          configuredWorkerCount: 2,
+          workers: [
+            { workerKey: 'worker-1', processId: 'abc12345xyz', lastActivityMs: Date.now() - 5_000,  assignedScriptCount: 3, restartAttempts: 0, rss: 87 * 1024 * 1024 },
+            { workerKey: 'worker-2', processId: 'def67890xyz', lastActivityMs: Date.now() - 90_000, assignedScriptCount: 2, restartAttempts: 0, rss: 102 * 1024 * 1024 },
+          ],
+          totalAssignedScripts:  5,
+          evictionTelemetry:     { totalEvictions: 0, lastEvictionAt: null, lastEvictionReason: null },
+          settings:              { idleTimeoutMs: 30 * 60_000, memoryCeilingBytes: 512 * 1024 * 1024 },
+        },
+      },
+    })).sections.find(s => s.id === 'scriptRunner')!;
+
+    const workers = section.checks.find(c => c.label === 'Workers')!;
+    expect(workers.status).toBe('info');
+    expect(workers.message).toContain('worker-1');
+    expect(workers.message).toContain('worker-2');
+    expect(workers.message).toContain('abc12345');  // shortened pid
+    expect(workers.message).toContain('3 script');
+    expect(workers.message).toContain('87 MB');
+    expect(workers.message).toContain('102 MB');
+
+    const total = section.checks.find(c => c.label === 'Total script assignments')!;
+    expect(total.status).toBe('info');
+    expect(total.message).toContain('5');
+  });
+
+  test('eviction telemetry: 0 evictions vs N evictions', () => {
+    const checkForEvictions = (totalEvictions: number, lastReason: string | null) =>
+      collectBackendDiagnostics(makeDeps({
+        scriptRunner: {
+          totalRestartCount:      0,
+          lastRestartReason:      null,
+          currentBackoffAttempts: 0,
+          childAlive:             true,
+          processId:              'p',
+          stats:                  null,
+          pool: {
+            configuredWorkerCount: 2,
+            workers:               [],
+            totalAssignedScripts:  0,
+            evictionTelemetry: {
+              totalEvictions,
+              lastEvictionAt:     lastReason ? Date.now() : null,
+              lastEvictionReason: lastReason,
+            },
+            settings: { idleTimeoutMs: 30 * 60_000, memoryCeilingBytes: 512 * 1024 * 1024 },
+          },
+        },
+      })).sections.find(s => s.id === 'scriptRunner')!
+        .checks.find(c => c.label === 'Evictions (this session)')!;
+
+    const none = checkForEvictions(0, null);
+    expect(none.message).toContain('No evictions');
+
+    const some = checkForEvictions(2, 'idle > 1800s');
+    expect(some.message).toContain('2 eviction');
+    expect(some.message).toContain('idle > 1800s');
+  });
+
+  test('pool with rss=null on a worker (per-worker query timed out) → shows ? MB', () => {
+    const section = collectBackendDiagnostics(makeDeps({
+      scriptRunner: {
+        totalRestartCount:      0,
+        lastRestartReason:      null,
+        currentBackoffAttempts: 0,
+        childAlive:             true,
+        processId:              'p',
+        stats:                  null,
+        pool: {
+          configuredWorkerCount: 2,
+          workers: [
+            { workerKey: 'worker-1', processId: 'p1', lastActivityMs: Date.now(), assignedScriptCount: 1, restartAttempts: 0, rss: null },
+          ],
+          totalAssignedScripts:  1,
+          evictionTelemetry:     { totalEvictions: 0, lastEvictionAt: null, lastEvictionReason: null },
+          settings:              { idleTimeoutMs: 30 * 60_000, memoryCeilingBytes: 512 * 1024 * 1024 },
+        },
+      },
+    })).sections.find(s => s.id === 'scriptRunner')!;
+
+    const workers = section.checks.find(c => c.label === 'Workers')!;
+    expect(workers.message).toContain('? MB');
+  });
 });
 
 // ─── Assistant section (Lisa) ───────────────────────────────────────────────
