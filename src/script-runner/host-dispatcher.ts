@@ -105,8 +105,11 @@ import { getActiveChatId, getActiveCharacterId } from '../engine/binding.js';
 import {
   scriptHasPinningRegistrations,
   getRegistrationCountsForScript,
+  setPinningHooks,
   type ScriptRegistrationCounts,
 } from '../engine/script-pinning.js';
+import { countUserEventSubscriptionsByScriptId } from '../engine/broadcast-bus.js';
+import { collectDescendantIds } from '../engine/dom-registry.js';
 
 // ─── Script resolver (Phase 9e) ─────────────────────────────────────────────
 //
@@ -901,6 +904,18 @@ const lastDispatchByScript = new Map<string, ScriptDispatchSnapshot>();
 //   - script-unregister IPC: walk all entries for the script + invoke each
 const handlerCleanups = new Map<string, Map<string, () => void>>();
 
+// v1.0.0-rc.4+ — wire script-pinning's hooks now that `handlerCleanups` is
+// in scope. `countUserEventSubscriptionsByScriptId` lives in broadcast-bus
+// (engine layer); script-pinning calls both via the injected hooks so it
+// doesn't have to import host-dispatcher directly (which would create a
+// cycle, since host-dispatcher already imports script-pinning).
+//
+// See `script-pinning.ts` § "Hook injection" for the full rationale.
+setPinningHooks({
+  handlerCleanupCount:   (scriptId) => handlerCleanups.get(scriptId)?.size ?? 0,
+  userBroadcastSubCount: (scriptId) => countUserEventSubscriptionsByScriptId(scriptId),
+});
+
 // ─── Per-script modal-handle map (Phase 9d.4.b) ──────────────────────────────
 //
 // `api.ui.showModal()` returns a `ModalHandle` synchronously to user code,
@@ -1416,7 +1431,93 @@ function invokeAndDropHandlerCleanup(scriptId: string, handlerId: string): boole
   }
   scriptCleanups.delete(handlerId);
   if (scriptCleanups.size === 0) handlerCleanups.delete(scriptId);
+  // v1.0.0-rc.4+ — also drop the reverse-index entry for this handler if
+  // it was a DOM event listener. Without this, the reverse index leaks
+  // stale handlerId references for any unregister-handler IPC that didn't
+  // come via `handle.remove()` (e.g., user-script calling the on()-
+  // returned unsub closure explicitly).
+  untrackDomListenerHandler(scriptId, handlerId);
   return true;
+}
+
+// ─── DOM event listener reverse index (v1.0.0-rc.4+) ────────────────────────
+//
+// Pre-rc.4 behaviour: when a script called `handle.on('click', fn)` on a
+// DOMHandle, the parent stored the canonical's unsub in `handlerCleanups`
+// keyed by `(scriptId, handlerId)`. When the script later removed the
+// element via `handle.remove()`, the canonical's `clearListeners(elementId)`
+// detached the FE-side listener but the parent's handlerCleanups entry
+// was NOT dropped — its unsub became a no-op (its underlying state was
+// already gone). The orphan entry was inert until rc.4's pinning policy
+// started reading `handlerCleanups[scriptId].size` for the `handlerClosures`
+// pin signal, at which point orphans cause over-pinning: a script that
+// has injected + then removed all its DOM stays falsely pinned via the
+// stale entries.
+//
+// Fix: track `(scriptId, elementId) → Set<handlerId>` so the handle-
+// remove path can locate the handlerCleanups entries that belong to
+// each removed element + cascade-drop them via
+// `invokeAndDropHandlerCleanup`. Only kind='domEventListener' uses this
+// reverse index — kind='domDelegate' delegates aren't tied to a single
+// elementId (they bind to a selector at a root scope) so their cleanup
+// stays explicit (script calls the unsub or script-unregister fires).
+const domListenerHandlers = new Map<string, Map<string, Set<string>>>();
+
+function trackDomListenerHandler(scriptId: string, elementId: string, handlerId: string): void {
+  let scriptMap = domListenerHandlers.get(scriptId);
+  if (!scriptMap) {
+    scriptMap = new Map();
+    domListenerHandlers.set(scriptId, scriptMap);
+  }
+  let handlerSet = scriptMap.get(elementId);
+  if (!handlerSet) {
+    handlerSet = new Set();
+    scriptMap.set(elementId, handlerSet);
+  }
+  handlerSet.add(handlerId);
+}
+
+/**
+ * Remove a single handlerId from the reverse index. Called from
+ * `invokeAndDropHandlerCleanup` so the reverse index stays in sync with
+ * the forward `handlerCleanups` map regardless of which path drops the
+ * entry (explicit user-script unsub OR cascade from
+ * `dropDomListenerHandlersForElement`).
+ *
+ * Idempotent — silently no-ops if no entry is found.
+ */
+function untrackDomListenerHandler(scriptId: string, handlerId: string): void {
+  const scriptMap = domListenerHandlers.get(scriptId);
+  if (!scriptMap) return;
+  for (const [elementId, handlerSet] of scriptMap) {
+    if (handlerSet.delete(handlerId) && handlerSet.size === 0) {
+      scriptMap.delete(elementId);
+    }
+  }
+  if (scriptMap.size === 0) domListenerHandlers.delete(scriptId);
+}
+
+/**
+ * Cascade-cleanup entry point for the `handleInternalDomRequest` 'remove'
+ * branch. Walks the reverse index for the given `(scriptId, elementId)`,
+ * invokes + drops every matching `handlerCleanups` entry.
+ *
+ * Caller iterates [elementId, ...descendants] before invoking — descendants
+ * are computed via `collectDescendantIds` BEFORE the canonical
+ * `handle.remove()` runs (which unregisters the dom-registry entries and
+ * would make the descendant traversal return an empty list).
+ */
+function dropDomListenerHandlersForElement(scriptId: string, elementId: string): void {
+  const scriptMap = domListenerHandlers.get(scriptId);
+  if (!scriptMap) return;
+  const handlerSet = scriptMap.get(elementId);
+  if (!handlerSet) return;
+  // Snapshot before iterating — `invokeAndDropHandlerCleanup` calls
+  // `untrackDomListenerHandler` which mutates the same Set.
+  const handlerIds = [...handlerSet];
+  for (const handlerId of handlerIds) {
+    invokeAndDropHandlerCleanup(scriptId, handlerId);
+  }
 }
 
 const pendingRuns = new Map<string, PendingRun>();
@@ -2447,6 +2548,12 @@ function handleRegisterHandler(msg: RegisterHandler): void {
       try {
         const canonicalUnsub = canonicalHandle.on(msg.event, wrapper, msg.options);
         recordHandlerCleanup(msg.scriptId, msg.handlerId, canonicalUnsub);
+        // v1.0.0-rc.4+ — populate the elementId → handlerId reverse
+        // index so `handleInternalDomRequest`'s 'remove' branch can
+        // cascade-drop this entry when the underlying DOM element is
+        // removed. Without this, pinning's `handlerClosures` count
+        // accumulates stale entries for elements that no longer exist.
+        trackDomListenerHandler(msg.scriptId, msg.elementId, msg.handlerId);
       } catch (err) {
         spindle.log.warn(
           `[script-runner] DOMHandle.on failed (script ${msg.scriptId}, ` +
@@ -3318,6 +3425,20 @@ async function handleInternalDomRequest(
       handle.update(html);
       value = undefined;
     } else if (action === 'remove') {
+      // v1.0.0-rc.4+ — cascade-drop handlerCleanups entries for any DOM
+      // event listeners attached to this element OR its descendants
+      // BEFORE the canonical `handle.remove()` tears down the dom-
+      // registry entries (collectDescendantIds would return [] after
+      // that). Without this cascade, the parent's handlerCleanups map
+      // accumulates orphan entries (canonical unsubs that no-op
+      // because the FE listener is gone), which inflates pinning's
+      // `handlerClosures` count and keeps scripts pinned past their
+      // UI lifecycle. See `notes/post-eviction-registration-pinning.md`
+      // § "DOMHandle.remove cascade" for the full backstory.
+      const descendants = collectDescendantIds(elementId);
+      for (const id of [elementId, ...descendants]) {
+        dropDomListenerHandlersForElement(active.scriptId, id);
+      }
       handle.remove();
       // Drop our entry — canonical removed the element + cascaded to
       // descendants + cleared listeners. Future method calls on this
@@ -5195,6 +5316,7 @@ export function unregisterScriptFromChild(scriptId: string): void {
   pendingFloatWidgets.delete(scriptId);
   pendingDrawerTabs.delete(scriptId);
   handlerCleanups.delete(scriptId);
+  domListenerHandlers.delete(scriptId);
   broadcastForwarders.delete(scriptId);
   persistentHandles.delete(scriptId);
   // v0.26.1 — drop the obj→handleId reverse map alongside the persistent
@@ -6509,6 +6631,7 @@ export function __resetForTests(): void {
   broadcastForwarders.clear();
   lastDispatchByScript.clear();
   handlerCleanups.clear();
+  domListenerHandlers.clear();
   pendingModals.clear();
   pendingDomHandles.clear();
   pendingAdvancedModals.clear();

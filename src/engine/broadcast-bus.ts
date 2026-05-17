@@ -203,3 +203,34 @@ export function countSubscriptions(): number {
   for (const set of bus.values()) n += set.size;
   return n;
 }
+
+/**
+ * v1.0.0-rc.4+ — count user-event broadcast subscriptions owned by
+ * `scriptId`, EXCLUDING any subscription whose event name starts with
+ * `ls:` (the LumiScript-internal reserved prefix).
+ *
+ * Why the prefix filter: `ls:startup`, `ls:tool:*`, `ls:collection:*`,
+ * etc. are engine-emitted lifecycle events. They fire only as a side-
+ * effect of the script's own activity (a body run, a tool registration,
+ * a db mutation). A worker hosting an "ls:*-only" subscriber never needs
+ * to stay warm waiting for one to arrive externally — when the producing
+ * activity happens, the worker is by definition already alive (or being
+ * spawned). Counting these would over-pin every script that subscribes
+ * to `ls:startup` for re-init purposes.
+ *
+ * Cross-worker user-event broadcasts (`tracker:rerun-state-changed`,
+ * `my-app:custom-event`) ARE load-bearing — a forwarded broadcast from
+ * worker A into worker B's dead bus is silently dropped. Pinning closes
+ * that gap.
+ *
+ * O(subs-for-this-script) via the reverse handlerIndex; cheap.
+ */
+export function countUserEventSubscriptionsByScriptId(scriptId: string): number {
+  const entries = handlerIndex.get(scriptId);
+  if (!entries) return 0;
+  let count = 0;
+  for (const entry of entries) {
+    if (!entry.event.startsWith('ls:')) count++;
+  }
+  return count;
+}

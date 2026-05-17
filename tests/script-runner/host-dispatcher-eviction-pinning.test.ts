@@ -31,6 +31,7 @@ import {
   __resetForTests,
   __getWorkerForScriptForTests,
   __setWorkerLastActivityForTests,
+  __recordHandlerCleanupForTests,
   setWorkerCountReader,
   setEvictionConfigReader,
   evictionSweep,
@@ -40,6 +41,7 @@ import {
 import { addTool, clearAll as clearToolStore }       from '../../src/engine/tool-store.js';
 import { addMacro, clearAll as clearMacroStore }     from '../../src/engine/macro-store.js';
 import { addEndpoint, clearAll as clearRpcStore }    from '../../src/engine/rpc-store.js';
+import { on as broadcastOn, clearAll as clearBroadcast } from '../../src/engine/broadcast-bus.js';
 import {
   installMultiWorkerMockIpc,
   type MultiWorkerMockIpc,
@@ -63,6 +65,7 @@ describe('v1.0.0-rc.3 — eviction pinning by active registrations', () => {
     clearToolStore();
     clearMacroStore();
     clearRpcStore();
+    clearBroadcast();
     setWorkerCountReader(() => 4);
     setEvictionConfigReader(() => ({
       idleTimeoutMs:      100,                      // aggressive — instant idle eviction
@@ -145,6 +148,58 @@ describe('v1.0.0-rc.3 — eviction pinning by active registrations', () => {
         scriptId:   's1',
         scriptName: 'Test Script',
       });
+      __setWorkerLastActivityForTests('worker-1', Date.now() - 10_000);
+
+      await evictionSweep();
+
+      expect(stopCallCount(mock.pairForKey('worker-1').childHandle)).toBe(0);
+    });
+
+    test('v1.0.0-rc.4 — handler closure (DOM listener / command / etc.) pins the hosting worker', async () => {
+      // Tracker UI case: script with a DOM injection + event listener,
+      // no entries in any of the per-handle registries. Pre-rc.4 this
+      // script would have been evictable; the click handler would
+      // become a null pointer on respawn.
+      __getWorkerForScriptForTests('s1');
+      __recordHandlerCleanupForTests('s1', 'h-dom-1', () => {});
+      __setWorkerLastActivityForTests('worker-1', Date.now() - 10_000);
+
+      await evictionSweep();
+
+      expect(stopCallCount(mock.pairForKey('worker-1').childHandle)).toBe(0);
+    });
+
+    test('v1.0.0-rc.4 — user-event broadcast subscription pins the hosting worker', async () => {
+      // Tracker-UI / tracker pair: cross-worker broadcasts forwarded
+      // into a dead worker silently drop. Pinning closes the gap.
+      __getWorkerForScriptForTests('s1');
+      broadcastOn('tracker:rerun-state-changed', () => {}, 's1');
+      __setWorkerLastActivityForTests('worker-1', Date.now() - 10_000);
+
+      await evictionSweep();
+
+      expect(stopCallCount(mock.pairForKey('worker-1').childHandle)).toBe(0);
+    });
+
+    test('v1.0.0-rc.4 — ls:*-only broadcast subscription does NOT pin (engine-lifecycle events filtered)', async () => {
+      // A script that only subscribes to `ls:startup` (re-init pattern)
+      // has no load-bearing reason to keep the worker warm — ls:* events
+      // fire as side-effects of local activity.
+      __getWorkerForScriptForTests('s1');
+      broadcastOn('ls:startup', () => {}, 's1');
+      broadcastOn('ls:tool:invoked', () => {}, 's1');
+      __setWorkerLastActivityForTests('worker-1', Date.now() - 10_000);
+
+      await evictionSweep();
+
+      // Worker IS evicted — no pinning from ls:*-only subs.
+      expect(stopCallCount(mock.pairForKey('worker-1').childHandle)).toBe(1);
+    });
+
+    test('v1.0.0-rc.4 — mixed ls:* + user-event subs DO pin (any non-ls:* sub is enough)', async () => {
+      __getWorkerForScriptForTests('s1');
+      broadcastOn('ls:startup',            () => {}, 's1');
+      broadcastOn('my-app:custom-event',   () => {}, 's1');
       __setWorkerLastActivityForTests('worker-1', Date.now() - 10_000);
 
       await evictionSweep();
@@ -285,12 +340,34 @@ describe('v1.0.0-rc.3 — eviction pinning by active registrations', () => {
       expect(w1!.pinningScripts[0]!.scriptId).toBe('s1');
       expect(w1!.pinningScripts[0]!.counts.tools).toBe(1);
       expect(w1!.pinningScripts[0]!.counts.macros).toBe(1);
+      expect(w1!.pinningScripts[0]!.counts.handlerClosures).toBe(0);
+      expect(w1!.pinningScripts[0]!.counts.userBroadcastSubs).toBe(0);
       expect(w1!.pinningScripts[0]!.counts.total).toBe(2);
 
       // The other workers have no assignments → no pinning scripts.
       const w2 = diag.workers.find((w) => w.workerKey === 'worker-2');
       expect(w2!.pinnedByRegistrations).toBe(false);
       expect(w2!.pinningScripts).toHaveLength(0);
+    });
+
+    test('v1.0.0-rc.4 — diagnostics breakdown surfaces handlerClosures + userBroadcastSubs counts', async () => {
+      __getWorkerForScriptForTests('s1');
+      __recordHandlerCleanupForTests('s1', 'h-dom-1', () => {});
+      __recordHandlerCleanupForTests('s1', 'h-dom-2', () => {});
+      broadcastOn('tracker:event',  () => {}, 's1');
+      broadcastOn('my-app:other',   () => {}, 's1');
+      broadcastOn('ls:startup',     () => {}, 's1');  // EXCLUDED from count
+
+      const diag = getWorkerPoolDiagnostics();
+      const w1 = diag.workers.find((w) => w.workerKey === 'worker-1');
+      expect(w1!.pinnedByRegistrations).toBe(true);
+      expect(w1!.pinningScripts).toHaveLength(1);
+
+      const counts = w1!.pinningScripts[0]!.counts;
+      expect(counts.handlerClosures).toBe(2);
+      expect(counts.userBroadcastSubs).toBe(2);  // ls:startup excluded
+      expect(counts.tools).toBe(0);
+      expect(counts.total).toBe(4);
     });
 
     test('totalEvictionsSkippedByPin increments per pinned worker per sweep pass', async () => {

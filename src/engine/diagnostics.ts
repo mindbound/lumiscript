@@ -257,6 +257,20 @@ export interface ScriptRunnerProbeResult {
           rpcEndpoints:          number;
           floatWidgets:          number;
           advancedModals:        number;
+          /**
+           * v1.0.0-rc.4+ — DOM event listeners (`handle.on`), DOM
+           * delegates (`api.ui.dom.delegate`), command handlers, and
+           * the handler-IPC kinds also surfaced by per-handle registry
+           * counts above. See `script-pinning.ts` for the full
+           * breakdown of contributing register-handler kinds.
+           */
+          handlerClosures:       number;
+          /**
+           * v1.0.0-rc.4+ — non-`ls:*` broadcast subscriptions. `ls:*`
+           * engine-lifecycle subs excluded since they only fire as
+           * side-effects of local activity.
+           */
+          userBroadcastSubs:     number;
           total:                 number;
         };
       }>;
@@ -764,6 +778,8 @@ function formatRegistrationBreakdown(c: {
   rpcEndpoints:          number;
   floatWidgets:          number;
   advancedModals:        number;
+  handlerClosures:       number;
+  userBroadcastSubs:     number;
 }): string {
   const parts: string[] = [];
   if (c.tools > 0)                  parts.push(`tools=${c.tools}`);
@@ -777,6 +793,8 @@ function formatRegistrationBreakdown(c: {
   if (c.rpcEndpoints > 0)           parts.push(`rpcEndpoints=${c.rpcEndpoints}`);
   if (c.floatWidgets > 0)           parts.push(`floatWidgets=${c.floatWidgets}`);
   if (c.advancedModals > 0)         parts.push(`advancedModals=${c.advancedModals}`);
+  if (c.handlerClosures > 0)        parts.push(`handlerClosures=${c.handlerClosures}`);
+  if (c.userBroadcastSubs > 0)      parts.push(`userBroadcastSubs=${c.userBroadcastSubs}`);
   return parts.join(', ');
 }
 
