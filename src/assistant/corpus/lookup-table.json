@@ -2836,6 +2836,215 @@
       "Promise"
     ]
   },
+  "api.presets.list": {
+    "kind": "method",
+    "method": "api.presets.list",
+    "namespace": "api.presets",
+    "signature": "list(options?: { limit?: number; offset?: number }): Promise<{ data: Preset[]; total: number }>",
+    "description": "List presets. Defaults: limit 50, max 200.",
+    "permissions": [
+      "presets"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.presets.get",
+      "api.presets.create",
+      "api.presets.update",
+      "api.presets.delete",
+      "api.presets.blocks.list",
+      "Promise"
+    ]
+  },
+  "api.presets.get": {
+    "kind": "method",
+    "method": "api.presets.get",
+    "namespace": "api.presets",
+    "signature": "get(presetId: string): Promise<Preset | null>",
+    "description": "Get a preset by id. Returns `null` if not found.",
+    "permissions": [
+      "presets"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.presets.list",
+      "api.presets.create",
+      "api.presets.update",
+      "api.presets.delete",
+      "api.presets.blocks.list",
+      "Promise"
+    ]
+  },
+  "api.presets.create": {
+    "kind": "method",
+    "method": "api.presets.create",
+    "namespace": "api.presets",
+    "signature": "create(input: PresetCreateInput): Promise<Preset>",
+    "description": "Create a new preset. `name` + `provider` required.",
+    "permissions": [
+      "presets"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.presets.list",
+      "api.presets.get",
+      "api.presets.update",
+      "api.presets.delete",
+      "api.presets.blocks.list",
+      "PresetCreateInput"
+    ]
+  },
+  "api.presets.update": {
+    "kind": "method",
+    "method": "api.presets.update",
+    "namespace": "api.presets",
+    "signature": "update(presetId: string, input: PresetUpdateInput): Promise<Preset>",
+    "description": "Update a preset. All fields optional.",
+    "permissions": [
+      "presets"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.presets.list",
+      "api.presets.get",
+      "api.presets.create",
+      "api.presets.delete",
+      "api.presets.blocks.list",
+      "PresetUpdateInput"
+    ]
+  },
+  "api.presets.delete": {
+    "kind": "method",
+    "method": "api.presets.delete",
+    "namespace": "api.presets",
+    "signature": "delete(presetId: string): Promise<boolean>",
+    "description": "Delete a preset. Returns `true` if deleted.",
+    "permissions": [
+      "presets"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.presets.list",
+      "api.presets.get",
+      "api.presets.create",
+      "api.presets.update",
+      "api.presets.blocks.list",
+      "Promise"
+    ]
+  },
+  "api.presets.blocks.list": {
+    "kind": "method",
+    "method": "api.presets.blocks.list",
+    "namespace": "api.presets",
+    "signature": "list(presetId: string): Promise<PromptBlock[]>",
+    "description": "Return the preset's ordered prompt blocks.",
+    "permissions": [
+      "presets"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.presets.list",
+      "api.presets.get",
+      "api.presets.create",
+      "api.presets.update",
+      "api.presets.delete",
+      "Promise"
+    ]
+  },
+  "api.presets.blocks.get": {
+    "kind": "method",
+    "method": "api.presets.blocks.get",
+    "namespace": "api.presets",
+    "signature": "get(presetId: string, blockId: string): Promise<PromptBlock | null>",
+    "description": "Get a block by id. Returns `null` if not found.",
+    "permissions": [
+      "presets"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.presets.list",
+      "api.presets.get",
+      "api.presets.create",
+      "api.presets.update",
+      "api.presets.delete",
+      "Promise"
+    ]
+  },
+  "api.presets.blocks.create": {
+    "kind": "method",
+    "method": "api.presets.blocks.create",
+    "namespace": "api.presets",
+    "signature": "create(presetId: string, input: PromptBlockCreateInput, options?: { index?: number }): Promise<PromptBlock>",
+    "description": "Create a prompt block. `options.index` inserts at a specific position; omitted appends.",
+    "permissions": [
+      "presets"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.presets.list",
+      "api.presets.get",
+      "api.presets.create",
+      "api.presets.update",
+      "api.presets.delete",
+      "PromptBlockCreateInput"
+    ]
+  },
+  "api.presets.blocks.update": {
+    "kind": "method",
+    "method": "api.presets.blocks.update",
+    "namespace": "api.presets",
+    "signature": "update(presetId: string, blockId: string, input: PromptBlockUpdateInput): Promise<PromptBlock>",
+    "description": "Update a block. All fields except `id` are optional.",
+    "permissions": [
+      "presets"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.presets.list",
+      "api.presets.get",
+      "api.presets.create",
+      "api.presets.update",
+      "api.presets.delete",
+      "PromptBlockUpdateInput"
+    ]
+  },
+  "api.presets.blocks.delete": {
+    "kind": "method",
+    "method": "api.presets.blocks.delete",
+    "namespace": "api.presets",
+    "signature": "delete(presetId: string, blockId: string): Promise<boolean>",
+    "description": "Delete a block. Returns `true` if deleted.",
+    "permissions": [
+      "presets"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.presets.list",
+      "api.presets.get",
+      "api.presets.create",
+      "api.presets.update",
+      "api.presets.delete",
+      "Promise"
+    ]
+  },
+  "api.presets.categories.list": {
+    "kind": "method",
+    "method": "api.presets.categories.list",
+    "namespace": "api.presets",
+    "signature": "list(presetId: string): Promise<PromptBlockCategoryGroup[]>",
+    "description": "Return category groups derived from the preset's ordered blocks.",
+    "permissions": [
+      "presets"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.presets.list",
+      "api.presets.get",
+      "api.presets.create",
+      "api.presets.update",
+      "api.presets.delete",
+      "Promise"
+    ]
+  },
   "api.regexScripts.list": {
     "kind": "method",
     "method": "api.regexScripts.list",
@@ -3230,7 +3439,7 @@
     "kind": "method",
     "method": "api.rpc.sync",
     "namespace": "api.rpc",
-    "signature": "sync<T = unknown>(channel: string, value: T, options?: { as?: string }): Promise<string>",
+    "signature": "sync<T = unknown>(channel: string, value: T, options?: { as?: string; policy?: RpcPolicy }): Promise<string>",
     "description": "Publish the latest value on a channel. Returns the fully-qualified endpoint.",
     "permissions": [],
     "examples": [],
@@ -3238,6 +3447,7 @@
       "api.rpc.handle",
       "api.rpc.read",
       "api.rpc.unregister",
+      "RpcPolicy",
       "Promise"
     ]
   },
@@ -3245,7 +3455,7 @@
     "kind": "method",
     "method": "api.rpc.handle",
     "namespace": "api.rpc",
-    "signature": "handle<T = unknown>(\n    channel: string,\n    handler: (ctx: RpcRequestContext) => T | Promise<T>,\n    options?: { as?: string },\n  ): Promise<string>",
+    "signature": "handle<T = unknown>(\n    channel: string,\n    handler: (ctx: RpcRequestContext) => T | Promise<T>,\n    options?: { as?: string; policy?: RpcPolicy },\n  ): Promise<string>",
     "description": "Register an on-demand handler. Returns the fully-qualified endpoint.",
     "permissions": [],
     "examples": [],
@@ -3254,7 +3464,8 @@
       "api.rpc.read",
       "api.rpc.unregister",
       "RpcRequestContext",
-      "Promise"
+      "Promise",
+      "RpcPolicy"
     ]
   },
   "api.rpc.read": {

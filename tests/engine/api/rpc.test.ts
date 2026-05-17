@@ -144,7 +144,37 @@ describe('sync', () => {
     await api.sync('state', { ok: true });
 
     const rpcPoolSync = (globalThis as any).spindle.rpcPool.sync;
-    expect(rpcPoolSync).toHaveBeenCalledWith('tracker.state', { ok: true });
+    // RC2 — canonical always passes the 3rd `policy` arg to Spindle,
+    // forwarding `options?.policy` (undefined when caller omits it).
+    expect(rpcPoolSync).toHaveBeenCalledWith('tracker.state', { ok: true }, undefined);
+  });
+
+  test('forwards options.policy as the 3rd argument to spindle.rpcPool.sync', async () => {
+    const deps = createTestDeps({ script: { name: 'tracker' } });
+    const api = buildRpcAPI(deps);
+
+    await api.sync('state', { ok: true }, { policy: { requires: [] } });
+
+    const rpcPoolSync = (globalThis as any).spindle.rpcPool.sync;
+    expect(rpcPoolSync).toHaveBeenCalledWith(
+      'tracker.state',
+      { ok: true },
+      { requires: [] },
+    );
+  });
+
+  test('forwards options.policy with non-empty requires through to Spindle', async () => {
+    const deps = createTestDeps({ script: { name: 'tracker' } });
+    const api = buildRpcAPI(deps);
+
+    await api.sync('state', 1, { policy: { requires: ['chat_mutation'] } });
+
+    const rpcPoolSync = (globalThis as any).spindle.rpcPool.sync;
+    expect(rpcPoolSync).toHaveBeenCalledWith(
+      'tracker.state',
+      1,
+      { requires: ['chat_mutation'] },
+    );
   });
 
   test('returns the fully-qualified endpoint string', () => {
@@ -246,9 +276,56 @@ describe('handle', () => {
     const result = wrapper({
       endpoint: 'lumiscript.tracker.greet',
       requesterExtensionId: 'foreign-ext',
+      effectivePermissions: [],
     });
     expect(result).toBe('hello-foreign-ext');
     expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  test('forwards options.policy as the 3rd argument to spindle.rpcPool.handle', async () => {
+    const deps = createTestDeps({ script: { name: 'tracker' } });
+    const api = buildRpcAPI(deps);
+
+    await api.handle('history', () => 'ok', { policy: { requires: ['chat_mutation'] } });
+
+    const rpcPoolHandle = (globalThis as any).spindle.rpcPool.handle;
+    // 3rd arg is the policy object; 1st is the channel path; 2nd is the handler.
+    expect(rpcPoolHandle.mock.calls[0]![2]).toEqual({ requires: ['chat_mutation'] });
+  });
+
+  test('passes effectivePermissions through the wrapper to the user handler', async () => {
+    const deps = createTestDeps({ script: { name: 'tracker' } });
+    const api = buildRpcAPI(deps);
+    // Capture the full ctx so we can assert effectivePermissions propagates.
+    let captured: { effectivePermissions?: readonly string[] } | null = null;
+    const handler = mock((ctx) => {
+      captured = ctx;
+      return 'ok';
+    });
+
+    await api.handle('greet', handler, { policy: { requires: ['images'] } });
+
+    const rpcPoolHandle = (globalThis as any).spindle.rpcPool.handle;
+    const wrapper = rpcPoolHandle.mock.calls[0]![1] as (ctx: unknown) => unknown;
+    wrapper({
+      endpoint: 'lumiscript.tracker.greet',
+      requesterExtensionId: 'foreign-ext',
+      effectivePermissions: ['images'],
+    });
+    expect(captured).not.toBeNull();
+    expect(captured!.effectivePermissions).toEqual(['images']);
+  });
+
+  test('omits policy when options.policy is not provided', async () => {
+    const deps = createTestDeps({ script: { name: 'tracker' } });
+    const api = buildRpcAPI(deps);
+
+    await api.handle('history', () => 'ok');
+
+    const rpcPoolHandle = (globalThis as any).spindle.rpcPool.handle;
+    // 3rd arg is undefined → Spindle falls back to its legacy
+    // "requester inherits owner permissions" guard.
+    expect(rpcPoolHandle.mock.calls[0]![2]).toBeUndefined();
   });
 });
 

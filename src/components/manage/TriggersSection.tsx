@@ -49,12 +49,21 @@ export const TRIGGER_EVENT_GROUPS: EventGroup[] = [
     ],
   },
   {
+    label: 'World Info',
+    events: [
+      { name: 'WORLD_INFO_ACTIVATED',     description: 'World Info entries were activated during prompt assembly. data.entries lists the activated entry IDs.' },
+      { name: 'WORLD_BOOK_CHANGED',       description: 'A world book was created, updated, had its semantic-activation toggled, or had any of its entries mutated. data.id + data.worldBook. Coarse-grained — also fires alongside WORLD_BOOK_ENTRY_CHANGED on per-entry mutations (handlers subscribed to both see two events per entry change). Bulk imports suppress per-entry events and fire this once at the end.' },
+      { name: 'WORLD_BOOK_DELETED',       description: 'A world book was deleted. data.id.' },
+      { name: 'WORLD_BOOK_ENTRY_CHANGED', description: 'A world book entry was created or updated. data.id + data.worldBookId + data.entry. Does NOT fire during bulk imports — those emit a single WORLD_BOOK_CHANGED for the parent book instead. Subscribe to WORLD_BOOK_CHANGED in addition if you need to catch imported entries.' },
+      { name: 'WORLD_BOOK_ENTRY_DELETED', description: 'A world book entry was deleted. data.id + data.worldBookId.' },
+    ],
+  },
+  {
     label: 'Settings',
     events: [
       { name: 'SETTINGS_UPDATED',          description: 'A setting was updated. data.key + data.value identify the change. (Chat navigation moved to its own CHAT_SWITCHED event in host 0.9.5+.)' },
       { name: 'PRESET_CHANGED',            description: 'Active prompt preset changed' },
       { name: 'CONNECTION_PROFILE_LOADED', description: 'A connection profile was activated' },
-      { name: 'WORLD_INFO_ACTIVATED',      description: 'World Info entries were activated' },
       { name: 'REGEX_SCRIPT_CHANGED',      description: 'A regex find/replace script was created, updated, duplicated, reordered, or had its enabled state toggled. data.id + data.script (RegexScriptInfo). Requires regex_scripts permission. v0.27.0+.' },
       { name: 'REGEX_SCRIPT_DELETED',      description: 'A regex find/replace script was deleted. data.id. Requires regex_scripts permission. v0.27.0+.' },
     ],

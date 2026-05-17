@@ -50,6 +50,7 @@ import type { ConsoleEntry, ConsoleEntryType } from '../types/script.js';
 import {
   buildProxiedAPI,
   runIdContext,
+  rejectionAttribution,
   notifyAdvancedModalDismissed,
   notifyFloatWidgetPosition,
   clearScriptStateOnUnregister,
@@ -666,8 +667,29 @@ async function runOne(
       ),
     );
 
+    // Wrap the body invocation in `runIdContext.run(req.runId, …)` so
+    // AsyncLocalStorage carries the runId through every async hop the
+    // body initiates — including detached promises like un-awaited
+    // `(async () => { … })()` IIFEs. Previously only the handler-fire
+    // path wrapped (line ~357); the body itself ran with no ALS store
+    // set, so the `unhandledRejection` guard above couldn't attribute
+    // detached rejections back to the originating script (the worker
+    // survived, but the editor console never saw the error). With the
+    // wrap, `runIdContext.getStore()` inside the guard returns
+    // `req.runId`, which resolves through `activeProxies` to the
+    // scriptId, and the rejection lands as an `error` entry in the
+    // user's editor console as expected.
+    //
+    // No behaviour change on the dispatch side: the proxy already does
+    // `runIdContext.getStore() ?? ctx.runId`, and `ctx.runId` was set
+    // to `req.runId` at proxy construction — so the getStore() result
+    // matches the fallback value. Handler-fire paths still override
+    // via their own `runIdContext.run(handlerRunId, …)` to swap in
+    // the per-fire runId.
     value = await Promise.race([
-      fn(proxy.api, req.data, proxy.script, capturedConsole, z, safeFetch, undefined, undefined),
+      runIdContext.run(req.runId, () =>
+        fn(proxy.api, req.data, proxy.script, capturedConsole, z, safeFetch, undefined, undefined),
+      ),
       timeoutPromise,
     ]);
   } catch (err) {
@@ -739,6 +761,128 @@ async function runOne(
   }
 }
 
+// ─── Unhandled-rejection guard (v1.0.0-rc.2+) ──────────────────────────────
+//
+// Without this, a detached promise rejection inside any user-script — e.g.
+// an un-awaited `(async () => { ... })();` IIFE whose inner `await` throws,
+// including `PERMISSION_DENIED:<perm>` on a gated API call or a missing-
+// method error from a script that predates an API addition — crashes the
+// entire shared worker subprocess via Bun's default unhandled-rejection-
+// exits-process behaviour.
+//
+// Worker death cascades: handler closures (macros, tools, interceptors,
+// broadcast subscriptions, RPC handlers, etc.) registered by ANY script
+// assigned to that worker are orphaned, since their child-side closures
+// live in the dead process while the parent's wrappers still point at
+// handlerIds that no longer exist. The parent auto-respawns the worker
+// (logging the "user-script handler closures ... are now orphaned"
+// warning) but the co-located scripts on that worker are functionally
+// dead until the user disable/re-enables them. That's a violation of the
+// v1.0 isolation contract — one badly-written script shouldn't take out
+// the others on its worker.
+//
+// Survival strategy:
+//   1. Attribute the rejection to the originating script via the WeakMap
+//      populated by `api-proxy.ts`'s `taggedReject` at the reject-call
+//      site (set BEFORE the rejection propagates, so the entry is
+//      available when this handler reads it — the ALS-based lookup
+//      below rarely propagates because Bun runs the event handler in
+//      a context detached from the rejecting promise's async tree, but
+//      it stays as a safety net).
+//   2. If attributable, route the rejection to that script's editor
+//      console as an error so the user can see what happened.
+//   3. Always log to backend stderr (server-side `console.error`) for
+//      the audit trail, including the unattributable case.
+//   4. Do NOT call `process.exit`. The worker stays alive; co-located
+//      scripts keep their registered handlers.
+//
+// Trade-off: bona-fide fatal runtime issues (rare) no longer crash-and-
+// respawn the worker; they leave a noisy log line instead. Right call in
+// 99% of cases — the common cause of an unhandled rejection is a user
+// script with a detached promise, not a runtime breakdown.
+//
+// Exported (not a closure inside the entry function) so unit tests can
+// drive it directly with mock inputs — Bun's test runner auto-fails any
+// test that produces an unhandled rejection, regardless of process-level
+// handlers, so we can't test the full event-firing flow without a
+// child-subprocess fixture. Unit-testing the routing logic + relying on
+// Node/Bun's documented behaviour that ANY registered `unhandledRejection`
+// listener suppresses the default exit is the practical regression gate.
+export function handleUnhandledRejection(
+  reason: unknown,
+  proc:   SpindleBackendProcessContext,
+): void {
+  const errMsg = reason instanceof Error
+    ? (reason.stack ?? reason.message ?? String(reason))
+    : String(reason);
+
+  // Backend stderr first — survives even if IPC routing fails or the
+  // originating runId can't be attributed.
+  console.error(
+    `[script-runner] unhandledRejection survived (worker stays up). Reason: ${errMsg}`,
+  );
+
+  // Two-tier attribution. See JSDoc above for full rationale.
+  let runId: string | undefined;
+  let scriptId: string | undefined;
+  if (reason !== null && typeof reason === 'object') {
+    const attribution = rejectionAttribution.get(reason);
+    if (attribution) {
+      runId    = attribution.runId;
+      scriptId = attribution.scriptId;
+    }
+  }
+  if (runId === undefined) {
+    const ctxRunId = runIdContext.getStore();
+    if (ctxRunId !== undefined) {
+      const entry = activeProxies.get(ctxRunId);
+      if (entry) {
+        runId    = ctxRunId;
+        scriptId = entry.scriptId;
+      }
+    }
+  }
+  if (runId === undefined || scriptId === undefined) return;
+
+  // Route to the originating script's editor console as an error.
+  try {
+    proc.send({
+      type:     'console-entry',
+      runId,
+      scriptId,
+      entry: {
+        timestamp: new Date().toLocaleTimeString(),
+        type:      'error',
+        message:   `[lumiscript] unhandled rejection: ${errMsg}`,
+      },
+    });
+  } catch {
+    // Channel down — drop. Backend log line above is the fallback.
+  }
+}
+
+// ─── Test-only helpers ──────────────────────────────────────────────────────
+//
+// Exported with `_`-prefixed names so they're visible-but-discouraged for
+// production callers. Used by `tests/script-runner/unhandled-rejection-
+// guard.test.ts` to seed / clear the module-scope `activeProxies` map so
+// the guard's WeakMap + ALS attribution paths can be exercised against
+// known runIds without bringing up the full subprocess fixture.
+
+/** @internal Test seam — seed an activeProxies entry. */
+export function _setActiveProxyForTests(runId: string, scriptId: string): void {
+  // The `proxy` field of `ActiveProxyEntry` isn't read by the
+  // unhandledRejection guard (only `scriptId` is) — use an empty
+  // object cast through `unknown` so the test seam doesn't have to
+  // construct a real ProxyHandle.
+  activeProxies.set(runId, { scriptId, proxy: {} as unknown as ProxyHandle });
+}
+
+/** @internal Test seam — clear all activeProxies entries. */
+export function _clearActiveProxiesForTests(): void {
+  activeProxies.clear();
+}
+
 // ─── Entry ──────────────────────────────────────────────────────────────────
 
 /**
@@ -758,6 +902,12 @@ export default function (proc: SpindleBackendProcessContext): () => void {
       heartbeatTimer = null;
     }
   };
+
+  // Register the worker-isolation guard. See `handleUnhandledRejection`
+  // JSDoc for the full rationale.
+  process.on('unhandledRejection', (reason: unknown) => {
+    handleUnhandledRejection(reason, proc);
+  });
 
   proc.onMessage((payload) => {
     // Defensive: payloads come over IPC; validate shape before narrowing.

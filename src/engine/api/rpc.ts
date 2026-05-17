@@ -26,7 +26,7 @@
 
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
 
-import type { RpcAPI, RpcRequestContext } from '../../types/script.js';
+import type { RpcAPI, RpcPolicy, RpcRequestContext } from '../../types/script.js';
 import * as rpcStore from '../rpc-store.js';
 import type { APIBuildDeps } from './shared.js';
 
@@ -137,9 +137,16 @@ export function buildRpcAPI(deps: APIBuildDeps): RpcAPI {
   }
 
   return {
-    async sync<T>(channel: string, value: T, options?: { as?: string }): Promise<string> {
+    async sync<T>(
+      channel: string,
+      value: T,
+      options?: { as?: string; policy?: RpcPolicy },
+    ): Promise<string> {
       const channelPath = buildChannelPath(channel, options?.as);
-      const fullEndpoint = spindle.rpcPool.sync(channelPath, value);
+      // RC2 — forward `options.policy` to Spindle. When omitted, Spindle
+      // applies its legacy "requester must inherit every owner permission"
+      // confused-deputy guard. See `RpcPolicy` JSDoc for the three modes.
+      const fullEndpoint = spindle.rpcPool.sync(channelPath, value, options?.policy);
       recordRegistration(fullEndpoint, 'sync');
       return fullEndpoint;
     },
@@ -147,12 +154,15 @@ export function buildRpcAPI(deps: APIBuildDeps): RpcAPI {
     async handle<T>(
       channel: string,
       handler: (ctx: RpcRequestContext) => T | Promise<T>,
-      options?: { as?: string },
+      options?: { as?: string; policy?: RpcPolicy },
     ): Promise<string> {
       const channelPath = buildChannelPath(channel, options?.as);
       // `spindle.rpcPool.handle` accepts both sync and async handlers per
       // its types; pass the user (or wrapper) function through directly.
-      const fullEndpoint = spindle.rpcPool.handle(channelPath, handler);
+      // RC2 — forward `options.policy`; the handler will receive its
+      // `effectivePermissions` array on the RpcRequestContext per the
+      // declared policy.
+      const fullEndpoint = spindle.rpcPool.handle(channelPath, handler, options?.policy);
       recordRegistration(fullEndpoint, 'handle');
       return fullEndpoint;
     },

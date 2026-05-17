@@ -291,6 +291,8 @@ export interface LumiScriptAPI {
   databanks: DatabanksAPI;
   /** Persona (identity profile) CRUD + active persona switching. Requires personas permission. */
   personas: PersonasAPI;
+  /** Generation preset CRUD + nested prompt-block CRUD + host-derived category grouping. Mirrors Spindle's `spindle.presets.*` surface. Requires presets permission. */
+  presets: PresetsAPI;
   /** Regex find/replace script CRUD plus context-aware `getActive` resolver. Mirrors the resolution Lumiverse uses internally during prompt assembly + response baking + display rendering. Requires regex_scripts permission. */
   regexScripts: RegexScriptsAPI;
   /** Read-only access to the user's Council configuration: settings, members, and the available Lumia-item pool. No permission required. */
@@ -2155,6 +2157,230 @@ export type ActivatedWorldInfoEntry = WorldInfoEntry & {
    */
   score?: number;
 };
+
+// ─── Presets API ─────────────────────────────────────────────────────────────
+//
+// Full CRUD over user generation presets + nested prompt-block CRUD + a
+// host-derived category grouping view. Maps onto Lumiverse's
+// `spindle.presets.*` surface (lumiverse-spindle-types ≥0.4.74 / host
+// 1.0.0+). Requires the `presets` permission.
+//
+// A preset is the complete generation configuration: sampler/provider
+// parameters, ordered prompt blocks (with roles, positions, depth),
+// prompt behavior settings, and metadata. Programmatic access lets
+// scripts rotate prompt blocks based on chat context, snapshot presets
+// for backup/share, build ephemeral per-chat configurations, audit the
+// active preset for analytics, etc.
+//
+// Categories are NOT separate records — they're structural prompt
+// blocks where `marker === 'category'`, with children being the
+// following non-category blocks until the next category marker.
+// Category mode is `'radio'` (one enabled child) or `'checkbox'` (many).
+// Use `categories.list()` for host-derived grouping; use `blocks.*` to
+// mutate both normal blocks AND category-marker blocks.
+//
+// Naming convention: snake_case fields (`prompt_order`, `created_at`,
+// `updated_at`) are preserved from Spindle DTOs since they identify
+// stored data and match what callers see in host event payloads. The
+// DTO ↔ Info shape is structurally identical for this namespace; the
+// canonical layer is a thin pass-through with permission gating, no
+// per-field DTO translation.
+
+/** Prompt block role — message role or append injection tag. */
+export type PromptBlockRole =
+  | 'system' | 'user' | 'assistant' | 'user_append' | 'assistant_append';
+
+/** Where a prompt block injects relative to chat history. */
+export type PromptBlockPosition = 'pre_history' | 'post_history' | 'in_history';
+
+/** Selection mode for a category marker block — `'radio'` allows one
+ *  enabled child; `'checkbox'` allows many. Only meaningful when the
+ *  containing block's `marker === 'category'`. */
+export type PromptBlockCategoryMode = 'radio' | 'checkbox' | null;
+
+/**
+ * Prompt variable definition attached to a prompt block. Drives the
+ * preset-editor UI inputs that produce runtime substitution values.
+ * Discriminated union by `type`.
+ */
+export type PromptVariableDef =
+  | { id: string; name: string; label: string; type: 'text';     defaultValue: string; description?: string }
+  | { id: string; name: string; label: string; type: 'textarea'; defaultValue: string; rows?: number; description?: string }
+  | { id: string; name: string; label: string; type: 'number';   defaultValue: number; min?: number; max?: number; step?: number; description?: string }
+  | { id: string; name: string; label: string; type: 'slider';   defaultValue: number; min: number; max: number; step?: number; description?: string };
+
+/**
+ * Prompt block — a single segment of the preset's prompt assembly.
+ * Structurally identical to Spindle's `PromptBlockDTO`.
+ */
+export interface PromptBlock {
+  id: string;
+  name: string;
+  content: string;
+  role: PromptBlockRole;
+  enabled: boolean;
+  position: PromptBlockPosition;
+  /** Depth offset when `position` is `'in_history'`. */
+  depth: number;
+  /** `'category'` marks a structural category header; other strings are
+   *  structural insertion markers; `null` is a normal prompt block. */
+  marker: string | null;
+  isLocked: boolean;
+  color: string | null;
+  injectionTrigger: string[];
+  group: string | null;
+  /** Only meaningful when `marker === 'category'`. */
+  categoryMode?: PromptBlockCategoryMode;
+  variables?: PromptVariableDef[];
+}
+
+/**
+ * Prompt block category grouping derived from the preset's ordered
+ * blocks. Categories aren't separate records — `categoryBlock` is a
+ * marker-tagged `PromptBlock` and `children` are the following
+ * non-category blocks until the next category marker.
+ */
+export interface PromptBlockCategoryGroup {
+  /** The category header block, or `null` for uncategorized leading blocks. */
+  categoryBlock: PromptBlock | null;
+  /** Non-category blocks after the header until the next category header. */
+  children: PromptBlock[];
+}
+
+/**
+ * User generation preset — full prompt configuration (parameters,
+ * prompt blocks, behavior settings, metadata). Structurally identical
+ * to Spindle's `UserPresetDTO`.
+ */
+export interface Preset {
+  id: string;
+  name: string;
+  /** Preset provider, usually `'loom'` for native Lumiverse presets. */
+  provider: string;
+  /** Engine identifier. Defaults to `'classic'` on create. */
+  engine: string;
+  /** Sampler / provider parameters and Loom custom-body settings. */
+  parameters: Record<string, unknown>;
+  /** Ordered prompt blocks, including structural category markers. */
+  prompt_order: PromptBlock[];
+  /** Prompt behavior, completion settings, advanced prompt settings. */
+  prompts: Record<string, unknown>;
+  /** Loom metadata: description, source, model profiles, default status, prompt-variable values. */
+  metadata: Record<string, unknown>;
+  /** Unix epoch seconds. */
+  created_at: number;
+  /** Unix epoch seconds. */
+  updated_at: number;
+}
+
+/** Input for creating a new preset. `name` and `provider` required. */
+export interface PresetCreateInput {
+  name: string;
+  provider: string;
+  engine?: string;
+  parameters?: Record<string, unknown>;
+  prompt_order?: PromptBlock[];
+  prompts?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+}
+
+/** Input for updating a preset. All fields optional, including `name` and `provider`. */
+export type PresetUpdateInput = Partial<PresetCreateInput>;
+
+/** Input for creating a prompt block. Missing fields are defaulted by the host. */
+export type PromptBlockCreateInput = Partial<PromptBlock>;
+
+/** Input for updating a prompt block. Any subset of `PromptBlock` except `id`. */
+export type PromptBlockUpdateInput = Partial<Omit<PromptBlock, 'id'>>;
+
+/**
+ * Preset CRUD API. Requires the `presets` permission.
+ *
+ * Sub-namespaces:
+ *   - `api.presets.*`            — preset CRUD (list / get / create / update / delete)
+ *   - `api.presets.blocks.*`     — prompt-block CRUD within a preset
+ *   - `api.presets.categories.*` — host-derived category grouping view
+ *
+ * Use block CRUD for localized prompt edits — rewriting the entire
+ * `prompt_order` array on each change is wasteful. Use `categories.list()`
+ * for analytics or UI grouping; create/update/delete category headers
+ * through `blocks.*` (a category header is a block with `marker: 'category'`).
+ *
+ * @example
+ * // Rotate a system block based on chat context
+ * api.broadcast.on('scene-changed', async ({ tone }) => {
+ *   const blocks = await api.presets.blocks.list(activePresetId);
+ *   const styleBlock = blocks.find(b => b.name === 'Style');
+ *   if (styleBlock) {
+ *     await api.presets.blocks.update(activePresetId, styleBlock.id, {
+ *       content: tone === 'tense' ? '...' : '...',
+ *     });
+ *   }
+ * });
+ */
+export interface PresetsAPI {
+  /** List presets. Defaults: limit 50, max 200. */
+  list(options?: { limit?: number; offset?: number }): Promise<{ data: Preset[]; total: number }>;
+
+  /** Get a preset by id. Returns `null` if not found. */
+  get(presetId: string): Promise<Preset | null>;
+
+  /** Create a new preset. `name` and `provider` required. */
+  create(input: PresetCreateInput): Promise<Preset>;
+
+  /** Update a preset. All fields optional. */
+  update(presetId: string, input: PresetUpdateInput): Promise<Preset>;
+
+  /** Delete a preset. Returns `true` if deleted. */
+  delete(presetId: string): Promise<boolean>;
+
+  /**
+   * Prompt-block CRUD within a preset. Block operations update the
+   * parent preset's `prompt_order` array and go through the normal
+   * preset update flow.
+   */
+  blocks: {
+    /** Return the preset's ordered prompt blocks. */
+    list(presetId: string): Promise<PromptBlock[]>;
+
+    /** Get a block by id. Returns `null` if not found. */
+    get(presetId: string, blockId: string): Promise<PromptBlock | null>;
+
+    /**
+     * Create a prompt block. `options.index` inserts at a specific
+     * zero-based position within `prompt_order`; omitted appends to
+     * the end.
+     */
+    create(
+      presetId: string,
+      input: PromptBlockCreateInput,
+      options?: { index?: number },
+    ): Promise<PromptBlock>;
+
+    /** Update a block. All fields except `id` are optional. */
+    update(
+      presetId: string,
+      blockId: string,
+      input: PromptBlockUpdateInput,
+    ): Promise<PromptBlock>;
+
+    /** Delete a block. Returns `true` if deleted. */
+    delete(presetId: string, blockId: string): Promise<boolean>;
+  };
+
+  /**
+   * Host-derived category grouping. Categories aren't separate records;
+   * this is a precomputed view of `prompt_order` walked by category
+   * marker. Read-only — to create / update / delete a category, use
+   * `blocks.*` with `marker: 'category'`.
+   */
+  categories: {
+    /** Return category groups derived from the preset's ordered blocks.
+     *  The first group may have `categoryBlock: null` when normal blocks
+     *  appear before the first category marker. */
+    list(presetId: string): Promise<PromptBlockCategoryGroup[]>;
+  };
+}
 
 // ─── Regex Scripts API ──────────────────────────────────────────────────────
 //
@@ -4884,6 +5110,40 @@ export interface BroadcastAPI {
 // ─── RPC pool (cross-extension) ───────────────────────────────────────────────
 
 /**
+ * Optional read policy for an `api.rpc.sync()` / `api.rpc.handle()` endpoint.
+ * Mirrors Spindle's `SharedRpcEndpointPolicyDTO`.
+ *
+ * Three modes:
+ *   - **omit policy** → legacy default: requester must hold every gated
+ *     permission the owner currently has. Prevents confused-deputy-style
+ *     exploits where one extension uses another as a proxy for permissions
+ *     it doesn't own. Backward-compatible with pre-RC2 scripts.
+ *   - **`{ requires: [] }`** → readable without delegating any owner
+ *     permissions. Use for intentionally narrow / "public" endpoints
+ *     where requester permissions are irrelevant (presence, version,
+ *     status snapshots).
+ *   - **`{ requires: ['name'] }`** → both owner AND requester must hold
+ *     `'name'`. Inside the handler, gated api.* calls are limited to
+ *     this declared set — unrelated owner permissions do not bleed into
+ *     the delegated call.
+ *
+ * @example
+ * await api.rpc.sync('presence.online', true, { policy: { requires: [] } });
+ *
+ * @example
+ * await api.rpc.handle('logs.tail', tailLogs, { policy: { requires: ['chat_mutation'] } });
+ */
+export interface RpcPolicy {
+  /**
+   * Gated permission names required to read this endpoint.
+   * - omitted entirely → "inherit all owner permissions" (legacy default)
+   * - `[]` → no permission delegation; readable by any extension
+   * - `['name', ...]` → both owner and requester need every listed permission
+   */
+  requires?: readonly string[];
+}
+
+/**
  * Context delivered to an `api.rpc.handle()` callback when another extension
  * reads its endpoint. Mirrors Spindle's `SharedRpcRequestContextDTO`.
  */
@@ -4892,6 +5152,20 @@ export interface RpcRequestContext {
   endpoint: string;
   /** Identifier of the extension performing the read. */
   requesterExtensionId: string;
+  /**
+   * Gated permissions available to THIS delegated handler call, per the
+   * endpoint's policy. Inside the handler, gated api.* calls are limited
+   * to this set — unrelated owner permissions are NOT delegated. Read-only
+   * informational signal for handler logic; the host enforces the actual
+   * restriction.
+   *
+   * Values by policy:
+   *   - no policy → full owner permissions (legacy behaviour)
+   *   - `requires: []` → empty array
+   *   - `requires: ['name']` → exactly the listed names (intersection of
+   *     owner-grants and requester-grants)
+   */
+  effectivePermissions: readonly string[];
 }
 
 /**
@@ -4939,7 +5213,7 @@ export interface RpcAPI {
   sync<T = unknown>(
     channel: string,
     value: T,
-    options?: { as?: string },
+    options?: { as?: string; policy?: RpcPolicy },
   ): Promise<string>;
 
   /**
@@ -4963,7 +5237,7 @@ export interface RpcAPI {
   handle<T = unknown>(
     channel: string,
     handler: (ctx: RpcRequestContext) => T | Promise<T>,
-    options?: { as?: string },
+    options?: { as?: string; policy?: RpcPolicy },
   ): Promise<string>;
 
   /**

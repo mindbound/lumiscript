@@ -61,6 +61,7 @@ import type {
   WorldInfoAPI,
   DatabanksAPI,
   PersonasAPI,
+  PresetsAPI,
   CouncilAPI,
   FilesAPI,
   EnclaveAPI,
@@ -142,6 +143,30 @@ import { AsyncLocalStorage } from 'async_hooks';
  * Exposed for use by `child-entry.ts`'s `run-handler` handler.
  */
 export const runIdContext = new AsyncLocalStorage<string>();
+
+// ─── Unhandled-rejection attribution (v1.0.0-rc.2+) ─────────────────────────
+//
+// WeakMap keyed on the rejecting error object, valued by the originating
+// script's runId + scriptId. Populated at the reject-call site inside
+// every `dispatch` / `dispatchWithSignal` / `dispatchOnHandle` (so the
+// metadata is attached BEFORE the promise rejects and any user code
+// sees it), read by `child-entry.ts`'s `unhandledRejection` guard.
+//
+// Why not AsyncLocalStorage? `runIdContext.getStore()` returns
+// `undefined` inside the `unhandledRejection` event handler — the
+// handler runs from the JS engine's promise-machinery in a context
+// detached from the rejecting promise's async tree, so ALS doesn't
+// propagate. The error object itself is the only reliable carrier of
+// the runId across that boundary.
+//
+// WeakMap keys are objects, so a rejection whose `reason` is a string
+// or number can't be attributed (rare in practice — every api-proxy
+// rejection is an Error instance via the api-response handler). The
+// guard falls back to backend-stderr-only for non-object reasons.
+export const rejectionAttribution = new WeakMap<object, {
+  runId:    string;
+  scriptId: string;
+}>();
 
 // ─── Advanced-modal child-side state (Phase 9d.4.d) ─────────────────────────
 //
@@ -536,6 +561,7 @@ export interface ProxyHandle {
     | 'worldInfo'
     | 'databanks'
     | 'personas'
+    | 'presets'
     | 'council'
     | 'files'
     | 'enclave'
@@ -699,7 +725,20 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
     // unaffected — the user's await and flush() wait on the same Promise,
     // so total time = max(user-await, flush) = same as before.
     const p = new Promise<unknown>((resolve, reject) => {
-      pending.set(requestId, { resolve, reject });
+      // v1.0.0-rc.2+ — wrap reject so the error object carries
+      // attribution metadata for the `unhandledRejection` guard. See
+      // `rejectionAttribution` JSDoc. Tagging happens at the reject
+      // CALL SITE (before any user code touches the error) so the
+      // metadata is present whether the user awaits the rejection or
+      // lets it escape via a detached IIFE.
+      const taggedReject = (err: unknown): void => {
+        if (err !== null && typeof err === 'object') {
+          try { rejectionAttribution.set(err, { runId, scriptId: ctx.scriptId }); }
+          catch { /* WeakMap rejects non-extensible / non-object — defensive */ }
+        }
+        reject(err);
+      };
+      pending.set(requestId, { resolve, reject: taggedReject });
       const msg: ApiProxyRequest = {
         type:     'api-request',
         requestId,
@@ -713,7 +752,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
         ctx.send(msg);
       } catch (err) {
         pending.delete(requestId);
-        reject(err instanceof Error ? err : new Error(String(err)));
+        taggedReject(err instanceof Error ? err : new Error(String(err)));
       }
     });
     return trackChain(p);
@@ -756,7 +795,15 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
     const requestId = generateRequestId(runId);
     // v0.26.1 — wrap in trackChain. See `dispatch` for the rationale.
     const p = new Promise<unknown>((resolve, reject) => {
-      pending.set(requestId, { resolve, reject });
+      // v1.0.0-rc.2+ — see `dispatch` for the attribution-tagging rationale.
+      const taggedReject = (err: unknown): void => {
+        if (err !== null && typeof err === 'object') {
+          try { rejectionAttribution.set(err, { runId, scriptId: ctx.scriptId }); }
+          catch { /* defensive */ }
+        }
+        reject(err);
+      };
+      pending.set(requestId, { resolve, reject: taggedReject });
       const msg: ApiProxyRequest = {
         type:     'api-request',
         requestId,
@@ -771,7 +818,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
         ctx.send(msg);
       } catch (err) {
         pending.delete(requestId);
-        reject(err instanceof Error ? err : new Error(String(err)));
+        taggedReject(err instanceof Error ? err : new Error(String(err)));
         return;
       }
 
@@ -1057,7 +1104,15 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
     const requestId = generateRequestId(runId);
     // v0.26.1 — wrap in trackChain. See `dispatch` for the rationale.
     const p = new Promise<unknown>((resolve, reject) => {
-      pending.set(requestId, { resolve, reject });
+      // v1.0.0-rc.2+ — see `dispatch` for the attribution-tagging rationale.
+      const taggedReject = (err: unknown): void => {
+        if (err !== null && typeof err === 'object') {
+          try { rejectionAttribution.set(err, { runId, scriptId: ctx.scriptId }); }
+          catch { /* defensive */ }
+        }
+        reject(err);
+      };
+      pending.set(requestId, { resolve, reject: taggedReject });
       const msg: ApiProxyRequest = {
         type:     'api-request',
         requestId,
@@ -1072,7 +1127,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
         ctx.send(msg);
       } catch (err) {
         pending.delete(requestId);
-        reject(err instanceof Error ? err : new Error(String(err)));
+        taggedReject(err instanceof Error ? err : new Error(String(err)));
       }
     });
     return trackChain(p);
@@ -2857,6 +2912,30 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
     getWorldBook:   mkAsync<PersonasAPI['getWorldBook']>(dispatch,   'personas.getWorldBook'),
   };
 
+  // ── presets (CRUD + nested blocks/categories — v1.0.0-rc.2+) ─────────────
+  //
+  // Pure CRUD pass-through to the canonical (which gates on the
+  // `presets` permission). Nested namespaces (`blocks`, `categories`)
+  // are walked by `resolveMethodPath` on the parent side; we just
+  // dispatch dotted method names matching the canonical's structure.
+  const presets: PresetsAPI = {
+    list:   mkAsync<PresetsAPI['list']>(dispatch,   'presets.list'),
+    get:    mkAsync<PresetsAPI['get']>(dispatch,    'presets.get'),
+    create: mkAsync<PresetsAPI['create']>(dispatch, 'presets.create'),
+    update: mkAsync<PresetsAPI['update']>(dispatch, 'presets.update'),
+    delete: mkAsync<PresetsAPI['delete']>(dispatch, 'presets.delete'),
+    blocks: {
+      list:   mkAsync<PresetsAPI['blocks']['list']>(dispatch,   'presets.blocks.list'),
+      get:    mkAsync<PresetsAPI['blocks']['get']>(dispatch,    'presets.blocks.get'),
+      create: mkAsync<PresetsAPI['blocks']['create']>(dispatch, 'presets.blocks.create'),
+      update: mkAsync<PresetsAPI['blocks']['update']>(dispatch, 'presets.blocks.update'),
+      delete: mkAsync<PresetsAPI['blocks']['delete']>(dispatch, 'presets.blocks.delete'),
+    },
+    categories: {
+      list:   mkAsync<PresetsAPI['categories']['list']>(dispatch, 'presets.categories.list'),
+    },
+  };
+
   // ── council (read-only) ───────────────────────────────────────────────────
   const council: CouncilAPI = {
     getSettings:             mkAsync<CouncilAPI['getSettings']>(dispatch,             'council.getSettings'),
@@ -3414,7 +3493,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
   // libraries that touch unimplemented namespaces will throw clearly.
   const apiForLibraries = {
     utils, broadcast, variables, db, ui, llm,
-    chat, chats, characters, worldInfo, databanks, personas, council,
+    chat, chats, characters, worldInfo, databanks, personas, presets, council,
     files, enclave, tokens, events, commands, tools, macros,
     json,
   } as unknown as LumiScriptAPI;
@@ -3559,7 +3638,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
   return {
     api: {
       utils, broadcast, variables, db, ui, llm,
-      chat, chats, characters, worldInfo, databanks, personas, council,
+      chat, chats, characters, worldInfo, databanks, personas, presets, council,
       files, enclave, tokens, events, commands, tools, macros,
       json,
       rpc,

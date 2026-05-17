@@ -80,10 +80,14 @@ export const EVENTS: EventRow[] = [
   { group: 'Entities',   name: 'CHARACTER_DELETED',          payload: '{ id }' },
   { group: 'Entities',   name: 'CHARACTER_DUPLICATED',       payload: '{ id, newId }' },
   { group: 'Entities',   name: 'PERSONA_CHANGED',            payload: '{ persona }' },
+  { group: 'World Info', name: 'WORLD_INFO_ACTIVATED',       payload: '{ entries }', fires: 'World Info entries were activated during prompt assembly.' },
+  { group: 'World Info', name: 'WORLD_BOOK_CHANGED',         payload: '{ id, worldBook }', fires: 'Coarse-grained: world book was created, updated, had its semantic-activation toggled, or had any of its entries mutated (entry create / update / delete / reorder / bulk-op / import). Fires alongside `WORLD_BOOK_ENTRY_CHANGED` on per-entry mutations — handlers subscribed to both see two events per change. Bulk imports suppress per-entry events and emit this once at the end.' },
+  { group: 'World Info', name: 'WORLD_BOOK_DELETED',         payload: '{ id }', fires: 'World book was deleted.' },
+  { group: 'World Info', name: 'WORLD_BOOK_ENTRY_CHANGED',   payload: '{ id, worldBookId, entry }', fires: 'Entry was created or updated. Does NOT fire during bulk imports — those emit a single `WORLD_BOOK_CHANGED` for the parent book instead. Subscribe to `WORLD_BOOK_CHANGED` in addition if you need to catch imported entries.' },
+  { group: 'World Info', name: 'WORLD_BOOK_ENTRY_DELETED',   payload: '{ id, worldBookId }', fires: 'Entry was deleted.' },
   { group: 'Settings',   name: 'SETTINGS_UPDATED',           payload: '{ key, value }' },
   { group: 'Settings',   name: 'PRESET_CHANGED',             payload: '{ presetId }' },
   { group: 'Settings',   name: 'CONNECTION_PROFILE_LOADED',  payload: '{ connectionId }' },
-  { group: 'Settings',   name: 'WORLD_INFO_ACTIVATED',       payload: '{ entries }' },
   { group: 'Settings',   name: 'REGEX_SCRIPT_CHANGED',       payload: '{ id, script: RegexScriptInfo }  // create / update / duplicate / reorder / enable / disable. v0.27.0+ — requires regex_scripts permission' },
   { group: 'Settings',   name: 'REGEX_SCRIPT_DELETED',       payload: '{ id }  // v0.27.0+ — requires regex_scripts permission' },
   { group: 'Tools',      name: 'TOOL_INVOCATION',            payload: '{ toolName, requestId, args }' },
@@ -208,6 +212,7 @@ export const PERM_GROUPS: PermGroup[] = [
       { method: 'api.worldInfo.* (CRUD + getCapturedActive)', perms: ['world_books'] },
       { method: 'api.worldInfo.registerInterceptor / listInterceptors', perms: ['generation'] },
       { method: 'api.personas.*', perms: ['personas'] },
+      { method: 'api.presets.*', perms: ['presets'] },
       { method: 'api.regexScripts.*', perms: ['regex_scripts'] },
       { method: 'api.council.*', perms: [], note: 'free tier, read-only' },
     ],
@@ -2154,6 +2159,22 @@ export const API_GROUPS: FnGroup[] = [
     ],
   },
   {
+    group: 'api.presets',
+    rows: [
+      { name: 'list',              args: 'options?',                  desc: 'List user presets (paginated). Options: `{ limit?, offset? }`. Defaults: limit 50, max 200. Returns `{ data: Preset[], total }`. Requires presets permission.' },
+      { name: 'get',               args: 'presetId',                  desc: 'Get a preset by ID. Returns `null` if not found. Requires presets permission.' },
+      { name: 'create',            args: 'input',                     desc: 'Create a new preset. `input.name` and `input.provider` are required (`provider` is typically `\'loom\'` for native Lumiverse presets). All other fields optional with host defaults (`engine: \'classic\'`, empty parameters / prompt_order / prompts / metadata). Requires presets permission.' },
+      { name: 'update',            args: 'presetId, input',           desc: 'Update a preset. All fields optional. When `prompt_order` or `metadata` is updated, Lumiverse prunes stale `metadata.promptVariables` entries that no longer correspond to a variable definition on a block. Requires presets permission.' },
+      { name: 'delete',            args: 'presetId',                  desc: 'Delete a preset. Returns `true` if deleted. Requires presets permission.' },
+      { name: 'blocks.list',       args: 'presetId',                  desc: 'Return the preset\'s ordered prompt blocks (`PromptBlock[]`), including structural category-marker blocks. Requires presets permission.' },
+      { name: 'blocks.get',        args: 'presetId, blockId',         desc: 'Get a block by ID. Returns `null` if not found. Requires presets permission.' },
+      { name: 'blocks.create',     args: 'presetId, input, options?', desc: 'Create a prompt block. `options.index` inserts at a specific zero-based position within the preset\'s `prompt_order`; omitted appends to the end. Block ops update the parent preset\'s `prompt_order` array and trigger the normal preset update flow. Requires presets permission.' },
+      { name: 'blocks.update',     args: 'presetId, blockId, input',  desc: 'Update a block. All fields except `id` are optional. Requires presets permission.' },
+      { name: 'blocks.delete',     args: 'presetId, blockId',         desc: 'Delete a block. Returns `true` if deleted. Requires presets permission.' },
+      { name: 'categories.list',   args: 'presetId',                  desc: 'Return host-derived category groupings (`PromptBlockCategoryGroup[]`) for the preset\'s ordered blocks. Categories aren\'t separate records — they\'re structural prompt blocks with `marker === \'category\'`, and a group\'s children are the following non-category blocks until the next category marker. The first group may have `categoryBlock: null` if normal blocks appear before any category marker. To create / update / delete a category, use `blocks.*` with `marker: \'category\'`. Requires presets permission.' },
+    ],
+  },
+  {
     group: 'api.regexScripts',
     rows: [
       { name: 'list',       args: 'options?',          desc: "List regex find/replace scripts (paginated). Options: scope, scopeId (required for character/chat scope), target ('prompt'|'response'|'display'), limit (max 200), offset. Returns { data: RegexScriptInfo[], total }." },
@@ -2203,8 +2224,8 @@ export const API_GROUPS: FnGroup[] = [
   {
     group: 'api.rpc',
     rows: [
-      { name: 'sync',       args: 'channel, value, options?', desc: 'Publish the latest value on a channel for cross-extension consumption. Endpoints are auto-namespaced as `lumiscript.<scriptSlug>.<channel>` — `scriptSlug` auto-derives from the calling script\'s name, overridable via `options.as`. Returns the fully-qualified endpoint string. Free tier (no permission). Endpoints auto-unregister on script disable / delete / stale-after-re-run.' },
-      { name: 'handle',     args: 'channel, handler, options?', desc: 'Register an on-demand handler for a channel. Handler receives `RpcRequestContext { endpoint, requesterExtensionId }` and returns the response value (sync or async). Same `lumiscript.<scriptSlug>.<channel>` namespacing as `sync`. Returns the fully-qualified endpoint string. Free tier.' },
+      { name: 'sync',       args: 'channel, value, options?', desc: 'Publish the latest value on a channel for cross-extension consumption. Endpoints are auto-namespaced as `lumiscript.<scriptSlug>.<channel>` — `scriptSlug` auto-derives from the calling script\'s name, overridable via `options.as`. `options.policy` controls cross-extension permission delegation: omit for legacy "requester must hold every gated permission the owner has" guard, `{ requires: [] }` for public/narrow endpoints, `{ requires: [\'name\'] }` to scope delegated permissions explicitly. Returns the fully-qualified endpoint string. Free tier. Endpoints auto-unregister on script disable / delete / stale-after-re-run.' },
+      { name: 'handle',     args: 'channel, handler, options?', desc: 'Register an on-demand handler for a channel. Handler receives `RpcRequestContext { endpoint, requesterExtensionId, effectivePermissions }` and returns the response value (sync or async). `effectivePermissions` lists the gated permissions available to THIS delegated call per the endpoint\'s `options.policy`. Same `lumiscript.<scriptSlug>.<channel>` namespacing + `options.policy` semantics as `sync`. Returns the fully-qualified endpoint string. Free tier.' },
       { name: 'read',       args: 'endpoint',                  desc: 'Read a value from another extension\'s published endpoint. Pass the full `<extensionId>.<channel>` path. Throws on missing endpoint. For cross-extension data sharing — use `api.broadcast` for in-extension pub/sub instead.' },
       { name: 'unregister', args: 'channel, options?',         desc: 'Remove a channel previously published by the calling script via `sync` or `handle`. Idempotent — no-op if the channel isn\'t registered. Pass the same `options.as` you used at registration time if any.' },
     ],
@@ -2561,10 +2582,13 @@ export const NAMESPACE_CONCEPTS: Record<string, string> = {
     'In-memory real-time pub/sub between scripts. Events are NOT persisted — handlers fire synchronously when an event is emitted, and there\'s no replay across script reloads. Subscriptions persist between trigger runs (host wipes them at the START of each new run, not the end), so a "subscriber-only" script can watch events from a script it isn\'t co-triggered with. The `ls:*` prefix is reserved for system events; scripts should namespace their own events with a project-specific prefix. **Distinct from `api.events`** — that one is for persistent event tracking; this one is for real-time messaging.',
 
   'api.rpc':
-    'Cross-extension shared RPC pool. Wraps Spindle\'s `spindle.rpcPool` with two-tier namespacing: every endpoint is fully-qualified as `lumiscript.<scriptSlug>.<channel>` where `scriptSlug` auto-derives from the calling script\'s name (overridable via `options.as`). Use `sync(channel, value)` to publish a latest-value snapshot and `handle(channel, fn)` to register on-demand handlers — other LumiScript scripts AND other Lumiverse extensions can `read(endpoint)` from these channels. Free tier (no permission). Endpoints auto-unregister on script disable / delete / stale-after-re-run. **Distinct from `api.broadcast`** — broadcast is in-process pub/sub between LumiScript user-scripts; rpc is cross-extension, asks-the-pool RPC where the caller knows the target endpoint by name. Backend-console logs registrations for cross-extension exposure visibility.',
+    'Cross-extension shared RPC pool. Wraps Spindle\'s `spindle.rpcPool` with two-tier namespacing: every endpoint is fully-qualified as `lumiscript.<scriptSlug>.<channel>` where `scriptSlug` auto-derives from the calling script\'s name (overridable via `options.as`). Use `sync(channel, value)` to publish a latest-value snapshot and `handle(channel, fn)` to register on-demand handlers — other LumiScript scripts AND other Lumiverse extensions can `read(endpoint)` from these channels. Free tier (no permission). Endpoints auto-unregister on script disable / delete / stale-after-re-run. **Permission delegation**: `options.policy` controls how owner permissions flow to readers. Omit for the legacy "requester inherits every owner permission" guard; pass `{ requires: [] }` for intentionally narrow / public endpoints; pass `{ requires: [\'name\'] }` to scope delegated permissions explicitly. Handlers receive `effectivePermissions` on the `RpcRequestContext` so they can branch on what\'s actually delegated to this call. **Distinct from `api.broadcast`** — broadcast is in-process pub/sub between LumiScript user-scripts; rpc is cross-extension, asks-the-pool RPC where the caller knows the target endpoint by name. Backend-console logs registrations for cross-extension exposure visibility.',
 
   'api.events':
     'Persistent event tracking + replay. Events are durably stored and queryable across script reloads / extension restarts. Use cases: audit logs, state-resuming scripts (`getLatestState` for keys), custom analytics. **Distinct from `api.broadcast`** — that one is in-memory real-time pub/sub; this one is durable storage. Recording requires `event_tracking` permission.',
+
+  'api.presets':
+    'Generation preset CRUD. A preset is the complete prompt configuration: sampler/provider `parameters`, ordered `prompt_order` (prompt blocks with roles / positions / depth), `prompts` (behavior + completion settings), and `metadata` (description, model profiles, prompt-variable values). **Three sub-namespaces**: `api.presets.*` (preset CRUD), `api.presets.blocks.*` (prompt-block CRUD within a preset — block ops update the parent\'s `prompt_order` and trigger the normal preset update flow), `api.presets.categories.*` (host-derived category grouping view). **Categories are NOT separate records** — a category is a structural prompt block with `marker === \'category\'`, and its children are the following non-category blocks until the next category marker. `categoryMode` is `\'radio\'` (one enabled child) or `\'checkbox\'` (many). Use `categories.list()` for the precomputed grouping; create / update / delete category headers via `blocks.*` with `marker: \'category\'`. **Snake_case fields** (`prompt_order`, `created_at`, `updated_at`) are preserved from Spindle DTOs since they identify stored data. **Use cases**: rotate prompt blocks based on chat context, toggle radio-category options on character state changes, snapshot presets to JSON for backup, build ephemeral per-chat presets and clean up via `ls:teardown`. Requires `presets` permission.',
 
   'api.macros':
     'Two registration modes. **Pull mode** (`register(name, handler)`): handler runs at macro-resolution time, can be sync or async (function-reference form; string-handler form is sync-only). **Push mode** (`register(name)` + `updateMacroValue(name, value)`): register once with no handler, push values whenever they change — avoids RPC latency at generation time. Pull is simpler but pays per-resolve cost; push is faster but requires upstream "value changed" knowledge. Pick based on whether macro resolution is hot.',
@@ -2610,6 +2634,7 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   chats:             'Chat session metadata + CRUD on the chat list. Distinct from message content (chat_mutation).',
   characters:        'CRUD on characters via `api.characters.*`.',
   personas:          'CRUD on personas via `api.personas.*`.',
+  presets:           'CRUD on generation presets + their prompt blocks via `api.presets.*` (parameters, ordered prompt blocks with roles/positions/depth, behavior settings, metadata, plus host-derived category groupings).',
   world_books:       'CRUD on world books and entries via `api.worldInfo.*`.',
   regex_scripts:     'CRUD on regex find/replace scripts via `api.regexScripts.*`.',
   generation:        'Call LLM providers via `api.llm.*`. Also required to register world-info interceptors that touch the assembled prompt.',

@@ -4213,7 +4213,12 @@ async function handleRpcHandleRequest(
   try {
     const channel   = req.args[0];
     const handlerId = req.args[1];
-    const options   = req.args[2] as { as?: string } | undefined;
+    // RC2 — `options` may now carry `policy: RpcPolicy` in addition to
+    // `as?: string`. We forward it transparently to `active.api.rpc.handle`,
+    // which forwards to `spindle.rpcPool.handle`. The user-handler closure
+    // (lives child-side) receives `effectivePermissions` on the
+    // RpcRequestContext per the host's delegated-permission contract.
+    const options   = req.args[2] as { as?: string; policy?: import('../types/script.js').RpcPolicy } | undefined;
     if (typeof channel !== 'string' || channel.length === 0) {
       return {
         type:      'api-response',
@@ -6020,6 +6025,15 @@ export interface WorkerPoolDiagnostics {
     processId:           string;
     lastActivityMs:      number;
     assignedScriptCount: number;
+    /**
+     * Script IDs currently assigned to this worker, sorted alphabetically
+     * for deterministic output across reads. Names are resolved by the
+     * diagnostics collector via `scriptStorage.getScript(id)?.name`
+     * (this layer has no access to script storage). The modal uses the
+     * resolved names for the per-worker Scripts-column tooltip + the
+     * "Script assignments by worker" row in the Markdown export.
+     */
+    assignedScripts:     string[];
     restartAttempts:     number;
   }>;
   totalAssignedScripts: number;
@@ -6035,20 +6049,26 @@ export interface WorkerPoolDiagnostics {
 }
 
 export function getWorkerPoolDiagnostics(): WorkerPoolDiagnostics {
-  // Per-worker assigned-script counts. Iterate the assignment Map once
-  // rather than scanning per-worker for O(N) vs O(N*M).
-  const assignedByWorker = new Map<ScriptRunnerWorkerKey, number>();
-  for (const w of scriptWorkerAssignments.values()) {
-    assignedByWorker.set(w, (assignedByWorker.get(w) ?? 0) + 1);
+  // Per-worker assigned-script lists. Iterate the assignment Map once;
+  // counts are derived from list length. Scripts within a worker are
+  // alphabetically sorted for deterministic output across reads.
+  const assignedByWorker = new Map<ScriptRunnerWorkerKey, string[]>();
+  for (const [scriptId, workerKey] of scriptWorkerAssignments) {
+    const list = assignedByWorker.get(workerKey) ?? [];
+    list.push(scriptId);
+    assignedByWorker.set(workerKey, list);
   }
+  for (const list of assignedByWorker.values()) list.sort();
 
   const workers: WorkerPoolDiagnostics['workers'] = [];
   for (const [workerKey, handle] of childHandles) {
+    const scripts = assignedByWorker.get(workerKey) ?? [];
     workers.push({
       workerKey,
       processId:           handle.processId,
       lastActivityMs:      workerLastActivity.get(workerKey) ?? 0,
-      assignedScriptCount: assignedByWorker.get(workerKey) ?? 0,
+      assignedScriptCount: scripts.length,
+      assignedScripts:     scripts,
       restartAttempts:     getRestartAttempts(workerKey),
     });
   }

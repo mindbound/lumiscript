@@ -1938,6 +1938,120 @@ interface PersonasAPI {
   getWorldBook(personaId: string): Promise<WorldInfo | null>;
 }
 
+// ─── Presets API ──────────────────────────────────────────────────────────────
+
+/** Prompt block role — message role or append injection tag. */
+type PromptBlockRole = 'system' | 'user' | 'assistant' | 'user_append' | 'assistant_append';
+
+/** Where a prompt block injects relative to chat history. */
+type PromptBlockPosition = 'pre_history' | 'post_history' | 'in_history';
+
+/** Category selection mode — \`'radio'\` allows one enabled child; \`'checkbox'\` allows many. */
+type PromptBlockCategoryMode = 'radio' | 'checkbox' | null;
+
+/** Prompt variable definition (discriminated by \`type\`). */
+type PromptVariableDef =
+  | { id: string; name: string; label: string; type: 'text';     defaultValue: string; description?: string }
+  | { id: string; name: string; label: string; type: 'textarea'; defaultValue: string; rows?: number; description?: string }
+  | { id: string; name: string; label: string; type: 'number';   defaultValue: number; min?: number; max?: number; step?: number; description?: string }
+  | { id: string; name: string; label: string; type: 'slider';   defaultValue: number; min: number; max: number; step?: number; description?: string };
+
+/** Prompt block — a single segment of the preset's prompt assembly. */
+interface PromptBlock {
+  id: string; name: string; content: string;
+  role: PromptBlockRole; enabled: boolean;
+  position: PromptBlockPosition; depth: number;
+  /** \`'category'\` marks a structural category header; \`null\` is a normal block. */
+  marker: string | null;
+  isLocked: boolean; color: string | null;
+  injectionTrigger: string[]; group: string | null;
+  /** Only meaningful when \`marker === 'category'\`. */
+  categoryMode?: PromptBlockCategoryMode;
+  variables?: PromptVariableDef[];
+}
+
+/** Category grouping derived from the preset's ordered blocks. */
+interface PromptBlockCategoryGroup {
+  /** The category header block, or \`null\` for uncategorized leading blocks. */
+  categoryBlock: PromptBlock | null;
+  /** Non-category blocks after the header until the next category header. */
+  children: PromptBlock[];
+}
+
+/** User generation preset — full prompt configuration. */
+interface Preset {
+  id: string; name: string;
+  provider: string; engine: string;
+  parameters: Record<string, unknown>;
+  /** Ordered prompt blocks, including category markers. */
+  prompt_order: PromptBlock[];
+  prompts: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  /** Unix epoch seconds. */
+  created_at: number; updated_at: number;
+}
+
+/** Input for creating a preset. \`name\` + \`provider\` required. */
+interface PresetCreateInput {
+  name: string; provider: string;
+  engine?: string;
+  parameters?: Record<string, unknown>;
+  prompt_order?: PromptBlock[];
+  prompts?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+}
+
+/** Input for updating a preset. All fields optional. */
+type PresetUpdateInput = Partial<PresetCreateInput>;
+
+/** Input for creating a prompt block. Missing fields are defaulted by host. */
+type PromptBlockCreateInput = Partial<PromptBlock>;
+
+/** Input for updating a prompt block. Any subset of \`PromptBlock\` except \`id\`. */
+type PromptBlockUpdateInput = Partial<Omit<PromptBlock, 'id'>>;
+
+/**
+ * Preset CRUD API. Requires the \`presets\` permission. Sub-namespaces:
+ * \`api.presets.*\` (preset CRUD), \`api.presets.blocks.*\` (prompt-block
+ * CRUD within a preset), \`api.presets.categories.*\` (host-derived
+ * category grouping view). A preset is the complete generation
+ * configuration: parameters, ordered prompt blocks, behavior settings,
+ * metadata. Categories aren't separate records — they're prompt blocks
+ * with \`marker === 'category'\` and the following non-category blocks
+ * as children until the next category marker.
+ */
+interface PresetsAPI {
+  /** List presets. Defaults: limit 50, max 200. */
+  list(options?: { limit?: number; offset?: number }): Promise<{ data: Preset[]; total: number }>;
+  /** Get a preset by id. Returns \`null\` if not found. */
+  get(presetId: string): Promise<Preset | null>;
+  /** Create a new preset. \`name\` + \`provider\` required. */
+  create(input: PresetCreateInput): Promise<Preset>;
+  /** Update a preset. All fields optional. */
+  update(presetId: string, input: PresetUpdateInput): Promise<Preset>;
+  /** Delete a preset. Returns \`true\` if deleted. */
+  delete(presetId: string): Promise<boolean>;
+  /** Prompt-block CRUD within a preset. */
+  blocks: {
+    /** Return the preset's ordered prompt blocks. */
+    list(presetId: string): Promise<PromptBlock[]>;
+    /** Get a block by id. Returns \`null\` if not found. */
+    get(presetId: string, blockId: string): Promise<PromptBlock | null>;
+    /** Create a prompt block. \`options.index\` inserts at a specific position; omitted appends. */
+    create(presetId: string, input: PromptBlockCreateInput, options?: { index?: number }): Promise<PromptBlock>;
+    /** Update a block. All fields except \`id\` are optional. */
+    update(presetId: string, blockId: string, input: PromptBlockUpdateInput): Promise<PromptBlock>;
+    /** Delete a block. Returns \`true\` if deleted. */
+    delete(presetId: string, blockId: string): Promise<boolean>;
+  };
+  /** Host-derived category grouping view (read-only). To mutate a
+   *  category, use \`blocks.*\` with \`marker: 'category'\`. */
+  categories: {
+    /** Return category groups derived from the preset's ordered blocks. */
+    list(presetId: string): Promise<PromptBlockCategoryGroup[]>;
+  };
+}
+
 // ─── Databanks API ────────────────────────────────────────────────────────────
 
 /** Activation scope for a databank. */
@@ -2304,9 +2418,24 @@ interface BroadcastAPI {
 
 // ─── RPC pool (cross-extension) ────────────────────────────────────────────────
 
+/**
+ * Optional read policy for an RPC endpoint. Omit for legacy
+ * owner-permission inheritance (requester must hold every gated permission
+ * the owner has). \`requires: []\` makes the endpoint readable without
+ * delegating any permissions. \`requires: ['name']\` requires both owner
+ * AND requester to hold the named permission.
+ */
+interface RpcPolicy {
+  requires?: readonly string[];
+}
+
 interface RpcRequestContext {
   endpoint: string;
   requesterExtensionId: string;
+  /** Gated permissions available to this delegated handler call (per the
+   *  endpoint's policy). Inside the handler, gated api.* calls are limited
+   *  to this set. */
+  effectivePermissions: readonly string[];
 }
 
 /**
@@ -2319,12 +2448,12 @@ interface RpcRequestContext {
  */
 interface RpcAPI {
   /** Publish the latest value on a channel. Returns the fully-qualified endpoint. */
-  sync<T = unknown>(channel: string, value: T, options?: { as?: string }): Promise<string>;
+  sync<T = unknown>(channel: string, value: T, options?: { as?: string; policy?: RpcPolicy }): Promise<string>;
   /** Register an on-demand handler. Returns the fully-qualified endpoint. */
   handle<T = unknown>(
     channel: string,
     handler: (ctx: RpcRequestContext) => T | Promise<T>,
-    options?: { as?: string },
+    options?: { as?: string; policy?: RpcPolicy },
   ): Promise<string>;
   /** Read a value from another extension's published endpoint (\`<extensionId>.<channel>\`). */
   read<T = unknown>(endpoint: string): Promise<T>;
@@ -2895,6 +3024,8 @@ interface LumiScriptAPI {
   databanks: DatabanksAPI;
   /** Persona CRUD + active persona switching. Requires personas permission. */
   personas: PersonasAPI;
+  /** Generation preset CRUD + nested prompt-block CRUD + host-derived category grouping. Requires presets permission. */
+  presets: PresetsAPI;
   /** Regex find/replace script CRUD plus context-aware \`getActive\` resolver. Requires regex_scripts permission. */
   regexScripts: RegexScriptsAPI;
   /** Read-only access to the user's Council configuration: settings, members, and the available Lumia-item pool. No permission required. */

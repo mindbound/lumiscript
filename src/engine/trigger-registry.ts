@@ -406,13 +406,16 @@ export class TriggerRegistry {
     if (events.length === 0) return;
 
     const hasStartup = events.includes(LS_STARTUP);
-    // Filter synthetic LS events out of the Spindle subscriptions — neither
-    // is dispatched via Spindle's event bus. `ls:startup` fires from
-    // `register()` below; `ls:teardown` fires from `fireTeardown()` which
-    // is invoked by backend.ts before disable/delete cleanup.
-    const spindleEvents = events.filter(
-      e => e !== LS_STARTUP && e !== LS_TEARDOWN,
-    );
+    // Filter the whole `ls:*` namespace out of the Spindle subscriptions.
+    // These are LumiScript-synthetic events fired directly via
+    // `fireStartup` / `fireTeardown` / `fireReload`; none are dispatched
+    // through Spindle's event bus, so calling `spindle.on('ls:...', ...)`
+    // produces host-side "Unknown event" warnings. Using the prefix rule
+    // (rather than enumerating LS_STARTUP / LS_TEARDOWN / LS_RELOAD /
+    // future LS_* additions) also drops legacy / stale triggers-list
+    // entries from older versions — e.g. `ls:enabled` from the pre-merge
+    // RC iterations — instead of leaking them as Spindle subscriptions.
+    const spindleEvents = events.filter(e => !e.startsWith('ls:'));
 
     // Capture the script ID only. The full script is fetched from storage at
     // invocation time so code changes take effect without re-registration.

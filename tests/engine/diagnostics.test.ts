@@ -44,7 +44,15 @@ function makeDeps(overrides?: Partial<DiagnosticsCollectorDeps> & {
   const scripts        = overrides?.scripts ?? [];
   const handlerCount   = overrides?.handlerCount ?? 0;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const scriptStorage  = { getScripts: () => scripts } as any;
+  const scriptStorage  = {
+    getScripts: () => scripts,
+    // v1.0 — diagnostics' Workers row resolves script names via
+    // `getScript(id)?.name`. Unit-test fixtures don't load real scripts,
+    // so this stub returns null and the resolver falls back to the
+    // scriptId string. Tests that exercise name resolution explicitly
+    // can override via `overrides.scriptStorage`.
+    getScript:  (id: string) => scripts.find((s) => s.id === id) ?? null,
+  } as any;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const triggerRegistry = { handlerCount } as any;
   // Strip our extra fixture keys before spreading.
@@ -136,6 +144,74 @@ describe('collectBackendDiagnostics — Section A (LumiScript)', () => {
     const check = report.sections.find(s => s.id === 'lumiscript')!
       .checks.find(c => c.label === 'Granted permissions')!;
     expect(check.details?.granted).toEqual(['chat_mutation', 'generation', 'interceptor']);
+  });
+
+  test('with lumiverseVersions probe: promotes min-host row to pass + adds backend/frontend rows', () => {
+    const section = collectBackendDiagnostics(makeDeps({
+      lumiScriptVersion:   '1.0.0-rc.2',
+      minLumiverseVersion: '0.9.7',
+      lumiverseVersions:   { backend: '0.9.7', frontend: '0.9.7' },
+    })).sections.find(s => s.id === 'lumiscript')!;
+
+    const minHost  = section.checks.find(c => c.label === 'Minimum Lumiverse host version')!;
+    const backend  = section.checks.find(c => c.label === 'Lumiverse backend version')!;
+    const frontend = section.checks.find(c => c.label === 'Lumiverse frontend version')!;
+
+    expect(minHost.status).toBe('pass');
+    // Message no longer repeats the backend version — that lives in the
+    // explicit "Lumiverse backend version" row below. Pass status badge
+    // carries the meets-min signal.
+    expect(minHost.message).toBe('Requires 0.9.7');
+    expect(minHost.details?.required).toBe('0.9.7');
+    expect(minHost.details?.backend).toBe('0.9.7');
+    expect(minHost.details?.frontend).toBe('0.9.7');
+
+    expect(backend.status).toBe('info');
+    expect(backend.message).toBe('0.9.7');
+    expect(frontend.status).toBe('info');
+    expect(frontend.message).toBe('0.9.7');
+  });
+
+  test('with lumiverseVersions probe + backend BELOW minimum: warn on min-host row', () => {
+    const section = collectBackendDiagnostics(makeDeps({
+      minLumiverseVersion: '0.9.7',
+      // Backend running 0.8.5 — below the required 0.9.7.
+      lumiverseVersions:   { backend: '0.8.5', frontend: '0.8.5' },
+    })).sections.find(s => s.id === 'lumiscript')!;
+
+    const minHost = section.checks.find(c => c.label === 'Minimum Lumiverse host version')!;
+    expect(minHost.status).toBe('warn');
+    expect(minHost.message).toBe('Requires 0.9.7 — extension may misbehave');
+    // Actual versions still available via `details` for programmatic
+    // consumers, even though they're elided from the message.
+    expect(minHost.details?.backend).toBe('0.8.5');
+  });
+
+  test('with lumiverseVersions: backend version newer than minimum still passes', () => {
+    const section = collectBackendDiagnostics(makeDeps({
+      minLumiverseVersion: '0.9.5',
+      lumiverseVersions:   { backend: '1.2.3', frontend: '1.2.3' },
+    })).sections.find(s => s.id === 'lumiscript')!;
+
+    const minHost = section.checks.find(c => c.label === 'Minimum Lumiverse host version')!;
+    expect(minHost.status).toBe('pass');
+  });
+
+  test('without lumiverseVersions probe: min-host row stays info (no backend/frontend rows)', () => {
+    const section = collectBackendDiagnostics(makeDeps({
+      minLumiverseVersion: '0.9.7',
+      // lumiverseVersions omitted — fallback path.
+    })).sections.find(s => s.id === 'lumiscript')!;
+
+    const minHost  = section.checks.find(c => c.label === 'Minimum Lumiverse host version')!;
+    const backend  = section.checks.find(c => c.label === 'Lumiverse backend version');
+    const frontend = section.checks.find(c => c.label === 'Lumiverse frontend version');
+
+    expect(minHost.status).toBe('info');
+    expect(minHost.message).toBe('Requires 0.9.7');
+    // Fallback path doesn't add the explicit backend/frontend rows.
+    expect(backend).toBeUndefined();
+    expect(frontend).toBeUndefined();
   });
 });
 
@@ -331,7 +407,14 @@ describe('collectBackendDiagnostics — Section B (script-runner)', () => {
     const memory   = section.checks.find(c => c.label === 'Memory')!;
     const cpu      = section.checks.find(c => c.label === 'CPU time')!;
     expect(alive.status).toBe('pass');
-    expect(alive.message).toContain('p-abc');
+    // v1.0: the "Subprocess alive" message no longer carries a specific
+    // processId — that would just be worker-1's PID in the multi-worker
+    // pool, which read as "there's one subprocess" misleadingly. The
+    // per-worker PIDs live in the Workers table further down. With no
+    // `pool` field in this fixture, the collector falls back to
+    // `childAlive ? 1 : 0`, so the message says "1 worker alive".
+    expect(alive.message).toContain('Running');
+    expect(alive.message).toContain('1 worker alive');
     expect(restarts.status).toBe('pass');
     expect(restarts.message).toContain('No respawns');
     expect(memory.status).toBe('info');
@@ -470,8 +553,8 @@ describe('collectBackendDiagnostics — Section B (script-runner)', () => {
         pool: {
           configuredWorkerCount: 2,
           workers: [
-            { workerKey: 'worker-1', processId: 'abc12345xyz', lastActivityMs: Date.now() - 5_000,  assignedScriptCount: 3, restartAttempts: 0, rss: 87 * 1024 * 1024 },
-            { workerKey: 'worker-2', processId: 'def67890xyz', lastActivityMs: Date.now() - 90_000, assignedScriptCount: 2, restartAttempts: 0, rss: 102 * 1024 * 1024 },
+            { workerKey: 'worker-1', processId: 'abc12345xyz', lastActivityMs: Date.now() - 5_000,  assignedScriptCount: 3, assignedScripts: ['s-1a', 's-1b', 's-1c'], restartAttempts: 0, rss: 87 * 1024 * 1024 },
+            { workerKey: 'worker-2', processId: 'def67890xyz', lastActivityMs: Date.now() - 90_000, assignedScriptCount: 2, assignedScripts: ['s-2a', 's-2b'],         restartAttempts: 0, rss: 102 * 1024 * 1024 },
           ],
           totalAssignedScripts:  5,
           evictionTelemetry:     { totalEvictions: 0, lastEvictionAt: null, lastEvictionReason: null },
@@ -539,7 +622,7 @@ describe('collectBackendDiagnostics — Section B (script-runner)', () => {
         pool: {
           configuredWorkerCount: 2,
           workers: [
-            { workerKey: 'worker-1', processId: 'p1', lastActivityMs: Date.now(), assignedScriptCount: 1, restartAttempts: 0, rss: null },
+            { workerKey: 'worker-1', processId: 'p1', lastActivityMs: Date.now(), assignedScriptCount: 1, assignedScripts: ['s-only'], restartAttempts: 0, rss: null },
           ],
           totalAssignedScripts:  1,
           evictionTelemetry:     { totalEvictions: 0, lastEvictionAt: null, lastEvictionReason: null },

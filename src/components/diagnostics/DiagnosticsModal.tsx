@@ -260,9 +260,18 @@ const CheckRow: FC<CheckRowProps> = ({ check }) => (
           <tbody>
             {check.table.rows.map((row, rowIdx) => (
               <tr key={rowIdx}>
-                {row.map((cell, cellIdx) => (
-                  <td key={cellIdx}>{cell}</td>
-                ))}
+                {row.map((cell, cellIdx) => {
+                  // `cellTooltips` is an optional per-cell overlay with
+                  // the same shape as `rows`. Apply it via `title=` so
+                  // the browser's native tooltip surfaces on hover.
+                  // Used by the Workers row's Scripts column to reveal
+                  // the per-worker script-name list without bloating
+                  // the table layout.
+                  const tooltip = check.table?.cellTooltips?.[rowIdx]?.[cellIdx] ?? undefined;
+                  return (
+                    <td key={cellIdx} title={tooltip ?? undefined}>{cell}</td>
+                  );
+                })}
               </tr>
             ))}
           </tbody>

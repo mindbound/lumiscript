@@ -81,6 +81,7 @@ import { buildWorldInfoAPI  } from './api/world-info.js';
 import { buildDatabanksAPI } from './api/databanks.js';
 import { buildRpcAPI       } from './api/rpc.js';
 import { buildPersonasAPI  } from './api/personas.js';
+import { buildPresetsAPI   } from './api/presets.js';
 import { buildRegexScriptsAPI } from './api/regex-scripts.js';
 import { buildCouncilAPI   } from './api/council.js';
 import { buildToolsAPI     } from './api/tools.js';
@@ -409,6 +410,7 @@ export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiSc
     worldInfo:  buildWorldInfoAPI(deps),
     databanks:  buildDatabanksAPI(deps),
     personas:   buildPersonasAPI(deps),
+    presets:    buildPresetsAPI(deps),
     regexScripts: buildRegexScriptsAPI(deps),
     rpc:        buildRpcAPI(deps),
     council:    buildCouncilAPI(deps),

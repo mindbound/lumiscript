@@ -1181,6 +1181,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
               processId:           w.processId,
               lastActivityMs:      w.lastActivityMs,
               assignedScriptCount: w.assignedScriptCount,
+              assignedScripts:     w.assignedScripts,
               restartAttempts:     w.restartAttempts,
               rss:                 rssByWorker.get(w.workerKey) ?? null,
             })),
@@ -1300,11 +1301,32 @@ spindle.onFrontendMessage(async (raw, userId) => {
           };
         }
 
+        // v1.0.0-rc.2+ — probe the running Lumiverse host versions via
+        // the free-tier `spindle.version.*` surface (added in host
+        // bf974cfb). Wrapped in try/catch because older hosts that
+        // predate this surface would throw — diagnostics still work
+        // on those, just without the explicit version rows.
+        let lumiverseVersions: { backend: string; frontend: string } | undefined;
+        try {
+          const [backendVersion, frontendVersion] = await Promise.all([
+            spindle.version.getBackend(),
+            spindle.version.getFrontend(),
+          ]);
+          lumiverseVersions = { backend: backendVersion, frontend: frontendVersion };
+        } catch (err) {
+          spindle.log.warn(
+            `[LumiScript] diagnostics: spindle.version probe failed ` +
+            `(host probably predates the API) — ` +
+            `${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+
         const report = collectBackendDiagnostics({
           scriptStorage,
           triggerRegistry,
           lumiScriptVersion:   spindle.manifest.version,
           minLumiverseVersion: spindle.manifest.minimum_lumiverse_version ?? '0.0.0',
+          ...(lumiverseVersions !== undefined ? { lumiverseVersions } : {}),
           grantedPermissions:  [...grantedPermissions],
           activeUserId,
           storageProbe,

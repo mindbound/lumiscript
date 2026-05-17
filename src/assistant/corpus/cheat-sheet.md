@@ -91,6 +91,7 @@ How permissions actually work: LumiScript permissions are declared **at the exte
 | `interceptor` | Register prompt injections, content processors, world-info interceptors — anything that mutates host data mid-flight. |
 | `macro_interceptor` | Register macro-resolution interceptors (`api.macros.registerInterceptor`). Performance-sensitive; gated separately from `interceptor`. |
 | `personas` | CRUD on personas via `api.personas.*`. |
+| `presets` | CRUD on generation presets + their prompt blocks via `api.presets.*` (parameters, ordered prompt blocks with roles/positions/depth, behavior settings, metadata, plus host-derived category groupings). |
 | `push_notification` | OS-level push notifications via `api.ui.pushNotification` (delivered when the app is unfocused). |
 | `regex_scripts` | CRUD on regex find/replace scripts via `api.regexScripts.*`. |
 | `tools` | Register Council-eligible LLM tools via `api.tools.*`. |
@@ -327,6 +328,24 @@ _The same method set applies to each of the 4 namespaces above._
 | async `switchActive` | personaId \| null | Switch the active persona. Pass null to deactivate. [personas] |
 | async `getWorldBook` | personaId | Get the world book attached to a persona. [personas] |
 
+## api.presets
+
+> **Concepts:** Generation preset CRUD. A preset is the complete prompt configuration: sampler/provider `parameters`, ordered `prompt_order` (prompt blocks with roles / positions / depth), `prompts` (behavior + completion settings), and `metadata` (description, model profiles, prompt-variable values). **Three sub-namespaces**: `api.presets.*` (preset CRUD), `api.presets.blocks.*` (prompt-block CRUD within a preset — block ops update the parent's `prompt_order` and trigger the normal preset update flow), `api.presets.categories.*` (host-derived category grouping view). **Categories are NOT separate records** — a category is a structural prompt block with `marker === 'category'`, and its children are the following non-category blocks until the next category marker. `categoryMode` is `'radio'` (one enabled child) or `'checkbox'` (many). Use `categories.list()` for the precomputed grouping; create / update / delete category headers via `blocks.*` with `marker: 'category'`. **Snake_case fields** (`prompt_order`, `created_at`, `updated_at`) are preserved from Spindle DTOs since they identify stored data. **Use cases**: rotate prompt blocks based on chat context, toggle radio-category options on character state changes, snapshot presets to JSON for backup, build ephemeral per-chat presets and clean up via `ls:teardown`. Requires `presets` permission.
+
+| Method | Args | Description |
+|---|---|---|
+| async `list` | options? | List user presets (paginated). Options: `{ limit?, offset? }`. Defaults: limit 50, max 200. Returns `{ data: Preset[], total }`. Requires presets permission. [presets] |
+| async `get` | presetId | Get a preset by ID. Returns `null` if not found. Requires presets permission. [presets] |
+| async `create` | input | Create a new preset. `input.name` and `input.provider` are required (`provider` is typically `'loom'` for native Lumiverse presets). All other fields optional with host defaults (`engine: 'classic'`, empty parameters / prompt_order / prompts / metadata). Requires presets permission. [presets] |
+| async `update` | presetId, input | Update a preset. All fields optional. When `prompt_order` or `metadata` is updated, Lumiverse prunes stale `metadata.promptVariables` entries that no longer correspond to a variable definition on a block. Requires presets permission. [presets] |
+| async `delete` | presetId | Delete a preset. Returns `true` if deleted. Requires presets permission. [presets] |
+| async `blocks.list` | presetId | Return the preset's ordered prompt blocks (`PromptBlock[]`), including structural category-marker blocks. Requires presets permission. [presets] |
+| async `blocks.get` | presetId, blockId | Get a block by ID. Returns `null` if not found. Requires presets permission. [presets] |
+| async `blocks.create` | presetId, input, options? | Create a prompt block. `options.index` inserts at a specific zero-based position within the preset's `prompt_order`; omitted appends to the end. Block ops update the parent preset's `prompt_order` array and trigger the normal preset update flow. Requires presets permission. [presets] |
+| async `blocks.update` | presetId, blockId, input | Update a block. All fields except `id` are optional. Requires presets permission. [presets] |
+| async `blocks.delete` | presetId, blockId | Delete a block. Returns `true` if deleted. Requires presets permission. [presets] |
+| async `categories.list` | presetId | Return host-derived category groupings (`PromptBlockCategoryGroup[]`) for the preset's ordered blocks. Categories aren't separate records — they're structural prompt blocks with `marker === 'category'`, and a group's children are the following non-category blocks until the next category marker. The first group may have `categoryBlock: null` if normal blocks appear before any category marker. To create / update / delete a category, use `blocks.*` with `marker: 'category'`. Requires presets permission. [presets] |
+
 ## api.regexScripts
 
 | Method | Args | Description |
@@ -382,12 +401,12 @@ _The same method set applies to each of the 4 namespaces above._
 
 ## api.rpc
 
-> **Concepts:** Cross-extension shared RPC pool. Wraps Spindle's `spindle.rpcPool` with two-tier namespacing: every endpoint is fully-qualified as `lumiscript.<scriptSlug>.<channel>` where `scriptSlug` auto-derives from the calling script's name (overridable via `options.as`). Use `sync(channel, value)` to publish a latest-value snapshot and `handle(channel, fn)` to register on-demand handlers — other LumiScript scripts AND other Lumiverse extensions can `read(endpoint)` from these channels. Free tier (no permission). Endpoints auto-unregister on script disable / delete / stale-after-re-run. **Distinct from `api.broadcast`** — broadcast is in-process pub/sub between LumiScript user-scripts; rpc is cross-extension, asks-the-pool RPC where the caller knows the target endpoint by name. Backend-console logs registrations for cross-extension exposure visibility.
+> **Concepts:** Cross-extension shared RPC pool. Wraps Spindle's `spindle.rpcPool` with two-tier namespacing: every endpoint is fully-qualified as `lumiscript.<scriptSlug>.<channel>` where `scriptSlug` auto-derives from the calling script's name (overridable via `options.as`). Use `sync(channel, value)` to publish a latest-value snapshot and `handle(channel, fn)` to register on-demand handlers — other LumiScript scripts AND other Lumiverse extensions can `read(endpoint)` from these channels. Free tier (no permission). Endpoints auto-unregister on script disable / delete / stale-after-re-run. **Permission delegation**: `options.policy` controls how owner permissions flow to readers. Omit for the legacy "requester inherits every owner permission" guard; pass `{ requires: [] }` for intentionally narrow / public endpoints; pass `{ requires: ['name'] }` to scope delegated permissions explicitly. Handlers receive `effectivePermissions` on the `RpcRequestContext` so they can branch on what's actually delegated to this call. **Distinct from `api.broadcast`** — broadcast is in-process pub/sub between LumiScript user-scripts; rpc is cross-extension, asks-the-pool RPC where the caller knows the target endpoint by name. Backend-console logs registrations for cross-extension exposure visibility.
 
 | Method | Args | Description |
 |---|---|---|
-| async `sync` | channel, value, options? | Publish the latest value on a channel for cross-extension consumption. Endpoints are auto-namespaced as `lumiscript.<scriptSlug>.<channel>` — `scriptSlug` auto-derives from the calling script's name, overridable via `options.as`. Returns the fully-qualified endpoint string. Free tier (no permission). Endpoints auto-unregister on script disable / delete / stale-after-re-run. |
-| async `handle` | channel, handler, options? | Register an on-demand handler for a channel. Handler receives `RpcRequestContext { endpoint, requesterExtensionId }` and returns the response value (sync or async). Same `lumiscript.<scriptSlug>.<channel>` namespacing as `sync`. Returns the fully-qualified endpoint string. Free tier. |
+| async `sync` | channel, value, options? | Publish the latest value on a channel for cross-extension consumption. Endpoints are auto-namespaced as `lumiscript.<scriptSlug>.<channel>` — `scriptSlug` auto-derives from the calling script's name, overridable via `options.as`. `options.policy` controls cross-extension permission delegation: omit for legacy "requester must hold every gated permission the owner has" guard, `{ requires: [] }` for public/narrow endpoints, `{ requires: ['name'] }` to scope delegated permissions explicitly. Returns the fully-qualified endpoint string. Free tier. Endpoints auto-unregister on script disable / delete / stale-after-re-run. |
+| async `handle` | channel, handler, options? | Register an on-demand handler for a channel. Handler receives `RpcRequestContext { endpoint, requesterExtensionId, effectivePermissions }` and returns the response value (sync or async). `effectivePermissions` lists the gated permissions available to THIS delegated call per the endpoint's `options.policy`. Same `lumiscript.<scriptSlug>.<channel>` namespacing + `options.policy` semantics as `sync`. Returns the fully-qualified endpoint string. Free tier. |
 | async `read` | endpoint | Read a value from another extension's published endpoint. Pass the full `<extensionId>.<channel>` path. Throws on missing endpoint. For cross-extension data sharing — use `api.broadcast` for in-extension pub/sub instead. |
 | async `unregister` | channel, options? | Remove a channel previously published by the calling script via `sync` or `handle`. Idempotent — no-op if the channel isn't registered. Pass the same `options.as` you used at registration time if any. |
 
@@ -483,10 +502,14 @@ Lumiverse + LumiScript lifecycle events. Scripts react to these by being **wired
 | `CHARACTER_DELETED` | { id } |  |
 | `CHARACTER_DUPLICATED` | { id, newId } |  |
 | `PERSONA_CHANGED` | { persona } |  |
+| `WORLD_INFO_ACTIVATED` | { entries } | World Info entries were activated during prompt assembly. |
+| `WORLD_BOOK_CHANGED` | { id, worldBook } | Coarse-grained: world book was created, updated, had its semantic-activation toggled, or had any of its entries mutated (entry create / update / delete / reorder / bulk-op / import). Fires alongside `WORLD_BOOK_ENTRY_CHANGED` on per-entry mutations — handlers subscribed to both see two events per change. Bulk imports suppress per-entry events and emit this once at the end. |
+| `WORLD_BOOK_DELETED` | { id } | World book was deleted. |
+| `WORLD_BOOK_ENTRY_CHANGED` | { id, worldBookId, entry } | Entry was created or updated. Does NOT fire during bulk imports — those emit a single `WORLD_BOOK_CHANGED` for the parent book instead. Subscribe to `WORLD_BOOK_CHANGED` in addition if you need to catch imported entries. |
+| `WORLD_BOOK_ENTRY_DELETED` | { id, worldBookId } | Entry was deleted. |
 | `SETTINGS_UPDATED` | { key, value } |  |
 | `PRESET_CHANGED` | { presetId } |  |
 | `CONNECTION_PROFILE_LOADED` | { connectionId } |  |
-| `WORLD_INFO_ACTIVATED` | { entries } |  |
 | `REGEX_SCRIPT_CHANGED` | { id, script: RegexScriptInfo }  // create / update / duplicate / reorder / enable / disable. v0.27.0+ — requires regex_scripts permission |  |
 | `REGEX_SCRIPT_DELETED` | { id }  // v0.27.0+ — requires regex_scripts permission |  |
 | `TOOL_INVOCATION` | { toolName, requestId, args } |  |

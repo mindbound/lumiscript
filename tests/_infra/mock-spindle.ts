@@ -213,6 +213,25 @@ export function createMockSpindle() {
       getWorldBook: mock(() => Promise.resolve(null)),
     },
 
+    // ─── Presets (v1.0.0-rc.2+) ────────────────────────────────────────
+    presets: {
+      list:   mock(() => Promise.resolve({ data: [], total: 0 })),
+      get:    mock(() => Promise.resolve(null)),
+      create: mock(() => Promise.resolve({ id: 'mock-preset-id' })),
+      update: mock(() => Promise.resolve({ id: 'mock-preset-id' })),
+      delete: mock(() => Promise.resolve(true)),
+      blocks: {
+        list:   mock(() => Promise.resolve([])),
+        get:    mock(() => Promise.resolve(null)),
+        create: mock(() => Promise.resolve({ id: 'mock-block-id' })),
+        update: mock(() => Promise.resolve({ id: 'mock-block-id' })),
+        delete: mock(() => Promise.resolve(true)),
+      },
+      categories: {
+        list:   mock(() => Promise.resolve([])),
+      },
+    },
+
     // ─── Regex Scripts (v0.27.0+) ──────────────────────────────────────
     regex_scripts: {
       list:      mock(() => Promise.resolve({ data: [], total: 0 })),

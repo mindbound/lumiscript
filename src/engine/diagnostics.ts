@@ -76,10 +76,18 @@ export interface DiagnosticCheck {
    * for the FE→BE wire. Renderers that support tables (the FE modal)
    * format it as an HTML table; renderers that don't fall back to
    * `message`.
+   *
+   * `cellTooltips` is an optional per-cell tooltip overlay, same shape
+   * as `rows`. The FE modal applies tooltip strings as `title=` on the
+   * matching `<td>` (hover-to-reveal). Use `null` to skip cells without
+   * a tooltip. Markdown export ignores `cellTooltips` — surface the
+   * same information through a follow-up check row when it should land
+   * in support reports.
    */
   table?: {
-    headers: string[];
-    rows:    string[][];
+    headers:       string[];
+    rows:          string[][];
+    cellTooltips?: Array<Array<string | null>>;
   };
   /**
    * Optional structured details. Must be JSON-serializable — gets wired
@@ -210,6 +218,13 @@ export interface ScriptRunnerProbeResult {
       processId:           string;
       lastActivityMs:      number;
       assignedScriptCount: number;
+      /**
+       * Script IDs currently assigned to this worker (alphabetically
+       * sorted for stable output). The collector resolves names via
+       * `scriptStorage.getScript(id)?.name` to drive the Scripts-column
+       * tooltip + the "Script assignments by worker" row.
+       */
+      assignedScripts:     string[];
       restartAttempts:     number;
       /** Async-collected RSS for this worker. Null if the per-worker query timed out or failed. */
       rss:                 number | null;
@@ -239,6 +254,20 @@ export interface DiagnosticsCollectorDeps {
   lumiScriptVersion:   string;
   /** Minimum Lumiverse host version declared in spindle.json. */
   minLumiverseVersion: string;
+  /**
+   * Lumiverse host versions probed at the call site via `spindle.version.*`
+   * (free tier — no permission, added in host bf974cfb / lumiverse-spindle-
+   * types 0.4.74-era). `undefined` when the caller chose to skip the
+   * probe (older hosts that predate this surface — the call would throw
+   * — or unit tests). When present, Section A promotes the "Minimum
+   * Lumiverse host version" row from info to pass/warn (comparing
+   * `backend >= minimum`) and adds two new explicit "Lumiverse backend
+   * version" + "Lumiverse frontend version" info rows.
+   */
+  lumiverseVersions?: {
+    backend:  string;
+    frontend: string;
+  };
   /** Spindle-granted permissions snapshot. */
   grantedPermissions:  string[];
   /**
@@ -294,35 +323,94 @@ export function collectBackendDiagnostics(deps: DiagnosticsCollectorDeps): Diagn
 
 // ─── Section A — LumiScript ─────────────────────────────────────────────────
 
+/**
+ * Loose semver compare — `version >= minimum`. Parses dotted
+ * MAJOR.MINOR.PATCH segments numerically; ignores any pre-release /
+ * build suffixes (`-rc.1`, `+sha`, etc.) since Lumiverse host versions
+ * today are plain MAJOR.MINOR.PATCH. NaN segments coerce to 0. Mirrors
+ * the comparator pattern documented in Spindle's `version.md`.
+ */
+function gteSemver(version: string, minimum: string): boolean {
+  const a = version.split('.').map((s) => parseInt(s, 10));
+  const b = minimum.split('.').map((s) => parseInt(s, 10));
+  for (let i = 0; i < 3; i++) {
+    const av = Number.isFinite(a[i]) ? (a[i] as number) : 0;
+    const bv = Number.isFinite(b[i]) ? (b[i] as number) : 0;
+    if (av > bv) return true;
+    if (av < bv) return false;
+  }
+  return true;
+}
+
 function buildLumiScriptSection(deps: DiagnosticsCollectorDeps): DiagnosticSection {
+  const checks: DiagnosticCheck[] = [
+    {
+      label:   'Version',
+      status:  'info',
+      message: deps.lumiScriptVersion,
+    },
+  ];
+
+  if (deps.lumiverseVersions !== undefined) {
+    // Promoted variant: now that we have the actual running backend
+    // version, compare it against the declared requirement and emit
+    // pass / warn. Bumps from the original info-only row that
+    // surfaced only the requirement.
+    const meets = gteSemver(deps.lumiverseVersions.backend, deps.minLumiverseVersion);
+    checks.push({
+      label:   'Minimum Lumiverse host version',
+      status:  meets ? 'pass' : 'warn',
+      // Drop the actual backend version from the message — the
+      // "Lumiverse backend version" row immediately below covers it
+      // explicitly, so repeating it here would duplicate in the
+      // visual UI AND the Markdown export. The pass/warn status
+      // badge is the actionable signal; the "may misbehave"
+      // qualifier on the warn branch keeps the warn state
+      // self-describing.
+      message: meets
+        ? `Requires ${deps.minLumiverseVersion}`
+        : `Requires ${deps.minLumiverseVersion} — extension may misbehave`,
+      details: {
+        required: deps.minLumiverseVersion,
+        backend:  deps.lumiverseVersions.backend,
+        frontend: deps.lumiverseVersions.frontend,
+      },
+    });
+    checks.push({
+      label:   'Lumiverse backend version',
+      status:  'info',
+      message: deps.lumiverseVersions.backend,
+    });
+    checks.push({
+      label:   'Lumiverse frontend version',
+      status:  'info',
+      message: deps.lumiverseVersions.frontend,
+    });
+  } else {
+    // Fallback: caller didn't probe `spindle.version.*` (older host
+    // pre-bf974cfb that lacks the API, probe failed, or unit test
+    // that doesn't exercise version reporting). Keep the original
+    // info-only row + skip the explicit backend/frontend rows.
+    checks.push({
+      label:   'Minimum Lumiverse host version',
+      status:  'info',
+      message: `Requires ${deps.minLumiverseVersion}`,
+    });
+  }
+
+  checks.push({
+    label:   'Granted permissions',
+    status:  deps.grantedPermissions.length > 0 ? 'pass' : 'warn',
+    message: deps.grantedPermissions.length > 0
+      ? `${deps.grantedPermissions.length} permission(s) granted`
+      : 'No permissions granted — extension features will be degraded',
+    details: { granted: [...deps.grantedPermissions].sort() },
+  });
+
   return {
     id:   'lumiscript',
     name: 'LumiScript',
-    checks: [
-      {
-        label:   'Version',
-        status:  'info',
-        message: deps.lumiScriptVersion,
-      },
-      {
-        label:   'Minimum Lumiverse host version',
-        status:  'info',
-        // We don't currently have a runtime API to read the CURRENT
-        // Lumiverse host version from the spindle surface, so this is
-        // info-only — we surface the requirement. Once a future
-        // `spindle.host.version` (or similar) ships, promote to pass/fail
-        // comparing requirement vs current.
-        message: `Requires ${deps.minLumiverseVersion}`,
-      },
-      {
-        label:   'Granted permissions',
-        status:  deps.grantedPermissions.length > 0 ? 'pass' : 'warn',
-        message: deps.grantedPermissions.length > 0
-          ? `${deps.grantedPermissions.length} permission(s) granted`
-          : 'No permissions granted — extension features will be degraded',
-        details: { granted: [...deps.grantedPermissions].sort() },
-      },
-    ],
+    checks,
   };
 }
 
@@ -347,12 +435,24 @@ function buildScriptRunnerSection(deps: DiagnosticsCollectorDeps): DiagnosticSec
 
   // Liveness — primary health signal. A subprocess that's dead in a
   // sustained way is the bug we most want to catch.
+  //
+  // The legacy "one subprocess with one processId" framing predates
+  // the v1.0 multi-worker pool; with Phase F, the per-worker IDs live
+  // in the Workers table further down. Reporting a single processId
+  // here read as "there's one subprocess" when in fact there are N.
+  // Drop processId from the message and surface a pool-aware "X
+  // worker(s) alive" instead. The "Subprocess alive" label itself is
+  // preserved per the Markdown-export format-stability commitment
+  // (don't rename existing check labels).
+  const aliveWorkerCount = probe.pool?.workers.length ?? (probe.childAlive ? 1 : 0);
   checks.push({
     label:   'Subprocess alive',
     status:  probe.childAlive ? 'pass' : 'fail',
     message: probe.childAlive
-      ? `Running (processId: ${probe.processId ?? '<unknown>'})`
-      : 'Not running — no child process handle (post-crash or pre-spawn state)',
+      ? aliveWorkerCount === 1
+        ? 'Running — 1 worker alive (see Workers table below for per-worker details)'
+        : `Running — ${aliveWorkerCount} workers alive (see Workers table below for per-worker details)`
+      : 'Not running — no workers alive (post-crash or pre-spawn state)',
   });
 
   // Restart history. Zero is the expected steady state. Any non-zero is
@@ -442,7 +542,15 @@ function buildScriptRunnerSection(deps: DiagnosticsCollectorDeps): DiagnosticSec
     // programmatic consumers (parsing support reports etc.).
     if (p.workers.length > 0) {
       const now = Date.now();
-      const summarised = p.workers.map((w) => {
+      // Pre-resolve script names per worker so the Scripts-column
+      // tooltip + the follow-up "Script assignments by worker" row
+      // use the same resolved values. Falls back to scriptId when
+      // name lookup fails (rare — script deleted between assignment
+      // and diagnostic snapshot).
+      const scriptNamesByWorker = p.workers.map((w) =>
+        w.assignedScripts.map((id) => deps.scriptStorage.getScript(id)?.name ?? id),
+      );
+      const summarised = p.workers.map((w, idx) => {
         const idleSec = Math.max(0, Math.round((now - w.lastActivityMs) / 1_000));
         const rssMb   = w.rss !== null ? `${Math.round(w.rss / 1024 / 1024)} MB` : '? MB';
         return {
@@ -452,12 +560,29 @@ function buildScriptRunnerSection(deps: DiagnosticsCollectorDeps): DiagnosticSec
           scripts:     String(w.assignedScriptCount),
           memory:      rssMb,
           restarts:    String(w.restartAttempts),
+          scriptNames: scriptNamesByWorker[idx]!,
         };
       });
       const messageLines = summarised.map((s) =>
         `${s.workerKey}: pid ${s.pidShort}, idle ${s.idle}, ${s.scripts} script(s), ${s.memory}` +
         (s.restarts !== '0' ? `, restart-attempts ${s.restarts}` : ''),
       );
+      // Per-row tooltip overlay. Headers are
+      // ['Worker', 'PID', 'Idle', 'Scripts', 'Memory', 'Restarts'];
+      // only the Scripts column (index 3) carries a tooltip — the
+      // comma-separated list of resolved script names assigned to
+      // that worker. `null` in the other slots tells the modal "no
+      // tooltip here". The breakdown is ALSO surfaced in the
+      // follow-up "Script assignments by worker" row below so it
+      // lands in the Markdown export (`cellTooltips` is FE-only).
+      const cellTooltips: Array<Array<string | null>> = summarised.map((s) => [
+        null,
+        null,
+        null,
+        s.scriptNames.length > 0 ? s.scriptNames.join(', ') : null,
+        null,
+        null,
+      ]);
       checks.push({
         label:   'Workers',
         status:  'info',
@@ -467,8 +592,28 @@ function buildScriptRunnerSection(deps: DiagnosticsCollectorDeps): DiagnosticSec
           rows:    summarised.map((s) => [
             s.workerKey, s.pidShort, s.idle, s.scripts, s.memory, s.restarts,
           ]),
+          cellTooltips,
         },
         details: { workers: p.workers },
+      });
+
+      // Per-worker script-name breakdown. Visible in the modal as its
+      // own row AND in the Markdown export (which ignores the
+      // `cellTooltips` overlay above, so without this row anyone
+      // pasting the report into a Discord support thread wouldn't
+      // see which scripts are on which worker).
+      const assignmentLines = summarised.map((s) =>
+        `${s.workerKey}: ${s.scriptNames.length > 0 ? s.scriptNames.join(', ') : '(none)'}`,
+      );
+      checks.push({
+        label:   'Script assignments by worker',
+        status:  'info',
+        message: assignmentLines.join(' · '),
+        details: {
+          assignmentsByWorker: Object.fromEntries(
+            summarised.map((s) => [s.workerKey, s.scriptNames]),
+          ),
+        },
       });
     }
 
