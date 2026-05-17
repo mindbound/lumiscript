@@ -228,12 +228,51 @@ export interface ScriptRunnerProbeResult {
       restartAttempts:     number;
       /** Async-collected RSS for this worker. Null if the per-worker query timed out or failed. */
       rss:                 number | null;
+      /**
+       * v1.0.0-rc.3+ — true when at least one assigned script holds
+       * active long-lived registrations (tools, macros, drawer tabs,
+       * RPC endpoints, etc.). Pinned workers are exempt from idle +
+       * memory eviction; the diagnostics panel surfaces this via the
+       * "Eviction-exempt scripts" row.
+       */
+      pinnedByRegistrations: boolean;
+      /**
+       * v1.0.0-rc.3+ — per-pinning-script registration breakdown. Each
+       * entry's `counts` is a copy of `ScriptRegistrationCounts` from
+       * `script-pinning.ts`. Cross-process JSON-only — typed `unknown`-
+       * compatible at this layer since the diagnostics report is what
+       * the FE modal consumes.
+       */
+      pinningScripts: Array<{
+        scriptId: string;
+        counts: {
+          tools:                 number;
+          macros:                number;
+          injections:            number;
+          drawerTabs:            number;
+          inputBarActions:       number;
+          worldInfoInterceptors: number;
+          messageProcessors:     number;
+          macroInterceptors:     number;
+          rpcEndpoints:          number;
+          floatWidgets:          number;
+          advancedModals:        number;
+          total:                 number;
+        };
+      }>;
     }>;
     totalAssignedScripts: number;
     evictionTelemetry: {
       totalEvictions:     number;
       lastEvictionAt:     number | null;
       lastEvictionReason: string | null;
+      /**
+       * v1.0.0-rc.3+ — sweep-tick decisions to skip eviction because the
+       * candidate worker hosts at least one script with active
+       * registrations. Surfaced in the "Evictions" diagnostics row when
+       * non-zero.
+       */
+      totalEvictionsSkippedByPin: number;
     };
     settings: {
       idleTimeoutMs:      number;
@@ -625,9 +664,59 @@ function buildScriptRunnerSection(deps: DiagnosticsCollectorDeps): DiagnosticSec
       details: { totalAssignedScripts: p.totalAssignedScripts },
     });
 
+    // v1.0.0-rc.3+ — registration-pinning breakdown. Surfaces ONLY when
+    // at least one worker has at least one pinning script; the row is
+    // omitted entirely for users with no tool/macro/panel-style scripts
+    // so the panel stays uncluttered. Each row lists worker → script →
+    // per-registry counts breakdown. Status is `info` — pinning is the
+    // desired behaviour, not a health concern.
+    const pinnedEntries = p.workers.flatMap((w) =>
+      w.pinningScripts.map((s) => ({ workerKey: w.workerKey, ...s })),
+    );
+    if (pinnedEntries.length > 0) {
+      const rows = pinnedEntries.map((entry) => {
+        const scriptName = deps.scriptStorage.getScript(entry.scriptId)?.name ?? entry.scriptId;
+        return [
+          entry.workerKey,
+          scriptName,
+          String(entry.counts.total),
+          formatRegistrationBreakdown(entry.counts),
+        ];
+      });
+      const messageLines = pinnedEntries.map((entry) => {
+        const scriptName = deps.scriptStorage.getScript(entry.scriptId)?.name ?? entry.scriptId;
+        return `${entry.workerKey}/${scriptName}: ${entry.counts.total} registration(s)`;
+      });
+      checks.push({
+        label:   'Eviction-exempt scripts (registrations)',
+        status:  'info',
+        message: messageLines.join(' · '),
+        table: {
+          headers: ['Worker', 'Script', 'Total', 'Breakdown'],
+          rows,
+        },
+        details: {
+          pinnedByWorker: Object.fromEntries(
+            p.workers
+              .filter((w) => w.pinnedByRegistrations)
+              .map((w) => [w.workerKey, w.pinningScripts]),
+          ),
+        },
+      });
+    }
+
     // Eviction telemetry. `info` at 0; `info` with detail at higher counts —
     // not a health signal per se (eviction is the desired behaviour), so
     // we don't escalate the status.
+    //
+    // v1.0.0-rc.3+ — `totalEvictionsSkippedByPin` is collected and threaded
+    // through `details` for completeness, but NOT surfaced in `message`:
+    // the counter is monotonic over sweep ticks × pinned-worker count, so
+    // its growth tracks session uptime rather than anything actionable.
+    // The dedicated "Eviction-exempt scripts (registrations)" row above
+    // conveys the actually-useful state (which scripts pin which workers).
+    // A growing "N skipped" number alongside "no evictions" reads like a
+    // bug to users who don't know the internals; better to omit it.
     const ev = p.evictionTelemetry;
     checks.push({
       label:   'Evictions (this session)',
@@ -636,9 +725,10 @@ function buildScriptRunnerSection(deps: DiagnosticsCollectorDeps): DiagnosticSec
         ? 'No evictions since LumiScript loaded'
         : `${ev.totalEvictions} eviction(s)${ev.lastEvictionReason ? ` — last reason: ${ev.lastEvictionReason}` : ''}`,
       details: {
-        totalEvictions:     ev.totalEvictions,
-        lastEvictionAt:     ev.lastEvictionAt,
-        lastEvictionReason: ev.lastEvictionReason,
+        totalEvictions:             ev.totalEvictions,
+        lastEvictionAt:             ev.lastEvictionAt,
+        lastEvictionReason:         ev.lastEvictionReason,
+        totalEvictionsSkippedByPin: ev.totalEvictionsSkippedByPin,
       },
     });
   }
@@ -651,6 +741,43 @@ function formatIdle(seconds: number): string {
   if (seconds < 60)   return `${seconds}s`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
   return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+}
+
+/**
+ * v1.0.0-rc.3+ — comma-joined registration breakdown, e.g.
+ * `"tools=2, drawerTabs=1"`. Zero-valued fields are dropped so the
+ * resulting string is the minimal informative view. Used by the
+ * "Eviction-exempt scripts" table's Breakdown column.
+ *
+ * Field name → display label mapping is stable across versions per the
+ * Markdown export format-commitment.
+ */
+function formatRegistrationBreakdown(c: {
+  tools:                 number;
+  macros:                number;
+  injections:            number;
+  drawerTabs:            number;
+  inputBarActions:       number;
+  worldInfoInterceptors: number;
+  messageProcessors:     number;
+  macroInterceptors:     number;
+  rpcEndpoints:          number;
+  floatWidgets:          number;
+  advancedModals:        number;
+}): string {
+  const parts: string[] = [];
+  if (c.tools > 0)                  parts.push(`tools=${c.tools}`);
+  if (c.macros > 0)                 parts.push(`macros=${c.macros}`);
+  if (c.injections > 0)             parts.push(`injections=${c.injections}`);
+  if (c.drawerTabs > 0)             parts.push(`drawerTabs=${c.drawerTabs}`);
+  if (c.inputBarActions > 0)        parts.push(`inputBarActions=${c.inputBarActions}`);
+  if (c.worldInfoInterceptors > 0)  parts.push(`worldInfoInterceptors=${c.worldInfoInterceptors}`);
+  if (c.messageProcessors > 0)      parts.push(`messageProcessors=${c.messageProcessors}`);
+  if (c.macroInterceptors > 0)      parts.push(`macroInterceptors=${c.macroInterceptors}`);
+  if (c.rpcEndpoints > 0)           parts.push(`rpcEndpoints=${c.rpcEndpoints}`);
+  if (c.floatWidgets > 0)           parts.push(`floatWidgets=${c.floatWidgets}`);
+  if (c.advancedModals > 0)         parts.push(`advancedModals=${c.advancedModals}`);
+  return parts.join(', ');
 }
 
 // Format helpers for Section B. Local — not exported because they're

@@ -527,7 +527,7 @@ describe('collectBackendDiagnostics — Section B (script-runner)', () => {
           configuredWorkerCount: 4,
           workers:               [],
           totalAssignedScripts:  0,
-          evictionTelemetry:     { totalEvictions: 0, lastEvictionAt: null, lastEvictionReason: null },
+          evictionTelemetry:     { totalEvictions: 0, lastEvictionAt: null, lastEvictionReason: null, totalEvictionsSkippedByPin: 0 },
           settings:              { idleTimeoutMs: 30 * 60_000, memoryCeilingBytes: 512 * 1024 * 1024 },
         },
       },
@@ -553,11 +553,11 @@ describe('collectBackendDiagnostics — Section B (script-runner)', () => {
         pool: {
           configuredWorkerCount: 2,
           workers: [
-            { workerKey: 'worker-1', processId: 'abc12345xyz', lastActivityMs: Date.now() - 5_000,  assignedScriptCount: 3, assignedScripts: ['s-1a', 's-1b', 's-1c'], restartAttempts: 0, rss: 87 * 1024 * 1024 },
-            { workerKey: 'worker-2', processId: 'def67890xyz', lastActivityMs: Date.now() - 90_000, assignedScriptCount: 2, assignedScripts: ['s-2a', 's-2b'],         restartAttempts: 0, rss: 102 * 1024 * 1024 },
+            { workerKey: 'worker-1', processId: 'abc12345xyz', lastActivityMs: Date.now() - 5_000,  assignedScriptCount: 3, assignedScripts: ['s-1a', 's-1b', 's-1c'], restartAttempts: 0, rss: 87 * 1024 * 1024,  pinnedByRegistrations: false, pinningScripts: [] },
+            { workerKey: 'worker-2', processId: 'def67890xyz', lastActivityMs: Date.now() - 90_000, assignedScriptCount: 2, assignedScripts: ['s-2a', 's-2b'],         restartAttempts: 0, rss: 102 * 1024 * 1024, pinnedByRegistrations: false, pinningScripts: [] },
           ],
           totalAssignedScripts:  5,
-          evictionTelemetry:     { totalEvictions: 0, lastEvictionAt: null, lastEvictionReason: null },
+          evictionTelemetry:     { totalEvictions: 0, lastEvictionAt: null, lastEvictionReason: null, totalEvictionsSkippedByPin: 0 },
           settings:              { idleTimeoutMs: 30 * 60_000, memoryCeilingBytes: 512 * 1024 * 1024 },
         },
       },
@@ -593,8 +593,9 @@ describe('collectBackendDiagnostics — Section B (script-runner)', () => {
             totalAssignedScripts:  0,
             evictionTelemetry: {
               totalEvictions,
-              lastEvictionAt:     lastReason ? Date.now() : null,
-              lastEvictionReason: lastReason,
+              lastEvictionAt:             lastReason ? Date.now() : null,
+              lastEvictionReason:         lastReason,
+              totalEvictionsSkippedByPin: 0,
             },
             settings: { idleTimeoutMs: 30 * 60_000, memoryCeilingBytes: 512 * 1024 * 1024 },
           },
@@ -622,10 +623,10 @@ describe('collectBackendDiagnostics — Section B (script-runner)', () => {
         pool: {
           configuredWorkerCount: 2,
           workers: [
-            { workerKey: 'worker-1', processId: 'p1', lastActivityMs: Date.now(), assignedScriptCount: 1, assignedScripts: ['s-only'], restartAttempts: 0, rss: null },
+            { workerKey: 'worker-1', processId: 'p1', lastActivityMs: Date.now(), assignedScriptCount: 1, assignedScripts: ['s-only'], restartAttempts: 0, rss: null, pinnedByRegistrations: false, pinningScripts: [] },
           ],
           totalAssignedScripts:  1,
-          evictionTelemetry:     { totalEvictions: 0, lastEvictionAt: null, lastEvictionReason: null },
+          evictionTelemetry:     { totalEvictions: 0, lastEvictionAt: null, lastEvictionReason: null, totalEvictionsSkippedByPin: 0 },
           settings:              { idleTimeoutMs: 30 * 60_000, memoryCeilingBytes: 512 * 1024 * 1024 },
         },
       },

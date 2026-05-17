@@ -3669,3 +3669,15 @@ export function __resetForTests(): void {
   domStableIdToElementId.clear();
   latestRunIdByScript.clear();
 }
+
+/** @internal — clear just the `domStableIdToElementId` cache for a single
+ *  script. Used by the post-eviction-alias regression test to simulate the
+ *  worker-death-with-parent-state-survival scenario: the worker is gone
+ *  (so the proxy's stableId cache is empty for the next run), but the
+ *  parent's dom-registry retains the existing stableId → elementId
+ *  mapping. The next inject from the new worker will generate a fresh
+ *  UUID, hit canonical's dedup path with the stale parent entry, and
+ *  exercise the alias-storage fix. */
+export function __clearScriptStableIdCacheForTests(scriptId: string): void {
+  domStableIdToElementId.delete(scriptId);
+}

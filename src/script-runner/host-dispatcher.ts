@@ -102,6 +102,11 @@ import {
   clearByScriptId as busClearByScriptId,
 } from '../engine/broadcast-bus.js';
 import { getActiveChatId, getActiveCharacterId } from '../engine/binding.js';
+import {
+  scriptHasPinningRegistrations,
+  getRegistrationCountsForScript,
+  type ScriptRegistrationCounts,
+} from '../engine/script-pinning.js';
 
 // ─── Script resolver (Phase 9e) ─────────────────────────────────────────────
 //
@@ -557,6 +562,17 @@ let evictionSweepTimer: ReturnType<typeof setInterval> | null = null;
 let totalEvictions:     number        = 0;
 let lastEvictionAt:     number | null = null;
 let lastEvictionReason: string | null = null;
+
+// v1.0.0-rc.3+ telemetry — eviction-sweep ticks that decided NOT to evict
+// a candidate worker because at least one assigned script holds active
+// registrations (tool / macro / drawer tab / RPC endpoint / etc.). The
+// counter increments once per skipped worker per sweep tick, so a sweep
+// that finds three over-threshold workers all pinned by registrations
+// bumps this by three. Sustained growth means "registration owners are
+// keeping workers warm against the idle policy" — expected for users
+// running long-lived tool / panel scripts, anomalous if the user has
+// none of those.
+let totalEvictionsSkippedByPin: number = 0;
 
 // v0.28.0+ — Diagnostics-only counters. Separate from `restartAttempts`
 // (which is the *current backoff index* and resets to 0 after a stable
@@ -3180,6 +3196,42 @@ async function handleInternalModalRequest(
  * handle (same elementId). We re-store under the same key (overwriting
  * with the same handle reference is harmless) and return the existing
  * elementId. The proxy's await unblocks with the correct id.
+ *
+ * ─── Post-eviction alias storage (v1.0.0-rc.3+) ─────────────────────────
+ *
+ * When a worker is evicted and respawned, the parent's dom-registry
+ * (with stableId → elementId mappings) survives — DOM persistent state
+ * outlives worker death by design. But the proxy's child-side
+ * `domStableIdToElementId` cache dies with the worker. Post-respawn,
+ * the proxy generates a fresh `_elementId` UUID for the same stableId
+ * and threads it in `options._elementId`. The canonical's stableId
+ * dedup path IGNORES `_elementId` and returns the existing handle's
+ * id (correct from canonical's POV — the dom-registry entry hasn't
+ * moved). But the proxy's sync DOMHandle now has `.id === _elementId`
+ * (the new UUID), and all subsequent handle method dispatches
+ * (`handle.on('click', …)`, `handle.update(...)`, etc.) carry the
+ * proxy's id — which `pendingDomHandles` doesn't have an entry for.
+ * Result: register-handler IPCs land "DOM handle not found" + the
+ * registration silently drops, breaking re-attached event listeners
+ * after eviction.
+ *
+ * Fix: when canonical's dedup returns a handle whose id differs from
+ * the proxy's supplied `_elementId`, store the handle in
+ * `pendingDomHandles` under BOTH ids. Both keys point at the same
+ * handle ref; subsequent lookups via either id succeed. The canonical
+ * still operates on its own id internally (dom-registry, FE messages
+ * use the canonical id) — only the parent's IPC lookup table carries
+ * the alias.
+ *
+ * Memory cost: each script × stableId × eviction-cycle accumulates
+ * one alias entry. Bounded by N evictions over the script's lifetime,
+ * freed on script-unregister. In practice tens of bytes per alias,
+ * tens of entries per long-lived script across a day — not a concern.
+ *
+ * Long-term: see roadmap entry on the holistic state-sync-on-respawn
+ * approach (Option C in the RC3 design conversation), which would
+ * eliminate the alias accumulation by pre-populating the proxy's
+ * stableId cache from the parent's view before the script body runs.
  */
 async function handleDomInjectRequest(
   req:    ApiProxyRequest,
@@ -3188,19 +3240,25 @@ async function handleDomInjectRequest(
   const requestId = req.requestId;
   try {
     let handle: DOMHandle;
+    let options: DOMInjectOptions | DOMMessageInjectOptions | undefined;
     if (req.method === 'ui.dom.inject') {
-      const target  = req.args[0] as string;
-      const html    = req.args[1] as string;
-      const options = req.args[2] as DOMInjectOptions | undefined;
+      const target = req.args[0] as string;
+      const html   = req.args[1] as string;
+      options      = req.args[2] as DOMInjectOptions | undefined;
       handle = active.api.ui.dom.inject(target, html, options);
     } else {
       // 'ui.dom.injectAtMessage'
       const messageId = req.args[0] as string;
       const html      = req.args[1] as string;
-      const options   = req.args[2] as DOMMessageInjectOptions | undefined;
+      options         = req.args[2] as DOMMessageInjectOptions | undefined;
       handle = active.api.ui.dom.injectAtMessage(messageId, html, options);
     }
     storePendingDomHandle(active.scriptId, handle.id, handle);
+    // Alias storage — see JSDoc § "Post-eviction alias storage".
+    const proxyElementId = (options as { _elementId?: string } | undefined)?._elementId;
+    if (proxyElementId !== undefined && proxyElementId !== handle.id) {
+      storePendingDomHandle(active.scriptId, proxyElementId, handle);
+    }
     return { type: 'api-response', requestId, ok: true, value: handle.id };
   } catch (err) {
     return {
@@ -3277,6 +3335,16 @@ async function handleInternalDomRequest(
       const childHandle = handle.injectChild(target, html, options);
       // Same shape as inject*: store by new elementId, return id.
       storePendingDomHandle(active.scriptId, childHandle.id, childHandle);
+      // Same post-eviction alias storage as handleDomInjectRequest. See
+      // that function's JSDoc § "Post-eviction alias storage" for the
+      // full rationale — short version: when canonical's stableId dedup
+      // returns a handle whose id differs from the proxy's supplied
+      // `_elementId`, store under both keys so subsequent handle method
+      // lookups via either id succeed.
+      const childProxyElementId = options?._elementId;
+      if (childProxyElementId !== undefined && childProxyElementId !== childHandle.id) {
+        storePendingDomHandle(active.scriptId, childProxyElementId, childHandle);
+      }
       value = childHandle.id;
     } else if (action === 'on') {
       // Phase 9d.4.c-2 routes DOMHandle.on() via the `register-handler`
@@ -5496,6 +5564,25 @@ export function scriptHasActiveDispatch(scriptId: string): boolean {
 }
 
 /**
+ * v1.0.0-rc.3+ — true if any script currently assigned to `workerKey`
+ * holds active registrations (tools, macros, drawer tabs, RPC endpoints,
+ * etc.) that would dangle after worker death. See `script-pinning.ts` for
+ * the full registry list and rationale.
+ *
+ * Used by `evictWorker` (race-safe gate) AND by `evictionSweep`'s
+ * candidate filters (efficiency — pinned workers are excluded from the
+ * candidate list before sorting, mirroring the `workerHasActiveRun`
+ * pattern).
+ */
+function workerHostsPinningRegistration(workerKey: ScriptRunnerWorkerKey): boolean {
+  for (const [scriptId, assignedWorker] of scriptWorkerAssignments) {
+    if (assignedWorker !== workerKey) continue;
+    if (scriptHasPinningRegistrations(scriptId)) return true;
+  }
+  return false;
+}
+
+/**
  * Evict a single worker. Race-checked: re-verifies "no active runs" just
  * before shutdown, since the snapshot the sweep took may be stale by the
  * time we reach this call (memory queries are async). If a run started
@@ -5509,6 +5596,30 @@ async function evictWorker(workerKey: ScriptRunnerWorkerKey, reason: string): Pr
   if (workerHasActiveRun(workerKey)) {
     spindle.log.info(
       `[script-runner] eviction skipped for worker '${workerKey}' (active run started during sweep; reason was: ${reason})`,
+    );
+    return;
+  }
+  // v1.0.0-rc.3+ — Registration-pinning gate. A worker hosting a script
+  // with active long-lived registrations (api.tools.register, api.macros.
+  // register, drawer tabs, RPC endpoints, etc.) must NOT be evicted —
+  // those registrations have parent-side wrappers that route through
+  // `sendRunHandlerRequest`, which throws synchronously when the worker
+  // isn't running. Evicting such a worker turns every host-side wrapper
+  // pointing at it into a null pointer; the user-visible symptom is
+  // "this tool / macro / panel stops working until I manually toggle the
+  // script". See `script-pinning.ts` for the full registry list +
+  // rationale, and `notes/post-eviction-registration-pinning.md` if a
+  // post-mortem follow-up surfaces a registry we missed.
+  //
+  // The check is BOTH here (race-safe — registrations could be added
+  // between candidate snapshot and this call) AND in `evictionSweep`'s
+  // candidate filters (so pinned workers don't displace eligible ones
+  // off the front of the sort).
+  if (workerHostsPinningRegistration(workerKey)) {
+    totalEvictionsSkippedByPin++;
+    spindle.log.info(
+      `[script-runner] eviction skipped for worker '${workerKey}' ` +
+      `(at least one assigned script holds active registrations; reason was: ${reason})`,
     );
     return;
   }
@@ -5565,10 +5676,37 @@ export async function evictionSweep(): Promise<void> {
   // ── Idle eviction pass ───────────────────────────────────────────────
   // Sort by ascending lastActivity (oldest first); evict any idle-past-
   // threshold workers while staying above the warm floor.
-  const idleCandidates = spawned
-    .filter((k) => !workerHasActiveRun(k))
-    .map((k) => ({ key: k, lastActivity: workerLastActivity.get(k) ?? now }))
-    .sort((a, b) => a.lastActivity - b.lastActivity);
+  //
+  // v1.0.0-rc.3+ — pinned workers (those hosting at least one script with
+  // active registrations) are filtered out at the candidate stage, NOT
+  // just at the `evictWorker` race-check. Filtering at the candidate
+  // stage matters for the floor-binding case: if 4 workers are spawned,
+  // 3 are pinned, and 1 is genuinely idle, including pinned workers in
+  // the candidate list would order them by lastActivity. The oldest
+  // pinned one might sort before the genuinely-idle non-pinned one,
+  // and `evictWorker` would skip it (via the registration gate) — but
+  // the floor-counter (`spawnedAfterIdle`) decrements optimistically,
+  // which could prematurely terminate the loop and leave the genuinely-
+  // idle non-pinned worker un-evicted. Filtering the candidates avoids
+  // that confusion entirely.
+  //
+  // The pinning-skip telemetry counter (`totalEvictionsSkippedByPin`) is
+  // bumped imperatively in this loop so steady-state filtered skips are
+  // observable in diagnostics (not just race-safe gate fires inside
+  // `evictWorker`). Bumping happens once per pinned worker per sweep
+  // pass; a worker pinned across both the idle and memory passes
+  // contributes two increments per sweep, which approximates "how often
+  // is the pinning policy kicking in" — fine for the diagnostic surface.
+  const idleCandidates: { key: ScriptRunnerWorkerKey; lastActivity: number }[] = [];
+  for (const k of spawned) {
+    if (workerHasActiveRun(k)) continue;
+    if (workerHostsPinningRegistration(k)) {
+      totalEvictionsSkippedByPin++;
+      continue;
+    }
+    idleCandidates.push({ key: k, lastActivity: workerLastActivity.get(k) ?? now });
+  }
+  idleCandidates.sort((a, b) => a.lastActivity - b.lastActivity);
 
   let spawnedAfterIdle = spawned.length;
   for (const c of idleCandidates) {
@@ -5593,11 +5731,30 @@ export async function evictionSweep(): Promise<void> {
   if (totalBytes <= config.memoryCeilingBytes) return;
 
   // Over ceiling — LRU-evict eligible workers until we drop under it.
-  // "Eligible" = no active run, above warm floor.
-  const lruCandidates = memReadings
-    .filter((r) => !workerHasActiveRun(r.key))
-    .map((r) => ({ ...r, lastActivity: workerLastActivity.get(r.key) ?? now }))
-    .sort((a, b) => a.lastActivity - b.lastActivity);
+  // "Eligible" = no active run, no pinning registrations, above warm floor.
+  //
+  // v1.0.0-rc.3+ — same registration-pin filter as the idle pass. A user
+  // whose pool is ALL pinned workers AND over the memory ceiling will
+  // see the sweep make no progress and surface a warning in the
+  // diagnostics panel ("eviction-exempt" row); that's the correct
+  // signal — the alternative ("evict pinned workers anyway as last
+  // resort") would silently break the user's tools / macros / panels
+  // mid-session. Better to leave memory pressure visible and let the
+  // user adjust pool settings or kill registration-holding scripts
+  // explicitly.
+  //
+  // Same telemetry-bump rationale as the idle pass — pinned-skips are
+  // counted imperatively so steady-state diagnostics reflect them.
+  const lruCandidates: { key: ScriptRunnerWorkerKey; bytes: number | null; lastActivity: number }[] = [];
+  for (const r of memReadings) {
+    if (workerHasActiveRun(r.key)) continue;
+    if (workerHostsPinningRegistration(r.key)) {
+      totalEvictionsSkippedByPin++;
+      continue;
+    }
+    lruCandidates.push({ ...r, lastActivity: workerLastActivity.get(r.key) ?? now });
+  }
+  lruCandidates.sort((a, b) => a.lastActivity - b.lastActivity);
 
   let runningTotal = totalBytes;
   let spawnedAfterMem = remaining.length;
@@ -5675,6 +5832,14 @@ export function __getCachedUserIdForTests(): string | null {
   return cachedUserId;
 }
 
+/** @internal — true iff `pendingDomHandles` has an entry for `(scriptId, elementId)`.
+ *  Lets the post-eviction alias-storage regression test verify the parent
+ *  stores DOM handles under both the canonical id AND the proxy's
+ *  `_elementId` after stableId dedup. */
+export function __hasPendingDomHandleForTests(scriptId: string, elementId: string): boolean {
+  return lookupPendingDomHandle(scriptId, elementId) !== undefined;
+}
+
 /** @internal */
 export function __getRestartAttemptsForTests(
   workerKey: ScriptRunnerWorkerKey = DEFAULT_WORKER_KEY,
@@ -5721,6 +5886,44 @@ export function __getKnownWorkerKeysForTests(): ScriptRunnerWorkerKey[] {
 /** @internal */
 export function __getAssignedScriptCountForTests(): number {
   return scriptWorkerAssignments.size;
+}
+
+/**
+ * v1.0.0-rc.3+ — direct test access to the handler-cleanup machinery.
+ * Installs a cleanup closure under `(scriptId, handlerId)` mirroring what
+ * `recordHandlerCleanup` does inside `handleRegisterHandler`. Used by the
+ * unregister-handler kind-switch tests to seed entries without driving
+ * the full register-handler IPC flow.
+ * @internal
+ */
+export function __recordHandlerCleanupForTests(
+  scriptId:  string,
+  handlerId: string,
+  cleanup:   () => void,
+): void {
+  recordHandlerCleanup(scriptId, handlerId, cleanup);
+}
+
+/**
+ * v1.0.0-rc.3+ — direct entry point for the parent's
+ * `handleUnregisterHandler` switch so tests can exercise each `kind`
+ * branch without driving a full child→parent IPC. Mirrors the call site
+ * inside `handleChildMessage`'s 'unregister-handler' case.
+ * @internal
+ */
+export function __handleUnregisterHandlerForTests(msg: UnregisterHandler): void {
+  handleUnregisterHandler(msg);
+}
+
+/**
+ * v1.0.0-rc.3+ — observe whether a `(scriptId, handlerId)` cleanup is
+ * currently installed. Used by tests to assert post-unregister-handler
+ * teardown landed (the entry should be gone after a successful
+ * `invokeAndDropHandlerCleanup`).
+ * @internal
+ */
+export function __hasHandlerCleanupForTests(scriptId: string, handlerId: string): boolean {
+  return handlerCleanups.get(scriptId)?.has(handlerId) ?? false;
 }
 
 // ─── Phase E eviction inspectors ──────────────────────────────────────────
@@ -6035,12 +6238,41 @@ export interface WorkerPoolDiagnostics {
      */
     assignedScripts:     string[];
     restartAttempts:     number;
+    /**
+     * v1.0.0-rc.3+ — true when at least one assigned script holds active
+     * long-lived registrations (tools, macros, drawer tabs, RPC endpoints,
+     * etc.). Pinned workers are exempt from idle + memory eviction (see
+     * `workerHostsPinningRegistration` + `evictWorker`).
+     */
+    pinnedByRegistrations: boolean;
+    /**
+     * v1.0.0-rc.3+ — per-pinning-script registration breakdown. Empty
+     * array when `pinnedByRegistrations` is false. Each entry is a script
+     * currently assigned to this worker that holds at least one
+     * registration. Used by the diagnostics panel to render the
+     * "Eviction-exempt scripts" row.
+     *
+     * `scriptId`s within the array are sorted alphabetically for
+     * deterministic output across reads.
+     */
+    pinningScripts: Array<{
+      scriptId: string;
+      counts:   ScriptRegistrationCounts;
+    }>;
   }>;
   totalAssignedScripts: number;
   evictionTelemetry: {
     totalEvictions:     number;
     lastEvictionAt:     number | null;
     lastEvictionReason: string | null;
+    /**
+     * v1.0.0-rc.3+ — count of sweep-tick decisions to NOT evict a
+     * candidate worker because at least one assigned script held active
+     * registrations. Sustained growth is expected for users running
+     * long-lived tool / panel scripts; non-zero with no registration
+     * scripts present would be anomalous.
+     */
+    totalEvictionsSkippedByPin: number;
   };
   settings: {
     idleTimeoutMs:      number;
@@ -6063,13 +6295,25 @@ export function getWorkerPoolDiagnostics(): WorkerPoolDiagnostics {
   const workers: WorkerPoolDiagnostics['workers'] = [];
   for (const [workerKey, handle] of childHandles) {
     const scripts = assignedByWorker.get(workerKey) ?? [];
+    // v1.0.0-rc.3+ — registration census per assigned script. Drops
+    // scripts with zero registrations from the breakdown so the
+    // diagnostics row only surfaces the load-bearing ones.
+    const pinningScripts: WorkerPoolDiagnostics['workers'][number]['pinningScripts'] = [];
+    for (const scriptId of scripts) {
+      const counts = getRegistrationCountsForScript(scriptId);
+      if (counts.total > 0) {
+        pinningScripts.push({ scriptId, counts });
+      }
+    }
     workers.push({
       workerKey,
-      processId:           handle.processId,
-      lastActivityMs:      workerLastActivity.get(workerKey) ?? 0,
-      assignedScriptCount: scripts.length,
-      assignedScripts:     scripts,
-      restartAttempts:     getRestartAttempts(workerKey),
+      processId:             handle.processId,
+      lastActivityMs:        workerLastActivity.get(workerKey) ?? 0,
+      assignedScriptCount:   scripts.length,
+      assignedScripts:       scripts,
+      restartAttempts:       getRestartAttempts(workerKey),
+      pinnedByRegistrations: pinningScripts.length > 0,
+      pinningScripts,
     });
   }
   // Stable order — alphabetical by workerKey makes the diagnostic output
@@ -6086,6 +6330,7 @@ export function getWorkerPoolDiagnostics(): WorkerPoolDiagnostics {
       totalEvictions,
       lastEvictionAt,
       lastEvictionReason,
+      totalEvictionsSkippedByPin,
     },
     settings: {
       idleTimeoutMs:      config.idleTimeoutMs,
@@ -6235,9 +6480,10 @@ export function __resetForTests(): void {
     evictionSweepTimer = null;
   }
   // Eviction telemetry — reset so tests see a clean slate.
-  totalEvictions     = 0;
-  lastEvictionAt     = null;
-  lastEvictionReason = null;
+  totalEvictions             = 0;
+  lastEvictionAt             = null;
+  lastEvictionReason         = null;
+  totalEvictionsSkippedByPin = 0;
   openAwaitTimeoutOverride   = null;
   restartBackoffOverride     = null;
   stabilityThresholdOverride = null;
