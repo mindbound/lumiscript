@@ -12,7 +12,7 @@
 
 import type { SpindleFrontendContext } from 'lumiverse-spindle-types';
 import type { BackendToFrontend, FrontendToBackend } from './types/messages.js';
-import type { DOMEventData, DOMDelegatedEventData, ConditionalPreventDefault } from './types/script.js';
+import type { DOMEventData, DOMDelegatedEventData, ConditionalPreventDefault, SerializedDOMElement } from './types/script.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -29,6 +29,7 @@ type DOMMessage = Extract<BackendToFrontend,
   | { type: 'dom_delegate_unregister' }
   | { type: 'dom_cleanup_script' }
   | { type: 'dom_make_draggable' }
+  | { type: 'dom_read_request' }
 >;
 
 function isDOMMessage(msg: unknown): msg is DOMMessage {
@@ -88,6 +89,91 @@ const styleScripts = new Map<string, string>();
 
 /** listenerId → { elementId, event, handler } for cleanup */
 const listenerMap = new Map<string, { elementId: string; event: string; handler: EventListener }>();
+
+// ─── DOM read helpers (v1.0.0-rc.6) ──────────────────────────────────────────
+
+/**
+ * Pick the right element to read for a `DOMHandle.read()` call.
+ *
+ * Wrapper structure on inject:
+ *   <div data-spindle-ext>                     ← elementMap entry (`el`)
+ *     <div data-ls-el="X" data-ls-script="Y">  ← LS wrapper (`lsWrapper`)
+ *       <user's content here>
+ *     </div>
+ *   </div>
+ *
+ * The user's mental model is "I injected `<button class="x">Hi</button>`,
+ * give me the button" — not "give me the Spindle wrapper" and not
+ * "give me the LS wrapper". Descent rule:
+ *
+ *   - LS wrapper has EXACTLY ONE element child → return that child.
+ *     Covers the overwhelmingly common single-root injection case.
+ *   - LS wrapper has 0 or >1 element children → return the LS wrapper.
+ *     Covers text-only injection ("Hello" with no element root) and
+ *     multi-root injection ("<span>1</span><span>2</span>") where
+ *     "the user's element" is genuinely ambiguous. The fallback gives
+ *     a consistent `tag: 'div'` + accurate `childCount` instead of
+ *     silently misrepresenting the structure.
+ */
+export function pickReadTarget(el: Element, elementId: string): Element {
+  const lsWrapper = el.querySelector(`[data-ls-el="${elementId}"]`) ?? el;
+  if (lsWrapper.children.length === 1) {
+    // .children.length === 1 implies firstElementChild !== null.
+    return lsWrapper.firstElementChild as Element;
+  }
+  return lsWrapper;
+}
+
+/**
+ * Internal wrapper attributes that get stripped from `read()` snapshots
+ * — exposing them would leak implementation details (elementId values,
+ * the Spindle marker) into user-script-visible payloads. Only relevant
+ * when `pickReadTarget` falls back to the LS wrapper (multi-root or
+ * text-only injection); the single-root descent path bypasses these
+ * attributes entirely since they live on the wrapper, not the user's
+ * element.
+ */
+const INTERNAL_WRAPPER_ATTRS = new Set([
+  'data-ls-el',
+  'data-ls-script',
+  'data-spindle-ext',
+]);
+
+/**
+ * Build a `SerializedDOMElement` snapshot from a live DOM element.
+ * Attribute names are lowercased for predictability — HTML treats them
+ * case-insensitively in lookups, but `element.attributes` reports
+ * source-case. Lowercasing here matches the typical "what would
+ * `getAttribute('class')` return" expectation regardless of how the
+ * script wrote the attribute.
+ *
+ * `text` uses `textContent` semantics (full descendant text, including
+ * elements that have been hidden via CSS but are still in the tree).
+ * Scripts that need "visible only" text should walk the DOM themselves
+ * via the html option + DOMParser, or use `delegate` events to capture
+ * live values.
+ */
+export function buildSerializedDOMElement(
+  target:      Element,
+  includeHtml: boolean,
+): SerializedDOMElement {
+  const attrs: Record<string, string> = {};
+  for (const attr of target.attributes) {
+    const name = attr.name.toLowerCase();
+    if (INTERNAL_WRAPPER_ATTRS.has(name)) continue;
+    attrs[name] = attr.value;
+  }
+  const snapshot: SerializedDOMElement = {
+    tag:        target.tagName.toLowerCase(),
+    attrs,
+    text:       target.textContent ?? '',
+    childCount: target.children.length,
+  };
+  if (includeHtml) {
+    snapshot.html = target.innerHTML;
+  }
+  return snapshot;
+}
 
 // ─── Delegation registry (v0.27.1 — api.ui.dom.delegate) ─────────────────────
 
@@ -835,6 +921,25 @@ export function installDOMHandler(
         if (!reg) break;
         delegationsByDelegationId.delete(delegationId);
         uninstallDelegationListenerIfUnused(reg.root, event);
+        break;
+      }
+
+      // ── DOM read request (v1.0.0-rc.6) ─────────────────────────────
+      // Build a serialized snapshot of the element bound to `elementId`
+      // and echo it back via `ls_dom_read_response`. The snapshot
+      // captures the element the user "thinks of" as their handle's
+      // element — see `pickReadTarget` for the descent rule that
+      // handles single-root vs multi-root vs text-only injections.
+      case 'dom_read_request': {
+        const { requestId, elementId, options } = msg;
+        const el = elementMap.get(elementId);
+        if (!el) {
+          sendToBackend({ type: 'dom_read_response', requestId, snapshot: null });
+          break;
+        }
+        const target = pickReadTarget(el, elementId);
+        const snapshot = buildSerializedDOMElement(target, options.html === true);
+        sendToBackend({ type: 'dom_read_response', requestId, snapshot });
         break;
       }
 

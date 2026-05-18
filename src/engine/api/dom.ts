@@ -26,6 +26,8 @@ import type {
   DOMInjectOptions,
   DOMListenOptions,
   DOMMessageInjectOptions,
+  DOMReadOptions,
+  SerializedDOMElement,
 } from '../../types/script.js';
 import type { BackendToFrontend } from '../../types/messages.js';
 import type { APIBuildDeps } from './shared.js';
@@ -60,6 +62,49 @@ const nextId = nextDOMId;
 
 function send(msg: BackendToFrontend): void {
   spindle.sendToFrontend(msg);
+}
+
+// ─── DOM read — request-response bridge (v1.0.0-rc.6) ───────────────────────
+
+/**
+ * Map of in-flight `DOMHandle.read()` calls keyed by requestId. The
+ * backend's frontend-message handler in `backend.ts` calls
+ * `resolveDomRead` when an `ls_dom_read_response` arrives from the
+ * frontend, which resolves the matching promise.
+ *
+ * Same shape as `pendingContextMenus` in `engine/api/ui.ts` — single-
+ * resolver Map, no rejection branch (the FE always sends a response,
+ * either with a snapshot or `null` for missing-element). Reaped
+ * entries: by `resolveDomRead` on successful response, or implicitly
+ * by `__resetDomReadsForTests` during test setup.
+ */
+const pendingDomReads = new Map<string, (snapshot: SerializedDOMElement | null) => void>();
+
+/**
+ * Resolve a pending `DOMHandle.read()` call. Invoked by the backend's
+ * frontend-message handler when `ls_dom_read_response` arrives. No-op
+ * if the requestId is unknown (stale response — caller has already
+ * timed out, script unregistered, etc.).
+ */
+export function resolveDomRead(
+  requestId: string,
+  snapshot:  SerializedDOMElement | null,
+): void {
+  const resolve = pendingDomReads.get(requestId);
+  if (!resolve) return;
+  pendingDomReads.delete(requestId);
+  resolve(snapshot);
+}
+
+/**
+ * Test-only reset for the pending-reads map. Mirrors `pendingContextMenus`'s
+ * absence of test reset — but DOM read tests typically run end-to-end so
+ * a clean slate per test avoids cross-talk.
+ *
+ * @internal
+ */
+export function __resetDomReadsForTests(): void {
+  pendingDomReads.clear();
 }
 
 /**
@@ -199,6 +244,22 @@ export function createDOMHandle(elementId: string, deps: APIBuildDeps): DOMHandl
         parentElementId: elementId,
       });
       return createDOMHandle(childId, deps);
+    },
+
+    read(options: DOMReadOptions = {}): Promise<SerializedDOMElement | null> {
+      gate();
+      const requestId = nextId('dr');
+      return new Promise<SerializedDOMElement | null>((resolve) => {
+        pendingDomReads.set(requestId, resolve);
+        send({
+          type:      'dom_read_request',
+          requestId,
+          elementId,
+          options: {
+            ...(options.html === true ? { html: true } : {}),
+          },
+        });
+      });
     },
   };
 }

@@ -233,6 +233,32 @@ export function resolveStableId(scriptId: string, stableId: string): string | un
 }
 
 /**
+ * v1.0.0-rc.6 — list every `stableId → elementId` mapping currently
+ * registered for the given script. Used by the script-runner host
+ * dispatcher to build the `ScriptStateSnapshot.domStableIds` field
+ * before a first-dispatch on a worker (cold spawn / post-respawn /
+ * post-rebalance reassignment).
+ *
+ * Returns an empty object when the script has no stable-id-tagged
+ * elements — callers can treat that as "no syncing needed" and omit
+ * the field from the snapshot.
+ *
+ * Single-pass walk over `stableIdIndex` (keyed by `scriptId:stableId`)
+ * for O(N) where N is the total stable-id-tagged elements across all
+ * scripts. Bounded in practice by tens-to-hundreds per active session.
+ */
+export function listStableIdsForScript(scriptId: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  const prefix = `${scriptId}:`;
+  for (const [key, elementId] of stableIdIndex) {
+    if (key.startsWith(prefix)) {
+      out[key.slice(prefix.length)] = elementId;
+    }
+  }
+  return out;
+}
+
+/**
  * Remove an element from the registry and clear its stable ID index entry.
  */
 export function unregisterElement(elementId: string): void {

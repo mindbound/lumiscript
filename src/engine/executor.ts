@@ -97,6 +97,7 @@ import { buildDOMAPI      } from './api/dom.js';
 import { buildMacrosAPI   } from './api/macros.js';
 import { buildTokensAPI   } from './api/tokens.js';
 import { buildDbAPI       } from './api/db.js';
+import { buildScriptStorageAPI } from './api/script-storage.js';
 import { resolveBuiltin, isBuiltinName } from './builtin-library-registry.js';
 import { getActiveChatId, getActiveCharacterId } from './binding.js';
 import { serializeConsoleArg } from './console-format.js';
@@ -429,6 +430,7 @@ export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiSc
     events:     buildEventsAPI(deps),
     tokens:     buildTokensAPI(deps),
     db:         buildDbAPI(deps),
+    scriptStorage: buildScriptStorageAPI(deps),
   };
   return api;
 }

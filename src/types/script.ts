@@ -325,6 +325,68 @@ export interface LumiScriptAPI {
   tokens: TokensAPI;
   /** JSON-file-backed micro-DB. Per-script / per-character / per-chat collections with CRUD, filter predicates, and jsonquery escape hatch. No permission required. */
   db: DbAPI;
+  /** Per-script in-memory key/value store. Lives on the parent (backend), so values survive worker eviction / respawn — but are cleared on script disable / delete and lost on full backend restart. No permission required. v1.0.0-rc.6+. */
+  scriptStorage: ScriptStorageAPI;
+}
+
+/**
+ * Per-script in-memory key/value store. Closes the "where does my script keep its session state?"
+ * UX gap that previously had users picking between `globalThis.__lumiscript_script_<id>_*`
+ * (verbose convention, easy to forget the prefix), `api.variables.local` (disk-persisted —
+ * overkill for ephemeral flags), or `api.db.*` (heavy machinery for a single boolean).
+ *
+ * **Lifecycle**:
+ *   - **In-memory only.** Values live in a parent-side `Map<scriptId, Map<key, value>>`. No disk
+ *     persistence. The full state is lost on backend restart / Lumiverse restart.
+ *   - **Survives** worker eviction + respawn (parent-side state, not in worker memory).
+ *   - **Survives** script edit / hot-reload (same as the `globalThis` convention — useful for
+ *     dev iteration).
+ *   - **Cleared** on script disable / delete (matches the `globalThis` sweep).
+ *
+ * **Scope**: per-script — `scriptA`'s `set('foo', ...)` doesn't reach `scriptB`'s slot. No
+ * cross-script visibility through the API itself. (`ls:scriptStorage:*` broadcasts are
+ * observable cross-script for debug / admin tooling — see below.)
+ *
+ * **Size cap**: 1 MB per script on the JSON-serialised size of the full map. `set()` throws
+ * a clear "scriptStorage capacity exceeded" error when a write would cross the cap. Anyone
+ * needing more should use `api.variables.*` (persisted) or `api.db.*` (structured collections).
+ *
+ * **Broadcasts**: every mutation fires an `ls:*`-prefixed event on the broadcast bus so
+ * debug / admin tooling can react without polling. `ls:scriptStorage:set` (payload
+ * `{ scriptId, key, value }`), `ls:scriptStorage:delete` (`{ scriptId, key }`),
+ * `ls:scriptStorage:clear` (`{ scriptId }`). No-op `delete` / `clear` calls don't fire.
+ *
+ * **Values must be JSON-serialisable.** Functions / symbols / DOM elements throw at the
+ * IPC boundary. Same posture as `api.broadcast.emit` / `api.variables.*`.
+ *
+ * **Races**: concurrent `set` to the same key from different runs / handler-fires is
+ * last-write-wins (the parent's Map is single-threaded). `get` is atomic — reads the
+ * current value, never observes a partial write.
+ */
+export interface ScriptStorageAPI {
+  /**
+   * Read a value. Returns `defaultValue` (or `undefined` if not provided) when the key
+   * is missing. The generic `T` is a type hint for IDE completion — the runtime can't
+   * enforce it.
+   */
+  get<T = unknown>(key: string, defaultValue?: T): Promise<T | undefined>;
+  /**
+   * Write a value. Throws if the JSON-serialised total size of this script's storage
+   * would exceed the 1 MB per-script cap. Fires `ls:scriptStorage:set`. Overwrites
+   * any prior value at the key.
+   */
+  set(key: string, value: unknown): Promise<void>;
+  /**
+   * Remove a key. Returns `true` if it existed (and fires `ls:scriptStorage:delete`),
+   * `false` if it didn't (no broadcast).
+   */
+  delete(key: string): Promise<boolean>;
+  /** Check whether a key exists. Does not return the value. */
+  has(key: string): Promise<boolean>;
+  /** Remove every entry for this script. Fires `ls:scriptStorage:clear` if at least one entry existed. */
+  clear(): Promise<void>;
+  /** List the current keys. Order is insertion-order (Map semantics). */
+  keys(): Promise<string[]>;
 }
 
 // ─── Chat API ─────────────────────────────────────────────────────────────────
@@ -4426,6 +4488,93 @@ export interface DOMHandle {
    * with safe interpolation is fine.
    */
   injectChild(target: string, html: string, options?: DOMInjectOptions): DOMHandle;
+  /**
+   * v1.0.0-rc.6 — read a serialized snapshot of this handle's current DOM
+   * state from the frontend.
+   *
+   * The snapshot captures: `tag`, `attrs` (all attributes set on the
+   * element, lowercase-keyed; internal `data-ls-*` / `data-spindle-ext`
+   * wrapper attributes are stripped), `text` (full descendant
+   * textContent), `childCount` (direct element children only — text
+   * nodes not counted). Pass `{ html: true }` to also include
+   * `innerHTML` — opt-in because innerHTML can be a large payload for
+   * deep subtrees and many use cases (verify attrs, check text content)
+   * don't need it.
+   *
+   * Which element gets snapshotted depends on the shape of what was
+   * injected. For the overwhelmingly common single-root case
+   * (`inject('body', '<button class="x">Hi</button>')` → snapshot has
+   * `tag: 'button'`), the user's root element is returned directly.
+   * For multi-root content (`<span>1</span><span>2</span>`) or
+   * text-only content, the snapshot falls back to LumiScript's wrapper
+   * element (`tag: 'div'`, accurate `childCount`).
+   *
+   * Resolution outcomes:
+   *   - Resolves with `SerializedDOMElement` when the read succeeded.
+   *   - Resolves with `null` when the parent knows about the element
+   *     but the frontend's `elementMap` no longer has it at read-time
+   *     (host shell tore down a parent container, frontend was reloaded
+   *     between dispatch and snapshot, etc.) — clean async-race
+   *     surface for "element vanished out from under us".
+   *   - Rejects with `DomHandleReleasedError` when the handle has been
+   *     released parent-side: script previously called `.remove()` on
+   *     this handle, `api.ui.dom.cleanup()` swept this script's state,
+   *     etc. Matches sibling methods (`update` / `remove` /
+   *     `makeDraggable`) — calling `read()` on a stale handle is a
+   *     script bug, surface as a throw.
+   *
+   * Deliberate omissions for v1.0: computed styles, bounding rect,
+   * recursive child snapshots, property snapshots (`.value` /
+   * `.checked`). Form-control live values can be read via
+   * `delegate(selector, 'input', ...)` event handlers; for deep markup
+   * traversal, request `{ html: true }` and parse client-side.
+   *
+   * Async because it routes through a frontend roundtrip (the DOM lives
+   * there, not on the backend). Same request-response correlation
+   * pattern as `api.ui.showContextMenu`.
+   */
+  read(options?: DOMReadOptions): Promise<SerializedDOMElement | null>;
+}
+
+/** Options for `DOMHandle.read()`. */
+export interface DOMReadOptions {
+  /**
+   * Also include `innerHTML` in the snapshot. Default `false` — most
+   * use cases (verify attrs, check text, structural inspection) don't
+   * need the full markup, and the omission keeps the IPC payload small.
+   * Set `true` when the script needs to traverse the descendant markup.
+   */
+  html?: boolean;
+}
+
+/** Snapshot returned by `DOMHandle.read()`. */
+export interface SerializedDOMElement {
+  /** Lowercase tag name (e.g. `'div'`, `'button'`). */
+  tag: string;
+  /**
+   * All attributes set on the element, keyed by lowercased attribute
+   * name. Includes `id`, `class`, `style`, `data-*`, `aria-*`, etc.
+   * Empty object if no attributes are set.
+   */
+  attrs: Record<string, string>;
+  /**
+   * Element's `textContent` — concatenated text from this element and
+   * all descendants. Empty string if the element has no text content.
+   */
+  text: string;
+  /**
+   * Number of direct element children. Text nodes and comment nodes are
+   * NOT counted. Use the `html` option to inspect the full subtree.
+   */
+  childCount: number;
+  /**
+   * Element's `innerHTML`. Present only when `read({ html: true })` was
+   * passed. The markup reflects whatever the frontend currently has —
+   * including any host-side modifications (e.g. Lumiverse markdown
+   * rendering, scrollbar synthesis) that mutated the originally-injected
+   * HTML.
+   */
+  html?: string;
 }
 
 /** DOM injection and styling API exposed as `api.ui.dom`. */

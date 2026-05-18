@@ -13,7 +13,11 @@
  */
 
 import { describe, test, expect } from 'bun:test';
-import { shouldPreventDefault } from '../src/dom-handler.js';
+import {
+  shouldPreventDefault,
+  pickReadTarget,
+  buildSerializedDOMElement,
+} from '../src/dom-handler.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const ev = (props: Record<string, any>) => props as unknown as Event;
@@ -194,5 +198,185 @@ describe('shouldPreventDefault — combined filters (AND semantics)', () => {
     expect(shouldPreventDefault(rule, ev({ ctrlKey: true,  shiftKey: false }))).toBe(true);
     expect(shouldPreventDefault(rule, ev({ ctrlKey: true,  shiftKey: true  }))).toBe(false);
     expect(shouldPreventDefault(rule, ev({ ctrlKey: false, shiftKey: false }))).toBe(false);
+  });
+});
+
+// ─── DOM read snapshot helpers (v1.0.0-rc.6) ──────────────────────────────────
+//
+// `pickReadTarget` and `buildSerializedDOMElement` back the frontend's
+// `dom_read_request` handler. They run in the browser against live DOM
+// in production, but the helpers themselves duck-type — element refs are
+// only accessed via well-known property names. Mock elements built as
+// plain objects (with explicit shapes for `attributes`, `children`,
+// `firstElementChild`, `querySelector`, `tagName`, `textContent`,
+// `innerHTML`) cover the unit-level surface without needing a real DOM.
+
+interface MockAttr { name: string; value: string }
+
+interface MockElement {
+  tagName:     string;
+  attributes:  Iterable<MockAttr>;
+  children:    { length: number; [index: number]: MockElement | undefined };
+  firstElementChild: MockElement | null;
+  textContent: string | null;
+  innerHTML:   string;
+  querySelector?: (selector: string) => MockElement | null;
+}
+
+function mockEl(opts: {
+  tag?:        string;
+  attrs?:      Record<string, string>;
+  children?:   MockElement[];
+  textContent?: string;
+  innerHTML?:  string;
+  queryReturn?: MockElement | null;
+}): MockElement {
+  const attrs: MockAttr[] = Object.entries(opts.attrs ?? {}).map(([name, value]) => ({ name, value }));
+  const children = opts.children ?? [];
+  return {
+    tagName:    (opts.tag ?? 'div').toUpperCase(),
+    attributes: attrs,
+    children: Object.assign([...children], { length: children.length }),
+    firstElementChild: children[0] ?? null,
+    textContent: opts.textContent ?? '',
+    innerHTML:   opts.innerHTML ?? '',
+    querySelector: opts.queryReturn !== undefined ? () => opts.queryReturn ?? null : undefined,
+  };
+}
+
+describe('pickReadTarget — descent rule', () => {
+  test('descends to user root when LS wrapper has exactly one element child', () => {
+    // Structure: outer (spindle wrapper) → LS wrapper → single user root.
+    const userRoot = mockEl({ tag: 'button', attrs: { class: 'my-btn' } });
+    const lsWrapper = mockEl({
+      tag:   'div',
+      attrs: { 'data-ls-el': 'el-1', 'data-ls-script': 's-1' },
+      children: [userRoot],
+    });
+    const outer = mockEl({ tag: 'div', queryReturn: lsWrapper });
+
+    const target = pickReadTarget(outer as unknown as Element, 'el-1');
+    expect(target).toBe(userRoot as unknown as Element);
+  });
+
+  test('falls back to LS wrapper when there are zero element children (text-only injection)', () => {
+    // Structure: outer → LS wrapper (textContent only, no element children).
+    const lsWrapper = mockEl({
+      tag:   'div',
+      attrs: { 'data-ls-el': 'el-1', 'data-ls-script': 's-1' },
+      children: [],
+      textContent: 'Hello world',
+    });
+    const outer = mockEl({ tag: 'div', queryReturn: lsWrapper });
+
+    const target = pickReadTarget(outer as unknown as Element, 'el-1');
+    expect(target).toBe(lsWrapper as unknown as Element);
+  });
+
+  test('falls back to LS wrapper when there are multiple element children (multi-root injection)', () => {
+    // Structure: outer → LS wrapper → [span, span] (multi-root content).
+    const child1 = mockEl({ tag: 'span' });
+    const child2 = mockEl({ tag: 'span' });
+    const lsWrapper = mockEl({
+      tag:   'div',
+      attrs: { 'data-ls-el': 'el-1', 'data-ls-script': 's-1' },
+      children: [child1, child2],
+    });
+    const outer = mockEl({ tag: 'div', queryReturn: lsWrapper });
+
+    const target = pickReadTarget(outer as unknown as Element, 'el-1');
+    expect(target).toBe(lsWrapper as unknown as Element);
+  });
+
+  test('falls back to outer when querySelector returns null (defensive against unwrapped binds)', () => {
+    // External-bound elements (modal bodies, drawer roots) might not have
+    // the LS wrapper inside. pickReadTarget's `?? el` fallback handles this.
+    const outer = mockEl({ tag: 'section', queryReturn: null });
+
+    const target = pickReadTarget(outer as unknown as Element, 'el-1');
+    expect(target).toBe(outer as unknown as Element);
+  });
+});
+
+describe('buildSerializedDOMElement — snapshot shape', () => {
+  test('basic snapshot: tag + attrs + text + childCount', () => {
+    const el = mockEl({
+      tag:   'button',
+      attrs: { class: 'primary', id: 'btn-1', 'aria-label': 'Submit' },
+      children: [mockEl({ tag: 'span' })],
+      textContent: 'Submit',
+    });
+    const snap = buildSerializedDOMElement(el as unknown as Element, false);
+    expect(snap).toEqual({
+      tag:        'button',
+      attrs:      { class: 'primary', id: 'btn-1', 'aria-label': 'Submit' },
+      text:       'Submit',
+      childCount: 1,
+    });
+    // No html field when includeHtml is false.
+    expect(snap.html).toBeUndefined();
+  });
+
+  test('innerHTML included when includeHtml is true', () => {
+    const el = mockEl({
+      tag:       'div',
+      attrs:     { class: 'wrap' },
+      children:  [mockEl({ tag: 'p' })],
+      innerHTML: '<p>Hello</p>',
+    });
+    const snap = buildSerializedDOMElement(el as unknown as Element, true);
+    expect(snap.html).toBe('<p>Hello</p>');
+  });
+
+  test('attribute names are lowercased', () => {
+    // HTML attributes are case-insensitive in lookups but `attributes`
+    // reports source-case. The builder normalises to lowercase so
+    // `attrs.class` always works regardless of how the script wrote it.
+    const el = mockEl({
+      tag: 'div',
+      attrs: { 'CLASS': 'x', 'Data-Foo': 'bar', 'ARIA-LABEL': 'hi' },
+    });
+    const snap = buildSerializedDOMElement(el as unknown as Element, false);
+    expect(snap.attrs).toEqual({
+      class: 'x',
+      'data-foo': 'bar',
+      'aria-label': 'hi',
+    });
+  });
+
+  test('strips internal wrapper attributes (data-ls-el, data-ls-script, data-spindle-ext)', () => {
+    // Relevant when pickReadTarget falls through to the LS wrapper.
+    // Exposing these would leak elementId values + the Spindle marker.
+    const wrapper = mockEl({
+      tag: 'div',
+      attrs: {
+        'data-ls-el':       'el-internal',
+        'data-ls-script':   'script-internal',
+        'data-spindle-ext': '',
+        'class':            'visible-only',
+        'data-user-attr':   'kept',
+      },
+    });
+    const snap = buildSerializedDOMElement(wrapper as unknown as Element, false);
+    expect(snap.attrs).toEqual({
+      class:          'visible-only',
+      'data-user-attr': 'kept',
+    });
+  });
+
+  test('empty attrs map for an element with no attributes set', () => {
+    const el = mockEl({ tag: 'p', attrs: {} });
+    const snap = buildSerializedDOMElement(el as unknown as Element, false);
+    expect(snap.attrs).toEqual({});
+    expect(snap.tag).toBe('p');
+  });
+
+  test('handles null textContent gracefully (empty string fallback)', () => {
+    // textContent CAN be null per the DOM spec on some node kinds;
+    // builder coerces to '' for predictable script-side reads.
+    const el = mockEl({ tag: 'div' });
+    el.textContent = null;
+    const snap = buildSerializedDOMElement(el as unknown as Element, false);
+    expect(snap.text).toBe('');
   });
 });

@@ -233,6 +233,28 @@ export type FrontendToBackend =
       requestId: string;
       selectedKey: string | null;
     }
+  // ─── DOM read response (frontend → backend) ───────────────────────
+  | {
+      /**
+       * v1.0.0-rc.6 — frontend's response to a `dom_read_request`. The
+       * backend correlates via `requestId` and resolves the awaiting
+       * `DOMHandle.read()` promise.
+       *
+       * `snapshot` is `null` when the element wasn't found in the live
+       * DOM at read-time (script called `.remove()` between dispatch
+       * and the FE handling the request, host shell tore down the
+       * parent, etc.) — surfaced to the script as a `null` resolution,
+       * NOT a throw.
+       *
+       * Naming: `dom_*` prefix (rather than `ls_*`) so this routes
+       * through the same DOM-handler message pipeline as the other
+       * DOM ops, matching the convention used by `dom_inject` /
+       * `dom_update` / `dom_remove` / etc.
+       */
+      type: 'dom_read_response';
+      requestId: string;
+      snapshot: import('./script.js').SerializedDOMElement | null;
+    }
   // ─── Input bar action click (frontend → backend) ──────────────────
   | {
       /**
@@ -325,6 +347,37 @@ export type FrontendToBackend =
       type: 'ls_drawer_tab_registered';
       scriptId: string;
       tabId: string;
+    }
+  // ─── Storage panel — Script Storage section (v1.0.0-rc.6+) ────────
+  | {
+      /** Request a full enumeration of `api.scriptStorage` slots across
+       *  all scripts. Backend replies with `script_storage_list`. */
+      type: 'list_script_storage';
+    }
+  | {
+      /** Load entries (key/value pairs) for a specific script's
+       *  scriptStorage slot for the inspect modal. Backend replies with
+       *  `script_storage_entries` echoing the scriptId. */
+      type: 'inspect_script_storage';
+      scriptId: string;
+    }
+  | {
+      /** Admin-clear a script's full scriptStorage slot. Fires the
+       *  same `ls:scriptStorage:clear` broadcast as user-script
+       *  `clear()`, so debug subscribers + the live-refresh path see
+       *  it. No reply — frontend re-fetches via the `script_storage_updated`
+       *  hint that lands on the broadcast. */
+      type: 'clear_script_storage';
+      scriptId: string;
+    }
+  | {
+      /** Admin-delete a single key from a script's scriptStorage slot.
+       *  Fires `ls:scriptStorage:delete` with the user-script-equivalent
+       *  payload. No reply — frontend re-fetches via the
+       *  `script_storage_updated` hint. */
+      type: 'delete_script_storage_entry';
+      scriptId: string;
+      key: string;
     }
   // ─── Storage panel — Collections section (admin view) ──────────────
   | {
@@ -663,6 +716,28 @@ export type BackendToFrontend =
       type: 'ls_modal_dismiss';
       modalId: string;
     }
+  // ─── DOM read request (backend → frontend) ─────────────────────────
+  | {
+      /**
+       * v1.0.0-rc.6 — request the frontend to read a serialized snapshot
+       * of the element bound to `elementId`. The frontend looks up the
+       * element in its `elementMap`, builds the `SerializedDOMElement`
+       * snapshot (or `null` if the element no longer exists in the live
+       * DOM), and echoes it back via `ls_dom_read_response` using the
+       * same `requestId` so the backend can resolve the awaiting
+       * `DOMHandle.read()` promise.
+       *
+       * `options.html` controls whether `innerHTML` is included in the
+       * snapshot (default `false` — most use cases don't need the full
+       * markup, and the omission keeps the IPC payload small).
+       */
+      type: 'dom_read_request';
+      requestId: string;
+      elementId: string;
+      options: {
+        html?: boolean;
+      };
+    }
   // ─── Context menu commands (backend → frontend) ────────────────────
   | {
       /**
@@ -846,6 +921,29 @@ export type BackendToFrontend =
       tabId: string;
     }
   // ─── Storage panel — Collections section ───────────────────────────
+  | {
+      /** v1.0.0-rc.6 — full scriptStorage enumeration (admin view).
+       *  Frontend replaces its row state with this on receipt. */
+      type: 'script_storage_list';
+      entries: import('../engine/api/script-storage.js').ScriptStorageSummary[];
+    }
+  | {
+      /** v1.0.0-rc.6 — key/value entries for a specific script's
+       *  scriptStorage slot, echoing the scriptId for inspect-modal
+       *  routing. `entries` is `null` when the script's slot vanished
+       *  between enumerate + inspect (e.g. host raced ahead of UI). */
+      type: 'script_storage_entries';
+      scriptId: string;
+      entries: Array<{ key: string; value: unknown }> | null;
+    }
+  | {
+      /** v1.0.0-rc.6 — debounced hint fired in response to any
+       *  `ls:scriptStorage:*` broadcast (set / delete / clear). No
+       *  payload. Frontend is expected to re-request
+       *  `list_script_storage` if the Storage panel's Script Storage
+       *  section is currently visible. Mirrors `collections_updated`. */
+      type: 'script_storage_updated';
+    }
   | {
       /** Full collection list (admin view). Frontend replaces its row
        *  state with this on receipt. */

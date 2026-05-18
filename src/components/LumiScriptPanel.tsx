@@ -5,6 +5,7 @@ import type { BackendToFrontend, FrontendToBackend, VariablesSnapshot } from '..
 import type { ActiveContext } from './manage/BindingsSection.js';
 import type { ExecutionDot } from './manage/ScriptListItem.js';
 import type { CollectionSummary, CollectionStats } from '../engine/db-admin.js';
+import type { ScriptStorageSummary } from '../engine/api/script-storage.js';
 import { DEFAULT_SETTINGS } from '../types/script.js';
 import { ManagePanel } from './manage/ManagePanel.js';
 import { StorageTab } from './storage/StorageTab.js';
@@ -117,6 +118,22 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
    * showing the stale count from the previous one. */
   const [dropTargetCount, setDropTargetCount] = useState<number | null>(null);
 
+  // ── Storage tab: Script Storage section (v1.0.0-rc.6+) ──────────────────
+  /** Per-script scriptStorage summaries. `null` before first load; `[]`
+   *  means no scripts have stored entries. Populated by
+   *  `script_storage_list` messages; re-requested on Storage-tab
+   *  activation + on every debounced `script_storage_updated` hint. */
+  const [scriptStorageEntries, setScriptStorageEntries] = useState<ScriptStorageSummary[] | null>(null);
+  /** scriptId currently open in the scriptStorage inspect modal.
+   *  `null` when the modal is closed. */
+  const [inspectScriptStorageId, setInspectScriptStorageId] = useState<string | null>(null);
+  /** Entries for the open scriptStorage inspect modal; `null` = loading. */
+  const [inspectScriptStorageEntries, setInspectScriptStorageEntries] = useState<Array<{ key: string; value: unknown }> | null>(null);
+  /** Bumps on every `script_storage_updated` hint so an open inspect
+   *  modal re-fetches and the section list re-renders. Mirrors the
+   *  collections refresh-token pattern. */
+  const [scriptStorageRefreshToken, setScriptStorageRefreshToken] = useState(0);
+
   /** Per-trigger invocation counter (session-local, increments on execution_started) */
   const [invocationCounts, setInvocationCounts] = useState<Record<string, number>>({});
 
@@ -222,6 +239,30 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
           // Bump the refresh token so an open inspect modal re-fetches
           // with its current filter/offset.
           setCollectionsRefreshToken(t => t + 1);
+          break;
+
+        // ── Storage tab: Script Storage section (v1.0.0-rc.6+) ─────────
+        case 'script_storage_list':
+          setScriptStorageEntries(msg.entries);
+          break;
+
+        case 'script_storage_entries':
+          // Echoed scriptId carries the inspect target. Functional setter
+          // accepts any arriving payload (the modal's effect that
+          // dispatched the request was gated on its current scriptId).
+          setInspectScriptStorageEntries(prev => {
+            void prev;
+            return msg.entries;
+          });
+          break;
+
+        case 'script_storage_updated':
+          // Debounced hint from any `ls:scriptStorage:*` broadcast. Same
+          // shape as the collections refresh: re-list always (covers the
+          // tab-not-active case for free), bump the token so an open
+          // modal re-fetches.
+          sendToBackend({ type: 'list_script_storage' });
+          setScriptStorageRefreshToken(t => t + 1);
           break;
 
         case 'injections_updated':
@@ -385,6 +426,7 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
   useEffect(() => {
     if (activeTab === 'storage') {
       sendToBackend({ type: 'list_collections' });
+      sendToBackend({ type: 'list_script_storage' });
     }
   }, [activeTab, sendToBackend]);
 
@@ -527,6 +569,30 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
               }
               sendToBackend({ type: 'drop_collection', path });
               setDropTarget(null);
+            }}
+            scriptStorageEntries={scriptStorageEntries}
+            inspectScriptStorageId={inspectScriptStorageId}
+            inspectScriptStorageEntries={inspectScriptStorageEntries}
+            scriptStorageRefreshToken={scriptStorageRefreshToken}
+            onInspectScriptStorage={(id) => {
+              // Same loading-state-clear pattern as collections.
+              setInspectScriptStorageId(id);
+              setInspectScriptStorageEntries(null);
+            }}
+            onClearScriptStorage={(summary) => {
+              // Fire-and-forget admin clear. No confirmation dialog
+              // for v1.0 — scriptStorage is session-scoped (volatile)
+              // and the broadcast-driven live refresh makes the
+              // result immediately visible. Polish: inline confirm
+              // pill in v1.x if real footguns surface.
+              sendToBackend({ type: 'clear_script_storage', scriptId: summary.scriptId });
+              // If the user has the inspect modal open on the script
+              // they just cleared, close it — same rationale as the
+              // drop-confirm path closing the records modal.
+              if (inspectScriptStorageId === summary.scriptId) {
+                setInspectScriptStorageId(null);
+                setInspectScriptStorageEntries(null);
+              }
             }}
           />
         )}

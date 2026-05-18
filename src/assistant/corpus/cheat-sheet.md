@@ -522,6 +522,34 @@ _The same method set applies to each of the 4 namespaces above._
 | `collection.clear` | — | Remove all records, leaving an empty collection file. |
 | `collection.query` | jsonQuery | Run a jsonquery string against the full collection. Escape hatch for aggregations / sorts / complex projections. Example: 'filter(.margin > 0) \| size()'. Throws SyntaxError on malformed queries. |
 
+## api.scriptStorage
+
+> **Concepts:** Per-script in-memory key/value store for session state. Closes the "where does my script keep its session state?" UX gap that was previously covered by the `globalThis.__lumiscript_script_<id>_*` convention (verbose, easy to forget the prefix). **Free tier — no permission required.** v1.0.0-rc.6+.
+
+**Picking the right storage primitive** — the LumiScript storage story now has three tiers, picked by intent:
+  - `api.scriptStorage` — in-memory, session-scoped, free-tier. Best for "remember this for the session" flags (tracker rerun-inflight, current selection, transient cache).
+  - `api.variables.*` — disk-persisted, scope-tiered (local/global/character/chat), free-tier. Best for "remember this across restarts" state.
+  - `api.db.*` — disk-persisted, structured collections with schema + filters + queries. Best for record-shaped data you want to search / aggregate.
+
+**Lifecycle**: in-memory only — values live in a parent-side `Map<scriptId, Map<key, value>>`, no disk write. Survives worker eviction / respawn (parent-side state, not in worker memory). Survives script edit / hot-reload (matches the `globalThis` convention — preserves dev iteration state). Cleared on script disable / delete via the `teardownDisabledScript` path. Lost on full backend restart.
+
+**Size cap**: 1 MB per script on the JSON-serialised size of the full map. `set()` throws `"capacity exceeded"` cleanly when a write would cross the cap, with a migration hint pointing to `api.variables.*` / `api.db.*`. The cap is intentional — scriptStorage is a "small bag of session flags" surface, not bulk storage.
+
+**Broadcasts**: every mutation fires an `ls:scriptStorage:*` event on the broadcast bus. `ls:scriptStorage:set` carries `{ scriptId, key, value }`; `ls:scriptStorage:delete` carries `{ scriptId, key }`; `ls:scriptStorage:clear` carries `{ scriptId }`. No-op `delete` / empty `clear` calls don't fire. The `ls:*` prefix avoids the eviction-pinning policy. Useful for debug / admin tooling; user scripts typically don't need to subscribe.
+
+**Values must be JSON-serialisable.** Passing functions / symbols / DOM elements throws at the IPC boundary — same posture as `api.broadcast.emit` and `api.variables.*`.
+
+**Cross-script isolation**: per-script via `scriptId`-keyed outer Map. Script A's writes never appear in Script B's reads. (Cross-script visibility for debug tooling is available via the broadcast events above.)
+
+| Method | Args | Description |
+|---|---|---|
+| async `get` | key, defaultValue? | Read a value. Returns `defaultValue` (or `undefined` if not provided) when the key is missing. Generic type hint via `get<T>(...)` for IDE completion — the runtime doesn't enforce T. v1.0.0-rc.6+. |
+| async `set` | key, value | Write a value. Overwrites any prior value at the key. Fires `ls:scriptStorage:set` with `{ scriptId, key, value }`. Throws "capacity exceeded" if the JSON-serialised total would cross the 1 MB per-script cap (use `api.variables.*` or `api.db.*` for storage at this scale). Value must be JSON-serialisable. |
+| async `delete` | key | Remove a key. Returns `true` if it existed (and fires `ls:scriptStorage:delete` with `{ scriptId, key }`), `false` if it didn't (no broadcast). |
+| async `has` | key | Check whether a key exists. Returns true for keys with any value including 0 / false / null / "". |
+| async `clear` | — | Remove every entry for this script. Fires `ls:scriptStorage:clear` with `{ scriptId }` if at least one entry existed; no broadcast for an already-empty storage. |
+| async `keys` | — | List the current keys. Order is insertion-order (Map semantics). |
+
 ## script
 
 | Method | Args | Description |
@@ -652,9 +680,15 @@ Public types referenced by `api.*` method signatures. **Each type is in the look
 - `DOMMessageInjectOptions` — Options for api.ui.dom.injectAtMessage(messageId, html, options?).
 - `DOMDelegateOptions` — Options for api.ui.dom.delegate(selector, event, handler, options?). v0.27.1+.
 - `DOMDelegatedEventData` — Event data delivered to handlers registered via api.ui.dom.delegate(). Extends DOMEventData with a serialized snapshot of the matched element + modifier-key state + optional message context. v0.27.1+.
-- `DOMHandle` — Returned by api.ui.dom.inject() and api.ui.dom.injectAtMessage(). All methods are fire-and-forget.
+- `DOMHandle` — Returned by api.ui.dom.inject() and api.ui.dom.injectAtMessage(). Most methods are fire-and-forget; the exception is `read(options?)` which is async (it awaits a frontend roundtrip).
 - `DOMEventData` — Serialized event data passed to DOM event handlers. A safe subset of the browser Event object.
 - `DOMListenOptions` — Options bag for DOMHandle.on(event, handler, options?).
+- `DOMReadOptions` — Options bag for DOMHandle.read(options?). All fields optional — `read()` with no argument returns a baseline snapshot. v1.0.0-rc.6+.
+- `SerializedDOMElement` — Snapshot returned by DOMHandle.read(). Frontend-built serialization of the element bound to the handle. v1.0.0-rc.6+.
+
+Which element gets snapshotted depends on the shape of what the script injected: for the common single-root case the user's root element is returned directly (e.g. `inject('<button class="x">Hi</button>')` → `tag: 'button'`); for multi-root or text-only content the snapshot falls back to LumiScript's wrapper (`tag: 'div'`, accurate `childCount`). Either way, internal `data-ls-*` and `data-spindle-ext` wrapper attributes are stripped from the `attrs` map.
+
+Deliberate omissions for v1.0: computed styles, bounding rect, recursive child snapshots, property snapshots (`.value` / `.checked`). Form-control live values can be read via `delegate(selector, 'input', ...)` event handlers; for deep markup traversal, request `{ html: true }` and parse client-side.
 - `ConditionalPreventDefault` — Predicate-based preventDefault rule for DOMDelegateOptions / DOMListenOptions (v0.27.5+). Fires event.preventDefault() only when the event matches all provided filters (AND semantics). Each filter is optional; empty {} = always match (equivalent to `preventDefault: true`). Filters are evaluated synchronously frontend-side at fire time. Common shapes: { onKeys: ['Enter'], whenModifiers: { exclude: ['shift'] } } (plain Enter, not Shift+Enter); { onKeys: ['s', 'S'], whenModifiers: { require: ['ctrl'] } } (Ctrl+S override); { onButtons: [2] } (right-click only).
 - `LLMMessage` — A single message in the messages array passed to api.llm.generate / generateStructured / generateWithTools.
 - `LlmMessagePart` — A single content part inside an LLMMessage. Discriminated union — switch on the `type` field. Mirrors the host's LlmMessagePartDTO; available since v0.29.0 / lumiverse-spindle-types ≥0.4.71.

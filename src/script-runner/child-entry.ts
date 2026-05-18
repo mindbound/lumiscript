@@ -54,6 +54,7 @@ import {
   notifyAdvancedModalDismissed,
   notifyFloatWidgetPosition,
   clearScriptStateOnUnregister,
+  applyScriptStateSnapshot,
   type ProxyHandle,
 } from './api-proxy.js';
 import { serializeConsoleArg } from '../engine/console-format.js';
@@ -959,6 +960,16 @@ export default function (proc: SpindleBackendProcessContext): () => void {
 
       case 'script-unregister':
         handleScriptUnregister(msg);
+        break;
+
+      case 'script-state-sync':
+        // v1.0.0-rc.6 — parent sending a per-script stable-id snapshot
+        // to pre-populate our proxy-side caches before the next
+        // `run-script` for this script arrives. Bun IPC is FIFO per
+        // channel, so this case ALWAYS lands before the corresponding
+        // `run-script` for the same script-worker pairing. Synchronous
+        // body — no async work between this and the next message read.
+        applyScriptStateSnapshot(msg.snapshot);
         break;
 
       case 'advanced-modal-dismissed':

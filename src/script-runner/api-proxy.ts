@@ -52,6 +52,8 @@ import type {
   DOMMessageInjectOptions,
   DOMDelegateOptions,
   DOMDelegatedEventData,
+  DOMReadOptions,
+  SerializedDOMElement,
   ScriptNamespace,
   ScriptType,
   LLMAPI,
@@ -70,6 +72,7 @@ import type {
   FilesAPI,
   EnclaveAPI,
   TokensAPI,
+  ScriptStorageAPI,
   EventsAPI,
   CommandsAPI,
   ToolsAPI,
@@ -126,6 +129,7 @@ import type {
   AbortRequest,
   RegisterHandler,
   UnregisterHandler,
+  ScriptStateSnapshot,
 } from '../types/script-runner-ipc.js';
 import { isHandleRef } from '../types/script-runner-ipc.js';
 import { AsyncLocalStorage } from 'async_hooks';
@@ -281,6 +285,40 @@ export function clearScriptStateOnUnregister(scriptId: string): void {
   domStableIdToElementId.delete(scriptId);
   // Latest-run tracker — same.
   latestRunIdByScript.delete(scriptId);
+}
+
+/**
+ * v1.0.0-rc.6 — apply a `ScriptStateSnapshot` received from the parent
+ * via the `script-state-sync` IPC. Seeds the proxy-side stable-id caches
+ * so the child's view aligns with the parent's view BEFORE the script's
+ * body re-runs.
+ *
+ * Called from `child-entry.ts` on receipt of the IPC. Idempotent on
+ * repeated application of the same snapshot (Map.set is overwrite-with-
+ * same-value when the entry already exists). Tolerates missing
+ * optional fields gracefully (forward-compat).
+ *
+ * Today this only seeds `domStableIdToElementId`. New proxy-side stable-
+ * id caches plug into the same snapshot shape as they land in
+ * `types/script-runner-ipc.ts:ScriptStateSnapshot`.
+ *
+ * Empty / missing `domStableIds` is a no-op — the parent wouldn't have
+ * sent the snapshot at all if there was nothing to sync (gated on
+ * `buildScriptStateSnapshot !== null`), but defending against future
+ * snapshot fields landing without companion seeders here.
+ */
+export function applyScriptStateSnapshot(snapshot: ScriptStateSnapshot): void {
+  const { scriptId, domStableIds } = snapshot;
+  if (domStableIds !== undefined) {
+    let scriptMap = domStableIdToElementId.get(scriptId);
+    if (!scriptMap) {
+      scriptMap = new Map<string, string>();
+      domStableIdToElementId.set(scriptId, scriptMap);
+    }
+    for (const [stableId, elementId] of Object.entries(domStableIds)) {
+      scriptMap.set(stableId, elementId);
+    }
+  }
 }
 
 // ─── Latest-run tracker per script (Phase 9d.4.x cross-run handle fix) ─────
@@ -582,6 +620,8 @@ export interface ProxyHandle {
     | 'json'
     // ── v0.26.0 additions ───────────────────────────────────────────────────
     | 'rpc'
+    // ── v1.0.0-rc.6 additions ──────────────────────────────────────────────
+    | 'scriptStorage'
   >;
   /**
    * Phase 7 — `script.*` namespace injected as a separate top-level
@@ -1668,6 +1708,41 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
           try { ctx.send(unsubMsg); } catch { /* sync void: no throw */ }
         };
       }) as DOMHandle['on'],
+
+      /**
+       * v1.0.0-rc.6 — `DOMHandle.read(options?)` is the first DOMHandle
+       * method that awaits an api-response value (rather than firing
+       * sync void / returning a sync handle). The parent's
+       * `handleInternalDomRequest` 'read' branch awaits the canonical
+       * `handle.read()` Promise (which itself routes through an FE
+       * round-trip via `ls_dom_read_request` / `ls_dom_read_response`)
+       * and returns the `SerializedDOMElement | null` as the
+       * api-response value.
+       *
+       * Routes through `dispatchOnHandle` like the other rc.5-fix
+       * DOMHandle methods: the `targetHandle` hint lets the parent's
+       * `resolveActiveRun` fall back to the script's current activeRun
+       * when this dispatch is initiated under a handler-fire ALS
+       * context. Honours `gateOrFire` so reads on a `.root` of a
+       * still-opening showAdvancedModal/createFloatWidget queue behind
+       * the open-ack rather than racing against parent-side handle
+       * binding.
+       *
+       * Failure modes:
+       *   - Handle no longer registered parent-side → dispatch rejects
+       *     with `DomHandleReleasedError`. The proxy re-throws (no
+       *     `.catch(() => undefined)` — `read()` is not sync-void; a
+       *     thrown error is meaningful to user-script callers).
+       *   - Element gone from live DOM at FE read-time → resolves with
+       *     `null` (NOT a throw). Matches the documented behaviour.
+       */
+      read: ((options?: DOMReadOptions): Promise<SerializedDOMElement | null> => {
+        return gateOrFire(() => dispatchOnHandle(
+          targetHandle,
+          'ui._dom.read',
+          options !== undefined ? [elementId, options] : [elementId],
+        )) as Promise<SerializedDOMElement | null>;
+      }) as DOMHandle['read'],
     };
   }
 
@@ -3094,6 +3169,22 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
     list:   mkAsync<EnclaveAPI['list']>(dispatch,   'enclave.list'),
   };
 
+  // ── scriptStorage (v1.0.0-rc.6 — per-script in-memory KV) ────────────────
+  //
+  // All six methods are pure async pass-through to the parent's canonical
+  // `buildScriptStorageAPI`. The parent holds the actual `Map<scriptId,
+  // Map<key, value>>`; the proxy just dispatches each call. Size cap
+  // enforcement, broadcast emission, and lifecycle bookkeeping all live
+  // parent-side. Free tier — no permission gating on either end.
+  const scriptStorage: ScriptStorageAPI = {
+    get:    mkAsync<ScriptStorageAPI['get']>(dispatch,    'scriptStorage.get'),
+    set:    mkAsync<ScriptStorageAPI['set']>(dispatch,    'scriptStorage.set'),
+    delete: mkAsync<ScriptStorageAPI['delete']>(dispatch, 'scriptStorage.delete'),
+    has:    mkAsync<ScriptStorageAPI['has']>(dispatch,    'scriptStorage.has'),
+    clear:  mkAsync<ScriptStorageAPI['clear']>(dispatch,  'scriptStorage.clear'),
+    keys:   mkAsync<ScriptStorageAPI['keys']>(dispatch,   'scriptStorage.keys'),
+  };
+
   // ── tokens (server-side counting) ─────────────────────────────────────────
   const tokens: TokensAPI = {
     countText:     mkAsync<TokensAPI['countText']>(dispatch,     'tokens.countText'),
@@ -3608,7 +3699,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
   // LumiScriptAPI even though we currently only implement a subset —
   // libraries that touch unimplemented namespaces will throw clearly.
   const apiForLibraries = {
-    utils, broadcast, variables, db, ui, llm,
+    utils, broadcast, variables, db, scriptStorage, ui, llm,
     chat, chats, characters, worldInfo, databanks, personas, presets, images, imageGen, oauth, theme, council,
     files, enclave, tokens, events, commands, tools, macros,
     json,
@@ -3753,7 +3844,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
 
   return {
     api: {
-      utils, broadcast, variables, db, ui, llm,
+      utils, broadcast, variables, db, scriptStorage, ui, llm,
       chat, chats, characters, worldInfo, databanks, personas, presets, images, imageGen, oauth, theme, council,
       files, enclave, tokens, events, commands, tools, macros,
       json,

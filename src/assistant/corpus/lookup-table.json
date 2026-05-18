@@ -4303,6 +4303,108 @@
       "api.db.collection.insert"
     ]
   },
+  "api.scriptStorage.get": {
+    "kind": "method",
+    "method": "api.scriptStorage.get",
+    "namespace": "api.scriptStorage",
+    "signature": "get<T = unknown>(key: string, defaultValue?: T): Promise<T | undefined>",
+    "description": "Read a value. Returns `defaultValue` (or undefined) when the key is missing.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.scriptStorage.set",
+      "api.scriptStorage.delete",
+      "api.scriptStorage.has",
+      "api.scriptStorage.clear",
+      "api.scriptStorage.keys",
+      "Promise"
+    ]
+  },
+  "api.scriptStorage.set": {
+    "kind": "method",
+    "method": "api.scriptStorage.set",
+    "namespace": "api.scriptStorage",
+    "signature": "set(key: string, value: unknown): Promise<void>",
+    "description": "Write a value. Throws if the per-script size cap would be exceeded. Fires `ls:scriptStorage:set`.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.scriptStorage.get",
+      "api.scriptStorage.delete",
+      "api.scriptStorage.has",
+      "api.scriptStorage.clear",
+      "api.scriptStorage.keys",
+      "Promise"
+    ]
+  },
+  "api.scriptStorage.delete": {
+    "kind": "method",
+    "method": "api.scriptStorage.delete",
+    "namespace": "api.scriptStorage",
+    "signature": "delete(key: string): Promise<boolean>",
+    "description": "Remove a key. Returns `true` if it existed (fires broadcast), `false` if not.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.scriptStorage.get",
+      "api.scriptStorage.set",
+      "api.scriptStorage.has",
+      "api.scriptStorage.clear",
+      "api.scriptStorage.keys",
+      "Promise"
+    ]
+  },
+  "api.scriptStorage.has": {
+    "kind": "method",
+    "method": "api.scriptStorage.has",
+    "namespace": "api.scriptStorage",
+    "signature": "has(key: string): Promise<boolean>",
+    "description": "Check whether a key exists.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.scriptStorage.get",
+      "api.scriptStorage.set",
+      "api.scriptStorage.delete",
+      "api.scriptStorage.clear",
+      "api.scriptStorage.keys",
+      "Promise"
+    ]
+  },
+  "api.scriptStorage.clear": {
+    "kind": "method",
+    "method": "api.scriptStorage.clear",
+    "namespace": "api.scriptStorage",
+    "signature": "clear(): Promise<void>",
+    "description": "Remove every entry for this script. Fires `ls:scriptStorage:clear` if any entries existed.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.scriptStorage.get",
+      "api.scriptStorage.set",
+      "api.scriptStorage.delete",
+      "api.scriptStorage.has",
+      "api.scriptStorage.keys",
+      "Promise"
+    ]
+  },
+  "api.scriptStorage.keys": {
+    "kind": "method",
+    "method": "api.scriptStorage.keys",
+    "namespace": "api.scriptStorage",
+    "signature": "keys(): Promise<string[]>",
+    "description": "List the current keys in insertion order.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.scriptStorage.get",
+      "api.scriptStorage.set",
+      "api.scriptStorage.delete",
+      "api.scriptStorage.has",
+      "api.scriptStorage.clear",
+      "Promise"
+    ]
+  },
   "script.id": {
     "kind": "method",
     "method": "script.id",
@@ -6071,7 +6173,7 @@
   "DOMHandle": {
     "kind": "type",
     "type": "DOMHandle",
-    "note": "Returned by api.ui.dom.inject() and api.ui.dom.injectAtMessage(). All methods are fire-and-forget.",
+    "note": "Returned by api.ui.dom.inject() and api.ui.dom.injectAtMessage(). Most methods are fire-and-forget; the exception is `read(options?)` which is async (it awaits a frontend roundtrip).",
     "fields": [
       {
         "field": "id",
@@ -6102,6 +6204,18 @@
         "type": "void",
         "optional": false,
         "desc": "Enable frontend-only drag. Optional CSS selector picks a drag handle child; the root element moves. Without a selector, the whole element is draggable."
+      },
+      {
+        "field": "injectChild(target, html, options?)",
+        "type": "DOMHandle",
+        "optional": false,
+        "desc": "Inject HTML as a descendant of this handle's bound element. Target selector resolved RELATIVE to this element via the backend's element-map ref. Use when the parent may be orphaned at inject time (drawer tabs, modal bodies pre-mount). NOTE: bypasses host DOMPurify sanitization — sanitize untrusted HTML yourself before passing it."
+      },
+      {
+        "field": "read(options?)",
+        "type": "Promise<SerializedDOMElement | null>",
+        "optional": false,
+        "desc": "v1.0.0-rc.6+. Read a snapshot of this element's current DOM state (tag, attrs, text, childCount, optionally innerHTML). Returns `null` when the FE no longer has the element (host shell tore down a parent, etc.). Throws DomHandleReleasedError if the handle was already removed (`.remove()` or `api.ui.dom.cleanup()`). Async — uses the same request-response IPC pattern as api.ui.showContextMenu. Common uses: verify an injection rendered as expected, inspect script-controlled widget state, walk markup via `{ html: true }`. For form-control live values use `delegate(selector, 'input', ...)` instead — `.value` is a DOM property, not an attribute."
       }
     ],
     "usedBy": [
@@ -6187,6 +6301,58 @@
         "type": "boolean | ConditionalPreventDefault",
         "optional": true,
         "desc": "When true, the frontend listener calls event.preventDefault() synchronously before dispatching to the script handler. Must be set at registration time — the async worker-boundary dispatch returns too late to preventDefault from inside the handler body. v0.27.5+: can also be a ConditionalPreventDefault object to fire only on specific key / button / modifier combinations. Default: false."
+      }
+    ],
+    "usedBy": []
+  },
+  "DOMReadOptions": {
+    "kind": "type",
+    "type": "DOMReadOptions",
+    "note": "Options bag for DOMHandle.read(options?). All fields optional — `read()` with no argument returns a baseline snapshot. v1.0.0-rc.6+.",
+    "fields": [
+      {
+        "field": "html?",
+        "type": "boolean",
+        "optional": true,
+        "desc": "Also include `innerHTML` in the returned snapshot. Default false — keeps the IPC payload small for the common case (verify attrs, check text content). Set true when the script needs to traverse the descendant markup (e.g. parse a rendered subtree via DOMParser)."
+      }
+    ],
+    "usedBy": []
+  },
+  "SerializedDOMElement": {
+    "kind": "type",
+    "type": "SerializedDOMElement",
+    "note": "Snapshot returned by DOMHandle.read(). Frontend-built serialization of the element bound to the handle. v1.0.0-rc.6+.\n\nWhich element gets snapshotted depends on the shape of what the script injected: for the common single-root case the user's root element is returned directly (e.g. `inject('<button class=\"x\">Hi</button>')` → `tag: 'button'`); for multi-root or text-only content the snapshot falls back to LumiScript's wrapper (`tag: 'div'`, accurate `childCount`). Either way, internal `data-ls-*` and `data-spindle-ext` wrapper attributes are stripped from the `attrs` map.\n\nDeliberate omissions for v1.0: computed styles, bounding rect, recursive child snapshots, property snapshots (`.value` / `.checked`). Form-control live values can be read via `delegate(selector, 'input', ...)` event handlers; for deep markup traversal, request `{ html: true }` and parse client-side.",
+    "fields": [
+      {
+        "field": "tag",
+        "type": "string",
+        "optional": false,
+        "desc": "Lowercase tag name (e.g. 'div', 'button')."
+      },
+      {
+        "field": "attrs",
+        "type": "Record<string, string>",
+        "optional": false,
+        "desc": "All attributes set on the element, keyed by lowercased attribute name. Includes class, id, style, data-*, aria-*, etc. Internal `data-ls-*` / `data-spindle-ext` wrapper attributes are stripped. Empty object if no attributes set."
+      },
+      {
+        "field": "text",
+        "type": "string",
+        "optional": false,
+        "desc": "Element's textContent — concatenated text from this element and all descendants. Empty string if no text content. Includes text inside hidden-via-CSS elements (matches textContent semantics, not visibility). Use `delegate(...)` events for live form-control values like input.value (which are properties, not attributes)."
+      },
+      {
+        "field": "childCount",
+        "type": "number",
+        "optional": false,
+        "desc": "Number of direct ELEMENT children (text nodes and comment nodes are NOT counted). Use the `html` option to inspect the full subtree."
+      },
+      {
+        "field": "html?",
+        "type": "string",
+        "optional": true,
+        "desc": "Element's innerHTML. Present only when read({ html: true }) was passed. Reflects whatever the frontend currently has — including any host-side modifications (e.g. Lumiverse markdown rendering) that mutated the originally-injected HTML."
       }
     ],
     "usedBy": []

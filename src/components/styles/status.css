@@ -663,3 +663,227 @@
   flex: 1;
   min-width: 0;
 }
+
+/* ─── Script Storage section (v1.0.0-rc.6+) ──────────────────────────────────
+ *
+ * Parallel to the Collections section's classes. Different column layout
+ * (no scope column — scriptStorage is single-tier), but shares the
+ * filter / sortable-header / row-hover idioms. Where the row layout +
+ * filter row UI overlaps perfectly, we hard-duplicate the CSS rather
+ * than alias to `ls-collections-*` — keeps the two sections independent
+ * so future tweaks to one don't drift the other.
+ */
+
+.ls-scriptstorage-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+}
+
+.ls-scriptstorage-row {
+  display: grid;
+  grid-template-columns:
+    minmax(0, 2fr)   /* script — name + uuid fallback need space */
+    40px              /* keys count — "999" is longest realistic */
+    54px              /* size — "999 KB" */
+    60px              /* modified — "just now" / "59m ago" */
+    44px;             /* actions — two 20px buttons + gap */
+  column-gap: 4px;
+  align-items: center;
+  padding: 3px 6px;
+  border-radius: 3px;
+}
+
+.ls-scriptstorage-row:not(.ls-scriptstorage-header-row):hover {
+  background: var(--lumiverse-fill-1, rgba(255, 255, 255, 0.04));
+}
+
+.ls-scriptstorage-header-row {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--lumiverse-text-2, rgba(255, 255, 255, 0.5));
+  background: var(--lumiverse-fill-0, rgba(0, 0, 0, 0.3));
+}
+/* Right-align numeric columns (keys / size / modified). */
+.ls-scriptstorage-header-row > span:nth-child(2),
+.ls-scriptstorage-header-row > span:nth-child(3),
+.ls-scriptstorage-header-row > span:nth-child(4) { text-align: right; }
+
+.ls-scriptstorage-script {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ls-scriptstorage-script-unknown {
+  color: var(--lumiverse-text-2, rgba(255, 255, 255, 0.5));
+  font-style: italic;
+}
+
+.ls-scriptstorage-keys,
+.ls-scriptstorage-size,
+.ls-scriptstorage-modified {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--lumiverse-text-2, rgba(255, 255, 255, 0.7));
+}
+
+.ls-scriptstorage-actions {
+  display: flex;
+  gap: 4px;
+  justify-content: flex-end;
+}
+
+.ls-scriptstorage-action {
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.08));
+  background: var(--lumiverse-fill-0, rgba(0, 0, 0, 0.2));
+  color: var(--lumiverse-text-2, rgba(255, 255, 255, 0.7));
+  border-radius: 3px;
+  cursor: pointer;
+  padding: 0;
+}
+.ls-scriptstorage-action:not(:disabled):hover {
+  background: var(--lumiverse-fill-1, rgba(255, 255, 255, 0.06));
+  color: var(--lumiverse-text-0, rgba(255, 255, 255, 1));
+}
+.ls-scriptstorage-action-danger:not(:disabled):hover {
+  color: var(--lumiverse-danger, rgb(246, 130, 130));
+  border-color: var(--lumiverse-danger, rgb(246, 130, 130));
+}
+.ls-scriptstorage-action-confirm {
+  width: auto;
+  padding: 0 6px;
+  gap: 3px;
+  background: rgba(246, 130, 130, 0.15);
+  color: var(--lumiverse-danger, rgb(246, 130, 130));
+  border-color: var(--lumiverse-danger, rgb(246, 130, 130));
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+.ls-scriptstorage-filter {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 4px 4px;
+  border-bottom: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.08));
+  margin-bottom: 4px;
+}
+.ls-scriptstorage-filter-search {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+  background: var(--lumiverse-fill-0, rgba(0, 0, 0, 0.2));
+  border: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.08));
+  border-radius: 3px;
+  padding: 0 6px;
+  color: var(--lumiverse-text-2, rgba(255, 255, 255, 0.5));
+}
+.ls-scriptstorage-filter-input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--lumiverse-text-0, rgba(255, 255, 255, 1));
+  font: inherit;
+  font-size: 11px;
+  padding: 4px 0;
+}
+.ls-scriptstorage-filter-clear {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+}
+.ls-scriptstorage-filter-clear:hover {
+  color: var(--lumiverse-text-0, rgba(255, 255, 255, 1));
+}
+.ls-scriptstorage-filter-count {
+  font-size: 10px;
+  color: var(--lumiverse-text-2, rgba(255, 255, 255, 0.5));
+  font-variant-numeric: tabular-nums;
+}
+
+.ls-scriptstorage-sortable {
+  cursor: pointer;
+  user-select: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.ls-scriptstorage-sortable:hover {
+  color: var(--lumiverse-text-0, rgba(255, 255, 255, 1));
+}
+.ls-scriptstorage-sort-icon {
+  opacity: 0.4;
+}
+.ls-scriptstorage-sort-icon-active {
+  opacity: 1;
+  color: var(--lumiverse-accent, rgb(147, 112, 219));
+}
+
+/* ─── Inspect modal — scriptStorage entries ─────────────────────────────── */
+
+.ls-scriptstorage-entries {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px;
+}
+.ls-scriptstorage-entry {
+  border: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.08));
+  border-radius: 4px;
+  background: var(--lumiverse-fill-0, rgba(0, 0, 0, 0.15));
+}
+.ls-scriptstorage-entry-key-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.06));
+}
+.ls-scriptstorage-entry-key {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-weight: 600;
+  color: var(--lumiverse-accent, rgb(147, 112, 219));
+  font-size: 12px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ls-scriptstorage-entry-actions {
+  display: flex;
+  gap: 4px;
+}
+.ls-scriptstorage-entry-value {
+  margin: 0;
+  padding: 8px 10px;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--lumiverse-text-1, rgba(255, 255, 255, 0.85));
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow-y: auto;
+}

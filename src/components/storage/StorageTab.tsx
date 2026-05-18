@@ -19,14 +19,20 @@ import { type FC } from 'react';
 import type { FrontendToBackend, VariablesSnapshot } from '../../types/messages.js';
 import type { Script, DbRecord } from '../../types/script.js';
 import type { CollectionSummary, CollectionStats } from '../../engine/db-admin.js';
+import type { ScriptStorageSummary } from '../../engine/api/script-storage.js';
 import { VariablesSection } from './VariablesSection.js';
 import { CollectionsSection } from './CollectionsSection.js';
+import { ScriptStorageSection } from './ScriptStorageSection.js';
 import { InspectModal } from './InspectModal.js';
+import { InspectScriptStorageModal } from './InspectScriptStorageModal.js';
 import { DropConfirmDialog } from './DropConfirmDialog.js';
 
 export interface StorageTabProps {
   variables: VariablesSnapshot | null;
   collections: CollectionSummary[] | null;
+  /** v1.0.0-rc.6 — `api.scriptStorage` per-script summaries.
+   *  `null` before first load; `[]` means no scripts have stored entries. */
+  scriptStorageEntries: ScriptStorageSummary[] | null;
   scripts: Script[];
   sendToBackend: (msg: FrontendToBackend) => void;
   /** Path of the collection currently being inspected. `null` = no modal. */
@@ -58,11 +64,23 @@ export interface StorageTabProps {
   onDrop: (target: CollectionSummary | null) => void;
   /** Called when the user commits the drop from the dialog. */
   onDropConfirm: () => void;
+  // ── v1.0.0-rc.6 — Script Storage section ─────────────────────────
+  /** scriptId currently open in the scriptStorage inspect modal. `null` = closed. */
+  inspectScriptStorageId: string | null;
+  /** Entries returned for the open scriptStorage inspect modal. `null` = loading. */
+  inspectScriptStorageEntries: Array<{ key: string; value: unknown }> | null;
+  /** Bumps on every `script_storage_updated` hint — forces the modal to re-fetch. */
+  scriptStorageRefreshToken: number;
+  /** Open / close the scriptStorage inspect modal. */
+  onInspectScriptStorage: (scriptId: string | null) => void;
+  /** Clear a script's full scriptStorage slot (admin action from row). */
+  onClearScriptStorage: (summary: ScriptStorageSummary) => void;
 }
 
 export const StorageTab: FC<StorageTabProps> = ({
   variables,
   collections,
+  scriptStorageEntries,
   scripts,
   sendToBackend,
   inspectPath,
@@ -76,6 +94,11 @@ export const StorageTab: FC<StorageTabProps> = ({
   dropTargetCount,
   onDrop,
   onDropConfirm,
+  inspectScriptStorageId,
+  inspectScriptStorageEntries,
+  scriptStorageRefreshToken,
+  onInspectScriptStorage,
+  onClearScriptStorage,
 }) => {
   return (
     <>
@@ -87,6 +110,13 @@ export const StorageTab: FC<StorageTabProps> = ({
           sendToBackend={sendToBackend}
           onInspect={onInspect}
           onDrop={onDrop}
+        />
+        <ScriptStorageSection
+          entries={scriptStorageEntries}
+          scripts={scripts}
+          sendToBackend={sendToBackend}
+          onInspect={onInspectScriptStorage}
+          onClear={onClearScriptStorage}
         />
       </div>
       {inspectPath !== null && (
@@ -113,6 +143,16 @@ export const StorageTab: FC<StorageTabProps> = ({
           recordCount={dropTargetCount}
           onConfirm={onDropConfirm}
           onCancel={() => onDrop(null)}
+        />
+      )}
+      {inspectScriptStorageId !== null && (
+        <InspectScriptStorageModal
+          scriptId={inspectScriptStorageId}
+          scripts={scripts}
+          entries={inspectScriptStorageEntries}
+          refreshToken={scriptStorageRefreshToken}
+          onClose={() => onInspectScriptStorage(null)}
+          sendToBackend={sendToBackend}
         />
       )}
     </>

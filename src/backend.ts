@@ -61,6 +61,13 @@ import {
   clearByScriptId as clearCollectionHandleCacheByScriptId,
 } from './engine/collection-handle-cache.js';
 import { flushThemeOnTeardown } from './engine/api/theme.js';
+import {
+  clearScriptStorageForScript,
+  enumerateAllScriptStorage,
+  inspectScriptStorage,
+  clearScriptStorageAsAdmin,
+  deleteScriptStorageEntryAsAdmin,
+} from './engine/api/script-storage.js';
 import { logCleanup } from './engine/cleanup-log.js';
 import { dispatchToolInvocation } from './engine/tool-invocation.js';
 import { dispatchEvent as dispatchDOMEvent, dispatchDelegateEvent as dispatchDOMDelegateEvent, cleanupScript as cleanupDOMScript } from './engine/dom-registry.js';
@@ -87,6 +94,7 @@ import {
   dispatchActivation as dispatchTabActivation,
 } from './engine/drawer-tab-registry.js';
 import { resolveContextMenu } from './engine/api/ui.js';
+import { resolveDomRead } from './engine/api/dom.js';
 import { checkMinimumHostVersion } from './utils/host-version.js';
 import {
   enumerateAllCollections,
@@ -433,6 +441,32 @@ for (const event of COLLECTION_BROADCAST_EVENTS) {
   // script lifecycle events only, and no real script will ever own this
   // id, so the subscription persists for the worker's lifetime.
   busOn(event, () => scheduleCollectionsUpdate(), BACKEND_BROADCAST_OWNER);
+}
+
+// ─── `ls:scriptStorage:*` broadcast → `script_storage_updated` forwarder ─────
+//
+// v1.0.0-rc.6 — mirrors the Collections debounced-refresh-hint pattern
+// above. Scripts emit `ls:scriptStorage:set` / `:delete` / `:clear` on
+// every mutation; the Storage panel's Script Storage section wants to
+// refresh on change. Same 200 ms debounce — tight loops of `set` calls
+// don't thrash the FE.
+const SCRIPT_STORAGE_BROADCAST_EVENTS = [
+  'ls:scriptStorage:set',
+  'ls:scriptStorage:delete',
+  'ls:scriptStorage:clear',
+] as const;
+
+let scriptStorageUpdateTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleScriptStorageUpdate(): void {
+  if (scriptStorageUpdateTimer !== null) clearTimeout(scriptStorageUpdateTimer);
+  scriptStorageUpdateTimer = setTimeout(() => {
+    scriptStorageUpdateTimer = null;
+    send({ type: 'script_storage_updated' });
+  }, COLLECTIONS_UPDATE_DEBOUNCE_MS);
+}
+
+for (const event of SCRIPT_STORAGE_BROADCAST_EVENTS) {
+  busOn(event, () => scheduleScriptStorageUpdate(), BACKEND_BROADCAST_OWNER);
 }
 
 // ─── Prompt injection handlers ────────────────────────────────────────────────
@@ -816,6 +850,12 @@ async function teardownDisabledScript(scriptId: string, disabledScript: Script |
   catch (err) {
     spindle.log.warn(`[lumiscript] theme teardown push failed for ${disabledName}: ${String(err)}`);
   }
+  // v1.0.0-rc.6 — drop this script's `api.scriptStorage` slot. Mirrors the
+  // existing `globalThis.__lumiscript_script_<id>_*` sweep convention.
+  // Synchronous, no IPC — the map lives module-scope in `engine/api/
+  // script-storage.ts`. Fires an `ls:scriptStorage:clear` broadcast if
+  // the script had any entries (no-op for scripts that never wrote).
+  clearScriptStorageForScript(scriptId);
   logCleanup('tool',  'disabled', disabledName, clearedTools);
   logCleanup('macro', 'disabled', disabledName, clearedMacros);
   logCleanup('rpc',   'disabled', disabledName, clearedRpcEndpoints);
@@ -1814,6 +1854,36 @@ spindle.onFrontendMessage(async (raw, userId) => {
         break;
       }
 
+      // ── Storage panel: Script Storage (v1.0.0-rc.6+, admin view) ────────
+      case 'list_script_storage': {
+        const entries = enumerateAllScriptStorage();
+        send({ type: 'script_storage_list', entries });
+        break;
+      }
+
+      case 'inspect_script_storage': {
+        const entries = inspectScriptStorage(msg.scriptId);
+        send({ type: 'script_storage_entries', scriptId: msg.scriptId, entries });
+        break;
+      }
+
+      case 'clear_script_storage': {
+        // No-op-safe via the delegate to `clearScriptStorageForScript`.
+        // Fires `ls:scriptStorage:clear` if the slot had entries; the
+        // FE re-fetches via the `script_storage_updated` hint that
+        // lands after the broadcast settles through the 200 ms debounce.
+        clearScriptStorageAsAdmin(msg.scriptId);
+        break;
+      }
+
+      case 'delete_script_storage_entry': {
+        // Returns boolean for "did it exist"; we don't echo the result
+        // back — the FE refreshes via the `script_storage_updated`
+        // hint that lands after `ls:scriptStorage:delete` settles.
+        deleteScriptStorageEntryAsAdmin(msg.scriptId, msg.key);
+        break;
+      }
+
       // ── Storage panel: Collections (admin view) ─────────────────────────
       case 'list_collections': {
         await pushCollections(userId);
@@ -2313,6 +2383,17 @@ spindle.onFrontendMessage(async (raw, userId) => {
       // no-ops on unknown requestId (stale result after script teardown).
       case 'ls_context_menu_result': {
         resolveContextMenu(msg.requestId, msg.selectedKey);
+        break;
+      }
+
+      // ── DOM read response (v1.0.0-rc.6) ────────────────────────────────
+      // Frontend echoes this after building a `SerializedDOMElement`
+      // snapshot for a `DOMHandle.read()` call (or `null` if the
+      // element was no longer in the live DOM at read-time).
+      // `resolveDomRead` no-ops on unknown requestId — stale response
+      // after script teardown / cancellation just gets dropped.
+      case 'dom_read_response': {
+        resolveDomRead(msg.requestId, msg.snapshot);
         break;
       }
 

@@ -899,13 +899,15 @@ export const KEY_TYPES: TypeDoc[] = [
   },
   {
     name: 'DOMHandle',
-    note: 'Returned by api.ui.dom.inject() and api.ui.dom.injectAtMessage(). All methods are fire-and-forget.',
+    note: 'Returned by api.ui.dom.inject() and api.ui.dom.injectAtMessage(). Most methods are fire-and-forget; the exception is `read(options?)` which is async (it awaits a frontend roundtrip).',
     fields: [
       { field: 'id',          type: 'string',                                   optional: false, desc: 'Unique element ID (generated or from stable ID).' },
       { field: 'update(html)', type: 'void',                                    optional: false, desc: 'Replace the inner HTML of the injected element.' },
       { field: 'remove()',    type: 'void',                                     optional: false, desc: 'Remove the element from the DOM and detach all listeners.' },
       { field: 'on(event, handler, options?)', type: '() => void',              optional: false, desc: 'Attach a DOM event listener. Handler receives DOMEventData. Pass { preventDefault: true } to suppress the browser default synchronously (e.g. to block the native context menu on right-click). Returns an unsubscribe function.' },
       { field: 'makeDraggable(handleSelector?)', type: 'void',               optional: false, desc: 'Enable frontend-only drag. Optional CSS selector picks a drag handle child; the root element moves. Without a selector, the whole element is draggable.' },
+      { field: 'injectChild(target, html, options?)', type: 'DOMHandle',     optional: false, desc: 'Inject HTML as a descendant of this handle\'s bound element. Target selector resolved RELATIVE to this element via the backend\'s element-map ref. Use when the parent may be orphaned at inject time (drawer tabs, modal bodies pre-mount). NOTE: bypasses host DOMPurify sanitization — sanitize untrusted HTML yourself before passing it.' },
+      { field: 'read(options?)', type: 'Promise<SerializedDOMElement | null>', optional: false, desc: 'v1.0.0-rc.6+. Read a snapshot of this element\'s current DOM state (tag, attrs, text, childCount, optionally innerHTML). Returns `null` when the FE no longer has the element (host shell tore down a parent, etc.). Throws DomHandleReleasedError if the handle was already removed (`.remove()` or `api.ui.dom.cleanup()`). Async — uses the same request-response IPC pattern as api.ui.showContextMenu. Common uses: verify an injection rendered as expected, inspect script-controlled widget state, walk markup via `{ html: true }`. For form-control live values use `delegate(selector, \'input\', ...)` instead — `.value` is a DOM property, not an attribute.' },
     ],
   },
   {
@@ -929,6 +931,24 @@ export const KEY_TYPES: TypeDoc[] = [
     note: 'Options bag for DOMHandle.on(event, handler, options?).',
     fields: [
       { field: 'preventDefault?', type: 'boolean | ConditionalPreventDefault', optional: true, desc: "When true, the frontend listener calls event.preventDefault() synchronously before dispatching to the script handler. Must be set at registration time — the async worker-boundary dispatch returns too late to preventDefault from inside the handler body. v0.27.5+: can also be a ConditionalPreventDefault object to fire only on specific key / button / modifier combinations. Default: false." },
+    ],
+  },
+  {
+    name: 'DOMReadOptions',
+    note: 'Options bag for DOMHandle.read(options?). All fields optional — `read()` with no argument returns a baseline snapshot. v1.0.0-rc.6+.',
+    fields: [
+      { field: 'html?', type: 'boolean', optional: true, desc: 'Also include `innerHTML` in the returned snapshot. Default false — keeps the IPC payload small for the common case (verify attrs, check text content). Set true when the script needs to traverse the descendant markup (e.g. parse a rendered subtree via DOMParser).' },
+    ],
+  },
+  {
+    name: 'SerializedDOMElement',
+    note: 'Snapshot returned by DOMHandle.read(). Frontend-built serialization of the element bound to the handle. v1.0.0-rc.6+.\n\nWhich element gets snapshotted depends on the shape of what the script injected: for the common single-root case the user\'s root element is returned directly (e.g. `inject(\'<button class="x">Hi</button>\')` → `tag: \'button\'`); for multi-root or text-only content the snapshot falls back to LumiScript\'s wrapper (`tag: \'div\'`, accurate `childCount`). Either way, internal `data-ls-*` and `data-spindle-ext` wrapper attributes are stripped from the `attrs` map.\n\nDeliberate omissions for v1.0: computed styles, bounding rect, recursive child snapshots, property snapshots (`.value` / `.checked`). Form-control live values can be read via `delegate(selector, \'input\', ...)` event handlers; for deep markup traversal, request `{ html: true }` and parse client-side.',
+    fields: [
+      { field: 'tag',        type: 'string',                  optional: false, desc: "Lowercase tag name (e.g. 'div', 'button')." },
+      { field: 'attrs',      type: 'Record<string, string>',  optional: false, desc: 'All attributes set on the element, keyed by lowercased attribute name. Includes class, id, style, data-*, aria-*, etc. Internal `data-ls-*` / `data-spindle-ext` wrapper attributes are stripped. Empty object if no attributes set.' },
+      { field: 'text',       type: 'string',                  optional: false, desc: "Element's textContent — concatenated text from this element and all descendants. Empty string if no text content. Includes text inside hidden-via-CSS elements (matches textContent semantics, not visibility). Use `delegate(...)` events for live form-control values like input.value (which are properties, not attributes)." },
+      { field: 'childCount', type: 'number',                  optional: false, desc: 'Number of direct ELEMENT children (text nodes and comment nodes are NOT counted). Use the `html` option to inspect the full subtree.' },
+      { field: 'html?',      type: 'string',                  optional: true,  desc: "Element's innerHTML. Present only when read({ html: true }) was passed. Reflects whatever the frontend currently has — including any host-side modifications (e.g. Lumiverse markdown rendering) that mutated the originally-injected HTML." },
     ],
   },
   {
@@ -2514,6 +2534,17 @@ export const API_GROUPS: FnGroup[] = [
     ],
   },
   {
+    group: 'api.scriptStorage',
+    rows: [
+      { name: 'get',    args: 'key, defaultValue?', desc: "Read a value. Returns `defaultValue` (or `undefined` if not provided) when the key is missing. Generic type hint via `get<T>(...)` for IDE completion — the runtime doesn't enforce T. v1.0.0-rc.6+." },
+      { name: 'set',    args: 'key, value',        desc: 'Write a value. Overwrites any prior value at the key. Fires `ls:scriptStorage:set` with `{ scriptId, key, value }`. Throws "capacity exceeded" if the JSON-serialised total would cross the 1 MB per-script cap (use `api.variables.*` or `api.db.*` for storage at this scale). Value must be JSON-serialisable.' },
+      { name: 'delete', args: 'key',               desc: 'Remove a key. Returns `true` if it existed (and fires `ls:scriptStorage:delete` with `{ scriptId, key }`), `false` if it didn\'t (no broadcast).' },
+      { name: 'has',    args: 'key',               desc: 'Check whether a key exists. Returns true for keys with any value including 0 / false / null / "".' },
+      { name: 'clear',  args: '—',                 desc: 'Remove every entry for this script. Fires `ls:scriptStorage:clear` with `{ scriptId }` if at least one entry existed; no broadcast for an already-empty storage.' },
+      { name: 'keys',   args: '—',                 desc: 'List the current keys. Order is insertion-order (Map semantics).' },
+    ],
+  },
+  {
     group: 'script',
     rows: [
       { name: 'id',      args: '(property)', desc: "This script's stable UUID. Immutable across enables, edits, renames. Use as owner key for any external state the script creates (world-book entries via automation_id, persistent storage paths, etc.)." },
@@ -2807,6 +2838,9 @@ export const NAMESPACE_CONCEPTS: Record<string, string> = {
 
   'api.db':
     'Per-script schema-validated JSON collections. Each collection is a typed array of records persisted under the owning script\'s storage path; collections never leak across scripts. Optional Zod schema validates writes (insert + update). Built-in fields `id` / `createdAt` / `updatedAt` are reserved and auto-managed; Zod\'s `.strict()` / unknown-key stripping preserves them. Use for structured per-script data; for cross-script shared state see `api.variables.global`.',
+
+  'api.scriptStorage':
+    'Per-script in-memory key/value store for session state. Closes the "where does my script keep its session state?" UX gap that was previously covered by the `globalThis.__lumiscript_script_<id>_*` convention (verbose, easy to forget the prefix). **Free tier — no permission required.** v1.0.0-rc.6+.\n\n**Picking the right storage primitive** — the LumiScript storage story now has three tiers, picked by intent:\n  - `api.scriptStorage` — in-memory, session-scoped, free-tier. Best for "remember this for the session" flags (tracker rerun-inflight, current selection, transient cache).\n  - `api.variables.*` — disk-persisted, scope-tiered (local/global/character/chat), free-tier. Best for "remember this across restarts" state.\n  - `api.db.*` — disk-persisted, structured collections with schema + filters + queries. Best for record-shaped data you want to search / aggregate.\n\n**Lifecycle**: in-memory only — values live in a parent-side `Map<scriptId, Map<key, value>>`, no disk write. Survives worker eviction / respawn (parent-side state, not in worker memory). Survives script edit / hot-reload (matches the `globalThis` convention — preserves dev iteration state). Cleared on script disable / delete via the `teardownDisabledScript` path. Lost on full backend restart.\n\n**Size cap**: 1 MB per script on the JSON-serialised size of the full map. `set()` throws `"capacity exceeded"` cleanly when a write would cross the cap, with a migration hint pointing to `api.variables.*` / `api.db.*`. The cap is intentional — scriptStorage is a "small bag of session flags" surface, not bulk storage.\n\n**Broadcasts**: every mutation fires an `ls:scriptStorage:*` event on the broadcast bus. `ls:scriptStorage:set` carries `{ scriptId, key, value }`; `ls:scriptStorage:delete` carries `{ scriptId, key }`; `ls:scriptStorage:clear` carries `{ scriptId }`. No-op `delete` / empty `clear` calls don\'t fire. The `ls:*` prefix avoids the eviction-pinning policy. Useful for debug / admin tooling; user scripts typically don\'t need to subscribe.\n\n**Values must be JSON-serialisable.** Passing functions / symbols / DOM elements throws at the IPC boundary — same posture as `api.broadcast.emit` and `api.variables.*`.\n\n**Cross-script isolation**: per-script via `scriptId`-keyed outer Map. Script A\'s writes never appear in Script B\'s reads. (Cross-script visibility for debug tooling is available via the broadcast events above.)',
 
   'api.broadcast':
     'In-memory real-time pub/sub between scripts. Events are NOT persisted — handlers fire synchronously when an event is emitted, and there\'s no replay across script reloads. Subscriptions persist between trigger runs (host wipes them at the START of each new run, not the end), so a "subscriber-only" script can watch events from a script it isn\'t co-triggered with. The `ls:*` prefix is reserved for system events; scripts should namespace their own events with a project-specific prefix. **Distinct from `api.events`** — that one is for persistent event tracking; this one is for real-time messaging.',

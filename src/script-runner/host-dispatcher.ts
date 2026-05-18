@@ -54,6 +54,8 @@ import type {
   HandlerResult,
   RunHandlerRequest,
   ScriptUnregisterMessage,
+  ScriptStateSnapshot,
+  ScriptStateSyncMessage,
 } from '../types/script-runner-ipc.js';
 import type {
   LumiScriptAPI,
@@ -109,7 +111,10 @@ import {
   type ScriptRegistrationCounts,
 } from '../engine/script-pinning.js';
 import { countUserEventSubscriptionsByScriptId } from '../engine/broadcast-bus.js';
-import { collectDescendantIds } from '../engine/dom-registry.js';
+import {
+  collectDescendantIds,
+  listStableIdsForScript,
+} from '../engine/dom-registry.js';
 
 // ─── Script resolver (Phase 9e) ─────────────────────────────────────────────
 //
@@ -380,6 +385,43 @@ function processIdToWorkerKey(processId: string): ScriptRunnerWorkerKey | null {
 // phased out.
 
 const scriptWorkerAssignments = new Map<string, ScriptRunnerWorkerKey>();
+
+// ─── State-sync-on-respawn: per-worker "seen" tracker (v1.0.0-rc.6) ─────────
+//
+// Tracks which scripts have already received a `script-state-sync` message
+// on each worker since the worker last spawned. First dispatch of a script
+// on a given worker triggers a snapshot send (if there's any content); all
+// subsequent dispatches skip the send.
+//
+// Cleared per-worker when the worker dies (lifecycle 'failed' / 'timed_out'
+// → `cleanupRunsForDeadWorker`; graceful shutdown → `shutdownWorker`) so
+// the next dispatch after respawn re-sends the snapshot.
+//
+// Cleared per-script when the script is unregistered (the child wipes its
+// own `domStableIdToElementId` for the script on the same IPC, so the
+// "already-synced" state is stale and re-enabling the script needs a fresh
+// snapshot).
+//
+// Two-level map: workerKey → Set<scriptId>. Per-worker scoping is critical
+// because a script may be reassigned across workers (lazy-spawn lands on
+// a different worker than the previous run if assignments were rebalanced),
+// and each worker has its own child-side cache that needs its own sync.
+const scriptsSeenPerWorker = new Map<ScriptRunnerWorkerKey, Set<string>>();
+
+/**
+ * Build a `ScriptStateSnapshot` for the given script. Returns `null` when
+ * the script has no syncable state — callers skip the `script-state-sync`
+ * send in that case (the common case at startup, before any DOM injection
+ * with a stable id).
+ *
+ * Today this only walks `dom-registry`'s stableId index; new proxy-side
+ * stable-id caches plug into the same snapshot shape as they land.
+ */
+function buildScriptStateSnapshot(scriptId: string): ScriptStateSnapshot | null {
+  const domStableIds = listStableIdsForScript(scriptId);
+  if (Object.keys(domStableIds).length === 0) return null;
+  return { scriptId, domStableIds };
+}
 
 // Phase C2 — `workerCount` setting reader. Wired by `backend.ts` cold-start
 // init (see `setWorkerCountReader`) to pull live values from the settings
@@ -1535,6 +1577,43 @@ function dropDomListenerHandlersForElement(scriptId: string, elementId: string):
   const handlerIds = [...handlerSet];
   for (const handlerId of handlerIds) {
     invokeAndDropHandlerCleanup(scriptId, handlerId);
+  }
+}
+
+/**
+ * v1.0.0-rc.6 — bulk variant of `dropDomListenerHandlersForElement` for
+ * the `api.ui.dom.cleanup()` cascade. Walks every elementId tracked under
+ * the script + cascade-drops every `domEventListener` handler. Mirrors
+ * the per-element helper, just iterating the whole scriptMap.
+ *
+ * Scope: `kind='domEventListener'` only. The rc.4 cascade explicitly
+ * excluded `kind='domDelegate'` (delegates bind to selectors at a root
+ * scope, no per-element reverse index); same boundary applies here.
+ * Delegates' parent-side `handlerCleanups` entries get cleared only via
+ * explicit user-script unsub or full script-unregister teardown.
+ *
+ * Caller (`handleDomCleanupRequest`) invokes AFTER the canonical
+ * `api.ui.dom.cleanup()` has already swept dom-registry — but the
+ * reverse index is parent-side state in this module, so the canonical
+ * doesn't touch it. Ordering between the canonical sweep and this
+ * cascade is irrelevant: the canonical drops dom-registry entries
+ * (which makes the listener unsubs no-op), this drops the parent's
+ * `handlerCleanups` entries (which would otherwise stay as orphans
+ * causing false eviction-pinning).
+ *
+ * Idempotent — silently no-ops if the script has no tracked entries.
+ */
+function dropAllDomListenerHandlersForScript(scriptId: string): void {
+  const scriptMap = domListenerHandlers.get(scriptId);
+  if (!scriptMap) return;
+  // Snapshot the elementIds before iterating — `invokeAndDropHandlerCleanup`
+  // routes through `untrackDomListenerHandler` which mutates `scriptMap`,
+  // and we'd hit "Map changed during iteration" or skip-key issues without
+  // the snapshot. Collecting elementIds upfront is bounded by the script's
+  // current DOM-injection count.
+  const elementIds = [...scriptMap.keys()];
+  for (const elementId of elementIds) {
+    dropDomListenerHandlersForElement(scriptId, elementId);
   }
 }
 
@@ -3597,6 +3676,20 @@ async function handleInternalDomRequest(
           message: 'ui._dom.on: routing bug — DOMHandle.on() should dispatch via register-handler kind=domEventListener',
         },
       };
+    } else if (action === 'read') {
+      // v1.0.0-rc.6 — DOMHandle.read() is the first DOMHandle method
+      // that AWAITS a frontend roundtrip (the live DOM lives there).
+      // The canonical `handle.read(options)` returns a Promise that
+      // resolves when the FE's `ls_dom_read_response` arrives + routes
+      // through `resolveDomRead` in `engine/api/dom.ts`. We just await
+      // the canonical Promise here — the api-response carries the
+      // snapshot back to the child, where the proxy's awaiting promise
+      // resolves with it.
+      //
+      // `null` snapshot is a successful response (the element was gone
+      // by the time the FE looked it up) and propagates through ok:true.
+      const options = (req.args[1] as import('../types/script.js').DOMReadOptions | undefined) ?? {};
+      value = await handle.read(options);
     } else {
       return {
         type:      'api-response',
@@ -3626,6 +3719,15 @@ async function handleInternalDomRequest(
  * script (injections + styles + listeners); we additionally drop ALL
  * our `pendingDomHandles` entries for the script so subsequent method
  * calls on stale proxy handles fail fast.
+ *
+ * v1.0.0-rc.6 — also cascade-drop the script's parent-side
+ * `handlerCleanups` entries for `kind='domEventListener'` via
+ * `dropAllDomListenerHandlersForScript`. Mirrors the rc.4 cascade for
+ * `DOMHandle.remove()` but at script scope: pre-rc.6, a script calling
+ * `cleanup()` mid-session left orphan entries in `handlerCleanups`
+ * which inflated the `handlerClosures` pin count and held the worker
+ * alive past its useful lifetime. Delegates remain an explicit-cleanup
+ * surface (see `dropAllDomListenerHandlersForScript`'s scope note).
  */
 async function handleDomCleanupRequest(
   req:    ApiProxyRequest,
@@ -3634,6 +3736,7 @@ async function handleDomCleanupRequest(
   try {
     active.api.ui.dom.cleanup();
     dropAllPendingDomHandlesForScript(active.scriptId);
+    dropAllDomListenerHandlersForScript(active.scriptId);
     return { type: 'api-response', requestId: req.requestId, ok: true, value: undefined };
   } catch (err) {
     return {
@@ -4750,6 +4853,11 @@ function cleanupRunsForDeadWorker(
       broadcastHandlerInFlight.delete(scriptId);
     }
   }
+  // v1.0.0-rc.6 — drop the per-worker "scripts seen" set. The dead
+  // worker's child-side `domStableIdToElementId` cache is gone with it;
+  // the respawn path's next dispatch must re-send the snapshot to seed
+  // the fresh child's cache.
+  scriptsSeenPerWorker.delete(workerKey);
 }
 
 function handleLifecycle(event: BackendProcessLifecycleEventDTO): void {
@@ -5222,6 +5330,48 @@ export async function dispatchRunScript(
   // Phase E — bump activity for the dispatched worker.
   bumpWorkerActivity(workerKey);
 
+  // v1.0.0-rc.6 — state-sync-on-respawn. On first dispatch of this script
+  // to this worker since the worker last spawned, send a snapshot of the
+  // parent's view of the script's stable-id mappings so the child's
+  // proxy-side caches start aligned. Idempotent across subsequent
+  // dispatches (gated by `scriptsSeenPerWorker`); re-armed after respawn
+  // (cleanup paths clear the per-worker set so the post-respawn dispatch
+  // re-sends).
+  //
+  // Sent BEFORE the `run-script` IPC: Bun IPC is FIFO per channel, so
+  // ordering is guaranteed without an ack handshake. The child's
+  // `script-state-sync` handler applies the snapshot synchronously
+  // (single Map write) before the next message in the queue is read.
+  let seenOnWorker = scriptsSeenPerWorker.get(workerKey);
+  if (!seenOnWorker) {
+    seenOnWorker = new Set();
+    scriptsSeenPerWorker.set(workerKey, seenOnWorker);
+  }
+  if (!seenOnWorker.has(script.id)) {
+    const snapshot = buildScriptStateSnapshot(script.id);
+    if (snapshot !== null) {
+      const syncMsg: ScriptStateSyncMessage = { type: 'script-state-sync', snapshot };
+      try {
+        getChildHandle(workerKey)!.send(syncMsg);
+      } catch (err) {
+        // Non-fatal: log + proceed. The rc.3 alias-storage hotfix in
+        // `handleDomInjectRequest` still papers over the divergence if
+        // this send fails — worst case is bounded alias accumulation
+        // for this script on this worker until respawn re-attempts.
+        spindle.log.warn(
+          `[script-runner] script-state-sync send to worker '${workerKey}' ` +
+          `for script '${script.id}' failed: ${String(err)}`,
+        );
+      }
+    }
+    // Mark as seen even when snapshot was empty / send failed — we've
+    // "started the conversation" with this child about this script; any
+    // further stable-ids registered via subsequent inject calls flow
+    // through the normal proxy-IPC path and stay in sync without needing
+    // another snapshot send.
+    seenOnWorker.add(script.id);
+  }
+
   const runId = generateRunId();
 
   // Phase 9d.3 — refresh the per-script snapshot used by handler fires
@@ -5442,6 +5592,14 @@ export function unregisterScriptFromChild(scriptId: string): void {
   // sweep's "drop everything per-scriptId" shape.
   persistentObjToHandleId.delete(scriptId);
   lastDispatchByScript.delete(scriptId);
+  // v1.0.0-rc.6 — drop this script from every worker's "seen" set. The
+  // `script-unregister` IPC just sent above wipes the child's per-script
+  // `domStableIdToElementId` entry, so any "we've already synced this
+  // script" state is now stale. If the script is later re-enabled, the
+  // next dispatch on each worker will re-send a fresh snapshot.
+  for (const seenSet of scriptsSeenPerWorker.values()) {
+    seenSet.delete(scriptId);
+  }
   // Per-script onConsole fallback (used by handleConsoleEntry for orphaned-
   // runId + handler-call routing). Same lifecycle as lastDispatchByScript:
   // dropped when the script is disabled / deleted.
@@ -5534,6 +5692,12 @@ async function shutdownWorker(workerKey: ScriptRunnerWorkerKey): Promise<void> {
   // intentionally, not recovering from a crash.
   clearRestartTimer(workerKey);
   clearStabilityTimer(workerKey);
+  // v1.0.0-rc.6 — drop the per-worker "scripts seen" set, same rationale
+  // as `cleanupRunsForDeadWorker`. Graceful shutdown also discards the
+  // child's memory; if this worker key is later re-spawned (manual
+  // restart UI, pool rebalance), the first dispatch re-sends the
+  // snapshot.
+  scriptsSeenPerWorker.delete(workerKey);
 
   // Send graceful shutdown signal first; the child responds by calling
   // `process.complete()` which the host translates into a `completed`
@@ -6133,6 +6297,43 @@ export function __getCachedUserIdForTests(): string | null {
  *  `_elementId` after stableId dedup. */
 export function __hasPendingDomHandleForTests(scriptId: string, elementId: string): boolean {
   return lookupPendingDomHandle(scriptId, elementId) !== undefined;
+}
+
+/** @internal — v1.0.0-rc.6 — peek the per-worker "scripts seen" tracker
+ *  for the state-sync-on-respawn feature. Returns true when the given
+ *  script has already received a `script-state-sync` IPC on the given
+ *  worker since the worker last spawned. */
+export function __hasScriptBeenSeenOnWorkerForTests(
+  workerKey: ScriptRunnerWorkerKey,
+  scriptId:  string,
+): boolean {
+  return scriptsSeenPerWorker.get(workerKey)?.has(scriptId) ?? false;
+}
+
+/** @internal — v1.0.0-rc.6 — manually mark a script as "seen" on a
+ *  worker without going through full dispatch. Used by state-sync
+ *  tests that want to set up a "second dispatch" scenario without
+ *  spinning up the child runtime. */
+export function __markScriptSeenOnWorkerForTests(
+  workerKey: ScriptRunnerWorkerKey,
+  scriptId:  string,
+): void {
+  let set = scriptsSeenPerWorker.get(workerKey);
+  if (!set) {
+    set = new Set();
+    scriptsSeenPerWorker.set(workerKey, set);
+  }
+  set.add(scriptId);
+}
+
+/** @internal — v1.0.0-rc.6 — clear the per-worker "scripts seen"
+ *  tracker without going through the full lifecycle teardown path.
+ *  Lets state-sync tests simulate "worker memory dropped" while
+ *  keeping the rest of the dispatcher state intact (childHandle,
+ *  pendingRuns, etc.) — cleaner than firing lifecycle events when
+ *  the test only cares about the seen-tracker. */
+export function __clearScriptsSeenPerWorkerForTests(): void {
+  scriptsSeenPerWorker.clear();
 }
 
 /** @internal */
@@ -6758,6 +6959,8 @@ export function __resetForTests(): void {
   spawnInFlights.clear();
   // Phase C1 — worker assignment Map.
   scriptWorkerAssignments.clear();
+  // v1.0.0-rc.6 — state-sync per-worker "seen" tracker.
+  scriptsSeenPerWorker.clear();
   // Phase C2 — restore the workerCount reader's safe default. Without
   // this, a test that sets `setWorkerCountReader(() => N)` would leak the
   // configured N into other test files that just call `__resetForTests`.

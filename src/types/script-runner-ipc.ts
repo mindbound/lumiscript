@@ -377,6 +377,66 @@ export interface DiagnosticStatsRequest {
   requestId: string;
 }
 
+/**
+ * v1.0.0-rc.6 — per-script state snapshot the parent sends to a child worker
+ * when a script first dispatches to that worker (cold spawn OR post-respawn
+ * OR post-rebalance reassignment). Lets the child pre-populate proxy-side
+ * stable-id caches that would otherwise diverge from the parent's view.
+ *
+ * Empty fields MUST be omitted (not sent as `{}`); consumers treat an
+ * absent field as "no state to seed for that surface". The child tolerates
+ * unknown top-level keys for forward-compat — newer parents can extend the
+ * snapshot without breaking older child builds.
+ *
+ * ─── Why this exists ───────────────────────────────────────────────────────
+ *
+ * Eviction asymmetry: parent-side persistent state (dom-registry, etc.)
+ * survives worker death; child-side caches (api-proxy module-scope maps)
+ * die with the worker. Without seeding, the proxy's child-side cache
+ * regenerates IDs from scratch post-respawn while the parent's view still
+ * holds the original ones — same stable identifier maps to two different
+ * elementIds across the lifetime asymmetry boundary.
+ *
+ * The v1.0.0-rc.3 alias-storage hotfix in `handleDomInjectRequest` papers
+ * over the divergence by storing handles under BOTH the canonical id and
+ * the proxy's regenerated id; this snapshot replaces that hotfix with the
+ * architecturally clean approach (child snapshots state from parent on
+ * bootstrap, single source of truth). Keeping the hotfix in place as
+ * belt-and-suspenders until state-sync burns in for a release or two.
+ *
+ * ─── Inventory of caches today (rc.6) ─────────────────────────────────────
+ *
+ * Only `domStableIdToElementId` needs syncing. Other proxy-side maps
+ * (`advancedModalState`, `floatWidgetState`, `latestRunIdByScript`) don't
+ * carry cross-respawn stable-id idempotency semantics — modals / widgets
+ * are per-creation entities without a user-supplied stableId mapping, and
+ * the run-id tracker is runtime routing state that re-establishes on each
+ * dispatch.
+ */
+export interface ScriptStateSnapshot {
+  scriptId: string;
+  /**
+   * `stableId → elementId` for every DOM element this script has injected
+   * with a user-supplied stable ID. Omitted when the script has no
+   * stable-id-tagged elements (the common case at startup).
+   */
+  domStableIds?: Record<string, string>;
+}
+
+/**
+ * Parent → child message carrying a `ScriptStateSnapshot` for a script
+ * about to dispatch on this worker. Sent BEFORE the corresponding
+ * `RunScriptRequest` (Bun IPC is FIFO per channel, so ordering is
+ * guaranteed without an ack handshake).
+ *
+ * Idempotent on receipt: applying the same snapshot twice is a no-op.
+ * Empty snapshots are not sent (parent gates on `hasContent`).
+ */
+export interface ScriptStateSyncMessage {
+  type:     'script-state-sync';
+  snapshot: ScriptStateSnapshot;
+}
+
 export type ParentToChildMessage =
   | RunScriptRequest
   | ApiProxyResponse
@@ -387,6 +447,7 @@ export type ParentToChildMessage =
   | AdvancedModalDismissedNotice
   | FloatWidgetPositionNotice
   | DiagnosticStatsRequest
+  | ScriptStateSyncMessage
   | ShutdownRequest;
 
 // ─── Child → Parent ─────────────────────────────────────────────────────────

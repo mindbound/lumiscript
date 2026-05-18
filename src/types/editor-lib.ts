@@ -3227,6 +3227,42 @@ interface DbAPI {
   exists(name: string, scope?: DbScope): Promise<boolean>;
 }
 
+// ─── ScriptStorage API ───────────────────────────────────────────────────────
+
+/**
+ * Per-script in-memory key/value store for session state. v1.0.0-rc.6+.
+ *
+ * Values live on the backend in a parent-side Map keyed first by scriptId
+ * then by user-supplied key. No disk persistence. Lifecycle: survives
+ * worker eviction/respawn and script edits, cleared on script disable/
+ * delete, lost on backend restart.
+ *
+ * Cap: 1 MB per script on the JSON-serialised total. \`set()\` throws
+ * "capacity exceeded" when a write would cross the cap.
+ *
+ * Broadcasts: every mutation fires \`ls:scriptStorage:set\` /
+ * \`:delete\` / \`:clear\` on the broadcast bus.
+ *
+ * Pick the right primitive:
+ *   - \`api.scriptStorage\` — session-scoped flags (this).
+ *   - \`api.variables.*\` — disk-persisted, scope-tiered.
+ *   - \`api.db.*\` — structured collections with schema + filters.
+ */
+interface ScriptStorageAPI {
+  /** Read a value. Returns \`defaultValue\` (or undefined) when the key is missing. */
+  get<T = unknown>(key: string, defaultValue?: T): Promise<T | undefined>;
+  /** Write a value. Throws if the per-script size cap would be exceeded. Fires \`ls:scriptStorage:set\`. */
+  set(key: string, value: unknown): Promise<void>;
+  /** Remove a key. Returns \`true\` if it existed (fires broadcast), \`false\` if not. */
+  delete(key: string): Promise<boolean>;
+  /** Check whether a key exists. */
+  has(key: string): Promise<boolean>;
+  /** Remove every entry for this script. Fires \`ls:scriptStorage:clear\` if any entries existed. */
+  clear(): Promise<void>;
+  /** List the current keys in insertion order. */
+  keys(): Promise<string[]>;
+}
+
 // ─── Top-level API ────────────────────────────────────────────────────────────
 
 interface LumiScriptAPI {
@@ -3281,6 +3317,8 @@ interface LumiScriptAPI {
   tokens: TokensAPI;
   /** JSON-file-backed micro-DB. Owner-scoped collections, no permission required. */
   db: DbAPI;
+  /** Per-script in-memory key/value store for session state. Lives on the backend, survives worker eviction/respawn, cleared on script disable. 1 MB cap per script. v1.0.0-rc.6+. */
+  scriptStorage: ScriptStorageAPI;
 }
 
 interface ScriptNamespace {
