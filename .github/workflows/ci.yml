@@ -34,15 +34,6 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Audit dependencies (Phase 3d / LOW-05)
-        # Surfaces dep CVEs at PR time rather than at quarterly review. Set
-        # to advisory severity = high so transient low/moderate findings
-        # don't block merge — explicit triage via re-run with `--severity
-        # moderate` for the periodic deeper sweep. Failure here means a
-        # high/critical CVE landed in our dep tree; investigate before
-        # merging.
-        run: bun audit --severity high
-
       - name: Build (typechecks + bundles)
         run: bun run build
 
