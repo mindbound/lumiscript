@@ -60,6 +60,7 @@ import {
 import {
   clearByScriptId as clearCollectionHandleCacheByScriptId,
 } from './engine/collection-handle-cache.js';
+import { flushThemeOnTeardown } from './engine/api/theme.js';
 import { logCleanup } from './engine/cleanup-log.js';
 import { dispatchToolInvocation } from './engine/tool-invocation.js';
 import { dispatchEvent as dispatchDOMEvent, dispatchDelegateEvent as dispatchDOMDelegateEvent, cleanupScript as cleanupDOMScript } from './engine/dom-registry.js';
@@ -804,6 +805,17 @@ async function teardownDisabledScript(scriptId: string, disabledScript: Script |
   // wrappers themselves are then GC-able once the dispatcher's
   // persistentHandles + persistentObjToHandleId entries clear.
   clearCollectionHandleCacheByScriptId(scriptId);
+  // v1.0.0-rc.5 — drop this script's contributions from the theme
+  // override registry and push the post-clear merged result to
+  // `spindle.theme.{apply,applyPalette}`. Awaited so the disable
+  // op completes after the FE has visibly reverted the script's
+  // theme contributions (consistent with the modal-dismiss + drawer-
+  // tab-destroy ordering above). Errors during the spindle push are
+  // swallowed by `flushThemeOnTeardown` after logging.
+  try { await flushThemeOnTeardown(scriptId, activeUserId); }
+  catch (err) {
+    spindle.log.warn(`[lumiscript] theme teardown push failed for ${disabledName}: ${String(err)}`);
+  }
   logCleanup('tool',  'disabled', disabledName, clearedTools);
   logCleanup('macro', 'disabled', disabledName, clearedMacros);
   logCleanup('rpc',   'disabled', disabledName, clearedRpcEndpoints);

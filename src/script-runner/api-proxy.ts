@@ -62,6 +62,10 @@ import type {
   DatabanksAPI,
   PersonasAPI,
   PresetsAPI,
+  ImagesAPI,
+  ImageGenAPI,
+  OAuthAPI,
+  ThemeAPI,
   CouncilAPI,
   FilesAPI,
   EnclaveAPI,
@@ -562,6 +566,10 @@ export interface ProxyHandle {
     | 'databanks'
     | 'personas'
     | 'presets'
+    | 'images'
+    | 'imageGen'
+    | 'oauth'
+    | 'theme'
     | 'council'
     | 'files'
     | 'enclave'
@@ -1502,21 +1510,33 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
     const gateOrFire = (thunk: () => Promise<unknown>): Promise<unknown> =>
       gateAck === undefined ? thunk() : gateAck.then(thunk);
 
+    // v1.0.0-rc.5+ — `targetHandle` carries the persistent-handle hint so
+    // the parent's `resolveActiveRun` can fall back to the script's current
+    // activeRun when this dispatch is initiated under a handler-fire ALS
+    // context (`runIdSource === 'context'`) whose transient activeRun has
+    // already been dropped. Without it, every `handle.{update,remove,...}`
+    // call from inside a `handle.on('click', ...)` handler reliably bailed
+    // with RunCompletedError, silently swallowed by the `.catch(() => {})`
+    // wrappers below. The DOMHandle is a persistent kind so the fallback
+    // is policy-safe — see `HANDLE_KIND_LIFECYCLE` in script-runner-host.ts.
+    const targetHandle: HandleRef = { __handleRef: true, id: elementId, kind: 'DOMHandle' };
+
     return {
       get id(): string { return elementId; },
 
       update: (html: string): void => {
-        trackChain(gateOrFire(() => dispatch('ui._dom.update', [elementId, html]))
+        trackChain(gateOrFire(() => dispatchOnHandle(targetHandle, 'ui._dom.update', [elementId, html]))
           .catch(() => { /* canonical: sync void — drop errors */ }));
       },
 
       remove: (): void => {
-        trackChain(gateOrFire(() => dispatch('ui._dom.remove', [elementId]))
+        trackChain(gateOrFire(() => dispatchOnHandle(targetHandle, 'ui._dom.remove', [elementId]))
           .catch(() => { /* canonical: sync void */ }));
       },
 
       makeDraggable: (handleSelector?: string): void => {
-        trackChain(gateOrFire(() => dispatch(
+        trackChain(gateOrFire(() => dispatchOnHandle(
+          targetHandle,
           'ui._dom.makeDraggable',
           handleSelector !== undefined ? [elementId, handleSelector] : [elementId],
         )).catch(() => { /* canonical: sync void */ }));
@@ -1540,7 +1560,8 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
           ...options,
           _elementId: childElementId,
         };
-        trackChain(gateOrFire(() => dispatch(
+        trackChain(gateOrFire(() => dispatchOnHandle(
+          targetHandle,
           'ui._dom.injectChild',
           [elementId, target, html, fullOptions],
         )).catch((err) => {
@@ -2936,6 +2957,101 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
     },
   };
 
+  // ── images (CRUD + data-URL convenience — v1.0.0-rc.5+) ─────────────────
+  //
+  // Pure CRUD pass-through to the canonical (which gates on the `images`
+  // permission). `upload`'s input carries a `Uint8Array` for the raw
+  // bytes — Bun IPC structured-clones typed arrays cleanly so this
+  // works without per-arg massaging here.
+  const images: ImagesAPI = {
+    upload:            mkAsync<ImagesAPI['upload']>(dispatch,            'images.upload'),
+    uploadFromDataUrl: mkAsync<ImagesAPI['uploadFromDataUrl']>(dispatch, 'images.uploadFromDataUrl'),
+    get:               mkAsync<ImagesAPI['get']>(dispatch,               'images.get'),
+    delete:            mkAsync<ImagesAPI['delete']>(dispatch,            'images.delete'),
+  };
+
+  // ── imageGen (provider/connection metadata + generate — v1.0.0-rc.5+) ─────
+  //
+  // Pure pass-through. Permission (`image_gen`) gated by the canonical.
+  // `generate` returns a result whose `imageId` is the same handle type
+  // accepted by `api.images.get`, `api.theme.extractColors`, etc., so the
+  // namespace composes cleanly with the rest of the API surface.
+  const imageGen: ImageGenAPI = {
+    generate:        mkAsync<ImageGenAPI['generate']>(dispatch,        'imageGen.generate'),
+    getProviders:    mkAsync<ImageGenAPI['getProviders']>(dispatch,    'imageGen.getProviders'),
+    listConnections: mkAsync<ImageGenAPI['listConnections']>(dispatch, 'imageGen.listConnections'),
+    getConnection:   mkAsync<ImageGenAPI['getConnection']>(dispatch,   'imageGen.getConnection'),
+    getModels:       mkAsync<ImageGenAPI['getModels']>(dispatch,       'imageGen.getModels'),
+  };
+
+  // ── oauth (callback hook + state nonce — v1.0.0-rc.5+) ────────────────────
+  //
+  // `getCallbackUrl` + `createState` are pure pass-throughs (both async on
+  // the LumiScript side; host's `getCallbackUrl` is sync but the IPC
+  // boundary forces async). `onCallback` uses the handler-IPC pattern
+  // (same shape as `commands.onInvoked`): generate a handlerId, stash a
+  // wrapper around the user's closure in the child registry, send
+  // `register-handler` with kind='oauthCallback'. Single-handler-per-
+  // extension semantics + cross/same-script warning live parent-side in
+  // `host-dispatcher.ts:case 'oauthCallback'`. Permission (`oauth`) gated
+  // parent-side too.
+  const oauth: OAuthAPI = {
+    getCallbackUrl: mkAsync<OAuthAPI['getCallbackUrl']>(dispatch, 'oauth.getCallbackUrl'),
+    createState:    mkAsync<OAuthAPI['createState']>(dispatch,    'oauth.createState'),
+
+    onCallback: (handler) => {
+      const handlerId = generateHandlerId('oauthCallback');
+      ctx.registerHandlerClosure(handlerId, async (...handlerArgs: unknown[]) => {
+        // IPC args shape: [params: Record<string, string>]
+        return handler(handlerArgs[0] as Record<string, string>);
+      });
+      const msg: RegisterHandler = {
+        type:       'register-handler',
+        kind:       'oauthCallback',
+        runId:      runIdContext.getStore() ?? ctx.runId,
+        scriptId:   ctx.scriptId,
+        handlerId,
+        hasHandler: true,
+      };
+      try {
+        ctx.send(msg);
+      } catch (err) {
+        ctx.unregisterHandlerClosure(handlerId);
+        throw err instanceof Error ? err : new Error(String(err));
+      }
+
+      // Sync unsub — same shape as commands.onInvoked. The user calls
+      // this directly; we drop the local closure + send unregister-handler.
+      // Idempotent (registry .delete + parent's handler lookup are both
+      // safe under repeated calls).
+      return () => {
+        ctx.unregisterHandlerClosure(handlerId);
+        const unsubMsg: UnregisterHandler = {
+          type:       'unregister-handler',
+          kind:       'oauthCallback',
+          scriptId:   ctx.scriptId,
+          handlerId,
+        };
+        try { ctx.send(unsubMsg); } catch { /* sync void: no throw */ }
+      };
+    },
+  };
+
+  // ── theme (CSS variable overrides + palette + extraction — v1.0.0-rc.5+) ──
+  //
+  // Pure CRUD-shaped pass-through. Per-script merge happens parent-side
+  // in `engine/theme-store.ts` — the child just dispatches each method
+  // call with its arguments. Permission (`app_manipulation`) gated by
+  // the canonical.
+  const theme: ThemeAPI = {
+    apply:             mkAsync<ThemeAPI['apply']>(dispatch,             'theme.apply'),
+    applyPalette:      mkAsync<ThemeAPI['applyPalette']>(dispatch,      'theme.applyPalette'),
+    clear:             mkAsync<ThemeAPI['clear']>(dispatch,             'theme.clear'),
+    getCurrent:        mkAsync<ThemeAPI['getCurrent']>(dispatch,        'theme.getCurrent'),
+    extractColors:     mkAsync<ThemeAPI['extractColors']>(dispatch,     'theme.extractColors'),
+    generateVariables: mkAsync<ThemeAPI['generateVariables']>(dispatch, 'theme.generateVariables'),
+  };
+
   // ── council (read-only) ───────────────────────────────────────────────────
   const council: CouncilAPI = {
     getSettings:             mkAsync<CouncilAPI['getSettings']>(dispatch,             'council.getSettings'),
@@ -3493,7 +3609,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
   // libraries that touch unimplemented namespaces will throw clearly.
   const apiForLibraries = {
     utils, broadcast, variables, db, ui, llm,
-    chat, chats, characters, worldInfo, databanks, personas, presets, council,
+    chat, chats, characters, worldInfo, databanks, personas, presets, images, imageGen, oauth, theme, council,
     files, enclave, tokens, events, commands, tools, macros,
     json,
   } as unknown as LumiScriptAPI;
@@ -3638,7 +3754,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
   return {
     api: {
       utils, broadcast, variables, db, ui, llm,
-      chat, chats, characters, worldInfo, databanks, personas, presets, council,
+      chat, chats, characters, worldInfo, databanks, personas, presets, images, imageGen, oauth, theme, council,
       files, enclave, tokens, events, commands, tools, macros,
       json,
       rpc,

@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0-rc.4",
+  "version": "1.0.0-rc.5",
   "name": "LumiScript",
   "identifier": "lumiscript",
   "author": "mindbound",
@@ -25,7 +25,10 @@
     "tools",
     "push_notification",
     "event_tracking",
-    "app_manipulation"
+    "app_manipulation",
+    "images",
+    "image_gen",
+    "oauth"
   ],
   "entry_backend": "dist/backend.js",
   "entry_frontend": "dist/frontend.js",

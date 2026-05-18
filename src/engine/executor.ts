@@ -83,6 +83,10 @@ import { buildRpcAPI       } from './api/rpc.js';
 import { buildPersonasAPI  } from './api/personas.js';
 import { buildPresetsAPI   } from './api/presets.js';
 import { buildRegexScriptsAPI } from './api/regex-scripts.js';
+import { buildImagesAPI    } from './api/images.js';
+import { buildImageGenAPI  } from './api/imageGen.js';
+import { buildOAuthAPI     } from './api/oauth.js';
+import { buildThemeAPI     } from './api/theme.js';
 import { buildCouncilAPI   } from './api/council.js';
 import { buildToolsAPI     } from './api/tools.js';
 import { buildBroadcastAPI } from './api/broadcast.js';
@@ -412,6 +416,10 @@ export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiSc
     personas:   buildPersonasAPI(deps),
     presets:    buildPresetsAPI(deps),
     regexScripts: buildRegexScriptsAPI(deps),
+    images:     buildImagesAPI(deps),
+    imageGen:   buildImageGenAPI(deps),
+    oauth:      buildOAuthAPI(deps),
+    theme:      buildThemeAPI(deps),
     rpc:        buildRpcAPI(deps),
     council:    buildCouncilAPI(deps),
     tools:      buildToolsAPI(deps, () => api),

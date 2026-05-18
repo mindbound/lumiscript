@@ -687,13 +687,21 @@ interface HttpRequestOptions {
   headers?: Record<string, string>;
   body?: string;
   timeout?: number;
+  /**
+   * v1.0.0-rc.5+ — response body decoding hint.
+   * \`'text'\` (default) → body is a UTF-8 string.
+   * \`'arraybuffer'\`    → body is a Uint8Array of the raw response bytes.
+   * LumiScript transparently decodes the host's base64 transport.
+   */
+  responseType?: 'text' | 'arraybuffer';
 }
 
 interface HttpResponse {
   status: number;
   statusText: string;
   headers: Record<string, string>;
-  body: string;
+  /** \`string\` when responseType is 'text'/omitted; \`Uint8Array\` when 'arraybuffer'. */
+  body: string | Uint8Array;
 }
 
 interface UtilsAPI {
@@ -2246,6 +2254,221 @@ interface LumiaItem {
   updatedAt: number;
 }
 
+// ─── Images API ──────────────────────────────────────────────────────────────
+
+/** Camel-case mirror of Spindle's safe image-store DTO. */
+interface ImageInfo {
+  id:                  string;
+  originalFilename:    string;
+  mimeType:            string;
+  width:               number | null;
+  height:              number | null;
+  hasThumbnail:        boolean;
+  url:                 string;
+  specificity:         string;
+  ownerExtensionIdentifier: string | null;
+  ownerCharacterId:    string | null;
+  ownerChatId:         string | null;
+  createdAt:           number;
+}
+
+interface ImageUploadInput {
+  /** Raw image bytes. Source via \`api.utils.http.* responseType:'arraybuffer'\`, \`api.utils.image.dataUrlToBytes\`, \`api.files.*\`, etc. */
+  data:               Uint8Array;
+  filename?:          string;
+  mimeType?:          string;
+  ownerCharacterId?:  string;
+  ownerChatId?:       string;
+}
+
+interface ImageUploadFromDataUrlOptions {
+  originalFilename?:  string;
+  ownerCharacterId?:  string;
+  ownerChatId?:       string;
+}
+
+/**
+ * \`api.images\` — thin wrapper over Spindle's image-store surface.
+ * Requires \`images\` permission. The returned \`id\` field can be passed
+ * to \`api.theme.extractColors(id)\` or stored on a character avatar /
+ * databank document / etc. for later retrieval.
+ */
+interface ImagesAPI {
+  upload(input: ImageUploadInput): Promise<ImageInfo>;
+  uploadFromDataUrl(dataUrl: string, options?: ImageUploadFromDataUrlOptions): Promise<ImageInfo>;
+  get(imageId: string): Promise<ImageInfo | null>;
+  delete(imageId: string): Promise<boolean>;
+}
+
+// ─── Image Generation API ───────────────────────────────────────────────────
+
+/** One parameter's contract within a provider's capability schema. */
+interface ImageGenParameterSchema {
+  type:         'number' | 'integer' | 'boolean' | 'string' | 'select' | 'image_array';
+  default?:     unknown;
+  min?:         number;
+  max?:         number;
+  step?:        number;
+  description:  string;
+  required?:    boolean;
+  options?:     Array<{ id: string; label: string }>;
+  group?:       string;
+}
+
+/** Provider id + capability schema. */
+interface ImageGenProviderInfo {
+  id:   string;
+  name: string;
+  capabilities: {
+    parameters:       Record<string, ImageGenParameterSchema>;
+    apiKeyRequired:   boolean;
+    modelListStyle:   'static' | 'dynamic' | 'google';
+    staticModels?:    Array<{ id: string; label: string }>;
+    defaultUrl:       string;
+  };
+}
+
+/** A single image-gen connection profile (API keys masked to \`hasApiKey\`). */
+interface ImageGenConnectionInfo {
+  id:                 string;
+  name:               string;
+  provider:           string;
+  apiUrl:             string;
+  model:              string;
+  isDefault:          boolean;
+  hasApiKey:          boolean;
+  defaultParameters:  Record<string, unknown>;
+  metadata:           Record<string, unknown>;
+  createdAt:          number;
+  updatedAt:          number;
+}
+
+/** Input for \`api.imageGen.generate\`. */
+interface ImageGenInput {
+  connectionId?:      string;
+  prompt:             string;
+  negativePrompt?:    string;
+  model?:             string;
+  /** Provider-specific parameters; \`image_array\` types take arrays of \`imageId\` strings. */
+  parameters?:        Record<string, unknown>;
+  ownerCharacterId?:  string;
+  ownerChatId?:       string;
+}
+
+/** Result from \`api.imageGen.generate\`. */
+interface ImageGenResult {
+  /** Generated image as a base64 data URL. */
+  imageDataUrl:  string;
+  model:         string;
+  provider:      string;
+  /** Canonical image id — accepted by \`api.images.get\` / \`api.theme.extractColors\` / \`spindle.characters.setAvatar\`. */
+  imageId?:      string;
+  /** Public unauthenticated URL — suitable for \`api.ui.pushNotification({image: result.imageUrl})\`. */
+  imageUrl?:     string;
+}
+
+interface ImageGenAPI {
+  generate(input: ImageGenInput): Promise<ImageGenResult>;
+  getProviders(): Promise<ImageGenProviderInfo[]>;
+  listConnections(): Promise<ImageGenConnectionInfo[]>;
+  getConnection(connectionId: string): Promise<ImageGenConnectionInfo | null>;
+  getModels(connectionId: string): Promise<Array<{ id: string; label: string }>>;
+}
+
+// ─── OAuth API ──────────────────────────────────────────────────────────────
+
+interface OAuthAPI {
+  /** Register a callback handler. Single handler per extension (last-wins); LumiScript emits a warn on cross-script or same-script-re-register collisions. Returns sync unsubscribe fn (matches host + the commands.onInvoked proxy pattern). */
+  onCallback(
+    handler: (params: Record<string, string>) => Promise<{ html?: string } | void>,
+  ): () => void;
+  /** Get the callback URL path (host-relative). Stable per-extension; use as \`redirect_uri\` in your authorize URL. */
+  getCallbackUrl(): Promise<string>;
+  /** Mint a CSRF state nonce; pass to the authorize URL and the host verifies at callback time. */
+  createState(): Promise<string>;
+}
+
+// ─── Theme API ───────────────────────────────────────────────────────────────
+
+/** RGB color value, 0–255 per channel. */
+interface ColorRGB { r: number; g: number; b: number; }
+/** HSL color value (h: 0–360, s: 0–100, l: 0–100). */
+interface ColorHSL { h: number; s: number; l: number; }
+
+/** Palette extracted from an image via \`api.theme.extractColors\`. */
+interface ColorExtractionInfo {
+  dominant: ColorRGB;
+  regions:  { top: ColorRGB; center: ColorRGB; bottom: ColorRGB; left: ColorRGB; right: ColorRGB; };
+  flatness: { top: number; center: number; bottom: number; left: number; right: number; full: number; };
+  average:  ColorRGB;
+  isLight:  boolean;
+  dominantHsl: ColorHSL;
+}
+
+/** Read-only snapshot of the user's current theme configuration. */
+interface ThemeInfo {
+  id:             string;
+  name:           string;
+  mode:           'light' | 'dark';
+  accent:         ColorHSL;
+  enableGlass:    boolean;
+  radiusScale:    number;
+  fontScale:      number;
+  uiScale:        number;
+  characterAware: boolean;
+}
+
+/** CSS variable overrides applied via \`api.theme.apply\`. */
+interface ThemeOverride {
+  variables?: Record<string, string>;
+  variablesByMode?: {
+    dark?:  Record<string, string>;
+    light?: Record<string, string>;
+  };
+}
+
+interface ThemePaletteConfig { accent: ColorHSL; }
+
+interface ThemeVariablesConfig {
+  accent:        ColorHSL;
+  mode:          'dark' | 'light';
+  enableGlass?:  boolean;
+  radiusScale?:  number;
+  fontScale?:    number;
+  uiScale?:      number;
+  baseColors?:   {
+    primary?:    string;
+    secondary?:  string;
+    background?: string;
+    text?:       string;
+    danger?:     string;
+    success?:    string;
+    warning?:    string;
+    speech?:     string;
+    thoughts?:   string;
+  };
+  statusColors?: {
+    danger?:  string;
+    success?: string;
+    warning?: string;
+  };
+}
+
+/**
+ * \`api.theme\` — Lumiverse theme manipulation. Requires \`app_manipulation\`
+ * permission. Multiple LumiScript scripts can apply themes concurrently;
+ * LumiScript merges per-script overrides before pushing to Spindle, with
+ * last-applied-wins conflict resolution. Auto-cleared on script disable.
+ */
+interface ThemeAPI {
+  apply(overrides: ThemeOverride): Promise<void>;
+  applyPalette(palette: ThemePaletteConfig | null): Promise<void>;
+  clear(): Promise<void>;
+  getCurrent(): Promise<ThemeInfo>;
+  extractColors(imageId: string): Promise<ColorExtractionInfo>;
+  generateVariables(config: ThemeVariablesConfig): Promise<Record<string, string>>;
+}
+
 /**
  * \`api.council\` — read-only access to the user's Council configuration.
  * No permission required (free-tier surface). Useful for tailoring scripts
@@ -3028,6 +3251,14 @@ interface LumiScriptAPI {
   presets: PresetsAPI;
   /** Regex find/replace script CRUD plus context-aware \`getActive\` resolver. Requires regex_scripts permission. */
   regexScripts: RegexScriptsAPI;
+  /** Image-store CRUD: upload raw bytes / data URLs, get, delete. Requires images permission. */
+  images: ImagesAPI;
+  /** Image generation: fire generations against the user's configured connection profiles, list providers + connections + models. Returns an \`imageId\` that integrates with \`api.images.*\` / \`api.theme.extractColors\` / \`api.characters.setAvatar\`. Requires image_gen permission. */
+  imageGen: ImageGenAPI;
+  /** OAuth callback handling: register a callback handler for this extension's OAuth redirect URL, get the URL path itself, mint CSRF state nonces. Pair with \`api.utils.http\` for token-endpoint POSTs and \`api.enclave\` for encrypted token persistence. Requires oauth permission. */
+  oauth: OAuthAPI;
+  /** Theme manipulation: apply CSS variable overrides, palette-driven theming, read current theme, extract palettes from stored images. Requires app_manipulation permission. */
+  theme: ThemeAPI;
   /** Read-only access to the user's Council configuration: settings, members, and the available Lumia-item pool. No permission required. */
   council: CouncilAPI;
   /** File storage across three tiers. Requires allowDangerous. */

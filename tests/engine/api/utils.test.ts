@@ -140,6 +140,79 @@ describe('http', () => {
     await api.http.request('https://example.com', { method: 'PATCH' });
     expect(mockSpindle.cors).toHaveBeenCalledTimes(3);
   });
+
+  // ─── v1.0.0-rc.5+ binary response decoding ──────────────────────────────
+
+  test("responseType: 'arraybuffer' threads through to spindle.cors", async () => {
+    const api = buildApi({ script: { allowDangerous: true } });
+    await api.http.get('https://example.com/image.png', { responseType: 'arraybuffer' });
+    expect(mockSpindle.cors).toHaveBeenCalledWith(
+      'https://example.com/image.png',
+      { method: 'GET', headers: undefined, responseType: 'arraybuffer' },
+    );
+  });
+
+  test("responseType: 'text' threads through to spindle.cors", async () => {
+    const api = buildApi({ script: { allowDangerous: true } });
+    await api.http.get('https://example.com', { responseType: 'text' });
+    expect(mockSpindle.cors).toHaveBeenCalledWith(
+      'https://example.com',
+      { method: 'GET', headers: undefined, responseType: 'text' },
+    );
+  });
+
+  test('base64-encoded response body is decoded to a Uint8Array', async () => {
+    // Spindle's arraybuffer transport returns base64 in `body` with
+    // `encoding: 'base64'` on the response object. Verify the wrapper
+    // produces a Uint8Array regardless.
+    const payload = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]); // PNG header
+    const b64 = Buffer.from(payload).toString('base64');
+    mockSpindle.cors.mockReturnValueOnce(Promise.resolve({
+      status:     200,
+      statusText: 'OK',
+      headers:    { 'content-type': 'image/png' },
+      body:       b64,
+      encoding:   'base64',
+    }));
+    const api = buildApi({ script: { allowDangerous: true } });
+    const resp = await api.http.get('https://example.com/image.png', { responseType: 'arraybuffer' });
+    expect(resp.body).toBeInstanceOf(Uint8Array);
+    expect(Array.from(resp.body as Uint8Array)).toEqual(Array.from(payload));
+    expect(resp.status).toBe(200);
+    expect(resp.headers).toEqual({ 'content-type': 'image/png' });
+  });
+
+  test('text-mode response body passes through as string', async () => {
+    mockSpindle.cors.mockReturnValueOnce(Promise.resolve({
+      status:     200,
+      statusText: 'OK',
+      headers:    {},
+      body:       'hello world',
+      // No `encoding` field — text mode.
+    }));
+    const api = buildApi({ script: { allowDangerous: true } });
+    const resp = await api.http.get('https://example.com');
+    expect(typeof resp.body).toBe('string');
+    expect(resp.body).toBe('hello world');
+  });
+
+  test("post + responseType: 'arraybuffer' works through the post path", async () => {
+    const api = buildApi({ script: { allowDangerous: true } });
+    await api.http.post('https://example.com', 'request-body', { responseType: 'arraybuffer' });
+    expect(mockSpindle.cors).toHaveBeenCalledWith(
+      'https://example.com',
+      { method: 'POST', headers: undefined, responseType: 'arraybuffer', body: 'request-body' },
+    );
+  });
+
+  test("request method honours responseType in the options object", async () => {
+    const api = buildApi({ script: { allowDangerous: true } });
+    await api.http.request('https://example.com', { method: 'GET', responseType: 'arraybuffer' });
+    expect(mockSpindle.cors).toHaveBeenCalledWith(
+      'https://example.com',
+      { method: 'GET', headers: undefined, responseType: 'arraybuffer', body: undefined },
+    );
+  });
 });
 
 // ─── template ────────────────────────────────────────────────────────────────

@@ -40,6 +40,10 @@ import { listAll as listContentProcessors } from './message-content-processor-re
 import { listAll as listWorldInfoInterceptors } from './world-info-interceptor-registry.js';
 import { listAll as listRpc } from './rpc-store.js';
 import { countSubscriptions as countBroadcastSubs } from './broadcast-bus.js';
+import {
+  listScriptIdsInApplyOrder as listThemeScriptIds,
+  getContributionSummaryByScriptId as getThemeContributionSummary,
+} from './theme-store.js';
 import { countTotal as countDrawerTabs } from './drawer-tab-registry.js';
 import { countLiveWidgetsByScript } from './float-widget-registry.js';
 import { countLiveModalsByScript } from './advanced-modal-registry.js';
@@ -885,10 +889,7 @@ function buildRegistrationsSection(deps: DiagnosticsCollectorDeps): DiagnosticSe
     inputBarActions += countInputBarActionsByScript(s.id);
   }
 
-  return {
-    id:   'registrations',
-    name: 'Registrations',
-    checks: [
+  const checks: DiagnosticCheck[] = [
       {
         label:   'Scripts',
         status:  'info',
@@ -973,7 +974,75 @@ function buildRegistrationsSection(deps: DiagnosticsCollectorDeps): DiagnosticSe
         status:  'info',
         message: `${inputBarActions} registered`,
       },
-    ],
+  ];
+
+  // v1.0.0-rc.5+ — Active theme overrides row. Surfaces per-script
+  // attribution that survives worker eviction (theme state lives
+  // parent-side in `theme-store`, decoupled from the script's worker
+  // liveness — so a script that applied a theme and went dormant
+  // disappears from the worker / assignment views but its theme is
+  // still applied). The row only emits when at least one script has
+  // an active contribution; users without any theme-applying scripts
+  // see the panel unchanged. Worker-status column relies on
+  // `scriptRunner.pool` data — gracefully degrades to "unknown" when
+  // the caller didn't probe the pool.
+  const themeScriptIds = listThemeScriptIds();
+  if (themeScriptIds.length > 0) {
+    // Build a scriptId → workerKey map from the optional pool snapshot.
+    // Scripts not in any worker's assignedScripts have been evicted
+    // (or never had a worker assignment), but their theme state
+    // persists.
+    const assignedWorkerByScript = new Map<string, string>();
+    if (deps.scriptRunner?.pool) {
+      for (const w of deps.scriptRunner.pool.workers) {
+        for (const sid of w.assignedScripts) assignedWorkerByScript.set(sid, w.workerKey);
+      }
+    }
+    const poolProbed = deps.scriptRunner?.pool !== undefined;
+    const rows: string[][] = [];
+    const detailsByScript: Record<string, unknown> = {};
+    for (const scriptId of themeScriptIds) {
+      const summary = getThemeContributionSummary(scriptId);
+      if (!summary) continue; // shouldn't happen — listScriptIdsInApplyOrder is authoritative
+      const scriptName = deps.scriptStorage.getScript(scriptId)?.name ?? scriptId;
+      const varsCell =
+        summary.totalVariables === 0
+          ? '—'
+          : `${summary.totalVariables}` +
+            (summary.darkVariables > 0 || summary.lightVariables > 0
+              ? ` (flat=${summary.flatVariables}, dark=${summary.darkVariables}, light=${summary.lightVariables})`
+              : '');
+      const paletteCell =
+        summary.palette === 'set'     ? 'set' :
+        summary.palette === 'cleared' ? 'cleared' :
+                                         '—';
+      const assignedWorker = assignedWorkerByScript.get(scriptId);
+      const workerCell =
+        !poolProbed         ? 'unknown' :
+        assignedWorker      ? assignedWorker :
+                              'evicted';
+      rows.push([scriptName, varsCell, paletteCell, workerCell]);
+      detailsByScript[scriptId] = { name: scriptName, ...summary, worker: workerCell };
+    }
+    const messageLines = rows.map((r) =>
+      `${r[0]}: ${r[1] === '—' ? '' : `${r[1]} var(s)`}${r[2] !== '—' ? `, palette ${r[2]}` : ''} (${r[3]})`,
+    );
+    checks.push({
+      label:   'Active theme overrides',
+      status:  'info',
+      message: `${themeScriptIds.length} script(s) contributing — ${messageLines.join(' · ')}`,
+      table: {
+        headers: ['Script', 'Variables', 'Palette', 'Worker'],
+        rows,
+      },
+      details: { contributorsByScriptId: detailsByScript },
+    });
+  }
+
+  return {
+    id:   'registrations',
+    name: 'Registrations',
+    checks,
   };
 }
 

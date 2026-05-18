@@ -29,6 +29,7 @@ import { __reset as resetInputBarActionRegistry }      from '../../src/engine/in
 import { __reset as resetWorldInfoInterceptorRegistry } from '../../src/engine/world-info-interceptor-registry.js';
 import { __reset as resetFloatWidgetRegistry }         from '../../src/engine/float-widget-registry.js';
 import { __reset as resetAdvancedModalRegistry }       from '../../src/engine/advanced-modal-registry.js';
+import { __resetForTests as resetThemeStore }           from '../../src/engine/theme-store.js';
 // Phase 11.A — script-runner module-state resets so dispatcher / api-proxy
 // tests don't leak between cases. Importing these here pulls the modules
 // into the test runtime even for tests that don't exercise the script-runner
@@ -58,6 +59,7 @@ beforeEach(() => {
   resetWorldInfoInterceptorRegistry();
   resetFloatWidgetRegistry();
   resetAdvancedModalRegistry();
+  resetThemeStore();
   // Script-runner subsystem — Phase 11.A
   resetHostDispatcher();
   resetApiProxy();

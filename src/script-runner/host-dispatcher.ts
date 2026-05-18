@@ -904,6 +904,24 @@ const lastDispatchByScript = new Map<string, ScriptDispatchSnapshot>();
 //   - script-unregister IPC: walk all entries for the script + invoke each
 const handlerCleanups = new Map<string, Map<string, () => void>>();
 
+/**
+ * v1.0.0-rc.5+ — tracking for `api.oauth.onCallback` single-handler-per-
+ * extension semantics. The host's `spindle.oauth.onCallback` stores the
+ * handler in a single module-scope ref (last-write-wins); we mirror that
+ * here so:
+ *   1. Cross-script + same-script-re-register collisions can emit a
+ *      `spindle.log.warn` (non-terminating; visibility-only).
+ *   2. A guarded unsub fn fires `canonicalUnsub` only when the slot still
+ *      belongs to the unsubscribing script — prevents a stale-script's
+ *      teardown from accidentally nulling another script's handler when
+ *      the host's unsub fn (which always nulls unconditionally) would
+ *      otherwise hit the wrong target.
+ * Cleared by: explicit unsub (via the guarded path), script-unregister
+ * sweep firing the script's handlerCleanups entry, or replacement by
+ * another oauthCallback registration.
+ */
+let activeOAuthHandler: { scriptId: string; handlerId: string } | null = null;
+
 // v1.0.0-rc.4+ — wire script-pinning's hooks now that `handlerCleanups` is
 // in scope. `countUserEventSubscriptionsByScriptId` lives in broadcast-bus
 // (engine layer); script-pinning calls both via the injected hooks so it
@@ -1795,7 +1813,17 @@ function resolveActiveRun(
     case 'api-request':
       canFallback =
         ctx.runIdSource === 'latest' ||
-        (ctx.runIdSource === 'ctx' &&
+        // v1.0.0-rc.5+ — `'context'` (handler-fire ALS) is treated the same
+        // as `'ctx'` (originating-run fallback) when the dispatch targets a
+        // persistent handle. Original design denied `'context'` fallback to
+        // enforce "user-code handler-fires are per-call by design" — but
+        // that's about HANDLER INVOCATIONS being per-call, not about the
+        // DISPATCHES initiated synchronously inside them. A `handle.update()`
+        // call from within a `handle.on('click', ...)` body legitimately
+        // targets the persistent DOM element; failing because the click
+        // handler's transient activeRun was dropped between IPC send and
+        // parent-side processing is a race-window bug, not a feature.
+        ((ctx.runIdSource === 'ctx' || ctx.runIdSource === 'context') &&
          ctx.targetHandle !== undefined &&
          HANDLE_KIND_LIFECYCLE[ctx.targetHandle.kind] === 'persistent');
       break;
@@ -2703,6 +2731,89 @@ function handleRegisterHandler(msg: RegisterHandler): void {
       }
       break;
     }
+
+    case 'oauthCallback': {
+      // v1.0.0-rc.5 — api.oauth.onCallback() handler. Single-handler-per-
+      // extension semantics: the host's `spindle.oauth.onCallback` stores
+      // the handler in a module-scope ref (last-write-wins). When a
+      // different script — or the same script without first calling its
+      // returned unsub — re-registers, we emit a `spindle.log.warn`
+      // surfacing the silent overwrite. Non-terminating; the host's
+      // behaviour is preserved.
+      //
+      // The handler return value (`{html?: string} | void`) becomes the
+      // redirect URL's response body (or a host default page if
+      // void/undefined). 30_000 ms timeout matches the typical OAuth
+      // redirect window — users may take time to complete the provider
+      // side before the callback lands.
+      if (activeOAuthHandler !== null) {
+        if (activeOAuthHandler.scriptId !== msg.scriptId) {
+          spindle.log.warn(
+            `[script-runner] api.oauth.onCallback: script "${msg.scriptId}" is replacing the ` +
+            `OAuth callback handler previously registered by script "${activeOAuthHandler.scriptId}". ` +
+            `Only one OAuth callback handler is supported per extension — the prior handler will ` +
+            `no longer fire.`,
+          );
+        } else {
+          spindle.log.warn(
+            `[script-runner] api.oauth.onCallback: script "${msg.scriptId}" registered a new OAuth ` +
+            `callback while a previous registration from the same script was still active. The prior ` +
+            `handler will no longer fire — usually indicates a missing unsubscribe; consider calling ` +
+            `the returned unsub fn before re-registering.`,
+          );
+        }
+      }
+
+      const wrapper = async (params: Record<string, string>): Promise<{ html?: string } | void> => {
+        const result = await sendRunHandlerRequest(
+          msg.scriptId,
+          msg.handlerId,
+          'oauthCallback',
+          [params],
+          30_000,
+        );
+        if (!result.ok) {
+          // Surface as thrown — host's onCallback fire-and-forgets and
+          // logs internally; this just makes the error visible in
+          // backend log instead of silently dropping.
+          throw new Error(result.error?.message ?? 'oauth callback handler failed');
+        }
+        // Result value is the user's return — `{html?: string} | void`.
+        return result.value as { html?: string } | undefined;
+      };
+
+      const active = activeOrLatestForScript(msg.scriptId, msg.runId);
+      if (!active) {
+        logLateRegisterSkip(msg);
+        break;
+      }
+      try {
+        // Canonical's `oauth.onCallback(wrapper)` is sync — returns the
+        // sync unsub fn directly (matches the host's
+        // `spindle.oauth.onCallback` shape). Wrap canonicalUnsub in a
+        // guard so a stale unsub (from a script whose handler was already
+        // replaced by another script's registration) doesn't accidentally
+        // null the current handler.
+        const canonicalUnsub = active.api.oauth.onCallback(wrapper);
+        const guardedUnsub = (): void => {
+          if (activeOAuthHandler?.handlerId === msg.handlerId) {
+            try { canonicalUnsub(); } catch { /* swallow — host may have already cleaned up */ }
+            activeOAuthHandler = null;
+          }
+          // Else: another handler has the slot — don't null it. The
+          // current activeOAuthHandler's own unsub will fire when its
+          // owning script tears down (or the user calls its returned
+          // unsub explicitly).
+        };
+        recordHandlerCleanup(msg.scriptId, msg.handlerId, guardedUnsub);
+        activeOAuthHandler = { scriptId: msg.scriptId, handlerId: msg.handlerId };
+      } catch (err) {
+        spindle.log.warn(
+          `[script-runner] api.oauth.onCallback failed (script ${msg.scriptId}): ${String(err)}`,
+        );
+      }
+      break;
+    }
   }
 }
 
@@ -2759,7 +2870,8 @@ function handleUnregisterHandler(msg: UnregisterHandler): void {
     case 'domDelegate':
     case 'inputBarActionClick':
     case 'floatWidgetDragEnd':
-    case 'drawerTabActivate': {
+    case 'drawerTabActivate':
+    case 'oauthCallback': {
       // Phase 9d.3.d / 9d.4.c-2 / 9d.4.e-1-b / 9d.4.e-2-b / 9d.4.e-3-b
       // + v0.27.0 (worldInfoInterceptor) + v0.27.1 (domDelegate) — same
       // shape as commandsOnInvoked: handlerId-based, canonical's unsub fn
@@ -2915,10 +3027,14 @@ async function handleApiRequest(
   // is safe. Three permitted fallback shapes:
   //   - `_runIdSource === 'latest'`: top-level dispatch (db.collection,
   //     broadcast.emit, etc.) — no per-run state, always safe.
-  //   - `_runIdSource === 'ctx'` AND persistent target handle: handle
-  //     lifecycle is per-script, not per-run.
-  //   - `_runIdSource === 'ctx'` on transient handle / `'context'` (handler
-  //     fire ALS): NO fallback — handle/run is genuinely gone.
+  //   - `_runIdSource === 'ctx'` OR `'context'`, AND persistent target
+  //     handle: the handle resolves via the script's persistent table, so
+  //     we just need any active run for the api method's execution context.
+  //     (v1.0.0-rc.5+ extended `'context'` into this branch — the
+  //     handler-fire ALS source was previously denied fallback, which
+  //     broke DOMHandle method calls from inside `handle.on(...)` bodies.)
+  //   - `_runIdSource === 'ctx'` / `'context'` on transient handle: NO
+  //     fallback — handle/run is genuinely gone.
   // See `resolveActiveRun` JSDoc for the full rationale.
   const active = resolveActiveRun(
     {
@@ -5929,6 +6045,63 @@ export function __getActiveRunIdsForTests(): string[] {
   return Array.from(activeRuns.keys());
 }
 
+/**
+ * @internal
+ * Test-only exposure of `resolveActiveRun` so unit tests can exercise the
+ * fallback policy without standing up the full IPC fixture. The mock IPC's
+ * synchronous message delivery doesn't reproduce the production race where
+ * handler-result lands between message receipt and `handleApiRequest`'s
+ * sync `resolveActiveRun` call — direct unit tests are the only way to
+ * guard the fallback rule against regression.
+ *
+ * Returns just whether resolution succeeded + which scriptId the activeRun
+ * belongs to; tests don't need the full `ActiveRun` payload.
+ */
+export function __resolveActiveRunForTests(
+  ctx:    { scriptId: string; runId: string; runIdSource?: 'context' | 'latest' | 'ctx'; targetHandle?: HandleRef },
+  policy: 'api-request' | 'register-handler',
+): { resolved: boolean; scriptId?: string } {
+  const result = resolveActiveRun(ctx, policy);
+  return result ? { resolved: true, scriptId: result.scriptId } : { resolved: false };
+}
+
+/**
+ * @internal
+ * Test-only helper to install a fake activeRun + script-body-run mapping
+ * so unit tests for `resolveActiveRun` don't have to dispatch a real
+ * script run. Returns a teardown function that cleans up the inserted
+ * entries.
+ */
+export function __installFakeActiveRunForTests(
+  scriptId: string,
+  runId:    string,
+  opts: { isScriptBodyRun?: boolean } = {},
+): () => void {
+  const fakeRun = {
+    scriptId,
+    scriptName: `fake-${scriptId}`,
+    startedAt:  Date.now(),
+    workerKey:  'test-worker' as ScriptRunnerWorkerKey,
+    api:        {} as ReturnType<typeof buildScriptAPI>,
+    handles:    new Map(),
+  };
+  activeRuns.set(runId, fakeRun);
+  const hadScriptBody = scriptBodyActiveRunByScript.get(scriptId);
+  if (opts.isScriptBodyRun) {
+    scriptBodyActiveRunByScript.set(scriptId, runId);
+  }
+  return () => {
+    activeRuns.delete(runId);
+    if (opts.isScriptBodyRun) {
+      if (hadScriptBody !== undefined) {
+        scriptBodyActiveRunByScript.set(scriptId, hadScriptBody);
+      } else {
+        scriptBodyActiveRunByScript.delete(scriptId);
+      }
+    }
+  };
+}
+
 /** @internal */
 export function __hasActiveRunForTests(runId: string): boolean {
   return activeRuns.has(runId);
@@ -6631,6 +6804,7 @@ export function __resetForTests(): void {
   broadcastForwarders.clear();
   lastDispatchByScript.clear();
   handlerCleanups.clear();
+  activeOAuthHandler = null;
   domListenerHandlers.clear();
   pendingModals.clear();
   pendingDomHandles.clear();

@@ -232,6 +232,75 @@ export function createMockSpindle() {
       },
     },
 
+    // ─── Images (v1.0.0-rc.5+) ─────────────────────────────────────────
+    images: {
+      list:              mock(() => Promise.resolve({ data: [], total: 0 })),
+      get:               mock(() => Promise.resolve(null)),
+      upload:            mock(() => Promise.resolve({
+        id:                          'mock-image-id',
+        original_filename:           'mock.png',
+        mime_type:                   'image/png',
+        width:                       1,
+        height:                      1,
+        has_thumbnail:               false,
+        url:                         '/api/images/mock-image-id',
+        specificity:                 'full',
+        owner_extension_identifier:  'lumiscript',
+        owner_character_id:          null,
+        owner_chat_id:               null,
+        created_at:                  0,
+      })),
+      uploadMany:        mock(() => Promise.resolve([])),
+      uploadFromDataUrl: mock(() => Promise.resolve({
+        id:                          'mock-image-id',
+        original_filename:           'data-url.png',
+        mime_type:                   'image/png',
+        width:                       1,
+        height:                      1,
+        has_thumbnail:               false,
+        url:                         '/api/images/mock-image-id',
+        specificity:                 'full',
+        owner_extension_identifier:  'lumiscript',
+        owner_character_id:          null,
+        owner_chat_id:               null,
+        created_at:                  0,
+      })),
+      delete:            mock(() => Promise.resolve(true)),
+    },
+
+    // ─── Theme (v1.0.0-rc.5+) ──────────────────────────────────────────
+    theme: {
+      apply:             mock(() => Promise.resolve()),
+      applyPalette:      mock(() => Promise.resolve()),
+      clear:             mock(() => Promise.resolve()),
+      getCurrent:        mock(() => Promise.resolve({
+        id:             'lumiverse-purple',
+        name:           'Lumiverse Purple',
+        mode:           'dark',
+        accent:         { h: 280, s: 70, l: 60 },
+        enableGlass:    true,
+        radiusScale:    1,
+        fontScale:      1,
+        uiScale:        1,
+        characterAware: false,
+      })),
+      extractColors:     mock(() => Promise.resolve({
+        dominant:    { r: 100, g: 50, b: 200 },
+        regions:     {
+          top:    { r: 100, g: 50, b: 200 },
+          center: { r: 100, g: 50, b: 200 },
+          bottom: { r: 100, g: 50, b: 200 },
+          left:   { r: 100, g: 50, b: 200 },
+          right:  { r: 100, g: 50, b: 200 },
+        },
+        flatness:    { top: 0.5, center: 0.5, bottom: 0.5, left: 0.5, right: 0.5, full: 0.5 },
+        average:     { r: 100, g: 50, b: 200 },
+        isLight:     false,
+        dominantHsl: { h: 280, s: 70, l: 60 },
+      })),
+      generateVariables: mock(() => Promise.resolve({} as Record<string, string>)),
+    },
+
     // ─── Regex Scripts (v0.27.0+) ──────────────────────────────────────
     regex_scripts: {
       list:      mock(() => Promise.resolve({ data: [], total: 0 })),
@@ -315,14 +384,83 @@ export function createMockSpindle() {
       getLatestState: mock(() => Promise.resolve({})),
     },
 
-    // ─── Image Generation ──────────────────────────────────────────────
+    // ─── Image Generation (v1.0.0-rc.5+) ──────────────────────────────
     imageGen: {
-      generate: mock(() => Promise.resolve({})),
-      getProviders: mock(() => Promise.resolve([])),
-      listConnections: mock(() => Promise.resolve([])),
-      getConnection: mock(() => Promise.resolve(null)),
-      getModels: mock(() => Promise.resolve([])),
+      generate: mock(() => Promise.resolve({
+        imageDataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+        model:        'mock-model',
+        provider:     'mock-provider',
+        imageId:      'img-mock-generated-1',
+        imageUrl:     '/public/images/img-mock-generated-1.png',
+      })),
+      getProviders: mock(() => Promise.resolve([
+        {
+          id:   'mock-provider',
+          name: 'Mock Provider',
+          capabilities: {
+            parameters: {
+              width:  { type: 'integer', default: 512, min: 64, max: 2048, step: 64, description: 'Image width in pixels' },
+              steps:  { type: 'integer', default: 20, min: 1, max: 100, description: 'Number of sampling steps' },
+              prompt: { type: 'string', description: 'Text prompt', required: true },
+            },
+            apiKeyRequired: true,
+            modelListStyle: 'static',
+            staticModels:   [{ id: 'mock-model', label: 'Mock Model' }],
+            defaultUrl:     'https://mock.example.com/api',
+          },
+        },
+      ])),
+      listConnections: mock(() => Promise.resolve([
+        {
+          id:                 'conn-mock-1',
+          name:               'Mock Connection',
+          provider:           'mock-provider',
+          api_url:            'https://mock.example.com/api',
+          model:              'mock-model',
+          is_default:         true,
+          has_api_key:        true,
+          default_parameters: { width: 512, steps: 20 },
+          metadata:           {},
+          created_at:         1700000000,
+          updated_at:         1700000000,
+        },
+      ])),
+      getConnection: mock(() => Promise.resolve({
+        id:                 'conn-mock-1',
+        name:               'Mock Connection',
+        provider:           'mock-provider',
+        api_url:            'https://mock.example.com/api',
+        model:              'mock-model',
+        is_default:         true,
+        has_api_key:        true,
+        default_parameters: { width: 512, steps: 20 },
+        metadata:           {},
+        created_at:         1700000000,
+        updated_at:         1700000000,
+      })),
+      getModels: mock(() => Promise.resolve([
+        { id: 'mock-model',     label: 'Mock Model' },
+        { id: 'mock-model-alt', label: 'Mock Model Alt' },
+      ])),
     },
+
+    // ─── OAuth (v1.0.0-rc.5+) ─────────────────────────────────────────
+    //
+    // Mock returns:
+    //   - `onCallback` stores the handler in a per-mock module-scope ref
+    //     (matching the host's single-handler-per-extension behavior) and
+    //     returns a sync unsub that nulls the ref. Tests can verify which
+    //     handler is "registered" via the mock's recorded call args.
+    //   - `getCallbackUrl` returns a stable mock path.
+    //   - `createState` returns a deterministic mock nonce.
+    oauth: (() => {
+      const onCallbackMock = mock((_handler: unknown) => () => {});
+      return {
+        onCallback: onCallbackMock,
+        getCallbackUrl: mock(() => '/api/spindle-oauth/lumiscript/callback'),
+        createState:    mock(() => Promise.resolve('mock-state-nonce-abc123')),
+      };
+    })(),
 
     // ─── Push Notifications ────────────────────────────────────────────
     push: {

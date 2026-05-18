@@ -295,6 +295,14 @@ export interface LumiScriptAPI {
   presets: PresetsAPI;
   /** Regex find/replace script CRUD plus context-aware `getActive` resolver. Mirrors the resolution Lumiverse uses internally during prompt assembly + response baking + display rendering. Requires regex_scripts permission. */
   regexScripts: RegexScriptsAPI;
+  /** Image-store CRUD: upload raw bytes / data URLs, get, delete. Requires images permission. */
+  images: ImagesAPI;
+  /** Image generation: fire generations against the user's configured connection profiles, list providers + connections + models. Returns an `imageId` that integrates with `api.images.*` / `api.theme.extractColors` / `api.characters.setAvatar`. Requires image_gen permission. */
+  imageGen: ImageGenAPI;
+  /** OAuth callback handling: register a callback handler for this extension's OAuth redirect URL, get the URL path itself, mint CSRF state nonces. Pair with api.utils.http for token-endpoint POSTs and api.enclave for encrypted token persistence. Requires oauth permission. */
+  oauth: OAuthAPI;
+  /** Theme manipulation: apply CSS variable overrides, palette-driven theming, read current theme, extract palettes from stored images. Requires app_manipulation permission. */
+  theme: ThemeAPI;
   /** Read-only access to the user's Council configuration: settings, members, and the available Lumia-item pool. No permission required. */
   council: CouncilAPI;
   /** Requires allowDangerous */
@@ -1218,13 +1226,31 @@ export interface HttpRequestOptions {
   body?: string;
   /** Timeout in ms */
   timeout?: number;
+  /**
+   * v1.0.0-rc.5+ — response body decoding hint.
+   *
+   * - `'text'` (default) — `body` is a UTF-8 string.
+   * - `'arraybuffer'`    — `body` is a `Uint8Array` of the raw response bytes.
+   *   LumiScript transparently decodes Spindle's internal base64 transport so
+   *   script authors receive ready-to-use bytes (suitable for piping into
+   *   `api.images.upload`, `api.utils.image.detectMime`, etc.).
+   *
+   * Discriminate at runtime via `typeof response.body === 'string'` if your
+   * script accepts either responseType dynamically; otherwise rely on the
+   * value you passed in to determine the body's shape.
+   */
+  responseType?: 'text' | 'arraybuffer';
 }
 
 export interface HttpResponse {
   status: number;
   statusText: string;
   headers: Record<string, string>;
-  body: string;
+  /**
+   * Response body. `string` when the request's `responseType` was `'text'` or
+   * omitted; `Uint8Array` when `'arraybuffer'`.
+   */
+  body: string | Uint8Array;
 }
 
 export interface UtilsAPI {
@@ -2565,6 +2591,536 @@ export interface RegexScriptsAPI {
 
   /** Delete a regex script. Returns true if the row was deleted. Requires `regex_scripts` permission. */
   delete(scriptId: string): Promise<boolean>;
+}
+
+// ─── Images API ──────────────────────────────────────────────────────────────
+//
+// Thin wrapper over Spindle's image-store surface (`spindle.images.*`).
+// Scripts upload raw bytes and receive an `ImageInfo` whose `id` field can
+// then be passed to `api.theme.extractColors(id)` or stored on a character
+// avatar / databank document / etc. for later retrieval.
+//
+// Permission: `images`. (Distinct from `app_manipulation` which gates the
+// theme + DOM surfaces; uploading images is its own permission tier so
+// users can grant theme manipulation WITHOUT granting arbitrary image
+// uploads.)
+//
+// The wrapper covers the most common image-storage workflows. Less-used
+// `spindle.images.list` and `spindle.images.uploadMany` are not wrapped
+// in v1.0.0-rc.5 — `list` would expose arbitrary enumeration of all the
+// user's images (privacy surface), `uploadMany` is a perf-optimization
+// scripts can reach via a `Promise.all` over single `upload` calls. Add
+// either if real-world demand surfaces.
+
+/** Camel-case mirror of `ImageDTO` (Spindle's safe image-store DTO). */
+export interface ImageInfo {
+  id:                  string;
+  originalFilename:    string;
+  mimeType:            string;
+  /** Pixel width if the host could derive it from the upload. */
+  width:               number | null;
+  /** Pixel height if the host could derive it from the upload. */
+  height:              number | null;
+  hasThumbnail:        boolean;
+  /** Relative authenticated URL for this image, already sized to `specificity`. */
+  url:                 string;
+  /** Image specificity flag (`'full'` / `'avatar'` / `'thumbnail'`) — see `ImageSpecificityDTO`. */
+  specificity:         string;
+  ownerExtensionIdentifier: string | null;
+  ownerCharacterId:    string | null;
+  ownerChatId:         string | null;
+  createdAt:           number;
+}
+
+/** Input for `api.images.upload`. Mirrors `ImageUploadDTO`. */
+export interface ImageUploadInput {
+  /** Raw image bytes. Source via `api.utils.http.* responseType:'arraybuffer'`, `api.utils.image.dataUrlToBytes`, `api.files.*`, etc. */
+  data:               Uint8Array;
+  /** Optional filename to preserve when storing. */
+  filename?:          string;
+  /** Optional content type override (defaults to `image/png` when not inferable). */
+  mimeType?:          string;
+  /** Optional character ownership tag for the persisted image. */
+  ownerCharacterId?:  string;
+  /** Optional chat ownership tag for the persisted image. */
+  ownerChatId?:       string;
+}
+
+/** Convenience input for `api.images.uploadFromDataUrl`. */
+export interface ImageUploadFromDataUrlOptions {
+  /** Original filename to preserve on the persisted image. */
+  originalFilename?:  string;
+  /** Optional character ownership tag. */
+  ownerCharacterId?:  string;
+  /** Optional chat ownership tag. */
+  ownerChatId?:       string;
+}
+
+export interface ImagesAPI {
+  /**
+   * Upload raw image bytes to Lumiverse's image store. Returns an
+   * `ImageInfo` whose `id` field can be passed to `api.theme.extractColors`,
+   * stored on a character avatar, or retained on a databank document.
+   * Requires `images` permission.
+   */
+  upload(input: ImageUploadInput): Promise<ImageInfo>;
+
+  /**
+   * Upload an image from a `data:image/...;base64,...` data URL. Convenience
+   * wrapper that calls `api.utils.image.dataUrlToBytes` then `upload` under
+   * the hood. Requires `images` permission.
+   */
+  uploadFromDataUrl(dataUrl: string, options?: ImageUploadFromDataUrlOptions): Promise<ImageInfo>;
+
+  /**
+   * Look up an image by id. Returns `null` if no row with that id exists or
+   * the script's scope can't see it. Requires `images` permission.
+   */
+  get(imageId: string): Promise<ImageInfo | null>;
+
+  /**
+   * Delete an image by id. Returns `true` if a row was removed, `false` if
+   * the id was unknown / out-of-scope / already gone. Requires `images`
+   * permission.
+   */
+  delete(imageId: string): Promise<boolean>;
+}
+
+// ─── Image Generation API ───────────────────────────────────────────────────
+//
+// Wrapper over Spindle's image-generation surface (`spindle.imageGen.*`).
+// Lets scripts generate images via the user's configured image-gen
+// connection profiles, list available providers + their capability
+// schemas, and inspect / select connections + models.
+//
+// Permission: `image_gen` (separate from `images`, which only covers
+// raw-byte CRUD on the image store). A script that GENERATES needs
+// `image_gen`; one that just stores/retrieves needs `images`. Most
+// generation scripts will want both since the result auto-persists.
+//
+// **Integration with the rest of the API.** A successful `generate()`
+// returns the result image as a base64 data URL AND (when persistence
+// succeeds host-side) a canonical `imageId`. That `imageId` is the same
+// handle type accepted by `api.images.get(imageId)`,
+// `api.theme.extractColors(imageId)`, and `spindle.characters.setAvatar`.
+// The `imageUrl` field is a public unauthenticated URL suitable for
+// `api.ui.pushNotification({ image: result.imageUrl, ... })` — auth-free
+// so push-notification clients can render it without an auth header.
+
+/** Camel-case mirror of `ImageGenParameterSchemaDTO` — one parameter's contract within a provider's capability schema. */
+export interface ImageGenParameterSchema {
+  type:         'number' | 'integer' | 'boolean' | 'string' | 'select' | 'image_array';
+  default?:     unknown;
+  min?:         number;
+  max?:         number;
+  step?:        number;
+  description:  string;
+  required?:    boolean;
+  options?:     Array<{ id: string; label: string }>;
+  /** Optional grouping label — UI may render parameters with the same `group` together. */
+  group?:       string;
+}
+
+/** Camel-case mirror of `ImageGenProviderDTO` — provider id + capability schema (used to build dynamic parameter UIs). */
+export interface ImageGenProviderInfo {
+  id:   string;
+  name: string;
+  capabilities: {
+    /** Per-parameter contract (validate args before `generate` to surface errors fast). */
+    parameters:       Record<string, ImageGenParameterSchema>;
+    apiKeyRequired:   boolean;
+    modelListStyle:   'static' | 'dynamic' | 'google';
+    /** Populated when `modelListStyle === 'static'`. Dynamic providers expose models via `getModels(connectionId)`. */
+    staticModels?:    Array<{ id: string; label: string }>;
+    defaultUrl:       string;
+  };
+}
+
+/** Camel-case mirror of `ImageGenConnectionDTO` — a single connection profile (API keys masked to `hasApiKey`). */
+export interface ImageGenConnectionInfo {
+  id:                 string;
+  name:               string;
+  provider:           string;
+  apiUrl:             string;
+  model:              string;
+  isDefault:          boolean;
+  /** `true` if the user has supplied an API key for this connection (key itself is never exposed). */
+  hasApiKey:          boolean;
+  /** Per-connection default parameter values — merged with the request's `parameters` at `generate` time. */
+  defaultParameters:  Record<string, unknown>;
+  metadata:           Record<string, unknown>;
+  createdAt:          number;
+  updatedAt:          number;
+}
+
+/** Input for `api.imageGen.generate`. Mirrors `ImageGenRequestDTO`. */
+export interface ImageGenInput {
+  /**
+   * Connection profile ID to use. When omitted, uses the user's default
+   * image-gen connection (set via the Lumiverse UI). Look up via
+   * `api.imageGen.listConnections()`.
+   */
+  connectionId?:      string;
+  /** Text prompt for image generation. Required. */
+  prompt:             string;
+  /** Negative prompt — provider-dependent support. */
+  negativePrompt?:    string;
+  /** Override the connection profile's model. Look up via `api.imageGen.getModels(connectionId)`. */
+  model?:             string;
+  /**
+   * Provider-specific parameters (e.g. `width`, `height`, `steps`, `cfg_scale`,
+   * `input_images` for img2img, …). Validate against the provider's
+   * `parameters` schema from `getProviders()` if your script accepts
+   * user input. Merged with the connection's `defaultParameters` host-side.
+   *
+   * **Image inputs** — providers that support img2img / inpainting expose
+   * `image_array`-typed parameters. Pass them as arrays of `imageId`
+   * strings sourced from `api.images.upload` / `api.images.get` etc.:
+   * `parameters: { input_images: [resultFromPriorGen.imageId] }`.
+   */
+  parameters?:        Record<string, unknown>;
+  /** Tag the persisted result with a character ownership marker. */
+  ownerCharacterId?:  string;
+  /** Tag the persisted result with a chat ownership marker. */
+  ownerChatId?:       string;
+}
+
+/** Result from `api.imageGen.generate`. Mirrors `ImageGenResultDTO`. */
+export interface ImageGenResult {
+  /** Generated image as a base64 data URL — directly assignable to `<img src>` etc. */
+  imageDataUrl:  string;
+  /** Model that was actually used (may differ from input if `model` was omitted and the connection's default applied). */
+  model:         string;
+  /** Provider id that handled the generation. */
+  provider:      string;
+  /**
+   * Canonical image id in Lumiverse's image table. Pass to
+   * `api.images.get`, `api.theme.extractColors`,
+   * `spindle.characters.setAvatar`, etc. Present when host-side
+   * persistence succeeded (the typical case).
+   */
+  imageId?:      string;
+  /**
+   * Public unauthenticated URL for the persisted image. Auth-free so
+   * push-notification clients can render it without an auth header:
+   * `api.ui.pushNotification({ image: result.imageUrl, ... })`.
+   */
+  imageUrl?:     string;
+}
+
+export interface ImageGenAPI {
+  /**
+   * Generate an image. Returns the result image as a base64 data URL plus
+   * (when persistence succeeds) a canonical `imageId` you can pass to
+   * `api.images.*`, `api.theme.extractColors`, etc. Requires `image_gen`
+   * permission. Persistence ownership tags (`ownerCharacterId` /
+   * `ownerChatId`) attach to the result row when supplied.
+   */
+  generate(input: ImageGenInput): Promise<ImageGenResult>;
+
+  /**
+   * List all image-generation providers available on this Lumiverse install
+   * along with their capability schemas. Each provider's `capabilities.parameters`
+   * field describes the supported `parameters` for `generate()` calls
+   * against that provider's connections. Requires `image_gen` permission.
+   */
+  getProviders(): Promise<ImageGenProviderInfo[]>;
+
+  /**
+   * List the user's image-gen connection profiles. API keys are never
+   * exposed — only `hasApiKey: boolean` indicates whether the key is
+   * present. Requires `image_gen` permission.
+   */
+  listConnections(): Promise<ImageGenConnectionInfo[]>;
+
+  /**
+   * Get a single image-gen connection profile by id. Returns `null` when
+   * the id is unknown or the script's scope can't see it. Requires
+   * `image_gen` permission.
+   */
+  getConnection(connectionId: string): Promise<ImageGenConnectionInfo | null>;
+
+  /**
+   * List the models available on a connection profile. For providers with
+   * dynamic model lists (most cloud providers), this fetches live from
+   * the upstream API and may incur a network round-trip. Static-list
+   * providers return their `capabilities.staticModels` directly.
+   * Requires `image_gen` permission.
+   */
+  getModels(connectionId: string): Promise<Array<{ id: string; label: string }>>;
+}
+
+// ─── OAuth API ──────────────────────────────────────────────────────────────
+//
+// Thin wrapper over Spindle's OAuth surface (`spindle.oauth.*`). Gives
+// scripts the inbound-HTTP callback hook + a CSRF-state nonce primitive;
+// everything else (constructing the authorize URL, exchanging the code
+// for a token, persisting + refreshing the token) is the script's
+// responsibility — pair with `api.utils.http` (`cors_proxy` permission)
+// for token-endpoint POSTs and `api.enclave` for encrypted persistence.
+//
+// Permission: `oauth`.
+//
+// **Single handler per extension.** The host stores the callback handler
+// in a single module-scope ref (last-write-wins). LumiScript adds a
+// non-terminating warning when two scripts (or the same script twice)
+// race for the slot — the host's underlying behavior is preserved, only
+// the silent-overwrite is surfaced.
+//
+// **Cookbook recipe** for the full PKCE flow at
+// `notes/oauth-cookbook.md` once we cut a v1 docs pass.
+
+export interface OAuthAPI {
+  /**
+   * Register a callback handler for this extension's OAuth redirect URL.
+   *
+   * Handler receives the URL query params from the redirect (typed as
+   * `Record<string, string>`); optional return `{html}` becomes the
+   * response body shown in the user's browser tab once the redirect
+   * lands. Return `void` (or omit the html field) and the host renders
+   * a generic success page.
+   *
+   * **Single handler per extension.** Calling `onCallback` again replaces
+   * the prior registration (host-side, not LumiScript-scoped). When a
+   * different script — or the same script without first calling its
+   * returned unsub — re-registers, LumiScript emits a `spindle.log.warn`
+   * naming both scripts so the silent overwrite is visible during
+   * development.
+   *
+   * Returns an unsubscribe function synchronously (no await needed —
+   * matches the host's `spindle.oauth.onCallback` shape and the
+   * `commands.onInvoked` proxy pattern: dispatch is fire-and-forget at
+   * the proxy layer so we can return sync). Requires `oauth` permission.
+   */
+  onCallback(
+    handler: (params: Record<string, string>) => Promise<{ html?: string } | void>,
+  ): () => void;
+
+  /**
+   * Get the callback URL path. Stable per-extension — use as the
+   * `redirect_uri` in your authorize-URL construction. Returns the path
+   * (host-relative, e.g. `/api/spindle-oauth/lumiscript/callback`);
+   * prefix with your Lumiverse origin to form the absolute URL the
+   * provider will redirect to.
+   *
+   * (The host's `spindle.oauth.getCallbackUrl` is synchronous since the
+   * value is derived from the manifest identifier at module init.
+   * LumiScript scripts run in a subprocess, so all API calls cross an
+   * IPC boundary — this method is async on the script side.)
+   * Requires `oauth` permission.
+   */
+  getCallbackUrl(): Promise<string>;
+
+  /**
+   * Mint a CSRF state nonce. Pass to the authorize URL as `state=...`;
+   * the host verifies the returned state at callback time and rejects
+   * mismatched values before invoking your callback handler. Requires
+   * `oauth` permission.
+   */
+  createState(): Promise<string>;
+}
+
+// ─── Theme API ───────────────────────────────────────────────────────────────
+//
+// Wrapper over Spindle's theme-engine surface (`spindle.theme.*`). Lets
+// scripts apply CSS variable overrides, drive theming from an accent
+// palette (Lumiverse generates the coherent ~80+ variable set), read the
+// user's current theme info, and extract color palettes from stored
+// images for image-driven theming patterns.
+//
+// Permission: `app_manipulation` (shared with `api.ui.dom.*`).
+//
+// **Per-script attribution.** Multiple LumiScript scripts can apply
+// themes concurrently — LumiScript maintains a per-script override
+// registry and merges them before calling `spindle.theme.apply`.
+// Conflict resolution: last-applied-wins per variable key, ordered by
+// the script's most recent `apply` / `applyPalette` call. Auto-cleared
+// on script disable / delete via the standard teardown path; explicit
+// `clear()` available for in-script removal.
+
+/**
+ * Camel-case mirror of `ColorRGB` — RGB color value, 0–255 per channel.
+ */
+export interface ColorRGB {
+  r: number;
+  g: number;
+  b: number;
+}
+
+/**
+ * Camel-case mirror of `ColorHSL` — HSL color value
+ * (h: 0–360, s: 0–100, l: 0–100).
+ */
+export interface ColorHSL {
+  h: number;
+  s: number;
+  l: number;
+}
+
+/**
+ * Camel-case mirror of `ColorExtractionResult` — palette extracted from
+ * an image via `api.theme.extractColors`. `dominantHsl` pairs cleanly
+ * with `api.theme.applyPalette({ accent: ... })` for image-driven theming.
+ */
+export interface ColorExtractionInfo {
+  dominant: ColorRGB;
+  regions: {
+    top:    ColorRGB;
+    center: ColorRGB;
+    bottom: ColorRGB;
+    left:   ColorRGB;
+    right:  ColorRGB;
+  };
+  flatness: {
+    top:    number;
+    center: number;
+    bottom: number;
+    left:   number;
+    right:  number;
+    full:   number;
+  };
+  average:     ColorRGB;
+  /** Whether the dominant color is perceived as light (luminance > 152). */
+  isLight:     boolean;
+  /** HSL representation of the dominant color (ready to pass to applyPalette). */
+  dominantHsl: ColorHSL;
+}
+
+/**
+ * Camel-case mirror of `ThemeInfoDTO` — read-only snapshot of the user's
+ * current theme configuration (NOT including any extension overrides).
+ */
+export interface ThemeInfo {
+  /** Theme preset ID (e.g. `'lumiverse-purple'`, `'character-aware'`). */
+  id:             string;
+  /** Display name of the theme. */
+  name:           string;
+  /** Resolved mode — always `'light'` or `'dark'`, never `'system'`. */
+  mode:           'light' | 'dark';
+  /** Primary accent color in HSL. */
+  accent:         ColorHSL;
+  enableGlass:    boolean;
+  radiusScale:    number;
+  fontScale:      number;
+  uiScale:        number;
+  characterAware: boolean;
+}
+
+/**
+ * Camel-case mirror of `ThemeOverrideDTO`. Direct CSS variable overrides
+ * applied via `api.theme.apply`. See `ThemeOverrideDTO` JSDoc upstream
+ * for the canonical variable groupings (~80+ variables) covering
+ * primary accent, backgrounds, text, borders, status, glass, prose,
+ * shadows, radii, fills, cards, icons, modals, typography, transitions.
+ */
+export interface ThemeOverride {
+  /** Flat variable map applied regardless of light/dark mode. */
+  variables?: Record<string, string>;
+  /** Mode-specific overrides — `dark` / `light` selected at apply time by the host. */
+  variablesByMode?: {
+    dark?:  Record<string, string>;
+    light?: Record<string, string>;
+  };
+}
+
+/**
+ * Camel-case mirror of `ThemePaletteConfigDTO` — input for
+ * `api.theme.applyPalette`. Lumiverse derives the full mode-aware
+ * variable maps from the supplied accent + preserves the user's glass /
+ * radius / font / UI-scale settings.
+ */
+export interface ThemePaletteConfig {
+  accent: ColorHSL;
+}
+
+/**
+ * Camel-case mirror of `ThemeVariablesConfigDTO` — input for
+ * `api.theme.generateVariables`. Returned map can be passed to
+ * `api.theme.apply({ variables: ... })` for a complete coherent override.
+ */
+export interface ThemeVariablesConfig {
+  accent:        ColorHSL;
+  mode:          'dark' | 'light';
+  enableGlass?:  boolean;
+  radiusScale?:  number;
+  fontScale?:    number;
+  uiScale?:      number;
+  baseColors?:   {
+    primary?:    string;
+    secondary?:  string;
+    background?: string;
+    text?:       string;
+    danger?:     string;
+    success?:    string;
+    warning?:    string;
+    speech?:     string;
+    thoughts?:   string;
+  };
+  statusColors?: {
+    danger?:  string;
+    success?: string;
+    warning?: string;
+  };
+}
+
+export interface ThemeAPI {
+  /**
+   * Apply CSS variable overrides on top of the user's current theme.
+   *
+   * Within LumiScript, the call updates this script's slot in the
+   * per-script override registry, then the merged result of every
+   * script's contributions is pushed to `spindle.theme.apply`. Conflict
+   * resolution: last-applied-wins per variable key (ordered by the
+   * script's most recent `apply` / `applyPalette` call). Requires
+   * `app_manipulation` permission.
+   */
+  apply(overrides: ThemeOverride): Promise<void>;
+
+  /**
+   * Apply a palette-driven theme. Lumiverse derives the full ~80+
+   * variable set coherently from the supplied accent, preserving the
+   * user's glass / radius / font / UI-scale settings. Pass `null` to
+   * clear THIS script's palette override (other scripts' overrides are
+   * unaffected; use `clear()` to drop this script's variables-based
+   * overrides too). Requires `app_manipulation` permission.
+   */
+  applyPalette(palette: ThemePaletteConfig | null): Promise<void>;
+
+  /**
+   * Drop this script's contributions from the per-script override
+   * registry, re-merge, and push to `spindle.theme.apply` (or
+   * `spindle.theme.clear` if no scripts remain with active overrides).
+   * Idempotent on a script with no active overrides. Auto-called on
+   * script disable / delete via the standard teardown path. Requires
+   * `app_manipulation` permission.
+   */
+  clear(): Promise<void>;
+
+  /**
+   * Get a read-only snapshot of the user's current theme configuration.
+   * Returns the BASE theme — does not include any extension overrides.
+   * Requires `app_manipulation` permission.
+   */
+  getCurrent(): Promise<ThemeInfo>;
+
+  /**
+   * Extract a color palette from an image stored in Lumiverse's image
+   * system. The `imageId` must reference a row in the host's images
+   * table — sources include `character.imageId` and the id returned
+   * from `api.images.upload`. Throws if the id is unknown. Requires
+   * `app_manipulation` permission.
+   */
+  extractColors(imageId: string): Promise<ColorExtractionInfo>;
+
+  /**
+   * Generate the full set of Lumiverse CSS variables from a theme
+   * config without applying them. Returns a `Record<string, string>`
+   * containing every variable the theme engine would produce (~80+).
+   * Pass the result to `apply({ variables: ... })` for a complete
+   * coherent override, or tweak individual keys before applying.
+   * Requires `app_manipulation` permission.
+   */
+  generateVariables(config: ThemeVariablesConfig): Promise<Record<string, string>>;
 }
 
 // ─── World Info Interceptor (api.worldInfo.registerInterceptor) ────────────

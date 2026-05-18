@@ -259,7 +259,8 @@ export type HandlerKind =
   | 'inputBarActionClick'    // 9d.4.e-1-b — InputBarActionHandle.onClick() click handler
   | 'floatWidgetDragEnd'     // 9d.4.e-2-b — FloatWidgetHandle.onDragEnd() drag-end handler
   | 'drawerTabActivate'      // 9d.4.e-3-b — DrawerTabHandle.onActivate() activation handler
-  | 'rpc';                   // v0.26.0 — api.rpc.handle() on-demand handler (cross-extension RPC pool)
+  | 'rpc'                    // v0.26.0 — api.rpc.handle() on-demand handler (cross-extension RPC pool)
+  | 'oauthCallback';         // v1.0.0-rc.5 — api.oauth.onCallback() inbound-HTTP callback handler
 
 /**
  * Phase 9d.3 — parent firing a registered handler. The child looks up
@@ -709,6 +710,28 @@ export type RegisterHandler =
       // Same shape as `inputBarActionClick` (no event-name / payload —
       // tab activation is a single event with no args).
       tabId:     string;
+      hasHandler: true;
+    }
+  | {
+      // v1.0.0-rc.5 — api.oauth.onCallback() handler registration.
+      // No extra payload — the host stores the callback handler in a
+      // single module-scope ref (one slot per extension). Parent's
+      // handler wraps `spindle.oauth.onCallback(wrapper)`, where the
+      // wrapper fires `sendRunHandlerRequest(scriptId, handlerId,
+      // 'oauthCallback', [params], …)` and forwards the handler-result's
+      // value (`{html?: string} | undefined`) back to the host's
+      // callback API. Unsubscribe drops the parent's registration via
+      // the canonical's returned unsub fn, stored in handlerCleanups.
+      //
+      // Cross-script + same-script-re-register collisions surface as
+      // `spindle.log.warn` from the parent's `case 'oauthCallback'`
+      // branch — non-terminating, behaviour matches the host's
+      // last-wins semantics.
+      type:      'register-handler';
+      kind:      'oauthCallback';
+      runId:     string;
+      scriptId:  string;
+      handlerId: string;
       hasHandler: true;
     };
 

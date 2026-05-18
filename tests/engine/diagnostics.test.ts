@@ -26,6 +26,7 @@ import { addInjection } from '../../src/engine/injection-store.js';
 import { addTool } from '../../src/engine/tool-store.js';
 import { addMacro } from '../../src/engine/macro-store.js';
 import { on as broadcastOn, clearAll as clearBroadcast } from '../../src/engine/broadcast-bus.js';
+import * as themeStore from '../../src/engine/theme-store.js';
 import { createTestScript } from '../_infra/mock-deps.js';
 import type { Script } from '../../src/types/script.js';
 
@@ -316,6 +317,114 @@ describe('collectBackendDiagnostics — Section D (registrations)', () => {
     expect(section.checks.find(c => c.label === 'Macros')!.message).toContain('1');
     expect(section.checks.find(c => c.label === 'Injections')!.message).toContain('1');
     expect(section.checks.find(c => c.label === 'Broadcast subscriptions')!.message).toContain('1');
+  });
+
+  // v1.0.0-rc.5+ — Active theme overrides row.
+
+  test('Active theme overrides row is omitted when no script has applied a theme', () => {
+    themeStore.__resetForTests();
+    const section = collectBackendDiagnostics(makeDeps()).sections
+      .find(s => s.id === 'registrations')!;
+    expect(section.checks.find(c => c.label === 'Active theme overrides')).toBeUndefined();
+  });
+
+  test('Active theme overrides row appears when scripts have theme contributions', () => {
+    themeStore.__resetForTests();
+    themeStore.setVariables('script-A', {
+      variables:       { 'a': '1', 'b': '2' },
+      variablesByMode: { dark: { 'd': '3' } },
+    });
+    themeStore.setPalette('script-B', { accent: { h: 280, s: 70, l: 60 } });
+
+    const scripts: Script[] = [
+      createTestScript({ id: 'script-A', name: 'A' }),
+      createTestScript({ id: 'script-B', name: 'B' }),
+    ];
+    const section = collectBackendDiagnostics(makeDeps({ scripts })).sections
+      .find(s => s.id === 'registrations')!;
+    const row = section.checks.find(c => c.label === 'Active theme overrides');
+    expect(row).toBeDefined();
+    expect(row!.message).toContain('2 script(s) contributing');
+    // Table rows: Script / Variables / Palette / Worker
+    expect(row!.table?.headers).toEqual(['Script', 'Variables', 'Palette', 'Worker']);
+    expect(row!.table?.rows.length).toBe(2);
+    // Row order matches apply-order (oldest first).
+    expect(row!.table?.rows[0]![0]).toBe('A');
+    expect(row!.table?.rows[1]![0]).toBe('B');
+  });
+
+  test("Active theme overrides reports palette status (set / cleared / —)", () => {
+    themeStore.__resetForTests();
+    themeStore.setPalette('script-A', { accent: { h: 0, s: 0, l: 0 } });
+    themeStore.setPalette('script-B', null);
+    themeStore.setVariables('script-C', { variables: { 'x': '1' } });
+
+    const scripts: Script[] = [
+      createTestScript({ id: 'script-A', name: 'A' }),
+      createTestScript({ id: 'script-B', name: 'B' }),
+      createTestScript({ id: 'script-C', name: 'C' }),
+    ];
+    const row = collectBackendDiagnostics(makeDeps({ scripts })).sections
+      .find(s => s.id === 'registrations')!
+      .checks.find(c => c.label === 'Active theme overrides')!;
+
+    // Cells: [Script, Variables, Palette, Worker]
+    const aRow = row.table!.rows.find(r => r[0] === 'A')!;
+    const bRow = row.table!.rows.find(r => r[0] === 'B')!;
+    const cRow = row.table!.rows.find(r => r[0] === 'C')!;
+    expect(aRow[2]).toBe('set');
+    expect(bRow[2]).toBe('cleared');
+    expect(cRow[2]).toBe('—');
+  });
+
+  test("Active theme overrides shows worker status when pool is probed", () => {
+    themeStore.__resetForTests();
+    themeStore.setVariables('script-A', { variables: { 'x': '1' } });
+    themeStore.setVariables('script-B', { variables: { 'x': '2' } });
+
+    const scripts: Script[] = [
+      createTestScript({ id: 'script-A', name: 'A' }),
+      createTestScript({ id: 'script-B', name: 'B' }),
+    ];
+    const row = collectBackendDiagnostics(makeDeps({
+      scripts,
+      scriptRunner: {
+        totalRestartCount:      0,
+        lastRestartReason:      null,
+        currentBackoffAttempts: 0,
+        childAlive:             true,
+        processId:              'p',
+        stats:                  null,
+        pool: {
+          configuredWorkerCount: 2,
+          workers: [
+            { workerKey: 'worker-1', processId: 'p1', lastActivityMs: Date.now(), assignedScriptCount: 1, assignedScripts: ['script-A'], restartAttempts: 0, rss: null, pinnedByRegistrations: false, pinningScripts: [] },
+          ],
+          totalAssignedScripts:  1,
+          evictionTelemetry:     { totalEvictions: 0, lastEvictionAt: null, lastEvictionReason: null, totalEvictionsSkippedByPin: 0 },
+          settings:              { idleTimeoutMs: 30 * 60_000, memoryCeilingBytes: 512 * 1024 * 1024 },
+        },
+      },
+    })).sections
+      .find(s => s.id === 'registrations')!
+      .checks.find(c => c.label === 'Active theme overrides')!;
+
+    // script-A has an active worker (worker-1); script-B doesn't appear in any
+    // worker's assignedScripts — its worker has been evicted.
+    const aRow = row.table!.rows.find(r => r[0] === 'A')!;
+    const bRow = row.table!.rows.find(r => r[0] === 'B')!;
+    expect(aRow[3]).toBe('worker-1');
+    expect(bRow[3]).toBe('evicted');
+  });
+
+  test("Active theme overrides reports worker: 'unknown' when pool is NOT probed", () => {
+    themeStore.__resetForTests();
+    themeStore.setVariables('script-A', { variables: { 'x': '1' } });
+    const scripts: Script[] = [createTestScript({ id: 'script-A', name: 'A' })];
+    const row = collectBackendDiagnostics(makeDeps({ scripts })).sections
+      .find(s => s.id === 'registrations')!
+      .checks.find(c => c.label === 'Active theme overrides')!;
+    expect(row.table!.rows[0]![3]).toBe('unknown');
   });
 });
 

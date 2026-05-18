@@ -3178,6 +3178,337 @@
       "Promise"
     ]
   },
+  "api.images.upload": {
+    "kind": "method",
+    "method": "api.images.upload",
+    "namespace": "api.images",
+    "signature": "upload(input: ImageUploadInput): Promise<ImageInfo>",
+    "description": "Upload raw image bytes to Lumiverse's image store. `input.data` is a Uint8Array (source via api.utils.http.* with responseType:'arraybuffer', api.utils.image.dataUrlToBytes, api.files.*, etc.). Optional: filename, mimeType, ownerCharacterId, ownerChatId. Returns the ImageInfo whose `id` can be passed to api.theme.extractColors or stored on a character avatar. Requires images permission.",
+    "permissions": [
+      "images"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.images.uploadFromDataUrl",
+      "api.images.get",
+      "api.images.delete",
+      "ImageUploadInput",
+      "Promise",
+      "ImageInfo"
+    ]
+  },
+  "api.images.uploadFromDataUrl": {
+    "kind": "method",
+    "method": "api.images.uploadFromDataUrl",
+    "namespace": "api.images",
+    "signature": "uploadFromDataUrl(dataUrl: string, options?: ImageUploadFromDataUrlOptions): Promise<ImageInfo>",
+    "description": "Convenience: upload from a `data:image/...;base64,...` data URL. Optional options: originalFilename, ownerCharacterId, ownerChatId. Returns ImageInfo. Requires images permission.",
+    "permissions": [
+      "images"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.images.upload",
+      "api.images.get",
+      "api.images.delete",
+      "ImageUploadFromDataUrlOptions",
+      "Promise",
+      "ImageInfo"
+    ]
+  },
+  "api.images.get": {
+    "kind": "method",
+    "method": "api.images.get",
+    "namespace": "api.images",
+    "signature": "get(imageId: string): Promise<ImageInfo | null>",
+    "description": "Look up an image by id. Returns ImageInfo or null. Requires images permission.",
+    "permissions": [
+      "images"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.images.upload",
+      "api.images.uploadFromDataUrl",
+      "api.images.delete",
+      "Promise",
+      "ImageInfo"
+    ]
+  },
+  "api.images.delete": {
+    "kind": "method",
+    "method": "api.images.delete",
+    "namespace": "api.images",
+    "signature": "delete(imageId: string): Promise<boolean>",
+    "description": "Delete an image by id. Returns `true` if a row was removed. Requires images permission.",
+    "permissions": [
+      "images"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.images.upload",
+      "api.images.uploadFromDataUrl",
+      "api.images.get",
+      "Promise"
+    ]
+  },
+  "api.imageGen.generate": {
+    "kind": "method",
+    "method": "api.imageGen.generate",
+    "namespace": "api.imageGen",
+    "signature": "generate(input: ImageGenInput): Promise<ImageGenResult>",
+    "description": "Generate an image. `input.prompt` required; optional: connectionId (default: user's default connection), negativePrompt, model, parameters (provider-specific — validate against the provider's `parameters` schema from getProviders() if your script accepts user input), ownerCharacterId, ownerChatId. Returns ImageGenResult { imageDataUrl, model, provider, imageId?, imageUrl? } — `imageId` is the canonical handle accepted by api.images.get / api.theme.extractColors / characters.setAvatar; `imageUrl` is an auth-free public URL suitable for api.ui.pushNotification({image:...}). For img2img / inpainting, pass `parameters: { input_images: [imageId, ...] }`. Requires image_gen permission.",
+    "permissions": [
+      "image_gen"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.imageGen.getProviders",
+      "api.imageGen.listConnections",
+      "api.imageGen.getConnection",
+      "api.imageGen.getModels",
+      "ImageGenInput",
+      "Promise"
+    ]
+  },
+  "api.imageGen.getProviders": {
+    "kind": "method",
+    "method": "api.imageGen.getProviders",
+    "namespace": "api.imageGen",
+    "signature": "getProviders(): Promise<ImageGenProviderInfo[]>",
+    "description": "List all image-generation providers available on this Lumiverse install along with their capability schemas. Each provider's `capabilities.parameters` describes the supported `parameters` for generate() calls against that provider's connections — use to drive dynamic parameter UIs. Requires image_gen permission.",
+    "permissions": [
+      "image_gen"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.imageGen.generate",
+      "api.imageGen.listConnections",
+      "api.imageGen.getConnection",
+      "api.imageGen.getModels",
+      "Promise",
+      "ImageGenProviderInfo"
+    ]
+  },
+  "api.imageGen.listConnections": {
+    "kind": "method",
+    "method": "api.imageGen.listConnections",
+    "namespace": "api.imageGen",
+    "signature": "listConnections(): Promise<ImageGenConnectionInfo[]>",
+    "description": "List the user's image-gen connection profiles. API keys are never exposed — only `hasApiKey: boolean`. Use to populate a connection picker UI. Requires image_gen permission.",
+    "permissions": [
+      "image_gen"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.imageGen.generate",
+      "api.imageGen.getProviders",
+      "api.imageGen.getConnection",
+      "api.imageGen.getModels",
+      "Promise",
+      "ImageGenConnectionInfo"
+    ]
+  },
+  "api.imageGen.getConnection": {
+    "kind": "method",
+    "method": "api.imageGen.getConnection",
+    "namespace": "api.imageGen",
+    "signature": "getConnection(connectionId: string): Promise<ImageGenConnectionInfo | null>",
+    "description": "Get a single image-gen connection profile by id. Returns ImageGenConnectionInfo or null. Requires image_gen permission.",
+    "permissions": [
+      "image_gen"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.imageGen.generate",
+      "api.imageGen.getProviders",
+      "api.imageGen.listConnections",
+      "api.imageGen.getModels",
+      "Promise",
+      "ImageGenConnectionInfo"
+    ]
+  },
+  "api.imageGen.getModels": {
+    "kind": "method",
+    "method": "api.imageGen.getModels",
+    "namespace": "api.imageGen",
+    "signature": "getModels(connectionId: string): Promise<Array<{ id: string; label: string }>>",
+    "description": "List the models available on a connection profile. For dynamic-list providers, this fetches live from the upstream API (network round-trip). Static-list providers return their capabilities.staticModels directly. Returns Array<{id, label}>. Requires image_gen permission.",
+    "permissions": [
+      "image_gen"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.imageGen.generate",
+      "api.imageGen.getProviders",
+      "api.imageGen.listConnections",
+      "api.imageGen.getConnection",
+      "Promise",
+      "Array"
+    ]
+  },
+  "api.oauth.onCallback": {
+    "kind": "method",
+    "method": "api.oauth.onCallback",
+    "namespace": "api.oauth",
+    "signature": "onCallback(\n    handler: (params: Record<string, string>) => Promise<{ html?: string } | void>,\n  ): () => void",
+    "description": "Register a callback handler. Single handler per extension (last-wins); LumiScript emits a warn on cross-script or same-script-re-register collisions. Returns sync unsubscribe fn (matches host + the commands.onInvoked proxy pattern).",
+    "permissions": [
+      "oauth"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.oauth.getCallbackUrl",
+      "api.oauth.createState",
+      "Record",
+      "Promise"
+    ]
+  },
+  "api.oauth.getCallbackUrl": {
+    "kind": "method",
+    "method": "api.oauth.getCallbackUrl",
+    "namespace": "api.oauth",
+    "signature": "getCallbackUrl(): Promise<string>",
+    "description": "Get the callback URL path (host-relative). Stable per-extension; use as `redirect_uri` in your authorize URL.",
+    "permissions": [
+      "oauth"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.oauth.onCallback",
+      "api.oauth.createState",
+      "Promise"
+    ]
+  },
+  "api.oauth.createState": {
+    "kind": "method",
+    "method": "api.oauth.createState",
+    "namespace": "api.oauth",
+    "signature": "createState(): Promise<string>",
+    "description": "Mint a CSRF state nonce; pass to the authorize URL and the host verifies at callback time.",
+    "permissions": [
+      "oauth"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.oauth.onCallback",
+      "api.oauth.getCallbackUrl",
+      "Promise"
+    ]
+  },
+  "api.theme.apply": {
+    "kind": "method",
+    "method": "api.theme.apply",
+    "namespace": "api.theme",
+    "signature": "apply(overrides: ThemeOverride): Promise<void>",
+    "description": "Apply CSS variable overrides on top of the user's current theme. `overrides.variables` is a flat map applied regardless of mode; `overrides.variablesByMode.{dark,light}` is mode-selected at apply time by the host. LumiScript maintains per-script attribution — multiple scripts' apply calls merge with per-key last-applied-wins semantics. Requires app_manipulation permission.",
+    "permissions": [
+      "app_manipulation"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.theme.applyPalette",
+      "api.theme.clear",
+      "api.theme.getCurrent",
+      "api.theme.extractColors",
+      "api.theme.generateVariables",
+      "ThemeOverride"
+    ]
+  },
+  "api.theme.applyPalette": {
+    "kind": "method",
+    "method": "api.theme.applyPalette",
+    "namespace": "api.theme",
+    "signature": "applyPalette(palette: ThemePaletteConfig | null): Promise<void>",
+    "description": "Apply a palette-driven theme. `palette.accent` is `{h, s, l}` and Lumiverse generates the full variable set coherently, preserving the user's glass/radius/font/UI-scale. Pass `null` to drop this script's palette contribution. Across LumiScript scripts: most-recent-script-wins. Requires app_manipulation permission.",
+    "permissions": [
+      "app_manipulation"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.theme.apply",
+      "api.theme.clear",
+      "api.theme.getCurrent",
+      "api.theme.extractColors",
+      "api.theme.generateVariables",
+      "ThemePaletteConfig"
+    ]
+  },
+  "api.theme.clear": {
+    "kind": "method",
+    "method": "api.theme.clear",
+    "namespace": "api.theme",
+    "signature": "clear(): Promise<void>",
+    "description": "Drop this script's contributions from the per-script override registry, re-merge, push the post-clear result to spindle.theme.{apply,applyPalette}. Auto-called on script disable / delete. Requires app_manipulation permission.",
+    "permissions": [
+      "app_manipulation"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.theme.apply",
+      "api.theme.applyPalette",
+      "api.theme.getCurrent",
+      "api.theme.extractColors",
+      "api.theme.generateVariables",
+      "Promise"
+    ]
+  },
+  "api.theme.getCurrent": {
+    "kind": "method",
+    "method": "api.theme.getCurrent",
+    "namespace": "api.theme",
+    "signature": "getCurrent(): Promise<ThemeInfo>",
+    "description": "Get a read-only snapshot of the user's current theme configuration (NOT including any extension overrides). Returns ThemeInfo with id, name, mode ('light' | 'dark'), accent (HSL), enableGlass, radiusScale, fontScale, uiScale, characterAware. Requires app_manipulation permission.",
+    "permissions": [
+      "app_manipulation"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.theme.apply",
+      "api.theme.applyPalette",
+      "api.theme.clear",
+      "api.theme.extractColors",
+      "api.theme.generateVariables",
+      "Promise"
+    ]
+  },
+  "api.theme.extractColors": {
+    "kind": "method",
+    "method": "api.theme.extractColors",
+    "namespace": "api.theme",
+    "signature": "extractColors(imageId: string): Promise<ColorExtractionInfo>",
+    "description": "Extract a color palette from an image stored in Lumiverse's image system. `imageId` is a host-side UUID (sources: `character.imageId`, `api.images.upload(...).id`). Returns ColorExtractionInfo with dominant + per-region RGB + flatness scores + isLight + dominantHsl (ready to pass to applyPalette). Throws if the id is unknown. Requires app_manipulation permission.",
+    "permissions": [
+      "app_manipulation"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.theme.apply",
+      "api.theme.applyPalette",
+      "api.theme.clear",
+      "api.theme.getCurrent",
+      "api.theme.generateVariables",
+      "Promise"
+    ]
+  },
+  "api.theme.generateVariables": {
+    "kind": "method",
+    "method": "api.theme.generateVariables",
+    "namespace": "api.theme",
+    "signature": "generateVariables(config: ThemeVariablesConfig): Promise<Record<string, string>>",
+    "description": "Generate the full set of Lumiverse CSS variables from a theme config without applying them. Pass the result to apply({variables}) for a complete coherent override (or tweak individual keys before applying). config.accent + config.mode required; glass/radius/font/UI-scale/baseColors/statusColors optional. Requires app_manipulation permission.",
+    "permissions": [
+      "app_manipulation"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.theme.apply",
+      "api.theme.applyPalette",
+      "api.theme.clear",
+      "api.theme.getCurrent",
+      "api.theme.extractColors",
+      "ThemeVariablesConfig"
+    ]
+  },
   "api.council.getSettings": {
     "kind": "method",
     "method": "api.council.getSettings",
@@ -4469,6 +4800,71 @@
     "kind": "redirect",
     "attempted": "api.state",
     "message": "`api.state` does not exist. LumiScript doesn't have a unified app-state accessor — there's no host-settings or app-state read surface exposed to scripts. For script-readable state: variables via `api.variables.*` (four scopes); persistent files via `api.files.*`; script-owned databases via `api.db.*`; trigger payload via the `data` global; script self-info via the `script` global."
+  },
+  "window": {
+    "kind": "redirect",
+    "attempted": "window",
+    "message": "`window` does not exist in LumiScript. Scripts run in the script-runner Bun subprocess (server-side), not in the user's browser. There is no `window`, no `document`, no `location`. For UI on the user's frontend, use `api.ui.*` primitives — `api.ui.toast` (passive notification), `api.ui.prompt` / `api.ui.confirm` (input modals), `api.ui.showAdvancedModal` (full-content modal), `api.ui.dom.inject` (DOM injection into the host app shell, requires `app_manipulation` permission), `api.ui.pushNotification` (OS-level when app unfocused). For HTTP, use `api.utils.http.*` (requires `cors_proxy` + `allowDangerous`). For storage, use `api.variables.*` or `api.files.*` or `api.enclave` (encrypted)."
+  },
+  "window.location": {
+    "kind": "redirect",
+    "attempted": "window.location",
+    "message": "`window.location` does not exist in LumiScript — scripts run server-side in a Bun subprocess, not in the user's browser. There is no concept of \"the page's URL\" from the script's perspective. If you need a host-relative URL path (e.g. for OAuth `redirect_uri`), use `api.oauth.getCallbackUrl()` (returns the path, e.g. `/api/spindle-oauth/lumiscript/callback`). Composing the full absolute URL requires knowing the Lumiverse origin — script can't derive that from the runtime; pass it via a config constant in the script, or via `api.variables.global` set by a one-time setup script."
+  },
+  "window.location.origin": {
+    "kind": "redirect",
+    "attempted": "window.location.origin",
+    "message": "Same as `window.location` — does not exist server-side. See the `window.location` redirect for the OAuth-redirect-URI pattern."
+  },
+  "window.open": {
+    "kind": "redirect",
+    "attempted": "window.open",
+    "message": "`window.open` does not exist in LumiScript (scripts run server-side, not in the user's browser). To prompt the user to navigate to a URL — for OAuth authorize URLs, external dashboards, etc. — surface the URL via a UI primitive: `api.ui.showAdvancedModal({title:'Authorize', items:[{kind:'html', html:'<a href=\"...\" target=\"_blank\">Click to authorize</a>'}]})` (requires `app_manipulation`); or `api.ui.toast('Open this URL: '+url, 'info')` for a passive notice the user can click; or `api.ui.pushNotification({title:'Authorize', body:url})` (requires `push_notification`). There is no programmatic browser-tab control from the script side."
+  },
+  "document": {
+    "kind": "redirect",
+    "attempted": "document",
+    "message": "`document` does not exist in LumiScript — scripts run server-side in a Bun subprocess. For DOM manipulation in the host frontend, use `api.ui.dom.*` (`inject`, `addStyle`, `injectAtMessage`, `delegate`, `cleanup` — all gated on `app_manipulation` permission). The returned `DOMHandle` from `inject` lets you `.update(html)` / `.remove()` / `.on(event, handler)` etc. across the IPC boundary. There is no direct DOM access."
+  },
+  "localStorage": {
+    "kind": "redirect",
+    "attempted": "localStorage",
+    "message": "`localStorage` does not exist in LumiScript — scripts run server-side. For browser-style key/value storage, use `api.variables.local` (per-chat, transient), `api.variables.global` (per-user, durable), `api.variables.character` (per-character, durable), or `api.variables.chat` (per-chat, durable, persisted in chat metadata). For encrypted secrets specifically, use `api.enclave.*` (AES-256-GCM, per-user-per-extension scoped). All four `api.variables` scopes survive extension reloads."
+  },
+  "sessionStorage": {
+    "kind": "redirect",
+    "attempted": "sessionStorage",
+    "message": "`sessionStorage` does not exist in LumiScript — scripts run server-side, there is no browser session. For in-process scope (lifetime of the script-runner subprocess), use `globalThis.<key>`. For durable per-chat scope, `api.variables.local` (transient — wiped on chat close) or `api.variables.chat` (persisted in chat metadata)."
+  },
+  "fetch": {
+    "kind": "redirect",
+    "attempted": "fetch",
+    "message": "Top-level `fetch` is not available to LumiScript user code (the script-runner subprocess shadows it). Use `api.utils.http.*` — `get(url, opts?)`, `post(url, body, opts?)`, `put`, `delete`, `request(url, opts)`. Requires `cors_proxy` permission AND the per-script `allowDangerous` toggle (the latter is a UI flag in the script-list row, NOT a `spindle.json` field). Responses are capped at 25 MB by the host's CORS proxy."
+  },
+  "XMLHttpRequest": {
+    "kind": "redirect",
+    "attempted": "XMLHttpRequest",
+    "message": "`XMLHttpRequest` does not exist in LumiScript (and you wouldn't want it — the API is synchronous-by-default and frontend-only). Use `api.utils.http.*` for HTTP — async Promise-returning helpers, JSON-friendly body strings, `responseType: 'arraybuffer'` for binary. Requires `cors_proxy` + `allowDangerous`."
+  },
+  "navigator": {
+    "kind": "redirect",
+    "attempted": "navigator",
+    "message": "`navigator` does not exist in LumiScript — scripts run server-side, there is no user-agent or device context exposed. If you need a user identifier, the host already routes the right user's permissions / variables / etc. to your script based on the active session; there's no need to inspect `navigator`."
+  },
+  "alert": {
+    "kind": "redirect",
+    "attempted": "alert",
+    "message": "`alert` does not exist in LumiScript. For a passive notification: `api.ui.toast(msg, 'info' | 'success' | 'warning' | 'error')`. For a blocking confirm-style dialog: `await api.ui.confirm({ title, message })` returns `{ confirmed: boolean }`. For full-content prompts: `await api.ui.prompt({ title, fields })`. All free-tier (no permission)."
+  },
+  "prompt": {
+    "kind": "redirect",
+    "attempted": "prompt",
+    "message": "Top-level `prompt` (the browser dialog) does not exist in LumiScript. For input from the user: `await api.ui.prompt({ title, fields: [{ id, label, type, default? }, ...] })` returns `{ values: { [id]: value }, cancelled }`. Free-tier."
+  },
+  "confirm": {
+    "kind": "redirect",
+    "attempted": "confirm",
+    "message": "Top-level `confirm` (the browser dialog) does not exist in LumiScript. Use `await api.ui.confirm({ title, message, confirmLabel?, cancelLabel?, danger? })` — returns `{ confirmed: boolean }`. Free-tier."
   },
   "ChatMessage": {
     "kind": "type",
@@ -6356,6 +6752,12 @@
         "type": "number",
         "optional": true,
         "desc": "Request timeout in milliseconds."
+      },
+      {
+        "field": "responseType?",
+        "type": "'text' | 'arraybuffer'",
+        "optional": true,
+        "desc": "Decoding hint for the response body. 'text' (default) yields a string; 'arraybuffer' yields a Uint8Array of the raw response bytes (LumiScript decodes the host's base64 transport transparently). Use 'arraybuffer' when fetching images, PDFs, or any binary payload destined for api.images.upload / api.utils.image.* / api.files.*."
       }
     ],
     "usedBy": [
@@ -6391,9 +6793,9 @@
       },
       {
         "field": "body",
-        "type": "string",
+        "type": "string | Uint8Array",
         "optional": false,
-        "desc": "Response body as a string. Use JSON.parse for JSON responses."
+        "desc": "Response body. `string` when the request's responseType was 'text' or omitted; `Uint8Array` when 'arraybuffer'. Use JSON.parse on string bodies for JSON; pipe Uint8Array bodies into api.images.upload or api.utils.image.detectMime."
       }
     ],
     "usedBy": [
@@ -9369,6 +9771,699 @@
     ],
     "usedBy": [
       "api.databanks.documents.waitUntilReady"
+    ]
+  },
+  "ImageInfo": {
+    "kind": "type",
+    "type": "ImageInfo",
+    "note": "Returned by api.images.upload / uploadFromDataUrl / get. Camel-case mirror of ImageDTO from Spindle.",
+    "fields": [
+      {
+        "field": "id",
+        "type": "string",
+        "optional": false,
+        "desc": "Canonical image id — the handle accepted by api.images.get / api.theme.extractColors / api.imageGen img2img / spindle.characters.setAvatar."
+      },
+      {
+        "field": "originalFilename",
+        "type": "string",
+        "optional": false,
+        "desc": "Original filename preserved at upload time."
+      },
+      {
+        "field": "mimeType",
+        "type": "string",
+        "optional": false,
+        "desc": "Image MIME type (image/png, image/jpeg, image/webp, image/gif, image/bmp)."
+      },
+      {
+        "field": "width",
+        "type": "number | null",
+        "optional": false,
+        "desc": "Pixel width if the host could derive it from the upload."
+      },
+      {
+        "field": "height",
+        "type": "number | null",
+        "optional": false,
+        "desc": "Pixel height if the host could derive it from the upload."
+      },
+      {
+        "field": "hasThumbnail",
+        "type": "boolean",
+        "optional": false,
+        "desc": "Whether the host has generated a thumbnail variant for this image."
+      },
+      {
+        "field": "url",
+        "type": "string",
+        "optional": false,
+        "desc": "Relative authenticated URL for this image, already sized to specificity."
+      },
+      {
+        "field": "specificity",
+        "type": "string",
+        "optional": false,
+        "desc": "Image specificity flag — 'full' / 'sm' / 'lg'."
+      },
+      {
+        "field": "ownerExtensionIdentifier",
+        "type": "string | null",
+        "optional": false,
+        "desc": "Which extension uploaded the image — null for user-uploaded."
+      },
+      {
+        "field": "ownerCharacterId",
+        "type": "string | null",
+        "optional": false,
+        "desc": "Character ownership tag if set at upload time."
+      },
+      {
+        "field": "ownerChatId",
+        "type": "string | null",
+        "optional": false,
+        "desc": "Chat ownership tag if set at upload time."
+      },
+      {
+        "field": "createdAt",
+        "type": "number",
+        "optional": false,
+        "desc": "Creation timestamp (Unix ms)."
+      }
+    ],
+    "usedBy": [
+      "api.images.upload",
+      "api.images.uploadFromDataUrl",
+      "api.images.get"
+    ]
+  },
+  "ImageUploadInput": {
+    "kind": "type",
+    "type": "ImageUploadInput",
+    "note": "Passed to api.images.upload(input).",
+    "fields": [
+      {
+        "field": "data",
+        "type": "Uint8Array",
+        "optional": false,
+        "desc": "Raw image bytes. Source via api.utils.http.* with responseType:'arraybuffer', api.utils.image.dataUrlToBytes, api.files.*, etc."
+      },
+      {
+        "field": "filename?",
+        "type": "string",
+        "optional": true,
+        "desc": "Optional filename to preserve when storing."
+      },
+      {
+        "field": "mimeType?",
+        "type": "string",
+        "optional": true,
+        "desc": "Optional content type override. Defaults to image/png when not inferable host-side."
+      },
+      {
+        "field": "ownerCharacterId?",
+        "type": "string",
+        "optional": true,
+        "desc": "Optional character ownership tag for the persisted image."
+      },
+      {
+        "field": "ownerChatId?",
+        "type": "string",
+        "optional": true,
+        "desc": "Optional chat ownership tag for the persisted image."
+      }
+    ],
+    "usedBy": [
+      "api.images.upload"
+    ]
+  },
+  "ImageUploadFromDataUrlOptions": {
+    "kind": "type",
+    "type": "ImageUploadFromDataUrlOptions",
+    "note": "Passed to api.images.uploadFromDataUrl(dataUrl, options?). The data URL itself carries the bytes + MIME; these options only set ownership / display metadata.",
+    "fields": [
+      {
+        "field": "originalFilename?",
+        "type": "string",
+        "optional": true,
+        "desc": "Original filename to preserve on the persisted image."
+      },
+      {
+        "field": "ownerCharacterId?",
+        "type": "string",
+        "optional": true,
+        "desc": "Optional character ownership tag."
+      },
+      {
+        "field": "ownerChatId?",
+        "type": "string",
+        "optional": true,
+        "desc": "Optional chat ownership tag."
+      }
+    ],
+    "usedBy": [
+      "api.images.uploadFromDataUrl"
+    ]
+  },
+  "ImageGenInput": {
+    "kind": "type",
+    "type": "ImageGenInput",
+    "note": "Passed to api.imageGen.generate(input). Mirrors ImageGenRequestDTO with camel-case field names on the LumiScript surface.",
+    "fields": [
+      {
+        "field": "prompt",
+        "type": "string",
+        "optional": false,
+        "desc": "Text prompt for image generation. Required."
+      },
+      {
+        "field": "connectionId?",
+        "type": "string",
+        "optional": true,
+        "desc": "Connection profile to use. When omitted, uses the user's default image-gen connection (set via the Lumiverse UI). Look up via api.imageGen.listConnections()."
+      },
+      {
+        "field": "negativePrompt?",
+        "type": "string",
+        "optional": true,
+        "desc": "Negative prompt — provider-dependent support."
+      },
+      {
+        "field": "model?",
+        "type": "string",
+        "optional": true,
+        "desc": "Override the connection profile's model. Look up via api.imageGen.getModels(connectionId)."
+      },
+      {
+        "field": "parameters?",
+        "type": "Record<string, unknown>",
+        "optional": true,
+        "desc": "Provider-specific parameters (width, height, steps, cfg_scale, etc.). Validate against the provider's `parameters` schema from getProviders() if your script accepts user input. For img2img / inpainting providers, pass arrays of imageId strings under the image_array-typed parameter (e.g. `{ input_images: [imageId, ...] }`). Merged with the connection's defaultParameters host-side."
+      },
+      {
+        "field": "ownerCharacterId?",
+        "type": "string",
+        "optional": true,
+        "desc": "Tag the persisted result with a character ownership marker."
+      },
+      {
+        "field": "ownerChatId?",
+        "type": "string",
+        "optional": true,
+        "desc": "Tag the persisted result with a chat ownership marker."
+      }
+    ],
+    "usedBy": [
+      "api.imageGen.generate"
+    ]
+  },
+  "ImageGenResult": {
+    "kind": "type",
+    "type": "ImageGenResult",
+    "note": "Returned by api.imageGen.generate(input). The `imageId` is the integration seam — pass to api.images.get / api.theme.extractColors / spindle.characters.setAvatar. Use `imageDataUrl` for inline rendering (no auth needed) or `imageUrl` for push-notification image fields.",
+    "fields": [
+      {
+        "field": "imageDataUrl",
+        "type": "string",
+        "optional": false,
+        "desc": "Generated image as a base64 data URL — directly assignable to <img src>. Available immediately regardless of host-side persistence success."
+      },
+      {
+        "field": "model",
+        "type": "string",
+        "optional": false,
+        "desc": "Model that was actually used (may differ from input if `model` was omitted and the connection's default applied)."
+      },
+      {
+        "field": "provider",
+        "type": "string",
+        "optional": false,
+        "desc": "Provider id that handled the generation."
+      },
+      {
+        "field": "imageId?",
+        "type": "string",
+        "optional": true,
+        "desc": "Canonical image id in Lumiverse's image table. Pass to api.images.get, api.theme.extractColors, spindle.characters.setAvatar, etc. Present when host-side persistence succeeded (the typical case). When absent, use imageDataUrl for inline rendering."
+      },
+      {
+        "field": "imageUrl?",
+        "type": "string",
+        "optional": true,
+        "desc": "Public unauthenticated URL for the persisted image. Auth-free so push-notification clients can render it without an auth header: api.ui.pushNotification({ image: result.imageUrl, ... })."
+      }
+    ],
+    "usedBy": [
+      "api.imageGen.generate"
+    ]
+  },
+  "ImageGenProviderInfo": {
+    "kind": "type",
+    "type": "ImageGenProviderInfo",
+    "note": "Returned by api.imageGen.getProviders(). Each provider declares its capability schema; drive dynamic parameter UIs from `capabilities.parameters`.",
+    "fields": [
+      {
+        "field": "id",
+        "type": "string",
+        "optional": false,
+        "desc": "Provider id (e.g. \"nanogpt\", \"openai\", \"stability\")."
+      },
+      {
+        "field": "name",
+        "type": "string",
+        "optional": false,
+        "desc": "Human-readable provider name."
+      },
+      {
+        "field": "capabilities.parameters",
+        "type": "Record<string, ImageGenParameterSchema>",
+        "optional": false,
+        "desc": "Per-parameter contract — validate args before generate() to surface errors fast."
+      },
+      {
+        "field": "capabilities.apiKeyRequired",
+        "type": "boolean",
+        "optional": false,
+        "desc": "Whether the provider requires an API key on the connection profile."
+      },
+      {
+        "field": "capabilities.modelListStyle",
+        "type": "'static' | 'dynamic' | 'google'",
+        "optional": false,
+        "desc": "How models are listed. Static providers expose them under capabilities.staticModels; dynamic providers fetch from upstream via api.imageGen.getModels(connectionId)."
+      },
+      {
+        "field": "capabilities.staticModels?",
+        "type": "Array<{ id: string; label: string }>",
+        "optional": true,
+        "desc": "Populated when modelListStyle === 'static'."
+      },
+      {
+        "field": "capabilities.defaultUrl",
+        "type": "string",
+        "optional": false,
+        "desc": "Provider's default API URL — used as a placeholder when creating new connection profiles."
+      }
+    ],
+    "usedBy": [
+      "api.imageGen.getProviders"
+    ]
+  },
+  "ImageGenConnectionInfo": {
+    "kind": "type",
+    "type": "ImageGenConnectionInfo",
+    "note": "Returned by api.imageGen.listConnections() / getConnection(). API keys are NEVER exposed — only `hasApiKey: boolean` indicates presence.",
+    "fields": [
+      {
+        "field": "id",
+        "type": "string",
+        "optional": false,
+        "desc": "Connection profile id."
+      },
+      {
+        "field": "name",
+        "type": "string",
+        "optional": false,
+        "desc": "User-assigned connection name."
+      },
+      {
+        "field": "provider",
+        "type": "string",
+        "optional": false,
+        "desc": "Provider id this connection talks to."
+      },
+      {
+        "field": "apiUrl",
+        "type": "string",
+        "optional": false,
+        "desc": "API URL configured on the connection."
+      },
+      {
+        "field": "model",
+        "type": "string",
+        "optional": false,
+        "desc": "Default model on the connection."
+      },
+      {
+        "field": "isDefault",
+        "type": "boolean",
+        "optional": false,
+        "desc": "Whether this is the user's default image-gen connection — used by generate() when connectionId is omitted."
+      },
+      {
+        "field": "hasApiKey",
+        "type": "boolean",
+        "optional": false,
+        "desc": "Whether the user has supplied an API key for this connection. The key itself is never exposed."
+      },
+      {
+        "field": "defaultParameters",
+        "type": "Record<string, unknown>",
+        "optional": false,
+        "desc": "Per-connection default parameter values — merged with the request's `parameters` at generate() time."
+      },
+      {
+        "field": "metadata",
+        "type": "Record<string, unknown>",
+        "optional": false,
+        "desc": "Arbitrary metadata attached to the connection."
+      },
+      {
+        "field": "createdAt",
+        "type": "number",
+        "optional": false,
+        "desc": "Creation timestamp (Unix ms)."
+      },
+      {
+        "field": "updatedAt",
+        "type": "number",
+        "optional": false,
+        "desc": "Last update timestamp (Unix ms)."
+      }
+    ],
+    "usedBy": [
+      "api.imageGen.listConnections",
+      "api.imageGen.getConnection"
+    ]
+  },
+  "ImageGenParameterSchema": {
+    "kind": "type",
+    "type": "ImageGenParameterSchema",
+    "note": "One parameter's contract within an ImageGenProviderInfo.capabilities.parameters record. Use to drive dynamic parameter UIs or validate user-supplied args before calling generate().",
+    "fields": [
+      {
+        "field": "type",
+        "type": "'number' | 'integer' | 'boolean' | 'string' | 'select' | 'image_array'",
+        "optional": false,
+        "desc": "Parameter primitive. `select` has a fixed enum (see options); `image_array` takes arrays of imageId strings (img2img / inpainting providers)."
+      },
+      {
+        "field": "default?",
+        "type": "unknown",
+        "optional": true,
+        "desc": "Default value when the user omits the parameter."
+      },
+      {
+        "field": "min?",
+        "type": "number",
+        "optional": true,
+        "desc": "Minimum value for numeric parameters."
+      },
+      {
+        "field": "max?",
+        "type": "number",
+        "optional": true,
+        "desc": "Maximum value for numeric parameters."
+      },
+      {
+        "field": "step?",
+        "type": "number",
+        "optional": true,
+        "desc": "Step granularity for numeric parameters — useful for slider UIs."
+      },
+      {
+        "field": "description",
+        "type": "string",
+        "optional": false,
+        "desc": "Human-readable description — surface to users in your parameter UI."
+      },
+      {
+        "field": "required?",
+        "type": "boolean",
+        "optional": true,
+        "desc": "Whether the parameter must be supplied (no default applies)."
+      },
+      {
+        "field": "options?",
+        "type": "Array<{ id: string; label: string }>",
+        "optional": true,
+        "desc": "Enum entries for select-typed parameters."
+      },
+      {
+        "field": "group?",
+        "type": "string",
+        "optional": true,
+        "desc": "Optional grouping label — UI may render parameters with the same group together."
+      }
+    ],
+    "usedBy": []
+  },
+  "ColorRGB": {
+    "kind": "type",
+    "type": "ColorRGB",
+    "note": "RGB color value, 0–255 per channel. Used in ColorExtractionInfo.dominant / regions.* / average.",
+    "fields": [
+      {
+        "field": "r",
+        "type": "number",
+        "optional": false,
+        "desc": "Red channel, 0–255."
+      },
+      {
+        "field": "g",
+        "type": "number",
+        "optional": false,
+        "desc": "Green channel, 0–255."
+      },
+      {
+        "field": "b",
+        "type": "number",
+        "optional": false,
+        "desc": "Blue channel, 0–255."
+      }
+    ],
+    "usedBy": []
+  },
+  "ColorHSL": {
+    "kind": "type",
+    "type": "ColorHSL",
+    "note": "HSL color value. Used in ColorExtractionInfo.dominantHsl + ThemePaletteConfig.accent + ThemeInfo.accent. Drop-in compatible across all three — the typical pipeline is `extractColors(imageId).then(p => applyPalette({accent: p.dominantHsl}))`.",
+    "fields": [
+      {
+        "field": "h",
+        "type": "number",
+        "optional": false,
+        "desc": "Hue, 0–360 degrees."
+      },
+      {
+        "field": "s",
+        "type": "number",
+        "optional": false,
+        "desc": "Saturation, 0–100 percent."
+      },
+      {
+        "field": "l",
+        "type": "number",
+        "optional": false,
+        "desc": "Lightness, 0–100 percent."
+      }
+    ],
+    "usedBy": []
+  },
+  "ColorExtractionInfo": {
+    "kind": "type",
+    "type": "ColorExtractionInfo",
+    "note": "Returned by api.theme.extractColors(imageId). `dominantHsl` is the ready-to-pass accent for api.theme.applyPalette({accent: ...}).",
+    "fields": [
+      {
+        "field": "dominant",
+        "type": "ColorRGB",
+        "optional": false,
+        "desc": "Dominant color of the full image, in RGB."
+      },
+      {
+        "field": "regions",
+        "type": "{ top: ColorRGB; center: ColorRGB; bottom: ColorRGB; left: ColorRGB; right: ColorRGB }",
+        "optional": false,
+        "desc": "Per-region dominant colors. Useful for asymmetric layouts (e.g. character portrait centered with background dominant on edges)."
+      },
+      {
+        "field": "flatness",
+        "type": "{ top: number; center: number; bottom: number; left: number; right: number; full: number }",
+        "optional": false,
+        "desc": "Per-region + full-image flatness score (0 = highly variegated, 1 = uniform). Use to detect \"all one color\" cases."
+      },
+      {
+        "field": "average",
+        "type": "ColorRGB",
+        "optional": false,
+        "desc": "Arithmetic mean RGB across the full image."
+      },
+      {
+        "field": "isLight",
+        "type": "boolean",
+        "optional": false,
+        "desc": "Whether the dominant color is perceived as light (luminance > 152). Useful for picking complementary foreground colors."
+      },
+      {
+        "field": "dominantHsl",
+        "type": "ColorHSL",
+        "optional": false,
+        "desc": "HSL representation of dominant — drop-in for api.theme.applyPalette({accent: ...})."
+      }
+    ],
+    "usedBy": [
+      "api.theme.extractColors"
+    ]
+  },
+  "ThemeOverride": {
+    "kind": "type",
+    "type": "ThemeOverride",
+    "note": "Passed to api.theme.apply(overrides). Two-axis: `variables` applies regardless of mode, `variablesByMode` applies per dark/light at apply time. LumiScript maintains per-script attribution — multiple scripts' apply() calls merge with per-key last-applied-wins semantics.",
+    "fields": [
+      {
+        "field": "variables?",
+        "type": "Record<string, string>",
+        "optional": true,
+        "desc": "Flat CSS variable map applied regardless of the current mode. Keys are `--lumiverse-*` variable names (or any custom prefix)."
+      },
+      {
+        "field": "variablesByMode?",
+        "type": "{ dark?: Record<string, string>; light?: Record<string, string> }",
+        "optional": true,
+        "desc": "Mode-keyed overrides. The host picks `dark` or `light` at apply time based on the user's current mode. Mode-specific values take precedence over flat `variables` for the same key."
+      }
+    ],
+    "usedBy": [
+      "api.theme.apply"
+    ]
+  },
+  "ThemePaletteConfig": {
+    "kind": "type",
+    "type": "ThemePaletteConfig",
+    "note": "Passed to api.theme.applyPalette(palette | null). Lumiverse generates the full coherent variable set from the accent — preserves the user's glass / radius / font / UI-scale settings. Across LumiScript scripts: most-recent-script-wins. Pass `null` to drop this script's palette contribution.",
+    "fields": [
+      {
+        "field": "accent",
+        "type": "ColorHSL",
+        "optional": false,
+        "desc": "Primary accent color in HSL. Drop-in compatible with the dominantHsl returned by api.theme.extractColors."
+      }
+    ],
+    "usedBy": [
+      "api.theme.applyPalette"
+    ]
+  },
+  "ThemeInfo": {
+    "kind": "type",
+    "type": "ThemeInfo",
+    "note": "Returned by api.theme.getCurrent(). Read-only snapshot of the user's current theme configuration (NOT including any extension overrides).",
+    "fields": [
+      {
+        "field": "id",
+        "type": "string",
+        "optional": false,
+        "desc": "Theme id (e.g. \"lumiverse-purple\")."
+      },
+      {
+        "field": "name",
+        "type": "string",
+        "optional": false,
+        "desc": "Theme display name."
+      },
+      {
+        "field": "mode",
+        "type": "'light' | 'dark'",
+        "optional": false,
+        "desc": "Resolved color mode."
+      },
+      {
+        "field": "accent",
+        "type": "ColorHSL",
+        "optional": false,
+        "desc": "Primary accent."
+      },
+      {
+        "field": "enableGlass",
+        "type": "boolean",
+        "optional": false,
+        "desc": "Whether glassmorphic backdrop-filter tokens are enabled."
+      },
+      {
+        "field": "radiusScale",
+        "type": "number",
+        "optional": false,
+        "desc": "Border radius multiplier."
+      },
+      {
+        "field": "fontScale",
+        "type": "number",
+        "optional": false,
+        "desc": "Font-size multiplier."
+      },
+      {
+        "field": "uiScale",
+        "type": "number",
+        "optional": false,
+        "desc": "Overall UI scale multiplier."
+      },
+      {
+        "field": "characterAware",
+        "type": "boolean",
+        "optional": false,
+        "desc": "Whether the theme adapts to the active character's avatar palette automatically (host-side feature, independent of api.theme.extractColors)."
+      }
+    ],
+    "usedBy": [
+      "api.theme.getCurrent"
+    ]
+  },
+  "ThemeVariablesConfig": {
+    "kind": "type",
+    "type": "ThemeVariablesConfig",
+    "note": "Passed to api.theme.generateVariables(config). Mirrors the inputs that Lumiverse's theme engine uses to produce the full set of ~80+ CSS variables. The result can be passed to apply({variables}) for a complete coherent override, or tweaked individually before applying.",
+    "fields": [
+      {
+        "field": "accent",
+        "type": "ColorHSL",
+        "optional": false,
+        "desc": "Primary accent color in HSL."
+      },
+      {
+        "field": "mode",
+        "type": "'dark' | 'light'",
+        "optional": false,
+        "desc": "Resolved color mode."
+      },
+      {
+        "field": "enableGlass?",
+        "type": "boolean",
+        "optional": true,
+        "desc": "Enable glassmorphic backdrop-filter tokens. Default: true."
+      },
+      {
+        "field": "radiusScale?",
+        "type": "number",
+        "optional": true,
+        "desc": "Border radius multiplier. Default: 1."
+      },
+      {
+        "field": "fontScale?",
+        "type": "number",
+        "optional": true,
+        "desc": "Font-size multiplier. Default: 1."
+      },
+      {
+        "field": "uiScale?",
+        "type": "number",
+        "optional": true,
+        "desc": "Overall UI scale multiplier. Default: 1."
+      },
+      {
+        "field": "baseColors?",
+        "type": "Record<string, string>",
+        "optional": true,
+        "desc": "Optional base colors override (advanced — typically not needed; the accent + mode produce a coherent set on their own)."
+      },
+      {
+        "field": "statusColors?",
+        "type": "Record<string, string>",
+        "optional": true,
+        "desc": "Optional status colors override (success / warning / error / info — advanced)."
+      }
+    ],
+    "usedBy": [
+      "api.theme.generateVariables"
     ]
   },
   "MessageFooterOptions / MessageHeaderOptions": {

@@ -75,11 +75,11 @@ How permissions actually work: LumiScript permissions are declared **at the exte
 
 **Permissions gate `api.*` method calls, NOT the `data` trigger global.** Reading `data.message.content` from a `MESSAGE_SENT` trigger does NOT require `chat_mutation` — the host already routed the event payload to your script for free. Permissions only kick in when your script reaches back through the API (e.g. `api.chat.getMessages`, `api.chat.editMessage`). Don't list a permission unless your script actually calls a gated method.
 
-**`allowDangerous` is SEPARATE** — it's a per-script LumiScript-level UI toggle (in the script-list row), NOT a Spindle permission. It gates risky operations (outbound HTTP, encrypted secrets, file I/O, cross-script side effects). When a method's permission tag below shows `[X, + allowDangerous]`, BOTH gates must be on: the extension must have permission `X` granted AND the calling script must have `allowDangerous` toggled on.
+**`allowDangerous` is SEPARATE** — it's a per-script LumiScript-level UI toggle (in the script-list row), NOT a Spindle permission. It gates a **fixed set of surfaces**: outbound HTTP (`api.utils.http.*`), encrypted secrets (`api.enclave.*`), file I/O (`api.files.*`), and `api.chat.clearAllInjections`. **It does NOT gate any other surface.** Raw image bytes (`api.characters.setAvatar`, `api.images.upload`), DOM injection (`api.ui.dom.*`), theme manipulation (`api.theme.*`), character mutations (`api.characters.update`), OAuth callbacks (`api.oauth.*`), image generation (`api.imageGen.*`), and every other gated method flow through their own dedicated Spindle permissions only — no `allowDangerous` toggle required. If you find yourself reaching for `allowDangerous` to "unlock" a surface that isn't on the fixed list above, stop: the surface is gated by its own permission instead. When a method's permission tag below shows `[X, + allowDangerous]`, BOTH gates must be on: the extension must have permission `X` granted AND the calling script must have `allowDangerous` toggled on.
 
 | Permission | What it gates |
 |---|---|
-| `app_manipulation` | DOM injection, advanced modals, context menus — surfaces that script-own DOM in the host app shell. |
+| `app_manipulation` | Gates ONLY `api.ui.dom.*` (DOM injection, `addStyle`, delegation), `api.ui.showAdvancedModal`, `api.ui.showContextMenu`, and `api.theme.*`. Does NOT gate `api.chats.*` (use `chats`), `api.characters.*` (use `characters`), `api.ui.toast`, `api.ui.pushNotification`, or any other UI primitive — those have their own permissions. Mental model: this is the "script-owns-its-own-shell-pixels" gate. |
 | `characters` | CRUD on characters via `api.characters.*`. |
 | `chat_mutation` | Read / send / edit / delete chat messages. Required for most `api.chat.*` operations. |
 | `chats` | Chat session metadata + CRUD on the chat list. Distinct from message content (chat_mutation). |
@@ -88,8 +88,11 @@ How permissions actually work: LumiScript permissions are declared **at the exte
 | `ephemeral_storage` | TTL-bound `api.files.temp*` file storage with auto-expiry. |
 | `event_tracking` | Record + query persistent events via `api.events.*`. |
 | `generation` | Call LLM providers via `api.llm.*`. Also required to register world-info interceptors that touch the assembled prompt. |
+| `image_gen` | Generate images via `api.imageGen.*` against the user's configured image-gen connection profiles. Returns `ImageGenResult` with both a base64 data URL (immediate render) and (when persisted) a canonical `imageId` accepted by `api.images.get` / `api.theme.extractColors` / `characters.setAvatar`, plus an auth-free `imageUrl` for push notifications. Provider/connection metadata available for dynamic parameter UIs. |
+| `images` | Persist + retrieve images in Lumiverse's image store via `api.images.*`. Returns `ImageInfo` whose `id` can be passed to `api.theme.extractColors`, stored on a character avatar, or attached to a databank document. |
 | `interceptor` | Register prompt injections, content processors, world-info interceptors — anything that mutates host data mid-flight. |
 | `macro_interceptor` | Register macro-resolution interceptors (`api.macros.registerInterceptor`). Performance-sensitive; gated separately from `interceptor`. |
+| `oauth` | OAuth callback handling via `api.oauth.*` — the only inbound-HTTP hook Spindle exposes to extensions. Wrapper is intentionally thin: it covers the callback registration, CSRF state nonce, and the callback URL path. Constructing the authorize URL, exchanging the code for a token, and persisting + refreshing tokens are the script's responsibility (pair with `api.utils.http` + `api.enclave`). |
 | `personas` | CRUD on personas via `api.personas.*`. |
 | `presets` | CRUD on generation presets + their prompt blocks via `api.presets.*` (parameters, ordered prompt blocks with roles/positions/depth, behavior settings, metadata, plus host-derived category groupings). |
 | `push_notification` | OS-level push notifications via `api.ui.pushNotification` (delivered when the app is unfocused). |
@@ -296,6 +299,8 @@ _The same method set applies to each of the 4 namespaces above._
 
 > **Concepts:** Three ownership scopes — `global` (no owner key), `character` (owned by character UUID), `chat` (owned by chat UUID). Documents within a databank inherit their parent's scope. Document ingestion is **asynchronous**: `documents.create()` returns immediately with `status: 'pending'`; use `documents.waitUntilReady(docId)` to await chunking + vectorization. For input-bar actions or other UI surfaces that need ready-state confirmation, prefer `waitUntilReady` over manual polling.
 
+**File-type constraint**: Lumiverse accepts text-oriented uploads only — `.txt`, `.md`, `.markdown`, `.csv`, `.tsv`, `.json`, `.xml`, `.html`, `.htm`, `.yaml`, `.yml`, `.log`, `.rst`, `.rtf`. PDFs, images, archives, audio, and other binary payloads are rejected at ingestion even though `DatabankDocumentCreateInput.data` is typed `string | Uint8Array`. For non-text persistence, use `api.files.*` (UTF-8 strings — base64-encode binary first) or `api.images.*` (raw image bytes). Max 10 MB per document.
+
 | Method | Args | Description |
 |---|---|---|
 | async `list` | options? | List databanks (paginated). Options: limit, offset, scope, scopeId. Returns { data: DatabankInfo[], total }. Requires databanks permission. |
@@ -357,6 +362,56 @@ _The same method set applies to each of the 4 namespaces above._
 | async `create` | input | Create a new regex script. name and findRegex are required; everything else gets host-side defaults (placement: ['ai_output'], scope: 'global', target: 'response', flags: 'gi', etc.). [regex_scripts] |
 | async `update` | scriptId, input | Update a regex script. All fields optional; only provided fields are touched. Throws if the script is not found. [regex_scripts] |
 | async `delete` | scriptId | Delete a regex script. Returns true if the row was deleted. [regex_scripts] |
+
+## api.images
+
+> **Concepts:** Thin wrapper over Lumiverse's image store. Use cases: persist generated / fetched / pasted images and obtain an `imageId` that can be passed to `api.theme.extractColors` for palette derivation, stored on a character avatar, or attached to a databank document. **Two upload paths**: `upload({data: Uint8Array, ...})` for raw bytes (sourceable from `api.utils.http.*` with `responseType: 'arraybuffer'`, `api.utils.image.dataUrlToBytes(...).data`, `api.files.*`, etc.); `uploadFromDataUrl(dataUrl, options?)` for `data:image/...;base64,...` URLs. Both return `ImageInfo` whose `id` is the persisted UUID. **Distinct from `api.utils.image.*`** — those are CHILD-side byte-manipulation helpers (mime sniff, dataUrl ↔ bytes conversion); `api.images.*` is HOST-side persistence. Requires `images` permission.
+
+| Method | Args | Description |
+|---|---|---|
+| async `upload` | input | Upload raw image bytes to Lumiverse's image store. `input.data` is a Uint8Array (source via api.utils.http.* with responseType:'arraybuffer', api.utils.image.dataUrlToBytes, api.files.*, etc.). Optional: filename, mimeType, ownerCharacterId, ownerChatId. Returns the ImageInfo whose `id` can be passed to api.theme.extractColors or stored on a character avatar. Requires images permission. [images] |
+| async `uploadFromDataUrl` | dataUrl, options? | Convenience: upload from a `data:image/...;base64,...` data URL. Optional options: originalFilename, ownerCharacterId, ownerChatId. Returns ImageInfo. Requires images permission. [images] |
+| async `get` | imageId | Look up an image by id. Returns ImageInfo or null. Requires images permission. [images] |
+| async `delete` | imageId | Delete an image by id. Returns `true` if a row was removed. Requires images permission. [images] |
+
+## api.imageGen
+
+> **Concepts:** Image-generation surface. `generate({prompt, ...})` fires against the user's configured connection profiles (the same profiles the Lumiverse UI uses for image generation) and returns `ImageGenResult { imageDataUrl, model, provider, imageId?, imageUrl? }`. **`imageId` is the integration seam** — pass to `api.images.get`, `api.theme.extractColors`, or `spindle.characters.setAvatar` to compose with the rest of the API. `imageUrl` is an auth-free public URL suitable for `api.ui.pushNotification({image: result.imageUrl})`. **Provider/connection metadata** via `getProviders` (capability schemas — drive parameter UIs), `listConnections` / `getConnection` (connection picker UIs; API keys masked), `getModels` (model picker; dynamic providers fetch live from upstream). **Provider-specific parameters** flow opaquely through `input.parameters` — validate against the provider's `parameters` schema from `getProviders()` if your script accepts user input. **img2img / inpainting** via the `image_array` parameter type: pass arrays of `imageId` strings (`parameters: { input_images: [id1, id2] }`). **Distinct from `api.images.*`** — that one is raw-byte CRUD on already-stored images; this one creates new ones. Requires `image_gen` permission.
+
+| Method | Args | Description |
+|---|---|---|
+| async `generate` | input | Generate an image. `input.prompt` required; optional: connectionId (default: user's default connection), negativePrompt, model, parameters (provider-specific — validate against the provider's `parameters` schema from getProviders() if your script accepts user input), ownerCharacterId, ownerChatId. Returns ImageGenResult { imageDataUrl, model, provider, imageId?, imageUrl? } — `imageId` is the canonical handle accepted by api.images.get / api.theme.extractColors / characters.setAvatar; `imageUrl` is an auth-free public URL suitable for api.ui.pushNotification({image:...}). For img2img / inpainting, pass `parameters: { input_images: [imageId, ...] }`. Requires image_gen permission. [image_gen] |
+| async `getProviders` | — | List all image-generation providers available on this Lumiverse install along with their capability schemas. Each provider's `capabilities.parameters` describes the supported `parameters` for generate() calls against that provider's connections — use to drive dynamic parameter UIs. Requires image_gen permission. [image_gen] |
+| async `listConnections` | — | List the user's image-gen connection profiles. API keys are never exposed — only `hasApiKey: boolean`. Use to populate a connection picker UI. Requires image_gen permission. [image_gen] |
+| async `getConnection` | connectionId | Get a single image-gen connection profile by id. Returns ImageGenConnectionInfo or null. Requires image_gen permission. [image_gen] |
+| async `getModels` | connectionId | List the models available on a connection profile. For dynamic-list providers, this fetches live from the upstream API (network round-trip). Static-list providers return their capabilities.staticModels directly. Returns Array<{id, label}>. Requires image_gen permission. [image_gen] |
+
+## api.oauth
+
+> **Concepts:** OAuth callback surface — the **only inbound-HTTP hook** Spindle exposes to extensions. Three primitives: `onCallback(handler)` registers a handler for this extension's OAuth redirect URL, `getCallbackUrl()` returns the URL path to use as `redirect_uri`, `createState()` mints a CSRF state nonce. **Single handler per extension** (host stores in a module-scope ref; last-wins). LumiScript adds a `spindle.log.warn` on cross-script or same-script-re-register collisions — non-terminating; the host's behavior is preserved, only the silent overwrite is surfaced. **Wrapper is intentionally thin** — everything beyond these primitives (constructing the authorize URL, exchanging the code for a token, persisting + refreshing the token) is the script's responsibility. Pair with `api.utils.http` (`cors_proxy` + `allowDangerous`) for token-endpoint POSTs and `api.enclave` for encrypted token persistence. PKCE cookbook recipe deferred to v1.0 docs pass. Requires `oauth` permission.
+
+**Surfacing the authorize URL.** Scripts run server-side in the Bun subprocess — there is NO `window.open` and no programmatic browser-tab control. To prompt the user to visit the authorize URL, use one of: (a) `api.ui.showAdvancedModal({title:'Authorize', items:[{kind:'html', html:'<a href="..." target="_blank">Click to authorize</a>'}]})` (requires `app_manipulation`); (b) `api.ui.toast('Open this URL: '+authorizeUrl, 'info')` for a passive notice; (c) `api.ui.pushNotification({title:'Authorize required', body:authorizeUrl, actionUrl: authorizeUrl})` for an OS notification (requires `push_notification`); (d) inject a button into the host shell via `api.ui.dom.inject` (requires `app_manipulation`).
+
+**Composing the full `redirect_uri`.** `getCallbackUrl()` returns a host-relative path (e.g. `/api/spindle-oauth/lumiscript/callback`); the OAuth provider needs the absolute URL. Scripts can't introspect the Lumiverse origin at runtime — pass it as a config constant in the script source, or store via `api.variables.global` from a one-time setup script.
+
+| Method | Args | Description |
+|---|---|---|
+| `onCallback` | handler | Register a callback handler for this extension's OAuth redirect URL. Handler receives the URL query params as Record<string, string>; optional return { html } becomes the response body shown in the user's browser tab. **Single handler per extension** (host stores in a module-scope ref; last-wins). LumiScript emits a `spindle.log.warn` on cross-script or same-script-re-register collisions — non-terminating; the host's last-wins behavior is preserved. Returns a sync unsubscribe fn (wrapped in Promise per the IPC boundary). Requires oauth permission. [oauth] |
+| async `getCallbackUrl` | — | Get the host-relative callback URL path (e.g. `/api/spindle-oauth/lumiscript/callback`). Stable per-extension; use as the `redirect_uri` in your authorize URL construction. Async on the LumiScript side due to IPC boundary even though the host method is sync. Requires oauth permission. [oauth] |
+| async `createState` | — | Mint a CSRF state nonce. Pass to your authorize URL as `state=...`; the host verifies the returned state at callback time and rejects mismatches before invoking your handler. Requires oauth permission. [oauth] |
+
+## api.theme
+
+> **Concepts:** Lumiverse theme manipulation surface. Three usage tiers, increasing in flexibility: **simple** — `applyPalette({accent: {h, s, l}})` and let Lumiverse generate the full coherent ~80+ CSS variable set; **mode-aware** — `apply({variablesByMode: {dark: {...}, light: {...}}})` and the host dispatches per-mode at apply time; **expert** — `generateVariables(config)` → tweak → `apply({variables: ...})` for full programmatic control. **Per-script attribution**: multiple LumiScript scripts can apply themes concurrently — LumiScript maintains a per-script override registry and merges before pushing to spindle. Conflict resolution: per-key last-applied-wins for variables, most-recent-script-wins for palette. Auto-cleared on script disable / delete (no manual `clear()` needed for normal disable flows). **Cookbook pattern for interactive UI scripts**: scripts that combine theme apply with interactive DOM should clear their theme in the close / dismiss handler symmetric to DOM removal — `clear()` drops just this script's contributions, other scripts' themes survive. `extractColors(imageId)` pairs cleanly with `applyPalette({accent: result.dominantHsl})` for image-driven theming (avatar-themed UI, dynamic mood theming, etc.). Requires `app_manipulation` permission.
+
+| Method | Args | Description |
+|---|---|---|
+| async `apply` | overrides | Apply CSS variable overrides on top of the user's current theme. `overrides.variables` is a flat map applied regardless of mode; `overrides.variablesByMode.{dark,light}` is mode-selected at apply time by the host. LumiScript maintains per-script attribution — multiple scripts' apply calls merge with per-key last-applied-wins semantics. Requires app_manipulation permission. [app_manipulation] |
+| async `applyPalette` | palette \| null | Apply a palette-driven theme. `palette.accent` is `{h, s, l}` and Lumiverse generates the full variable set coherently, preserving the user's glass/radius/font/UI-scale. Pass `null` to drop this script's palette contribution. Across LumiScript scripts: most-recent-script-wins. Requires app_manipulation permission. [app_manipulation] |
+| async `clear` | — | Drop this script's contributions from the per-script override registry, re-merge, push the post-clear result to spindle.theme.{apply,applyPalette}. Auto-called on script disable / delete. Requires app_manipulation permission. [app_manipulation] |
+| async `getCurrent` | — | Get a read-only snapshot of the user's current theme configuration (NOT including any extension overrides). Returns ThemeInfo with id, name, mode ('light' \| 'dark'), accent (HSL), enableGlass, radiusScale, fontScale, uiScale, characterAware. Requires app_manipulation permission. [app_manipulation] |
+| async `extractColors` | imageId | Extract a color palette from an image stored in Lumiverse's image system. `imageId` is a host-side UUID (sources: `character.imageId`, `api.images.upload(...).id`). Returns ColorExtractionInfo with dominant + per-region RGB + flatness scores + isLight + dominantHsl (ready to pass to applyPalette). Throws if the id is unknown. Requires app_manipulation permission. [app_manipulation] |
+| async `generateVariables` | config | Generate the full set of Lumiverse CSS variables from a theme config without applying them. Pass the result to apply({variables}) for a complete coherent override (or tweak individual keys before applying). config.accent + config.mode required; glass/radius/font/UI-scale/baseColors/statusColors optional. Requires app_manipulation permission. [app_manipulation] |
 
 ## api.council
 
@@ -485,11 +540,11 @@ Lumiverse + LumiScript lifecycle events. Scripts react to these by being **wired
 | `ls:startup` | { __event: "ls:startup" } | Per-script when the script enters the active state: at LumiScript boot (extension enable / app start) AND after the user toggles the script from disabled→enabled. Symmetric partner to `ls:teardown`. Use for tool registration, cache pre-warm, broadcast subscription setup, and other init that should run whenever the script becomes runnable. On re-enable the case body re-runs in full — bottom-of-body `api.broadcast.on(...)` calls also re-execute, re-registering the subscriptions disable's cleanup wiped, so the case body itself can be empty if all you need is the body firing. |
 | `ls:teardown` | { reason: 'disabled' \| 'deleted', scriptId, scriptName } | Per-script when the script is disabled or deleted. Use for cleanup. |
 | `ls:reload` | { reason: 'autosave' \| 'manual', previousCodeHash, currentCodeHash, previousLength, currentLength, triggeredAt } | After a code edit IF the script opts in via the `// @ls:reload-on-edit` directive (~500ms debounce). Body re-runs in its existing worker so registered handlers refresh their closures. Also fires on click of the editor topbar Reload button (manual — bypasses the directive check). Branch on `data.__event === "ls:reload"` to detect. |
-| `MESSAGE_SENT` | { chatId, message } | Once per **user**-initiated send. Does NOT fire for assistant-side messages — use `GENERATION_ENDED` for those. |
-| `MESSAGE_EDITED` | { chatId, message } |  |
+| `MESSAGE_SENT` | { chatId, message: ChatMessage } | Once per **user**-initiated send. Does NOT fire for assistant-side messages — use `GENERATION_ENDED` for those. Note: `message` does NOT carry the active character — resolve via `api.chats.get(chatId).then(c => c.characterId)` then `api.characters.get(characterId)`. |
+| `MESSAGE_EDITED` | { chatId, message: ChatMessage } |  |
 | `MESSAGE_DELETED` | { chatId, messageId } |  |
-| `MESSAGE_SWIPED` | { chatId, message, action, swipeId, previousSwipeId? } | Twice per swipe-with-regen (initiation + completion); once for swipe-without-regen. |
-| `SWIPE_EDITED` | { chatId, message, previousSwipeId } |  |
+| `MESSAGE_SWIPED` | { chatId, message: ChatMessage, action, swipeId, previousSwipeId? } | Twice per swipe-with-regen (initiation + completion); once for swipe-without-regen. |
+| `SWIPE_EDITED` | { chatId, message: ChatMessage, previousSwipeId } |  |
 | `CHARACTER_MESSAGE_RENDERED` | { chatId, messageId } |  |
 | `USER_MESSAGE_RENDERED` | { chatId, messageId } |  |
 | `GENERATION_STARTED` | { generationId, chatId, model } |  |
@@ -497,15 +552,15 @@ Lumiverse + LumiScript lifecycle events. Scripts react to these by being **wired
 | `GENERATION_STOPPED` | { generationId, chatId, content } |  |
 | `STREAM_TOKEN_RECEIVED` | { generationId, chatId, token } |  |
 | `CHAT_CHANGED` | { chatId } | Chat **metadata** mutations only (rename, etc.). Does NOT fire on chat open/switch — use `CHAT_SWITCHED` for that. |
-| `CHAT_SWITCHED` | { chatId: string \| null }  // null on return-to-home | Active chat opens, switches, or closes (chatId becomes null on return-to-home). |
-| `CHARACTER_EDITED` | { id, character } |  |
+| `CHAT_SWITCHED` | { chatId: string \| null }  // null on return-to-home — NO characterId on the payload | Active chat opens, switches, or closes (chatId becomes null on return-to-home). **Important — Phase-1/Phase-2 character resolution**: triggers fire during Phase 1 (chatId set sync); characterId is resolved Phase-2 ~10–15 ms later via async lookup. So `data.characterId` does NOT exist on the payload, and reading the active-context characterId at trigger-fire time can see null/stale. **Pattern**: call `api.chats.getActive()` and read `chat.characterId` — that hits the host's live state which has it populated regardless of Phase-2 status. Caught during v1.0.0-rc.5 manual testing. |
+| `CHARACTER_EDITED` | { id, character: Character } |  |
 | `CHARACTER_DELETED` | { id } |  |
 | `CHARACTER_DUPLICATED` | { id, newId } |  |
-| `PERSONA_CHANGED` | { persona } |  |
-| `WORLD_INFO_ACTIVATED` | { entries } | World Info entries were activated during prompt assembly. |
-| `WORLD_BOOK_CHANGED` | { id, worldBook } | Coarse-grained: world book was created, updated, had its semantic-activation toggled, or had any of its entries mutated (entry create / update / delete / reorder / bulk-op / import). Fires alongside `WORLD_BOOK_ENTRY_CHANGED` on per-entry mutations — handlers subscribed to both see two events per change. Bulk imports suppress per-entry events and emit this once at the end. |
+| `PERSONA_CHANGED` | { persona: Persona } |  |
+| `WORLD_INFO_ACTIVATED` | { entries: WorldInfoEntry[] } | World Info entries were activated during prompt assembly. |
+| `WORLD_BOOK_CHANGED` | { id, worldBook: WorldInfo } | Coarse-grained: world book was created, updated, had its semantic-activation toggled, or had any of its entries mutated (entry create / update / delete / reorder / bulk-op / import). Fires alongside `WORLD_BOOK_ENTRY_CHANGED` on per-entry mutations — handlers subscribed to both see two events per change. Bulk imports suppress per-entry events and emit this once at the end. |
 | `WORLD_BOOK_DELETED` | { id } | World book was deleted. |
-| `WORLD_BOOK_ENTRY_CHANGED` | { id, worldBookId, entry } | Entry was created or updated. Does NOT fire during bulk imports — those emit a single `WORLD_BOOK_CHANGED` for the parent book instead. Subscribe to `WORLD_BOOK_CHANGED` in addition if you need to catch imported entries. |
+| `WORLD_BOOK_ENTRY_CHANGED` | { id, worldBookId, entry: WorldInfoEntry } | Entry was created or updated. Does NOT fire during bulk imports — those emit a single `WORLD_BOOK_CHANGED` for the parent book instead. Subscribe to `WORLD_BOOK_CHANGED` in addition if you need to catch imported entries. |
 | `WORLD_BOOK_ENTRY_DELETED` | { id, worldBookId } | Entry was deleted. |
 | `SETTINGS_UPDATED` | { key, value } |  |
 | `PRESET_CHANGED` | { presetId } |  |
@@ -679,6 +734,21 @@ Public types referenced by `api.*` method signatures. **Each type is in the look
 - `DatabankDocumentCreateInput` — Passed to api.databanks.documents.create(databankId, input). Upload returns immediately with status='pending' — use waitUntilReady() to await ingestion. Max size 10 MB.
 - `DatabankDocumentUpdateInput` — Passed to api.databanks.documents.update(documentId, input). The URL-safe slug regenerates automatically from the new name.
 - `DatabankWaitUntilReadyOptions` — Optional polling parameters for api.databanks.documents.waitUntilReady(documentId, options?). Throws on timeout, error status, or document deletion.
+- `ImageInfo` — Returned by api.images.upload / uploadFromDataUrl / get. Camel-case mirror of ImageDTO from Spindle.
+- `ImageUploadInput` — Passed to api.images.upload(input).
+- `ImageUploadFromDataUrlOptions` — Passed to api.images.uploadFromDataUrl(dataUrl, options?). The data URL itself carries the bytes + MIME; these options only set ownership / display metadata.
+- `ImageGenInput` — Passed to api.imageGen.generate(input). Mirrors ImageGenRequestDTO with camel-case field names on the LumiScript surface.
+- `ImageGenResult` — Returned by api.imageGen.generate(input). The `imageId` is the integration seam — pass to api.images.get / api.theme.extractColors / spindle.characters.setAvatar. Use `imageDataUrl` for inline rendering (no auth needed) or `imageUrl` for push-notification image fields.
+- `ImageGenProviderInfo` — Returned by api.imageGen.getProviders(). Each provider declares its capability schema; drive dynamic parameter UIs from `capabilities.parameters`.
+- `ImageGenConnectionInfo` — Returned by api.imageGen.listConnections() / getConnection(). API keys are NEVER exposed — only `hasApiKey: boolean` indicates presence.
+- `ImageGenParameterSchema` — One parameter's contract within an ImageGenProviderInfo.capabilities.parameters record. Use to drive dynamic parameter UIs or validate user-supplied args before calling generate().
+- `ColorRGB` — RGB color value, 0–255 per channel. Used in ColorExtractionInfo.dominant / regions.* / average.
+- `ColorHSL` — HSL color value. Used in ColorExtractionInfo.dominantHsl + ThemePaletteConfig.accent + ThemeInfo.accent. Drop-in compatible across all three — the typical pipeline is `extractColors(imageId).then(p => applyPalette({accent: p.dominantHsl}))`.
+- `ColorExtractionInfo` — Returned by api.theme.extractColors(imageId). `dominantHsl` is the ready-to-pass accent for api.theme.applyPalette({accent: ...}).
+- `ThemeOverride` — Passed to api.theme.apply(overrides). Two-axis: `variables` applies regardless of mode, `variablesByMode` applies per dark/light at apply time. LumiScript maintains per-script attribution — multiple scripts' apply() calls merge with per-key last-applied-wins semantics.
+- `ThemePaletteConfig` — Passed to api.theme.applyPalette(palette | null). Lumiverse generates the full coherent variable set from the accent — preserves the user's glass / radius / font / UI-scale settings. Across LumiScript scripts: most-recent-script-wins. Pass `null` to drop this script's palette contribution.
+- `ThemeInfo` — Returned by api.theme.getCurrent(). Read-only snapshot of the user's current theme configuration (NOT including any extension overrides).
+- `ThemeVariablesConfig` — Passed to api.theme.generateVariables(config). Mirrors the inputs that Lumiverse's theme engine uses to produce the full set of ~80+ CSS variables. The result can be passed to apply({variables}) for a complete coherent override, or tweaked individually before applying.
 
 ## Built-in libraries
 
