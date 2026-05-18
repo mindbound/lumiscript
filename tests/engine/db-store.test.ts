@@ -109,6 +109,92 @@ describe('matchesFilter', () => {
   });
 });
 
+// ─── matchesFilter: deep-equality semantics (audit F-H3, v1.0.0-rc.7) ───────
+//
+// `deepEqual` (private to db-store) used to compare nested objects via
+// `JSON.stringify(a) === JSON.stringify(b)`, which made comparisons
+// key-order-sensitive (`{a:1,b:2}` vs `{b:2,a:1}` came back unequal),
+// silently coerced `NaN`/`Infinity` to `null`, and dropped `undefined`
+// properties. These tests pin the v1.0.0-rc.7 structural deep-equal —
+// the public surface is matchesFilter on a nested-object filter value.
+
+describe('matchesFilter — structural deep-equality (F-H3)', () => {
+  test('nested object filter is key-order independent', () => {
+    // Pre-rc.7: this came back as no-match because `JSON.stringify`
+    // serialises in insertion order.
+    const record: DbRecord = {
+      id: 'r1', createdAt: 1, updatedAt: 2,
+      nested: { a: 1, b: 2 },
+    };
+    expect(matchesFilter(record, { nested: { a: 1, b: 2 } })).toBe(true);
+    expect(matchesFilter(record, { nested: { b: 2, a: 1 } })).toBe(true);
+  });
+
+  test('nested arrays still compare position-by-position', () => {
+    const record: DbRecord = {
+      id: 'r1', createdAt: 1, updatedAt: 2,
+      arr: [1, 2, 3],
+    };
+    expect(matchesFilter(record, { arr: [1, 2, 3] })).toBe(true);
+    expect(matchesFilter(record, { arr: [3, 2, 1] })).toBe(false);  // order matters in arrays
+    expect(matchesFilter(record, { arr: [1, 2] })).toBe(false);     // length matters
+  });
+
+  test('deep nested objects compare recursively', () => {
+    const record: DbRecord = {
+      id: 'r1', createdAt: 1, updatedAt: 2,
+      config: { ui: { theme: 'dark', size: { width: 100, height: 50 } } },
+    };
+    expect(matchesFilter(record, {
+      config: { ui: { theme: 'dark', size: { width: 100, height: 50 } } },
+    })).toBe(true);
+    // Different deep value → no match
+    expect(matchesFilter(record, {
+      config: { ui: { theme: 'dark', size: { width: 100, height: 51 } } },
+    })).toBe(false);
+    // Different top-level key order is still a match
+    expect(matchesFilter(record, {
+      config: { ui: { size: { height: 50, width: 100 }, theme: 'dark' } },
+    })).toBe(true);
+  });
+
+  test('NaN-vs-NaN compares equal (treated as identical for filtering)', () => {
+    const record: DbRecord = {
+      id: 'r1', createdAt: 1, updatedAt: 2,
+      score: NaN,
+    };
+    expect(matchesFilter(record, { score: NaN })).toBe(true);
+  });
+
+  test('NaN vs Infinity is no longer falsely equal', () => {
+    // Pre-rc.7: both serialised to `null`, so they compared equal under
+    // JSON.stringify equality. Post-rc.7: typed comparison catches this.
+    const record: DbRecord = {
+      id: 'r1', createdAt: 1, updatedAt: 2,
+      score: NaN,
+    };
+    expect(matchesFilter(record, { score: Infinity })).toBe(false);
+  });
+
+  test('different key sets at the same level → no match', () => {
+    const record: DbRecord = {
+      id: 'r1', createdAt: 1, updatedAt: 2,
+      nested: { a: 1, b: 2 },
+    };
+    expect(matchesFilter(record, { nested: { a: 1 } })).toBe(false);            // record has extra key
+    expect(matchesFilter(record, { nested: { a: 1, b: 2, c: 3 } })).toBe(false); // filter has extra key
+  });
+
+  test('object equality vs primitive equality at the same path', () => {
+    const record: DbRecord = {
+      id: 'r1', createdAt: 1, updatedAt: 2,
+      nested: { a: 1 },
+    };
+    // Primitive `1` does not match the nested object `{a: 1}`
+    expect(matchesFilter(record, { nested: 1 } as unknown as DbFilter)).toBe(false);
+  });
+});
+
 // ─── matchesFilter: operator envelopes ───────────────────────────────────────
 
 describe('matchesFilter — Mongo-style operators', () => {

@@ -6185,7 +6185,7 @@
         "field": "update(html)",
         "type": "void",
         "optional": false,
-        "desc": "Replace the inner HTML of the injected element."
+        "desc": "Replace the inner HTML of the injected element. **Does NOT run DOMPurify** — unlike `api.ui.dom.inject()`, this path writes `innerHTML` directly. Fine for script-authored template strings; sanitize manually before passing HTML built from LLM output, external HTTP fetches, or user input. v1.0.0-rc.7 doc clarification."
       },
       {
         "field": "remove()",

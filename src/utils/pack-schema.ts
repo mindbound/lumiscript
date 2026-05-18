@@ -39,9 +39,19 @@ const MetadataSchema = z.object({
 
 // ─── Canonical pack format (in-app import/export) ────────────────────────────
 
+/**
+ * Per-entry `code` size cap (v1.0.0-rc.7 — audit F-M8). The outer pack.json
+ * is already capped at 1 MB decompressed, but without a per-entry bound a
+ * single malformed / obfuscated payload could fill the envelope — giving
+ * a clean Zod validation error early in the import path is better than
+ * deferring the failure to runtime. 256 KB is generous: the largest scripts
+ * in the canonical examples set are well under 30 KB.
+ */
+const SCRIPT_CODE_MAX_BYTES = 256_000;
+
 const ScriptPackEntrySchema = z.object({
   name: z.string().min(1).max(200),
-  code: z.string(),
+  code: z.string().max(SCRIPT_CODE_MAX_BYTES),
   type: z.enum(['trigger', 'library']),
   triggers: z.array(z.string()).optional(),
   bindings: z.array(BindingSchema).optional(),

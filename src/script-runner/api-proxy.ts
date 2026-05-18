@@ -176,6 +176,34 @@ export const rejectionAttribution = new WeakMap<object, {
   scriptId: string;
 }>();
 
+// ─── Broadcast.emit rate-limit + size cap state (Phase 3d / LOW-01, v1.0.0-rc.7+)
+//
+// Per-script token bucket for `api.broadcast.emit`. Module-scope (NOT
+// per-run) so the rate limit persists across script runs of the same
+// script. Lazy initialization on first emit; stale entries for deleted
+// scripts are a negligible memory footprint (one Map entry = ~few hundred
+// bytes, scripts rarely run-then-permanently-delete in a single session).
+//
+// See `notes/lumiscript-security-audit.md` LOW-01 + the rc.7 audit response.
+
+/** 1 MB JSON-serialised cap (matches `api.scriptStorage` per-value ceiling). */
+const BROADCAST_EMIT_MAX_BYTES = 1_048_576;
+
+/** Sustained emit rate (per second per script). */
+const BROADCAST_EMIT_RATE_PER_SEC = 100;
+
+/** Token-bucket burst capacity (per script). */
+const BROADCAST_EMIT_BURST = 1_000;
+
+interface BroadcastEmitRateState {
+  /** Current available emit tokens. Refilled at `BROADCAST_EMIT_RATE_PER_SEC` per second up to BURST. */
+  tokens:       number;
+  /** Wall-clock ms timestamp of the last token-bucket refill. */
+  lastRefillMs: number;
+}
+
+const broadcastEmitRateState = new Map<string, BroadcastEmitRateState>();
+
 // ─── Advanced-modal child-side state (Phase 9d.4.d) ─────────────────────────
 //
 // Module-scope (cross-run) state for `api.ui.showAdvancedModal()`. Each
@@ -507,7 +535,6 @@ function convertZodToJsonSchemaIfNeeded(schema: unknown): {
 // caller doesn't await; the IPC fires; any failure surfaces silently
 // (matching the canonical contract: these methods don't throw to callers).
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function mkAsync<T extends (...args: any[]) => Promise<any>>(
   dispatch: (method: string, args: unknown[]) => Promise<unknown>,
   method: string,
@@ -515,7 +542,6 @@ function mkAsync<T extends (...args: any[]) => Promise<any>>(
   return ((...args: unknown[]) => dispatch(method, args)) as unknown as T;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function mkSyncVoidFireForget<T extends (...args: any[]) => void>(
   dispatch: (method: string, args: unknown[]) => Promise<unknown>,
   method: string,
@@ -1020,6 +1046,57 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
       // event name), the rejection surfaces in our pending-map's reject
       // path, where the catch swallows it (matching the canonical contract:
       // emit doesn't throw to callers).
+      //
+      // Phase 3d / LOW-01 (v1.0.0-rc.7+) — size cap + per-script rate limit.
+      // Without these, a hostile or buggy script can flood the broadcast bus
+      // with multi-megabyte payloads or thousands of emits/sec and saturate
+      // co-tenant scripts' message-loop time (the bus dispatches subscribers
+      // synchronously per `engine/broadcast-bus.ts:emit`). Cap at proxy entry
+      // (NOT at the bus) so internal `ls:*` events that route through the
+      // bus are unaffected. Errors throw synchronously from `emit()` —
+      // caller can `try { emit(...) } catch { ... }` to absorb. Same shape
+      // as `api.scriptStorage.set`'s capacity-exceeded throw.
+      let payloadBytes: number;
+      try {
+        payloadBytes = payload === undefined ? 0 : JSON.stringify(payload).length;
+      } catch (err) {
+        const errMessage = err instanceof Error ? err.message : String(err);
+        throw new Error(
+          `api.broadcast.emit: payload is not JSON-serialisable (${errMessage}). ` +
+          `Broadcast payloads must round-trip through structured-clone IPC.`,
+        );
+      }
+      if (payloadBytes > BROADCAST_EMIT_MAX_BYTES) {
+        throw new Error(
+          `api.broadcast.emit: payload size cap exceeded — ` +
+          `${payloadBytes} bytes serialised (cap: ${BROADCAST_EMIT_MAX_BYTES / 1024 / 1024} MB). ` +
+          `Use api.db.* or api.scriptStorage for the data and broadcast a small notification instead.`,
+        );
+      }
+      const now = Date.now();
+      const state = broadcastEmitRateState.get(ctx.scriptId)
+        ?? { tokens: BROADCAST_EMIT_BURST, lastRefillMs: now };
+      const elapsedSec = (now - state.lastRefillMs) / 1000;
+      state.tokens = Math.min(
+        BROADCAST_EMIT_BURST,
+        state.tokens + elapsedSec * BROADCAST_EMIT_RATE_PER_SEC,
+      );
+      state.lastRefillMs = now;
+      if (state.tokens < 1) {
+        // Pre-set state back so refill timer keeps advancing on subsequent
+        // throws — otherwise rapid-fire attempts would all see the same
+        // lastRefillMs and never recover.
+        broadcastEmitRateState.set(ctx.scriptId, state);
+        throw new Error(
+          `api.broadcast.emit: rate limit exceeded — ` +
+          `max ${BROADCAST_EMIT_RATE_PER_SEC}/sec sustained, ${BROADCAST_EMIT_BURST} burst per script. ` +
+          `Batch high-frequency events (e.g. coalesce on a 100ms timer) or push the data to api.db.* ` +
+          `and emit a single "data updated" notification.`,
+        );
+      }
+      state.tokens -= 1;
+      broadcastEmitRateState.set(ctx.scriptId, state);
+
       trackChain(dispatch('broadcast.emit', [event, payload]).catch(() => {
         // Silent — the host will have logged any real issue.
       }));
@@ -1396,7 +1473,6 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
       };
       trackChain(dispatch('ui.dom.inject', [target, html, fullOptions]).catch((err) => {
         try {
-          // eslint-disable-next-line no-console
           console.warn(
             `api.ui.dom.inject: dispatch failed (${err instanceof Error ? err.message : String(err)}); ` +
             `subsequent handle method calls will no-op via parent-side lookup miss`,
@@ -1415,7 +1491,6 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
       };
       trackChain(dispatch('ui.dom.injectAtMessage', [messageId, html, fullOptions]).catch((err) => {
         try {
-          // eslint-disable-next-line no-console
           console.warn(
             `api.ui.dom.injectAtMessage: dispatch failed (${err instanceof Error ? err.message : String(err)}); ` +
             `subsequent handle method calls will no-op via parent-side lookup miss`,
@@ -1606,7 +1681,6 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
           [elementId, target, html, fullOptions],
         )).catch((err) => {
           try {
-            // eslint-disable-next-line no-console
             console.warn(
               `DOMHandle.injectChild: dispatch failed (${err instanceof Error ? err.message : String(err)}); ` +
               `subsequent child-handle method calls will no-op via parent-side lookup miss`,
@@ -1926,7 +2000,6 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
         state.listeners.clear();
         advancedModalState.delete(modalId);
         try {
-          // eslint-disable-next-line no-console
           console.warn(
             `api.ui.showAdvancedModal: open dispatch failed (${err instanceof Error ? err.message : String(err)}); ` +
             `handle dismissed with reason='teardown'`,
@@ -2039,7 +2112,6 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
         // achieves that without further coordination.
         destroyedRef.current = true;
         try {
-          // eslint-disable-next-line no-console
           console.warn(
             `api.ui.registerInputBarAction: register dispatch failed (${err instanceof Error ? err.message : String(err)}); ` +
             `handle methods will no-op`,
@@ -2215,7 +2287,6 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
       ]).catch((err) => {
         destroyedRef.current = true;
         try {
-          // eslint-disable-next-line no-console
           console.warn(
             `api.ui.createFloatWidget: create dispatch failed (${err instanceof Error ? err.message : String(err)}); ` +
             `handle methods will no-op`,
@@ -2390,7 +2461,6 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
       ]).catch((err) => {
         destroyedRef.current = true;
         try {
-          // eslint-disable-next-line no-console
           console.warn(
             `api.ui.registerDrawerTab: register dispatch failed (${err instanceof Error ? err.message : String(err)}); ` +
             `handle methods will no-op`,

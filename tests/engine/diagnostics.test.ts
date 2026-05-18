@@ -44,7 +44,6 @@ function makeDeps(overrides?: Partial<DiagnosticsCollectorDeps> & {
 }): DiagnosticsCollectorDeps {
   const scripts        = overrides?.scripts ?? [];
   const handlerCount   = overrides?.handlerCount ?? 0;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const scriptStorage  = {
     getScripts: () => scripts,
     // v1.0 — diagnostics' Workers row resolves script names via
@@ -54,7 +53,6 @@ function makeDeps(overrides?: Partial<DiagnosticsCollectorDeps> & {
     // can override via `overrides.scriptStorage`.
     getScript:  (id: string) => scripts.find((s) => s.id === id) ?? null,
   } as any;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const triggerRegistry = { handlerCount } as any;
   // Strip our extra fixture keys before spreading.
   const { scripts: _drop1, handlerCount: _drop2, ...rest } = overrides ?? {};

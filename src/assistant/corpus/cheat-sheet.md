@@ -167,15 +167,15 @@ _The same method set applies to each of the 4 namespaces above._
 
 | Method | Args | Description |
 |---|---|---|
-| `uuid` | — | Generate a UUID v4 string. |
-| `shortId` | — | Generate a short random ID (8 chars, URL-safe). |
+| `uuid` | — | Generate a UUID v4 string. Cryptographically random (uses crypto.randomUUID). |
+| `shortId` | — | Generate a short random ID (8 chars, URL-safe). Cryptographically random (derived from crypto.randomUUID). |
 | async `wait` | ms | Pause execution for ms milliseconds. |
-| `random.int` | min, max | Random integer in [min, max] inclusive. |
-| `random.float` | min, max | Random float in [min, max). |
-| `random.pick` | array | Pick a random element from an array. |
-| `random.bool` | — | Random true/false. |
-| `random.chance` | probability | Returns true with probability p (0–1). |
-| `random.shuffle` | array | Return a shuffled copy of the array. |
+| `random.int` | min, max | Random integer in [min, max] inclusive. **NOT cryptographically secure** — uses Math.random for gameplay/UI use cases. For tokens or security-sensitive identifiers use api.utils.uuid / shortId or globalThis.crypto.getRandomValues. |
+| `random.float` | min, max | Random float in [min, max). **NOT cryptographically secure** (Math.random — see random.int). |
+| `random.pick` | array | Pick a random element from an array. **NOT cryptographically secure** (Math.random — see random.int). |
+| `random.bool` | — | Random true/false. **NOT cryptographically secure** (Math.random — see random.int). |
+| `random.chance` | probability | Returns true with probability p (0–1). **NOT cryptographically secure** (Math.random — see random.int). |
+| `random.shuffle` | array | Return a shuffled copy of the array. **NOT cryptographically secure** (Math.random — see random.int). |
 | async `http.get` | url, options? | GET request via cors_proxy. Requires allowDangerous. [cors_proxy, + allowDangerous] |
 | async `http.post` | url, body, options? | POST request via cors_proxy. Requires allowDangerous. [cors_proxy, + allowDangerous] |
 | async `http.put` | url, body, options? | PUT request via cors_proxy. Requires allowDangerous. [cors_proxy, + allowDangerous] |

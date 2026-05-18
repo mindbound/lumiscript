@@ -218,7 +218,6 @@ const consoleContext = new AsyncLocalStorage<(e: ConsoleEntry) => void>();
 
 // ─── Async function constructor (exported for use by TriggerRegistry) ─────────
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export const AsyncFunctionCtor = Object.getPrototypeOf(async function () {}).constructor as any;
 
 // ─── Sandbox globals ──────────────────────────────────────────────────────────
@@ -281,7 +280,6 @@ export async function executeScript(
   try {
     const safeFetch = buildSafeFetch(script);
 
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
     const fn: (...args: unknown[]) => Promise<unknown> = new AsyncFunctionCtor(
       'api',
       'data',
@@ -503,7 +501,6 @@ export function buildScriptNamespace(
         const silentConsole = { log: () => {}, warn: () => {}, error: () => {}, info: () => {} };
         const libSafeFetch = buildSafeFetch(library);
 
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-call
         const libFn: (...args: unknown[]) => Promise<unknown> = new AsyncFunctionCtor(
           'api', 'data', 'script', '__console', 'exports', 'module',
           'fetch',   // shadow: library's own allowDangerous flag governs access

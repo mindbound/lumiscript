@@ -144,14 +144,10 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
 
       switch (msg.type) {
         case 'scripts_updated':
-          // eslint-disable-next-line no-console
-          console.log(`[LumiScript] scripts_updated: ${msg.scripts.length} script(s)`);
           setScripts(msg.scripts);
           break;
 
         case 'script_patched': {
-          // eslint-disable-next-line no-console
-          console.log(`[LumiScript] script_patched: id=${msg.script.id}, codeLen=${msg.script.code?.length ?? -1}`);
           setScripts(prev => prev.map(s => s.id === msg.script.id ? msg.script : s));
           break;
         }
@@ -441,6 +437,50 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
       sendToBackend({ type: 'count_collection', path: dropTarget.path });
     }
   }, [dropTarget, sendToBackend]);
+
+  // MED-01 sanitiser-strip listener (Phase 3b, v1.0.0-rc.7+).
+  // `src/dom-handler.ts` runs DOMPurify on `dom_update` and `injectChild`
+  // payloads; when content is stripped, it dispatches a window CustomEvent
+  // with `{scriptId, removedCount, summary}`. We surface that as a
+  // `type: 'security'` entry in the affected script's editor console so
+  // authors get a clear deprecation signal when their inline event-handler
+  // attributes (`onclick=`, `onerror=`, ...) no longer fire. Mirror of the
+  // `console_entry` path above — same MAX cap, same truncation notice.
+  useEffect(() => {
+    const handler = (event: Event): void => {
+      const detail = (event as CustomEvent<{ scriptId?: string; removedCount?: number; summary?: string }>).detail;
+      if (!detail || typeof detail.scriptId !== 'string') return;
+      const { scriptId, removedCount, summary } = detail;
+      const MAX_CONSOLE_ENTRIES = settings.consoleHistoryLimit;
+      setExecState(prev => {
+        const existing = prev.consoleHistory[scriptId] ?? [];
+        if (existing.length >= MAX_CONSOLE_ENTRIES) return prev;
+        const isLastSlot = existing.length === MAX_CONSOLE_ENTRIES - 1;
+        const entry = isLastSlot
+          ? {
+              timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
+              type: 'warn' as const,
+              message: `[Console output truncated at ${MAX_CONSOLE_ENTRIES} entries. Clear the console to resume capture.]`,
+            }
+          : {
+              timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
+              type: 'security' as const,
+              message:
+                `[security] DOM sanitiser stripped ${removedCount ?? '?'} item(s) from injected HTML: ${summary ?? '(unknown)'}. ` +
+                `Use DOMHandle.on(event, handler) instead of inline event-handler attributes (onclick=, onerror=, etc.).`,
+            };
+        return {
+          ...prev,
+          consoleHistory: {
+            ...prev.consoleHistory,
+            [scriptId]: [...existing, entry],
+          },
+        };
+      });
+    };
+    window.addEventListener('ls:dom-sanitizer-strip', handler);
+    return () => window.removeEventListener('ls:dom-sanitizer-strip', handler);
+  }, [settings.consoleHistoryLimit]);
 
   const clearConsole = useCallback((scriptId: string) => {
     setExecState(prev => ({

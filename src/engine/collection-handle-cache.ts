@@ -35,7 +35,6 @@
  * of script — mirrors the rpc-store / tool-store pattern.
  */
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyCollection = unknown;
 
 // scriptId → ((scope::path) → Collection wrapper)

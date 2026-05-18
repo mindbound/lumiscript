@@ -17,9 +17,10 @@ import {
   shouldPreventDefault,
   pickReadTarget,
   buildSerializedDOMElement,
+  buildSanitizerStripDetail,
+  type SanitizerRemovedEntry,
 } from '../src/dom-handler.js';
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 const ev = (props: Record<string, any>) => props as unknown as Event;
 
 describe('shouldPreventDefault — boolean rules', () => {
@@ -378,5 +379,97 @@ describe('buildSerializedDOMElement — snapshot shape', () => {
     el.textContent = null;
     const snap = buildSerializedDOMElement(el as unknown as Element, false);
     expect(snap.text).toBe('');
+  });
+});
+
+// ─── buildSanitizerStripDetail (Phase 3b / MED-01, v1.0.0-rc.7+) ────────────
+//
+// Pure function that builds the `ls:dom-sanitizer-strip` event payload from
+// `DOMPurify.removed`. Tests exercise it with synthetic entries — no DOM,
+// no DOMPurify dependency at test time. The actual DOMPurify integration is
+// verified by the frontend build (`src/dom-handler.ts:sanitizeUserHtml`)
+// and by manual / E2E testing in a real browser; this unit fence catches
+// regressions in the summary-building / dispatch-eligibility logic.
+
+describe('buildSanitizerStripDetail', () => {
+  test('returns null when nothing was removed', () => {
+    expect(buildSanitizerStripDetail('script-1', [])).toBeNull();
+  });
+
+  test('builds a single-element summary', () => {
+    const removed: SanitizerRemovedEntry[] = [{ element: { nodeName: 'IFRAME' } }];
+    const detail = buildSanitizerStripDetail('script-1', removed);
+    expect(detail).toEqual({
+      scriptId:     'script-1',
+      removedCount: 1,
+      summary:      '<iframe>',
+    });
+  });
+
+  test('builds a single-attribute summary', () => {
+    const removed: SanitizerRemovedEntry[] = [{ attribute: { name: 'onerror' } }];
+    const detail = buildSanitizerStripDetail('script-1', removed);
+    expect(detail).toEqual({
+      scriptId:     'script-1',
+      removedCount: 1,
+      summary:      '@onerror',
+    });
+  });
+
+  test('lowercases element names (DOMPurify returns uppercase)', () => {
+    const removed: SanitizerRemovedEntry[] = [
+      { element: { nodeName: 'SCRIPT' } },
+      { element: { nodeName: 'IFRAME' } },
+    ];
+    const detail = buildSanitizerStripDetail('script-1', removed);
+    expect(detail?.summary).toBe('<script>, <iframe>');
+  });
+
+  test('truncates to first 3 + "+N more" suffix', () => {
+    const removed: SanitizerRemovedEntry[] = [
+      { element: { nodeName: 'SCRIPT' } },
+      { attribute: { name: 'onclick' } },
+      { attribute: { name: 'onerror' } },
+      { element: { nodeName: 'IFRAME' } },
+      { attribute: { name: 'onload' } },
+    ];
+    const detail = buildSanitizerStripDetail('script-1', removed);
+    expect(detail).toEqual({
+      scriptId:     'script-1',
+      removedCount: 5,
+      summary:      '<script>, @onclick, @onerror (+2 more)',
+    });
+  });
+
+  test('mixed element + attribute entries', () => {
+    const removed: SanitizerRemovedEntry[] = [
+      { element: { nodeName: 'SCRIPT' } },
+      { attribute: { name: 'onerror' } },
+      { element: { nodeName: 'OBJECT' } },
+    ];
+    const detail = buildSanitizerStripDetail('s', removed);
+    expect(detail?.summary).toBe('<script>, @onerror, <object>');
+  });
+
+  test('skips malformed entries without crashing', () => {
+    // DOMPurify might (theoretically) emit unexpected shapes. The helper
+    // should not throw — it'll just emit a less-informative summary.
+    const removed: SanitizerRemovedEntry[] = [
+      {} as SanitizerRemovedEntry,
+      { element: { nodeName: 'IFRAME' } },
+      { attribute: {} as { name?: string } },
+    ];
+    const detail = buildSanitizerStripDetail('s', removed);
+    expect(detail?.removedCount).toBe(3);
+    // Only the valid IFRAME entry contributes a named token.
+    expect(detail?.summary).toBe('<iframe>');
+  });
+
+  test('preserves scriptId verbatim', () => {
+    const detail = buildSanitizerStripDetail(
+      'spawned-by:scene/encounter-42',
+      [{ attribute: { name: 'onclick' } }],
+    );
+    expect(detail?.scriptId).toBe('spawned-by:scene/encounter-42');
   });
 });

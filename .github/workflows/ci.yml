@@ -1,0 +1,50 @@
+# LumiScript — CI (v1.0.0-rc.7+, audit F-M3)
+#
+# Runs the full build pipeline + test suite on every push and PR. The
+# `bun run build` script chains typecheck:scripts + typecheck + typecheck:test
+# before the three bundle builds, so a single green CI run gates: source
+# typecheck, test typecheck, all three minified bundles emit, and 2300+
+# tests pass.
+#
+# Catches regressions before tagged releases — particularly useful given
+# that one previously-undetected typecheck:test failure had silently masked
+# bundle rebuilds for an entire RC cycle (see notes/ post-mortem). With CI
+# in place, future drift surfaces immediately.
+
+name: CI
+
+on:
+  push:
+    branches: [main, staging]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Audit dependencies (Phase 3d / LOW-05)
+        # Surfaces dep CVEs at PR time rather than at quarterly review. Set
+        # to advisory severity = high so transient low/moderate findings
+        # don't block merge — explicit triage via re-run with `--severity
+        # moderate` for the periodic deeper sweep. Failure here means a
+        # high/critical CVE landed in our dep tree; investigate before
+        # merging.
+        run: bun audit --severity high
+
+      - name: Build (typechecks + bundles)
+        run: bun run build
+
+      - name: Test
+        run: bun test

@@ -13,6 +13,104 @@
 import type { SpindleFrontendContext } from 'lumiverse-spindle-types';
 import type { BackendToFrontend, FrontendToBackend } from './types/messages.js';
 import type { DOMEventData, DOMDelegatedEventData, ConditionalPreventDefault, SerializedDOMElement } from './types/script.js';
+import DOMPurify from 'dompurify';
+
+// ─── HTML sanitisation (MED-01, v1.0.0-rc.7+) ───────────────────────────────
+//
+// `dom_inject` (line ~701) delegates to `ctx.dom.inject`, which runs the
+// host's DOMPurify pass. But `injectChild` (orphan-parent insertion at line
+// ~697) and `dom_update` (innerHTML replacement at line ~836) both reach for
+// `.innerHTML` directly, bypassing the host's sanitiser. Pre-rc.7 those
+// paths trusted user-script content; post-CRIT-01-fix they become the
+// next-easiest exfiltration channel for pack-installed scripts (inline
+// `<img onerror>` etc. can phone home or grab session cookies). See audit
+// MED-01 and `notes/security-hardening-rc7.md` for the full rationale.
+//
+// DOMPurify's defaults already strip every `on*` event handler, `<script>`,
+// `javascript:` URLs, and other XSS vectors. We layer `FORBID_TAGS` on top
+// to mirror the host's three-layer policy from commit `dd6d7cd3`.
+//
+// When sanitisation removes content, we dispatch `ls:dom-sanitizer-strip`
+// as a window CustomEvent (`scriptId`, `summary`). `LumiScriptPanel.tsx`
+// listens and pushes a `type: 'security'` entry into the script's editor
+// console as a deprecation aid — well-written scripts use `DOMHandle.on()`
+// event delegation, but inline handlers in `dom.update()` HTML stop
+// working after rc.7 and need a clear migration signal.
+
+const FORBIDDEN_TAGS = ['iframe', 'frame', 'object', 'embed', 'form'];
+
+/**
+ * Shape of a single entry in `DOMPurify.removed` after a `sanitize()` call.
+ * Either an `element` (whole tag stripped) or an `attribute` (attr stripped
+ * from a still-allowed element). We only consume the fields we surface.
+ * Kept structural rather than importing DOMPurify's internal types so tests
+ * can construct synthetic entries without pulling DOMPurify into the test
+ * env (which would require a DOM polyfill like happy-dom).
+ */
+export interface SanitizerRemovedEntry {
+  element?:   { nodeName?: string };
+  attribute?: { name?: string };
+}
+
+export interface SanitizerStripDetail {
+  scriptId:     string;
+  removedCount: number;
+  summary:      string;
+}
+
+/**
+ * Build the `detail` payload for the `ls:dom-sanitizer-strip` window event
+ * from the `DOMPurify.removed` array. Pure function — no DOM, no DOMPurify
+ * dependency at call time. Exported for unit testing.
+ *
+ * Returns `null` when nothing was removed (callers skip the event dispatch).
+ */
+export function buildSanitizerStripDetail(
+  scriptId: string,
+  removed:  readonly SanitizerRemovedEntry[],
+): SanitizerStripDetail | null {
+  if (removed.length === 0) return null;
+  const names: string[] = [];
+  for (const r of removed.slice(0, 3)) {
+    if (r.attribute?.name) {
+      names.push(`@${r.attribute.name}`);
+    } else if (r.element?.nodeName) {
+      names.push(`<${String(r.element.nodeName).toLowerCase()}>`);
+    }
+  }
+  const more = removed.length > 3 ? ` (+${removed.length - 3} more)` : '';
+  return {
+    scriptId,
+    removedCount: removed.length,
+    summary:      names.join(', ') + more,
+  };
+}
+
+function sanitizeUserHtml(html: string, scriptId: string): string {
+  const clean = DOMPurify.sanitize(html, {
+    FORBID_TAGS: FORBIDDEN_TAGS,
+    // DOMPurify defaults strip all on* event handlers, formaction, srcdoc,
+    // javascript: URLs, data: URLs on dangerous elements, etc.
+  });
+  const detail = buildSanitizerStripDetail(
+    scriptId,
+    (DOMPurify.removed ?? []) as readonly SanitizerRemovedEntry[],
+  );
+  if (detail !== null) {
+    try {
+      window.dispatchEvent(new CustomEvent('ls:dom-sanitizer-strip', { detail }));
+    } catch {
+      // Defensive — failure to dispatch shouldn't block the sanitised
+      // injection. Browser console still gets the warn below.
+    }
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[LumiScript] DOM sanitiser stripped ${detail.removedCount} item(s) from script "${scriptId}" injection: ${detail.summary}. ` +
+      `Use DOMHandle.on(event, handler) instead of inline event-handler attributes.`,
+    );
+  }
+  return String(clean);
+}
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -687,14 +785,14 @@ export function installDOMHandler(
           }
           // Manual insert to mirror Spindle's wrapper nesting. `ctx.dom.inject`
           // uses `document.querySelector` which can't resolve inside orphaned
-          // subtrees, so we can't delegate to it on this path. Note: this
-          // bypasses the host's DOMPurify pass — acceptable here because
-          // the content originates from user-written script code (already
-          // trusted in LumiScript's model); the outer `data-ls-script` attr
-          // still applies for scoped-CSS isolation via `@scope`.
+          // subtrees, so we can't delegate to it on this path. We run our own
+          // DOMPurify sanitisation pass (Phase 3b / MED-01, v1.0.0-rc.7+);
+          // see the `sanitizeUserHtml` helper above for the threat model
+          // and config rationale. The outer `data-ls-script` attr still
+          // applies for scoped-CSS isolation via `@scope`.
           const spindleWrapper = document.createElement('div');
           spindleWrapper.setAttribute('data-spindle-ext', '');
-          spindleWrapper.innerHTML = wrappedHtml;
+          spindleWrapper.innerHTML = sanitizeUserHtml(wrappedHtml, scriptId);
           targetEl.insertAdjacentElement(position as InsertPosition, spindleWrapper);
           el = spindleWrapper;
         } else {
@@ -831,9 +929,11 @@ export function installDOMHandler(
       case 'dom_update': {
         const el = elementMap.get(msg.elementId);
         if (!el) break;
-        // Update the inner content of the wrapper, preserving the wrapper attributes
+        // Update the inner content of the wrapper, preserving the wrapper attributes.
+        // Phase 3b / MED-01 — route through DOMPurify; see `sanitizeUserHtml`.
         const inner = el.querySelector(`[data-ls-el="${msg.elementId}"]`) ?? el;
-        inner.innerHTML = msg.html;
+        const owningScriptId = elementScripts.get(msg.elementId) ?? '<unknown>';
+        inner.innerHTML = sanitizeUserHtml(msg.html, owningScriptId);
         break;
       }
 

@@ -1,0 +1,20 @@
+# LumiScript — editor config (v1.0.0-rc.7+)
+#
+# Formatting is already consistent across the tree (someone has been
+# running formatting locally); this file makes contributor IDE settings
+# auto-align so newcomers don't fight the tree's conventions.
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 2
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+[*.md]
+# Markdown is whitespace-sensitive — preserve trailing spaces (line breaks)
+# and don't enforce final newline (some Markdown tools care about its presence).
+trim_trailing_whitespace = false

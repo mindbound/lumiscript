@@ -67,21 +67,64 @@ function getPath(obj: unknown, path: string): unknown {
 }
 
 /**
- * Deep-equality comparison. Primitives compare by `===`; arrays and objects
- * compare structurally via `JSON.stringify`. Functions / Date / Map / Set
- * are not expected in DB records (JSON-serializable only) and will compare
- * by reference via stringify's fallback behaviour.
+ * Structural deep-equality comparison. Primitives compare by `===` (with
+ * NaN-NaN treated as equal — `Number.isNaN(a) && Number.isNaN(b)`).
+ * Arrays compare length + element-by-element. Objects compare key-set +
+ * value-by-value, **key-order independent**. Functions / Date / Map /
+ * Set / RegExp aren't expected in DB records (JSON-serializable only) and
+ * compare by reference identity through the early `===` short-circuit.
+ *
+ * Pre-rc.7 this used `JSON.stringify` for object equality, which made
+ * the comparison key-order-sensitive (`{a:1,b:2}` vs `{b:2,a:1}` came back
+ * unequal) and silently coerced `NaN`/`Infinity` to `null` + dropped
+ * `undefined` properties. Per audit finding F-H3 — used by every
+ * `api.db.collection.find` / `findOne` / `update` / `delete` / `count`
+ * filter, so the key-order footgun bit real users writing nested filters.
+ *
+ * Note on cycles: this function does not handle reference cycles. DB
+ * records are JSON-serialisable by contract (enforced at insert/update),
+ * so cycles can't legitimately appear. A caller that hands a cyclic
+ * filter would hit a stack overflow rather than infinite-loop, which is
+ * still a clean failure mode.
  */
 function deepEqual(a: unknown, b: unknown): boolean {
   if (a === b) return true;
-  if (a == null || b == null) return false;
+  // NaN-NaN: not equal under `===`, but structurally identical.
+  if (typeof a === 'number' && typeof b === 'number' && Number.isNaN(a) && Number.isNaN(b)) {
+    return true;
+  }
+  if (a === null || b === null || a === undefined || b === undefined) return false;
   if (typeof a !== typeof b) return false;
   if (typeof a !== 'object') return false;
-  try {
-    return JSON.stringify(a) === JSON.stringify(b);
-  } catch {
-    return false;
+
+  const aIsArr = Array.isArray(a);
+  const bIsArr = Array.isArray(b);
+  if (aIsArr !== bIsArr) return false;
+
+  if (aIsArr) {
+    const aa = a as unknown[];
+    const ba = b as unknown[];
+    if (aa.length !== ba.length) return false;
+    for (let i = 0; i < aa.length; i++) {
+      if (!deepEqual(aa[i], ba[i])) return false;
+    }
+    return true;
   }
+
+  // Plain object — compare key sets + values regardless of insertion order.
+  const ao = a as Record<string, unknown>;
+  const bo = b as Record<string, unknown>;
+  const ak = Object.keys(ao);
+  const bk = Object.keys(bo);
+  if (ak.length !== bk.length) return false;
+  for (const k of ak) {
+    // `hasOwn` guards against prototype-chain key collisions
+    // (defence-in-depth — DB records shouldn't have polluted prototypes,
+    // but the json-API audit fix shows this isn't free).
+    if (!Object.prototype.hasOwnProperty.call(bo, k)) return false;
+    if (!deepEqual(ao[k], bo[k])) return false;
+  }
+  return true;
 }
 
 /**

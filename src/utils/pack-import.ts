@@ -5,6 +5,21 @@
  * Extracts and validates a script pack ZIP. Runs entirely on the frontend.
  * Only reads `pack.json` by exact name — all other ZIP entries are ignored,
  * preventing path traversal attacks.
+ *
+ * Zip-bomb DoS mitigation (Phase 3b / MED-02, v1.0.0-rc.7+): uses fflate's
+ * `unzipSync(buf, { filter })` form. The filter callback runs against each
+ * entry's central-directory metadata BEFORE inflation; entries that don't
+ * match the filter are skipped without being decompressed. A malicious
+ * archive containing a 1 MB `pack.json` plus a 100 GB sibling entry no
+ * longer inflates the sibling. Pre-rc.7 used bare `unzipSync(buf)` which
+ * inflates every entry before any cap is applied (audit MED-02).
+ *
+ * Note: the audit's MED-02 §4.6 stated `unzipSync` doesn't support filter
+ * and recommended the async `unzip(buf, opts, cb)` form. Empirically (fflate
+ * 0.8.3) `unzipSync` DOES accept `{ filter }` in its second arg and behaves
+ * identically — verified by probe + the regression test below. The sync
+ * form is simpler and avoids fflate's async-worker code path which has
+ * issues under Bun's test runtime.
  */
 
 import { unzipSync, strFromU8 } from 'fflate';
@@ -26,7 +41,13 @@ export async function parseScriptPack(file: File): Promise<ScriptPackEntry[]> {
 
   let files: Record<string, Uint8Array>;
   try {
-    files = unzipSync(buf);
+    // Inflate `pack.json` only; every other entry is skipped at the
+    // central-directory stage without being decompressed. This is the
+    // zip-bomb mitigation — adversarial sibling entries never reach the
+    // inflate codepath.
+    files = unzipSync(buf, {
+      filter: (file) => file.name === 'pack.json',
+    });
   } catch {
     throw new Error('Could not read ZIP file. Is this a valid .zip archive?');
   }

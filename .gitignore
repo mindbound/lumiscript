@@ -5,3 +5,4 @@ tsconfig.tsbuildinfo
 *.local
 .env
 CLAUDE.md
+package-lock.json

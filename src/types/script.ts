@@ -244,7 +244,7 @@ export const DEFAULT_SETTINGS: LumiScriptSettings = {
 
 // ─── Execution ────────────────────────────────────────────────────────────────
 
-export type ConsoleEntryType = 'log' | 'warn' | 'error' | 'info' | 'success' | 'separator';
+export type ConsoleEntryType = 'log' | 'warn' | 'error' | 'info' | 'success' | 'separator' | 'security';
 
 export interface ConsoleEntry {
   timestamp: string;   // Formatted time string (HH:MM:SS)
@@ -4440,7 +4440,25 @@ export interface DOMDelegatedEventData extends DOMEventData {
 export interface DOMHandle {
   /** Unique element ID (generated or stable). */
   readonly id: string;
-  /** Replace the element's inner HTML with new sanitized content. */
+  /**
+   * Replace the element's inner HTML.
+   *
+   * **Sanitisation note** (v1.0.0-rc.7 doc update — F-M5): unlike
+   * `api.ui.dom.inject()` (which runs the host's DOMPurify pass on the
+   * initial HTML), `handle.update()` writes `innerHTML` directly. This
+   * matches `DOMHandle.injectChild`'s posture and is fine for the
+   * common case where `html` is built from script-authored template
+   * strings — the trust model already runs user-written script code.
+   *
+   * It is **not** safe when `html` is constructed from untrusted input:
+   * - LLM responses fetched via `api.llm.generate*`
+   * - HTML fetched from external URLs via `api.utils.http.get`
+   * - User text from `api.ui.prompt` / chat-input handlers
+   *
+   * For those cases, escape the untrusted parts yourself (template-tag
+   * helpers, manual entity-encoding, or piping through a sanitiser
+   * library bundled into your script) before calling `update()`.
+   */
   update(html: string): void;
   /** Remove the element from the DOM and clean up listeners. */
   remove(): void;

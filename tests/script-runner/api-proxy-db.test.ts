@@ -86,7 +86,6 @@ function fakeCollectionRef(): HandleRef {
 // level requires id/createdAt/updatedAt on `parse()`'s return. We cast
 // in the test to model the real-world JS-script usage (where TS doesn't
 // enforce the constraint) — the proxy doesn't care either way at runtime.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 const DiceRollSchema: any = z.object({
   notation:   z.string(),
   total:      z.number(),

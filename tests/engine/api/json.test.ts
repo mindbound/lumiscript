@@ -1,8 +1,8 @@
 import { describe, test, expect } from 'bun:test';
 import { buildJSONAPI } from '../../../src/engine/api/json.js';
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- The API uses
-// `as never` return types for type flexibility; tests verify runtime behavior.
+// The API uses `as never` return types for type flexibility — these tests
+// verify runtime behaviour rather than type-level contracts, so cast to `any`.
 const json = buildJSONAPI() as any;
 
 // ─── parse ───────────────────────────────────────────────────────────────────
@@ -325,5 +325,174 @@ describe('query', () => {
       { name: 'Bob' },
       { name: 'Charlie' },
     ]);
+  });
+});
+
+// ─── Audit-driven fixes (v1.0.0-rc.7) ────────────────────────────────────────
+
+// F-C1 — `api.json.set` / `get` must reject `__proto__` / `prototype` /
+// `constructor` path segments. Prototype pollution via these keys would
+// corrupt cross-script state on the same worker.
+
+describe('set — prototype-pollution defence (F-C1)', () => {
+  test('throws on a path containing __proto__', () => {
+    expect(() => json.set({}, '__proto__.polluted', 'YES'))
+      .toThrow(/path segment "__proto__" is reserved/);
+  });
+
+  test('throws on a path containing prototype', () => {
+    expect(() => json.set({}, 'foo.prototype.bar', 'YES'))
+      .toThrow(/prototype/);
+  });
+
+  test('throws on a path containing constructor', () => {
+    expect(() => json.set({}, 'constructor.prototype.polluted', 'YES'))
+      .toThrow(/constructor/);
+  });
+
+  test('Object.prototype stays clean after a rejected set attempt', () => {
+    try { json.set({}, '__proto__.polluted', 'YES'); } catch { /* expected */ }
+    expect(({} as any).polluted).toBeUndefined();
+  });
+
+  test('normal nested paths still work', () => {
+    expect(json.set({}, 'a.b.c', 42)).toEqual({ a: { b: { c: 42 } } });
+  });
+
+  test('paths containing similar-but-safe segments are allowed', () => {
+    // Keys with prototype-like substrings shouldn't false-positive — only
+    // the exact `__proto__` / `prototype` / `constructor` segments are reserved.
+    expect(() => json.set({}, 'my_prototype.x', 1)).not.toThrow();
+    expect(() => json.set({}, 'protoType.x', 1)).not.toThrow();
+    expect(() => json.set({}, '__protocol__.x', 1)).not.toThrow();
+  });
+});
+
+describe('get — prototype-pollution defence (F-C1)', () => {
+  test('throws on __proto__ in path', () => {
+    expect(() => json.get({}, '__proto__.toString'))
+      .toThrow(/api\.json\.get/);
+  });
+
+  test('throws on constructor in path', () => {
+    expect(() => json.get({}, 'constructor.name'))
+      .toThrow(/constructor/);
+  });
+
+  test('normal get paths still return values', () => {
+    expect(json.get({ a: { b: 42 } }, 'a.b')).toBe(42);
+  });
+});
+
+// F-H1 — `api.json.merge` must actually deep-merge, not shallow-replace.
+
+describe('merge — actual deep merge (F-H1)', () => {
+  test('shallow-overlapping keys: later wins (sanity baseline)', () => {
+    expect(json.merge({ a: 1 }, { a: 2 })).toEqual({ a: 2 });
+  });
+
+  test('non-overlapping keys: union', () => {
+    expect(json.merge({ a: 1 }, { b: 2 })).toEqual({ a: 1, b: 2 });
+  });
+
+  test('deep merge preserves earlier-object keys nested under same parent', () => {
+    // The canonical test case for the F-H1 fix. Pre-fix this returned
+    // `{ a: { d: 3 } }` — `b` and `c` silently dropped.
+    expect(json.merge({ a: { b: 1, c: 2 } }, { a: { d: 3 } }))
+      .toEqual({ a: { b: 1, c: 2, d: 3 } });
+  });
+
+  test('deep merge recurses through multiple levels', () => {
+    expect(json.merge(
+      { config: { ui: { theme: 'dark', font: 'sans' } } },
+      { config: { ui: { theme: 'light' }, locale: 'en' } },
+    )).toEqual({
+      config: { ui: { theme: 'light', font: 'sans' }, locale: 'en' },
+    });
+  });
+
+  test('arrays are replaced, not concatenated (least-surprise semantics)', () => {
+    expect(json.merge({ tags: ['a', 'b'] }, { tags: ['c'] }))
+      .toEqual({ tags: ['c'] });
+  });
+
+  test('multiple sources merge in order (left to right)', () => {
+    expect(json.merge(
+      { a: { x: 1 } },
+      { a: { y: 2 } },
+      { a: { z: 3 } },
+    )).toEqual({ a: { x: 1, y: 2, z: 3 } });
+  });
+
+  test('non-object inputs are tolerantly skipped', () => {
+    expect(json.merge({ a: 1 }, null, undefined, 'string', 42, { b: 2 }))
+      .toEqual({ a: 1, b: 2 });
+  });
+
+  test('merge does not mutate any source object', () => {
+    const a = { x: { y: 1 } };
+    const b = { x: { z: 2 } };
+    const result = json.merge(a, b);
+    expect(result).toEqual({ x: { y: 1, z: 2 } });
+    expect(a).toEqual({ x: { y: 1 } });
+    expect(b).toEqual({ x: { z: 2 } });
+  });
+
+  test('merge rejects prototype-chain keys (defence in depth)', () => {
+    const evil: any = {};
+    Object.defineProperty(evil, '__proto__', {
+      value: { polluted: 'YES' },
+      enumerable: true,
+      configurable: true,
+    });
+    json.merge({}, evil);
+    expect(({} as any).polluted).toBeUndefined();
+  });
+});
+
+// F-H2 — `api.json.sort` must handle null / undefined cleanly + use typed
+// comparison so numbers sort numerically.
+
+describe('sort — null-safe + typed comparison (F-H2)', () => {
+  test('sorts numbers numerically, not lexicographically', () => {
+    // Pre-fix `<` on unknown unknowns produced lexicographic ordering:
+    // ['1', '10', '2', '9'].
+    const data = [{ n: 10 }, { n: 2 }, { n: 9 }, { n: 1 }];
+    const sorted = json.sort(data, 'n');
+    expect(sorted.map((d: { n: number }) => d.n)).toEqual([1, 2, 9, 10]);
+  });
+
+  test('nulls sort to the end in ascending order', () => {
+    const data = [{ v: 2 }, { v: null }, { v: 1 }, { v: null }];
+    const sorted = json.sort(data, 'v');
+    expect(sorted.map((d: { v: number | null }) => d.v)).toEqual([1, 2, null, null]);
+  });
+
+  test('nulls sort to the start in descending order', () => {
+    const data = [{ v: 2 }, { v: null }, { v: 1 }];
+    const sorted = json.sort(data, 'v', 'desc');
+    expect(sorted.map((d: { v: number | null }) => d.v)).toEqual([null, 2, 1]);
+  });
+
+  test('undefined values sort with the same semantics as null', () => {
+    const data = [{ v: 'b' }, { v: undefined }, { v: 'a' }];
+    const sorted = json.sort(data, 'v');
+    expect(sorted.map((d: { v: string | undefined }) => d.v)).toEqual(['a', 'b', undefined]);
+  });
+
+  test('all-nullish entries compare as equal (no shuffle)', () => {
+    const data = [{ v: null }, { v: undefined }, { v: null }];
+    expect(() => json.sort(data, 'v')).not.toThrow();
+  });
+
+  test('string sort is case-sensitive lexicographic (existing behaviour)', () => {
+    const data = [{ s: 'banana' }, { s: 'apple' }, { s: 'cherry' }];
+    expect(json.sort(data, 's').map((d: { s: string }) => d.s))
+      .toEqual(['apple', 'banana', 'cherry']);
+  });
+
+  test('mixed types fall back to string comparison (no throw)', () => {
+    const data = [{ v: 1 }, { v: 'apple' }, { v: 2 }];
+    expect(() => json.sort(data, 'v')).not.toThrow();
   });
 });

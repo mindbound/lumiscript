@@ -115,6 +115,8 @@ import {
   collectDescendantIds,
   listStableIdsForScript,
 } from '../engine/dom-registry.js';
+import { LumiScriptSecurityError } from '../types/lumiscript-errors.js';
+import { ChildToParentMessageSchema, findMostSpecificIpcIssue } from '../types/script-runner-ipc-schemas.js';
 
 // ─── Script resolver (Phase 9e) ─────────────────────────────────────────────
 //
@@ -2006,17 +2008,38 @@ function logLateRegisterSkip(msg: RegisterHandler): void {
 // ─── Inbound message routing ────────────────────────────────────────────────
 
 function handleChildMessage(payload: unknown, processId: string): void {
-  // Defensive: validate shape before narrowing — payloads cross IPC and
-  // could in principle be corrupted or malformed.
-  if (
-    !payload ||
-    typeof payload !== 'object' ||
-    typeof (payload as { type?: unknown }).type !== 'string'
-  ) {
-    spindle.log.warn('[script-runner] discarded malformed child message');
+  // Phase 3c / MED-04 — runtime IPC validation. Replaces the pre-rc.7
+  // `typeof payload.type === 'string'` shorthand with a strict
+  // `ChildToParentMessageSchema.safeParse(payload)`. On failure we log the
+  // first issue's path + message and drop the message silently — malformed
+  // IPC is either a contract drift (caught during dev) or an attack vector
+  // (caught at the boundary). Per-handler validation that already exists
+  // stays in place as defence-in-depth. See
+  // `src/types/script-runner-ipc-schemas.ts` for the schema design notes
+  // and `notes/security-hardening-rc7.md` for the audit-response framing.
+  const parsed = ChildToParentMessageSchema.safeParse(payload);
+  if (!parsed.success) {
+    // `findMostSpecificIpcIssue` digs into Zod's `invalid_union` branch
+    // errors to surface a narrow field-level path. Without this, every
+    // top-level failure would log "(root): Invalid input" — useless for
+    // post-mortem.
+    const { path: issuePath, message: issueMessage } = findMostSpecificIpcIssue(parsed.error.issues);
+    // Type hint helps when the validator rejects a message whose `type`
+    // field is recoverable. Defensive triple-check so logging a malformed
+    // payload never throws.
+    const typeHint =
+      payload !== null
+      && typeof payload === 'object'
+      && typeof (payload as { type?: unknown }).type === 'string'
+        ? ` (type=${(payload as { type: string }).type})`
+        : '';
+    spindle.log.warn(
+      `[script-runner] dropped malformed child message${typeHint}: ` +
+      `${issuePath}: ${issueMessage}`,
+    );
     return;
   }
-  const msg = payload as ChildToParentMessage;
+  const msg = parsed.data as ChildToParentMessage;
 
   // Worker-key derived once per inbound message — used both for activity
   // bumping (Phase E) AND for routing the api-response back to the
@@ -5193,6 +5216,122 @@ export function spawnScriptRunner(
  * (which is stable across runs) and from `DispatchRunScriptOpts` (which
  * carries parent-side callbacks + tracking sets).
  */
+// ─── Dispatch-time security check (CRIT-01 mitigation, v1.0.0-rc.7+) ────────
+//
+// The runtime sandbox lockdown installed by `child-entry.ts:installSandboxLockdown`
+// covers `globalThis.X` property access (Bun, process, fetch, Function, eval, …)
+// but it cannot intercept dynamic `import()` / `require()` because those are
+// JS syntax operators, not property lookups. We catch them at dispatch time
+// by inspecting the user-script source before sending the RunScriptRequest IPC.
+//
+// Comment-stripped regex check. Strings stay (false positives on user-string
+// content that contains `import(` are recoverable user-side via rename;
+// legitimate user code does not contain literal `import(` in strings often
+// enough to justify a real tokenizer for v1.0 interim hardening).
+
+/** Strip `// line comments` and `/* block comments *\/` to reduce false positives. */
+function stripCommentsForSecurityCheck(code: string): string {
+  return code
+    .replace(/\/\/[^\n]*/g, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '');
+}
+
+/**
+ * Dispatch-time check for the one CRIT-01 vector the runtime lockdown
+ * cannot intercept: dynamic `import()` / `require()` in user-script source.
+ *
+ * Throws `LumiScriptSecurityError` if the source contains either pattern
+ * outside of comments. Strings are not stripped — false positives from
+ * literal `import(` inside string content are tolerable for v1.0 (users
+ * rename) and adding a real tokenizer expands the surface unnecessarily.
+ *
+ * Called from `dispatchRunScript` at the top, before any IPC send or
+ * per-run state mutation. On reject, `dispatchRunScript` surfaces the
+ * error in the editor console with `entry.type: 'security'` then rethrows.
+ *
+ * Exported for the regression test (`tests/script-runner/sandbox-escape.test.ts`)
+ * which exercises the regex against the PoC vectors from
+ * `notes/lumiscript-security-audit.md` §2.2.
+ */
+export function checkUserScriptSecurity(code: string): void {
+  const stripped = stripCommentsForSecurityCheck(code);
+  if (/\bimport\s*\(/.test(stripped)) {
+    throw new LumiScriptSecurityError(
+      'Dynamic import() is not allowed in LumiScript user scripts. ' +
+      "Use script.require('library-name') for inter-script dependencies, " +
+      'or use the appropriate api.* method for host resources.',
+    );
+  }
+  // `(?<!\.)` lookbehind allows method-style usage. `script.require('foo')`
+  // is LumiScript's documented library-loading API and must not be rejected;
+  // only the bare `require(` form (the CJS-style global resolver) is forbidden.
+  if (/(?<!\.)\brequire\s*\(/.test(stripped)) {
+    throw new LumiScriptSecurityError(
+      'Bare require() is not allowed in LumiScript user scripts. ' +
+      "Use script.require('library-name') for inter-script dependencies.",
+    );
+  }
+  // `Function` is whitelisted on globalThis (backend libraries reach for
+  // it). Reject explicit `new Function(...)` / `Function(...)` calls in
+  // user source as defence-in-depth against runtime-constructed dynamic
+  // imports (the body of `new Function('return imp'+'ort("x")')` survives
+  // the import() / require() regex above because of string concatenation,
+  // but the explicit Function constructor invocation is harder to obfuscate).
+  // Same `(?<!\.)` lookbehind as require — user objects with a `.Function`
+  // member method are unusual but valid; only the bare constructor invocation
+  // is forbidden.
+  if (/(?<!\.)\b(?:new\s+)?Function\s*\(/.test(stripped)) {
+    throw new LumiScriptSecurityError(
+      'Function constructor (new Function / Function()) is not allowed in ' +
+      'LumiScript user scripts. Define functions with normal syntax instead.',
+    );
+  }
+  // Prototype-chain access to the Function constructor —
+  // `({}).constructor.constructor(...)` or `[].constructor.constructor(...)`
+  // etc. — also forbidden. Same residual-gap closure as above.
+  if (/\.\s*constructor\s*\.\s*constructor\b/.test(stripped)) {
+    throw new LumiScriptSecurityError(
+      'Prototype-chain access to the Function constructor ' +
+      '(.constructor.constructor) is not allowed in LumiScript user scripts.',
+    );
+  }
+  // `globalThis.Bun` / `globalThis["Bun"]` access — Bun's runtime defines
+  // `globalThis.Bun` as `configurable: false, writable: false`, which means
+  // the Layer 2 runtime lockdown in `child-entry.ts:installSandboxLockdown`
+  // cannot replace it with a throwing accessor (the property descriptor
+  // is unmodifiable from JS). Layer 1 (AsyncFunction parameter shadowing)
+  // makes BARE `Bun` undefined, but `globalThis.Bun` reads the real Bun
+  // object. The source-level reject below catches the common literal forms
+  // and raises the bar significantly. Determined attackers can still alias
+  // (`const g = globalThis; g.Bun`); fully closing this requires running
+  // user scripts in a separate realm (ShadowRealm or QuickJS-WASM) which
+  // is the v1.1 Option C path. See `notes/security-hardening-rc7.md` §4.
+  if (/\bglobalThis\s*\.\s*Bun\b/.test(stripped) ||
+      /\bglobalThis\s*\[\s*['"`]\s*Bun\s*['"`]/.test(stripped)) {
+    throw new LumiScriptSecurityError(
+      'globalThis.Bun access is not allowed in LumiScript user scripts. ' +
+      'The Bun runtime API is not exposed to user scripts; use api.utils.http / ' +
+      'api.files (with allowDangerous) for the equivalent capabilities.',
+    );
+  }
+  // `globalThis.process` / `globalThis["process"]` — same shape as Bun above.
+  // The Layer 2 lockdown CANNOT lock `process` either, but for a different
+  // reason: Spindle's `backend-process-runtime.ts` uses `process.send` /
+  // `process.on` / `process.exit` to manage the subprocess lifecycle; locking
+  // process breaks Spindle's own runtime and times out subprocess startup
+  // (verified against Lumiverse 0.9.7). The Layer 1 parameter shadow handles
+  // bare `process`; this source-check catches the common literal forms; the
+  // same aliasing residual applies as for Bun.
+  if (/\bglobalThis\s*\.\s*process\b/.test(stripped) ||
+      /\bglobalThis\s*\[\s*['"`]\s*process\s*['"`]/.test(stripped)) {
+    throw new LumiScriptSecurityError(
+      'globalThis.process access is not allowed in LumiScript user scripts. ' +
+      'The host process API is not exposed; sandboxed scripts cannot reach environment ' +
+      'variables, exit the runtime, or send IPC messages directly.',
+    );
+  }
+}
+
 export interface DispatchRunScriptRequest {
   /** Trigger event payload — passed as the AsyncFunction's `data` arg. */
   data:               unknown;
@@ -5298,6 +5437,26 @@ export async function dispatchRunScript(
   request: DispatchRunScriptRequest,
   opts:    DispatchRunScriptOpts = {},
 ): Promise<RunScriptResult> {
+  // CRIT-01 mitigation (v1.0.0-rc.7+): reject scripts containing literal
+  // `import(` / `require(` BEFORE building the api, mutating per-script
+  // state, or dispatching IPC. The runtime lockdown installed by
+  // `child-entry.ts:installSandboxLockdown` covers property-based access
+  // paths; this check covers the syntax-operator path that the runtime
+  // sandbox cannot intercept. See `notes/security-hardening-rc7.md`.
+  try {
+    checkUserScriptSecurity(script.code);
+  } catch (err) {
+    if (err instanceof LumiScriptSecurityError) {
+      // Surface in editor console with distinct `security` visual.
+      opts.onConsole?.({
+        timestamp: new Date().toLocaleTimeString(),
+        type:      'security',
+        message:   `[security] ${err.message}`,
+      });
+    }
+    throw err;
+  }
+
   // Phase C1 — derive the worker hosting this script. C1 always returns
   // DEFAULT_WORKER_KEY (single-worker behaviour preserved); C2 promotes to
   // least-loaded distribution.

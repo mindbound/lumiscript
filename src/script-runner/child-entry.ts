@@ -63,6 +63,7 @@ import { serializeConsoleArg } from '../engine/console-format.js';
 // they do in the in-process executor (which injects `z` into the
 // AsyncFunction sandbox as a top-level binding).
 import * as z from 'zod';
+import { LumiScriptSecurityError } from '../types/lumiscript-errors.js';
 
 // ─── Error classes ──────────────────────────────────────────────────────────
 
@@ -104,6 +105,289 @@ const IDLE_HEARTBEAT_INTERVAL_MS = 5_000;
 const AsyncFunctionCtor = (async () => {}).constructor as new (
   ...args: string[]
 ) => (...args: unknown[]) => Promise<unknown>;
+
+// ─── Sandbox lockdown (CRIT-01 mitigation, v1.0.0-rc.7+) ────────────────────
+//
+// Capture-then-lockdown. Backend code paths reach for `process.X` /
+// `globalThis.fetch` during normal operation; those captures land at
+// module-init time (the consts below), before `installSandboxLockdown` runs
+// from inside the default export's body. After lockdown, every non-
+// whitelisted global throws `LumiScriptSecurityError` on access. User-script
+// bodies see the lockdown via three layers of defence (parameter shadowing
+// + globalThis lockdown + AsyncFunction body lexical rebindings); the
+// dispatch-time check in `host-dispatcher.ts:checkUserScriptSecurity` catches
+// dynamic `import()` (the one vector the runtime lockdown can't intercept,
+// since `import()` is a JS syntax operator, not a property lookup).
+//
+// Full design + residual-gap accounting in `notes/security-hardening-rc7.md`.
+
+/** Captured `process.on` — `process` becomes a throwing accessor post-lockdown. */
+const _processOn          = process.on.bind(process);
+/** Captured `process.memoryUsage` — used by `diagnostic-stats-request` handler. */
+const _processMemoryUsage = process.memoryUsage.bind(process);
+/** Captured `process.cpuUsage` — used by `diagnostic-stats-request` handler. */
+const _processCpuUsage    = process.cpuUsage.bind(process);
+/** Captured `process.uptime` — used by `diagnostic-stats-request` handler. */
+const _processUptime      = process.uptime.bind(process);
+/** Captured host `fetch` — passed to `allowDangerous` scripts as `safeFetch`. */
+const _hostFetch          = globalThis.fetch.bind(globalThis);
+
+/**
+ * Allowlist of `globalThis` properties that survive the lockdown sweep.
+ * Anything not on this list becomes a throwing accessor raising
+ * `LumiScriptSecurityError` on read. Append additions cautiously — every
+ * entry expands the user-script attack surface.
+ *
+ * Deliberate omissions: `Bun` (cannot be locked — non-configurable in Bun
+ * runtime; passed via AsyncFunction parameter), `fetch` (locked at globalThis,
+ * passed via parameter), `Function` / `eval` (locked — blocks `new Function`,
+ * `(0, eval)`), `Worker`, `navigator`, `document`, `window`, `self`,
+ * `require`, `XMLHttpRequest`, `WebSocket`, `EventSource`.
+ */
+const SAFE_GLOBALS: ReadonlySet<string> = new Set([
+  // Identity
+  'globalThis',
+  // Standard ES global functions + value constants — pure, no capability
+  // surface. User scripts use these freely; backend libs use them too.
+  // Locking them was a "conservative default" oversight (verified by manual
+  // smoke-test: scripts using `isNaN()` hit the lockdown's throwing accessor).
+  'isNaN', 'isFinite', 'parseInt', 'parseFloat',
+  'NaN', 'Infinity', 'undefined',
+  'encodeURI', 'encodeURIComponent', 'decodeURI', 'decodeURIComponent',
+  'escape', 'unescape',
+  // Core built-ins
+  'Object', 'Array', 'Number', 'Boolean', 'String', 'Symbol',
+  'Date', 'RegExp', 'Map', 'Set', 'WeakMap', 'WeakSet', 'WeakRef',
+  'Promise', 'Proxy', 'Reflect',
+  // Function constructor — Zod's schema compiler and Handlebars' template
+  // compiler both invoke `new Function(...)` at runtime. Locking Function
+  // breaks both. Whitelisting Function does NOT materially worsen the
+  // user-script threat surface because `({}).constructor.constructor`
+  // already reaches the same Function constructor through the prototype
+  // chain (auditor's residual gap from §2.5 Option B). The dispatch-time
+  // check in `host-dispatcher.ts:checkUserScriptSecurity` rejects explicit
+  // `Function(` and `.constructor.constructor` usage in user source as
+  // defence-in-depth.
+  'Function',
+  // Buffer — Node-compat; backend libraries reach for it at runtime. User
+  // scripts that use it can only manipulate bytes; doesn't enable escape.
+  'Buffer',
+  // Error types
+  'Error', 'TypeError', 'RangeError', 'ReferenceError', 'SyntaxError',
+  'URIError', 'EvalError', 'AggregateError',
+  // Math + data
+  'JSON', 'Math', 'Intl', 'BigInt',
+  // Typed arrays + binary
+  'ArrayBuffer', 'SharedArrayBuffer', 'DataView', 'Atomics',
+  'Int8Array', 'Uint8Array', 'Uint8ClampedArray',
+  'Int16Array', 'Uint16Array', 'Int32Array', 'Uint32Array',
+  'Float32Array', 'Float64Array', 'BigInt64Array', 'BigUint64Array',
+  // Text + URL
+  'TextEncoder', 'TextDecoder', 'URL', 'URLSearchParams',
+  // In-memory binary data carriers — no filesystem, no network, no escape
+  // path. Tests use `new File(...)` to construct script-pack fixtures;
+  // user scripts can use them for in-memory binary manipulation (e.g.
+  // building blobs for api.images.upload). Filesystem access is gated by
+  // api.files / allowDangerous, not these constructors.
+  'Blob', 'File', 'FileReader', 'FormData',
+  // HTTP message carriers — structural types. Network capability still
+  // requires the fetch parameter (gated by allowDangerous via Layer 1).
+  'Headers', 'Request', 'Response',
+  // Async + timers + structured clone
+  'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval',
+  'queueMicrotask', 'structuredClone',
+  // Abort
+  'AbortController', 'AbortSignal',
+  // Crypto (also used by api.utils.shortId; deliberate to expose to scripts)
+  'crypto',
+  // Benign
+  'WebAssembly', 'performance', 'FinalizationRegistry',
+  // Console — per-run shadowed via AsyncFunction's `const console = __console;`,
+  // but kept whitelisted so the binding exists in the brief window before
+  // the per-run preamble takes effect.
+  'console',
+  // Bun runtime metadata — read-only object (`{ userAgent: "Bun/X.Y.Z",
+  // platform, hardwareConcurrency }`), no capability surface. Whitelisted
+  // both for legitimate user-script use and because some 3rd-party libs
+  // do `typeof navigator !== 'undefined' && navigator?.userAgent?.includes(...)`
+  // for runtime detection (e.g. Zod's Cloudflare-Workers check).
+  'navigator',
+  // Event types — pure data carriers, no capability.
+  'Event', 'EventTarget', 'CustomEvent', 'MessageEvent', 'ErrorEvent', 'CloseEvent',
+  'DOMException',
+  // ES2024 disposable resource pattern (`using` syntax).
+  'AsyncDisposableStack', 'DisposableStack', 'SuppressedError',
+  // Generic iteration.
+  'Iterator',
+  // Float16Array — ES2025 typed array.
+  'Float16Array',
+  // ES2024 ShadowRealm — pure realm-isolation primitive. Whitelisted so user
+  // scripts can experiment with it; doesn't grant any capability the host
+  // realm doesn't already have. (Long-term: this might become the v1.1
+  // Option C closure mechanism for CRIT-01 residuals.)
+  'ShadowRealm',
+  // URLPattern — pattern matching for URLs (ES proposal, Bun ships it).
+  'URLPattern',
+  // Streams API — pure data transforms, no I/O capability themselves.
+  // The dangerous part of streams is what you READ FROM or PIPE TO —
+  // those endpoints (fetch responses, Bun.file, etc.) are separately gated.
+  'ReadableStream', 'ReadableStreamBYOBReader', 'ReadableStreamBYOBRequest',
+  'ReadableStreamDefaultController', 'ReadableStreamDefaultReader',
+  'ReadableByteStreamController',
+  'WritableStream', 'WritableStreamDefaultController', 'WritableStreamDefaultWriter',
+  'TransformStream', 'TransformStreamDefaultController',
+  'ByteLengthQueuingStrategy', 'CountQueuingStrategy',
+  'CompressionStream', 'DecompressionStream',
+  'TextDecoderStream', 'TextEncoderStream',
+  // Web Crypto type classes (instance methods are pure crypto; the
+  // capability surface is the bound key material, which user scripts can
+  // create freely just like with `crypto.subtle`).
+  'Crypto', 'CryptoKey', 'SubtleCrypto',
+  // Performance API class hierarchy — measurement primitives only.
+  'Performance', 'PerformanceEntry', 'PerformanceMark', 'PerformanceMeasure',
+  'PerformanceObserver', 'PerformanceObserverEntryList',
+  'PerformanceResourceTiming', 'PerformanceServerTiming', 'PerformanceTiming',
+  // MessageChannel / MessagePort — within a single subprocess, can't reach
+  // anything dangerous (process is the IPC endpoint; whitelisted separately).
+  'MessageChannel', 'MessagePort',
+  // Bun bundler error types — pure error subclasses, no capability.
+  'BuildError', 'BuildMessage', 'ResolveError', 'ResolveMessage',
+  // Bun's streaming HTML rewriter — instance methods are pure transforms;
+  // the class itself doesn't grant capability. User scripts can use it for
+  // DOM manipulation without reaching the host's actual DOM.
+  'HTMLRewriter',
+  // setImmediate / reportError — benign Node-compat helpers.
+  'setImmediate', 'clearImmediate', 'reportError',
+  // Spindle host gateway — NOT present on the script-runner subprocess's
+  // globalThis in production (Spindle injects it into the BACKEND worker,
+  // a different process). Whitelisted here because the test infrastructure
+  // (`tests/_infra/setup.ts`) runs both backend and script-runner code in
+  // a single Bun process and puts `spindle` on globalThis for every test
+  // via `beforeEach`. No production exposure — `spindle` simply isn't
+  // there for the lockdown to find when it iterates `Object.getOwnPropertyNames`.
+  'spindle',
+  // `process` — Spindle's `backend-process-runtime.ts` uses `process.send`,
+  // `process.on`, and `process.exit` internally to manage the subprocess
+  // lifecycle (init handshake, shutdown, IPC). Locking `process` breaks
+  // Spindle's own runtime and causes the subprocess to time out at startup
+  // (verified empirically against host Lumiverse 0.9.7). Whitelisted on
+  // architectural necessity. User-script defence:
+  //   - Layer 1: AsyncFunction parameter shadow makes bare `process` undefined.
+  //   - Layer 4: `checkUserScriptSecurity` (host-dispatcher) rejects literal
+  //     `globalThis.process` / `globalThis["process"]` in user source.
+  // Residual gap (same shape as Bun §4.0): aliased forms
+  // (`const p = globalThis.process; p.env`) bypass Layer 4 and reach the real
+  // process. v1.1 Option C (ShadowRealm / QuickJS) is the proper closure —
+  // it gives the user-script realm its own `process` that the host's IPC
+  // doesn't touch. See `notes/security-hardening-rc7.md` §4.0.
+  'process',
+]);
+
+/**
+ * Install the LumiScript sandbox lockdown on the current realm. Replaces
+ * every `globalThis` property not in `SAFE_GLOBALS` with a writable data
+ * slot holding `undefined` (read returns `undefined`, `typeof` returns
+ * `"undefined"`, assignment rebinds the slot normally). Monkey-patches
+ * `setTimeout` / `setInterval` to reject the string-form callback (which
+ * compiles to `Function` under the hood).
+ *
+ * Idempotent: a property already locked with our non-configurable accessor
+ * trips the inner `try/catch` and remains locked. Safe to call multiple
+ * times; only the first call installs.
+ *
+ * Called once from the default export's body, before `proc.onMessage` is
+ * registered. Module-init captures above must complete first.
+ *
+ * Residual gaps (closed by Option C / v1.1):
+ *   - `({}).constructor.constructor('code')()` reaches the Function
+ *     constructor via prototype chain, bypassing the globalThis lock.
+ *     Constructed-function bodies execute in global scope where property
+ *     locks apply, BUT `import()` is a syntax operator and works inside
+ *     constructed functions — defended at dispatch time by
+ *     `checkUserScriptSecurity` rejecting literal `import(` in source.
+ *   - JIT / Bun-internal escapes via runtime bugs.
+ * See `notes/security-hardening-rc7.md` for the full accounting.
+ *
+ * Exported for the sandbox-escape regression test (`tests/script-runner/
+ * sandbox-escape.test.ts`) which exercises every PoC vector from
+ * `notes/lumiscript-security-audit.md` §2.2 + §2.6 against a locked realm.
+ */
+export function installSandboxLockdown(): void {
+  for (const name of Object.getOwnPropertyNames(globalThis)) {
+    if (SAFE_GLOBALS.has(name)) continue;
+    try {
+      // Replace the property with a writable data slot holding `undefined`.
+      // Design rationale (post-rc.7 manual-testing pivot):
+      //
+      //   The lockdown's purpose is blocking READ access to ORIGINAL host
+      //   references. `defineProperty` replaces the data slot — the
+      //   original Bun-side / Node-compat value (fs, http, Worker, etc.)
+      //   is gone from the global object. Backend code paths capture what
+      //   they need before lockdown (see `_processOn` / `_hostFetch` /
+      //   etc. above).
+      //
+      //   Why `value: undefined` (data) instead of `get() { throw }`:
+      //   the throwing-accessor design (rc.7 v1) broke `typeof X` feature
+      //   detection used widely by third-party libraries (Zod, Handlebars,
+      //   anything checking `typeof navigator !== 'undefined'` etc.). The
+      //   `typeof` operator on a throwing getter rethrows. Returning
+      //   undefined makes `typeof X === 'undefined'` evaluate naturally,
+      //   matching the semantics of "X doesn't exist on globalThis."
+      //
+      //   Runtime access to a locked global from user code: `globalThis.Bun`
+      //   evaluates to `undefined`; downstream `.file(...)` throws a
+      //   standard `TypeError: Cannot read properties of undefined`. Less
+      //   explicit than the old `LumiScriptSecurityError` but matches
+      //   browser/Node feature-detect conventions. Explicit security errors
+      //   for known-bad patterns still come from Layer 4
+      //   (`checkUserScriptSecurity` in host-dispatcher) at dispatch time.
+      //
+      //   `writable: true, configurable: true` ensures the test
+      //   infrastructure's `globalThis.spindle = createMockSpindle()`
+      //   reassignment continues to work and the lockdown remains
+      //   idempotent (second `installSandboxLockdown()` redefines).
+      //
+      //   `enumerable: false` keeps the now-undefined slot out of
+      //   `Object.keys(globalThis)` enumeration — same observable effect
+      //   as the property having been deleted.
+      Object.defineProperty(globalThis, name, {
+        configurable: true,
+        enumerable:   false,
+        writable:     true,
+        value:        undefined,
+      });
+    } catch {
+      // Property was non-configurable at the platform level (`Bun`, some
+      // engine-internal slots). The fallback layers — AsyncFunction
+      // parameter shadowing (Layer 1), AsyncFunction body lexical
+      // preamble (Layer 3), and `checkUserScriptSecurity` source check
+      // (Layer 4) — cover the common access patterns. The aliased-form
+      // residual is documented in `notes/security-hardening-rc7.md` §4.0.
+    }
+  }
+
+  // setTimeout / setInterval can accept a string in some runtimes (the
+  // string compiles to Function under the hood — a vector if our Function
+  // lock fails). Monkey-patch to require a callable first arg.
+  const _setTimeout  = globalThis.setTimeout;
+  const _setInterval = globalThis.setInterval;
+  globalThis.setTimeout = ((cb: unknown, ms?: unknown, ...args: unknown[]): ReturnType<typeof setTimeout> => {
+    if (typeof cb !== 'function') {
+      throw new LumiScriptSecurityError(
+        'setTimeout requires a function callback (string form is not supported in the LumiScript sandbox)',
+      );
+    }
+    return _setTimeout(cb as (...a: unknown[]) => void, ms as number, ...(args as unknown[]));
+  }) as typeof setTimeout;
+  globalThis.setInterval = ((cb: unknown, ms?: unknown, ...args: unknown[]): ReturnType<typeof setInterval> => {
+    if (typeof cb !== 'function') {
+      throw new LumiScriptSecurityError(
+        'setInterval requires a function callback (string form is not supported in the LumiScript sandbox)',
+      );
+    }
+    return _setInterval(cb as (...a: unknown[]) => void, ms as number, ...(args as unknown[]));
+  }) as typeof setInterval;
+}
 
 /**
  * Active proxy handles by `runId`. One entry per dispatched run.
@@ -621,7 +905,7 @@ async function runOne(
     //           per the Lumiverse 519565 capability regex.
     //   - `process`: always undefined — same reason.
     const safeFetch: typeof globalThis.fetch = req.allowDangerous
-      ? globalThis.fetch.bind(globalThis)
+      ? _hostFetch
       : ((() => {
           throw new Error(
             `"${req.scriptName}" must enable Allow Dangerous to use fetch directly. ` +
@@ -629,6 +913,25 @@ async function runOne(
           );
         }) as unknown as typeof globalThis.fetch);
 
+    // CRIT-01 Layer 3: hard lexical rebindings layered on top of the
+    // AsyncFunction parameter shadowing. Belt-and-braces against the
+    // globalThis lockdown (Layer 2):
+    //   - `Function = undefined` blocks `new Function('return Bun')()`
+    //     even if a future Bun runtime change makes `globalThis.Function`
+    //     non-configurable and the lockdown can't lock it.
+    //   - `global/self/window/require` are platform-specific aliases
+    //     for the global object; we want them inert regardless of which
+    //     platform Bun happens to ship them under.
+    // Deliberate omissions:
+    //   - `eval` — strict mode forbids `const eval` as a binding (SyntaxError).
+    //     The globalThis lockdown handles `(0, eval)` / bare `eval(...)`.
+    //   - `globalThis` — whitelisted by lockdown so legitimate access to
+    //     `globalThis.Map` etc. still works; per-property locks defend
+    //     against `globalThis.Bun`.
+    //   - `Bun` / `process` / `fetch` — already parameter-shadowed below.
+    // Caveat: shadowing `Function` breaks `something instanceof Function`
+    // and `typeof Function === 'function'`. Use `typeof x === 'function'`
+    // instead. Flagged in rc.7 release notes.
     const fn = new AsyncFunctionCtor(
       'api',
       'data',
@@ -638,7 +941,15 @@ async function runOne(
       'fetch',
       'Bun',
       'process',
-      `"use strict";\nconst console = __console;\n${req.code}\n`,
+      `"use strict";
+const console  = __console;
+const Function = undefined;
+const global   = undefined;
+const self     = undefined;
+const window   = undefined;
+const require  = undefined;
+${req.code}
+`,
     );
 
     // Async timeout race — same pattern as the legacy in-process
@@ -809,6 +1120,37 @@ async function runOne(
 // child-subprocess fixture. Unit-testing the routing logic + relying on
 // Node/Bun's documented behaviour that ANY registered `unhandledRejection`
 // listener suppresses the default exit is the practical regression gate.
+
+// ─── Per-script rejection log rate-limit (Phase 3d / LOW-01, v1.0.0-rc.7+)
+//
+// A hostile or buggy script doing `for (let i=0; i<1e6; i++) Promise.reject(...)`
+// would, pre-rc.7, write a million backend-stderr lines and emit a million
+// console-entry IPCs — disk fills, log aggregators rate-limit, the editor's
+// own console truncation cap kicks in. Bucket per scriptId (plus a
+// `__unattributed__` fallback bucket for rejections that don't carry the
+// WeakMap+ALS attribution). After 10 rejections in a 60s window, further
+// rejections drop silently; when the window resets, the next-arriving
+// rejection prepends a "N additional rejection(s) suppressed" summary
+// before logging itself normally. No window-end timer — the summary fires
+// on demand when activity resumes, which is when the user is actually
+// looking at the console.
+
+/** Max rejections logged per scriptId per window. Audit LOW-03. */
+const UNHANDLED_REJECTION_THRESHOLD = 10;
+/** Window length for the rejection-log rate-limit, in milliseconds. */
+const UNHANDLED_REJECTION_WINDOW_MS = 60_000;
+
+interface UnhandledRejectionRateState {
+  /** Wall-clock ms when this window started. */
+  windowStartMs: number;
+  /** Rejections LOGGED (stderr + editor) so far this window. */
+  count:         number;
+  /** Rejections SILENTLY dropped this window (count > threshold). */
+  suppressed:    number;
+}
+
+const unhandledRejectionRateState = new Map<string, UnhandledRejectionRateState>();
+
 export function handleUnhandledRejection(
   reason: unknown,
   proc:   SpindleBackendProcessContext,
@@ -816,12 +1158,6 @@ export function handleUnhandledRejection(
   const errMsg = reason instanceof Error
     ? (reason.stack ?? reason.message ?? String(reason))
     : String(reason);
-
-  // Backend stderr first — survives even if IPC routing fails or the
-  // originating runId can't be attributed.
-  console.error(
-    `[script-runner] unhandledRejection survived (worker stays up). Reason: ${errMsg}`,
-  );
 
   // Two-tier attribution. See JSDoc above for full rationale.
   let runId: string | undefined;
@@ -843,9 +1179,90 @@ export function handleUnhandledRejection(
       }
     }
   }
+
+  // ── Rate-limit gate (Phase 3d / LOW-03) ───────────────────────────────
+  // Bucket per scriptId; unattributable rejections share a fallback bucket.
+  // Threshold = `UNHANDLED_REJECTION_THRESHOLD` per `UNHANDLED_REJECTION_WINDOW_MS`.
+  const rateLimitKey = scriptId ?? '__unattributed__';
+  const now = Date.now();
+  const state = unhandledRejectionRateState.get(rateLimitKey);
+  let suppressedSummary: string | null = null;
+  let shouldLog = true;
+
+  if (state === undefined) {
+    unhandledRejectionRateState.set(rateLimitKey, {
+      windowStartMs: now,
+      count:         1,
+      suppressed:    0,
+    });
+  } else if (now - state.windowStartMs > UNHANDLED_REJECTION_WINDOW_MS) {
+    // Window expired. If the prior window suppressed any rejections,
+    // emit a summary BEFORE the current rejection so the user sees the
+    // count when activity resumes.
+    if (state.suppressed > 0) {
+      suppressedSummary =
+        `${state.suppressed} additional rejection(s) were suppressed during the previous ` +
+        `${UNHANDLED_REJECTION_WINDOW_MS / 1000}s rate-limit window`;
+    }
+    state.windowStartMs = now;
+    state.count         = 1;
+    state.suppressed    = 0;
+  } else if (state.count < UNHANDLED_REJECTION_THRESHOLD) {
+    state.count += 1;
+  } else {
+    state.suppressed += 1;
+    shouldLog = false;
+  }
+
+  // Emit the previous-window suppression summary if one was queued.
+  if (suppressedSummary !== null) {
+    console.error(
+      `[script-runner] ${suppressedSummary}` +
+      (scriptId !== undefined ? ` for script ${scriptId}.` : ' (unattributed).'),
+    );
+    if (scriptId !== undefined && runId !== undefined) {
+      try {
+        proc.send({
+          type:     'console-entry',
+          runId,
+          scriptId,
+          entry: {
+            timestamp: new Date().toLocaleTimeString(),
+            type:      'warn',
+            message:   `[lumiscript] ${suppressedSummary}.`,
+          },
+        });
+      } catch {
+        // Channel down — drop; backend stderr above is the fallback.
+      }
+    }
+  }
+
+  // Drop fully if past threshold this window.
+  if (!shouldLog) return;
+
+  // Backend stderr — survives even if IPC routing fails or the originating
+  // runId can't be attributed.
+  console.error(
+    `[script-runner] unhandledRejection survived (worker stays up). Reason: ${errMsg}`,
+  );
+
   if (runId === undefined || scriptId === undefined) return;
 
-  // Route to the originating script's editor console as an error.
+  // CRIT-01: detect LumiScriptSecurityError thrown by the sandbox lockdown
+  // (Layer 2 throwing accessors / setTimeout monkey-patch) so the editor
+  // console can render it with the distinct `security` kind. Match by
+  // `.name` rather than `instanceof` so cross-module class-identity drift
+  // doesn't cause silent demotion to plain error styling.
+  const isSecurityError = reason !== null
+    && typeof reason === 'object'
+    && (reason as { name?: unknown }).name === 'LumiScriptSecurityError';
+  const consoleType: ConsoleEntryType = isSecurityError ? 'security' : 'error';
+  const consoleMessage = isSecurityError
+    ? `[security] ${reason instanceof Error ? reason.message : errMsg}`
+    : `[lumiscript] unhandled rejection: ${errMsg}`;
+
+  // Route to the originating script's editor console.
   try {
     proc.send({
       type:     'console-entry',
@@ -853,13 +1270,18 @@ export function handleUnhandledRejection(
       scriptId,
       entry: {
         timestamp: new Date().toLocaleTimeString(),
-        type:      'error',
-        message:   `[lumiscript] unhandled rejection: ${errMsg}`,
+        type:      consoleType,
+        message:   consoleMessage,
       },
     });
   } catch {
     // Channel down — drop. Backend log line above is the fallback.
   }
+}
+
+/** @internal Test seam — reset the rate-limit map between tests. */
+export function _resetUnhandledRejectionRateStateForTests(): void {
+  unhandledRejectionRateState.clear();
 }
 
 // ─── Test-only helpers ──────────────────────────────────────────────────────
@@ -893,6 +1315,12 @@ export function _clearActiveProxiesForTests(): void {
  * the same cleanup for graceful-stop requests from the parent).
  */
 export default function (proc: SpindleBackendProcessContext): () => void {
+  // CRIT-01 mitigation: install the sandbox lockdown BEFORE any user-code-
+  // adjacent surface is wired (heartbeat timer, IPC message handler).
+  // Module-init captures (`_processOn` / `_hostFetch` / etc.) are already
+  // bound — see the "Sandbox lockdown" section above.
+  installSandboxLockdown();
+
   let heartbeatTimer: ReturnType<typeof setInterval> | null = setInterval(() => {
     proc.heartbeat();
   }, IDLE_HEARTBEAT_INTERVAL_MS);
@@ -905,8 +1333,10 @@ export default function (proc: SpindleBackendProcessContext): () => void {
   };
 
   // Register the worker-isolation guard. See `handleUnhandledRejection`
-  // JSDoc for the full rationale.
-  process.on('unhandledRejection', (reason: unknown) => {
+  // JSDoc for the full rationale. Uses the pre-lockdown captured
+  // `_processOn` because `process` itself is a throwing accessor after
+  // `installSandboxLockdown` ran above.
+  _processOn('unhandledRejection', (reason: unknown) => {
     handleUnhandledRejection(reason, proc);
   });
 
@@ -985,8 +1415,12 @@ export default function (proc: SpindleBackendProcessContext): () => void {
         // of this child's own resource usage. Standard Node-compat
         // process introspection APIs; no banned-API concern. Cheap to
         // sample — both calls return immediately without IO.
-        const mem = process.memoryUsage();
-        const cpu = process.cpuUsage();
+        //
+        // Uses the pre-lockdown captured `_processMemoryUsage` / etc.
+        // because `process` itself is a throwing accessor after
+        // `installSandboxLockdown` ran at the top of this default export.
+        const mem = _processMemoryUsage();
+        const cpu = _processCpuUsage();
         proc.send({
           type:        'diagnostic-stats-response',
           requestId:   msg.requestId,
@@ -996,7 +1430,7 @@ export default function (proc: SpindleBackendProcessContext): () => void {
           external:    mem.external,
           cpuUserUs:   cpu.user,
           cpuSystemUs: cpu.system,
-          uptimeSec:   process.uptime(),
+          uptimeSec:   _processUptime(),
         });
         break;
       }

@@ -282,7 +282,6 @@ export function buildWorldInfoAPI(deps: APIBuildDeps): LumiScriptAPI['worldInfo'
         const BOOK_PAGE = 200;
         // Single pass — most users have well under 200 books. Additional
         // pages are handled by the while-loop below if the count exceeds.
-        // eslint-disable-next-line no-constant-condition
         while (true) {
           const books = await spindle.world_books.list({
             userId: uid,

@@ -56,7 +56,6 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
   >('pending');
   const mountTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const editorRef = useRef<any>(null);
   // v0.26.x diagnostic — last value the user typed/pasted that hasn't been
   // confirmed-saved (cleared in saveCode after the IPC fires). Used by the
@@ -133,8 +132,6 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
       }
       const pending = pendingValueRef.current;
       if (pending !== null) {
-        // eslint-disable-next-line no-console
-        console.log(`[LumiScript] ScriptEditor unmount: flushing pending save (script=${scriptIdRef.current}, len=${pending.length})`);
         try {
           sendToBackendRef.current({
             type: 'update_script',
@@ -142,7 +139,8 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
             patch: { code: pending },
           });
         } catch (err) {
-          // eslint-disable-next-line no-console
+          // Keep the error log — unmount-flush failures are actually
+          // actionable for the user (their last edits didn't make it).
           console.error('[LumiScript] ScriptEditor unmount-flush failed:', err);
         }
         pendingValueRef.current = null;
@@ -166,8 +164,6 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
   }, [sendToBackend]);
 
   const saveCode = useCallback((code: string) => {
-    // eslint-disable-next-line no-console
-    console.log(`[LumiScript] saveCode: script=${script.id}, len=${code.length}, head="${code.slice(0, 40).replace(/\n/g, '\\n')}"`);
     sendToBackend({ type: 'update_script', id: script.id, patch: { code } });
     pendingValueRef.current = null;
     setUnsaved(false);
