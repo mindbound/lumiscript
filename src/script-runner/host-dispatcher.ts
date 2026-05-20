@@ -97,6 +97,7 @@ import { buildScriptAPI } from '../engine/executor.js';
 import {
   dispatchApiCall,
   HANDLE_KIND_LIFECYCLE,
+  HANDLE_RETURNING_METHODS,
   type HandleHelpers,
 } from '../engine/script-runner-host.js';
 import {
@@ -1873,6 +1874,14 @@ interface ResolveActiveRunCtx {
   runIdSource?:   'context' | 'latest' | 'ctx' | undefined;
   /** Only relevant for `'api-request'` policy with `runIdSource === 'ctx'`. */
   targetHandle?:  HandleRef | undefined;
+  /**
+   * Only relevant for `'api-request'` policy — the dotted method path. Used
+   * to detect handle-returning factory calls (e.g. `db.collection`) so they
+   * can fall back to the script's current run when their originating run
+   * was orphaned. Factory calls produce per-script-persistent handles whose
+   * lifecycle is decoupled from any single run, so the fallback is safe.
+   */
+  method?:        string | undefined;
 }
 type ResolveActiveRunPolicy = 'register-handler' | 'api-request';
 
@@ -1891,23 +1900,47 @@ function resolveActiveRun(
     case 'register-handler':
       canFallback = true;
       break;
-    case 'api-request':
+    case 'api-request': {
+      const sourceAllowsHandleFallback =
+        ctx.runIdSource === 'ctx' || ctx.runIdSource === 'context';
+      // v1.0.0-rc.5+ — `'context'` (handler-fire ALS) is treated the same
+      // as `'ctx'` (originating-run fallback) when the dispatch targets a
+      // persistent handle. Original design denied `'context'` fallback to
+      // enforce "user-code handler-fires are per-call by design" — but
+      // that's about HANDLER INVOCATIONS being per-call, not about the
+      // DISPATCHES initiated synchronously inside them. A `handle.update()`
+      // call from within a `handle.on('click', ...)` body legitimately
+      // targets the persistent DOM element; failing because the click
+      // handler's transient activeRun was dropped between IPC send and
+      // parent-side processing is a race-window bug, not a feature.
+      const isPersistentTargetHandle =
+        ctx.targetHandle !== undefined &&
+        HANDLE_KIND_LIFECYCLE[ctx.targetHandle.kind] === 'persistent';
+      // v1.0.0-rc.7.1 — same logic for handle-returning *factory* calls
+      // (`db.collection`, `ui.dom.addStyle`). These don't carry a
+      // `targetHandle` on the request (they create one), but their RESULT
+      // is a per-script-persistent handle registered in the script's
+      // persistent table with obj-reuse dedup. The factory's behaviour is
+      // a pure function of (args, script-scope) — it doesn't read or
+      // mutate per-run state — so executing under the script's current
+      // activeRun produces an equivalent result to the orphaned run's
+      // activeRun. Closes a sub-second cross-run-orphan window where two
+      // tracker body fires firing 10 ms apart (chat-driven event pairs)
+      // would otherwise produce spurious `RunCompletedError` warns even
+      // though the script's persistent state remained correct. See
+      // `notes/known-issue-late-dispatch-tracker.md` for the empirical
+      // trace that established the diagnosis.
+      const factoryReturnKind = ctx.method !== undefined
+        ? HANDLE_RETURNING_METHODS[ctx.method]
+        : undefined;
+      const isPersistentFactoryCall =
+        factoryReturnKind !== undefined &&
+        HANDLE_KIND_LIFECYCLE[factoryReturnKind] === 'persistent';
       canFallback =
         ctx.runIdSource === 'latest' ||
-        // v1.0.0-rc.5+ — `'context'` (handler-fire ALS) is treated the same
-        // as `'ctx'` (originating-run fallback) when the dispatch targets a
-        // persistent handle. Original design denied `'context'` fallback to
-        // enforce "user-code handler-fires are per-call by design" — but
-        // that's about HANDLER INVOCATIONS being per-call, not about the
-        // DISPATCHES initiated synchronously inside them. A `handle.update()`
-        // call from within a `handle.on('click', ...)` body legitimately
-        // targets the persistent DOM element; failing because the click
-        // handler's transient activeRun was dropped between IPC send and
-        // parent-side processing is a race-window bug, not a feature.
-        ((ctx.runIdSource === 'ctx' || ctx.runIdSource === 'context') &&
-         ctx.targetHandle !== undefined &&
-         HANDLE_KIND_LIFECYCLE[ctx.targetHandle.kind] === 'persistent');
+        (sourceAllowsHandleFallback && (isPersistentTargetHandle || isPersistentFactoryCall));
       break;
+    }
   }
   if (!canFallback) return undefined;
 
@@ -1917,12 +1950,16 @@ function resolveActiveRun(
   const fallback = activeRuns.get(latestRunId);
   if (!fallback) return undefined;
 
-  // Audit-trail log. Includes policy + (when relevant) targetHandle/runIdSource
+  // Audit-trail log. Includes policy + (when relevant) targetHandle/runIdSource/method
   // so the operator can correlate with downstream warns.
   const detail = policy === 'register-handler'
     ? 'register-handler'
     : `api dispatch (source=${ctx.runIdSource ?? 'unknown'}` +
-      (ctx.targetHandle ? `, handle=${ctx.targetHandle.kind}/${ctx.targetHandle.id})` : ')');
+      (ctx.targetHandle
+        ? `, handle=${ctx.targetHandle.kind}/${ctx.targetHandle.id})`
+        : ctx.method && HANDLE_RETURNING_METHODS[ctx.method] !== undefined
+          ? `, factory=${ctx.method}→${HANDLE_RETURNING_METHODS[ctx.method]})`
+          : ')');
   spindle.log.info(
     `[script-runner] ${detail} fallback: runId ${ctx.runId} no longer active; ` +
     `routing to script's current run ${latestRunId} (script ${ctx.scriptId})`,
@@ -3144,6 +3181,7 @@ async function handleApiRequest(
       runId:        req.runId,
       runIdSource:  req._runIdSource,
       targetHandle: req.targetHandle,
+      method:       req.method,
     },
     'api-request',
   );
@@ -3176,6 +3214,23 @@ async function handleApiRequest(
     const sourceSuffix = req._runIdSource
       ? `, runIdSource=${req._runIdSource}`
       : '';
+    // v1.0.0-rc.7.1 — late-dispatch diagnosis aid. If a NEWER activeRun
+    // exists for the same script, this late dispatch was almost certainly
+    // orphaned by cross-run drop at line ~5634 (new dispatchRunScript
+    // unconditionally drops the previous script-body run's activeRun).
+    // If no newer run exists, the dispatch leaked some other way (cascade-
+    // depth exhaustion in proxy.flush, an untracked dispatch path, etc.).
+    // Distinguishing the two cases lets the operator pick the right
+    // remediation without having to instrument both sides. See
+    // `notes/known-issue-late-dispatch-tracker.md`.
+    let newerRunForScript: string | null = null;
+    for (const [otherRunId, entry] of activeRuns) {
+      if (entry.scriptId === req.scriptId && otherRunId !== req.runId) {
+        newerRunForScript = otherRunId;
+        break;
+      }
+    }
+    const newerRunSuffix = `, newerRunForScript=${newerRunForScript ?? 'none'}`;
     sendApiResponse(responseWorkerKey, {
       type:      'api-response',
       requestId: req.requestId,
@@ -3184,7 +3239,7 @@ async function handleApiRequest(
         name:    'RunCompletedError',
         message:
           `api-proxy host: late api call "${req.method}" from script "${req.scriptId}" arrived ` +
-          `after run ${req.runId} ended (requestId=${req.requestId}${handleSuffix}${sourceSuffix})`,
+          `after run ${req.runId} ended (requestId=${req.requestId}${handleSuffix}${sourceSuffix}${newerRunSuffix})`,
       },
     });
     return;
@@ -5316,12 +5371,12 @@ export function checkUserScriptSecurity(code: string): void {
   }
   // `globalThis.process` / `globalThis["process"]` — same shape as Bun above.
   // The Layer 2 lockdown CANNOT lock `process` either, but for a different
-  // reason: Spindle's `backend-process-runtime.ts` uses `process.send` /
-  // `process.on` / `process.exit` to manage the subprocess lifecycle; locking
-  // process breaks Spindle's own runtime and times out subprocess startup
-  // (verified against Lumiverse 0.9.7). The Layer 1 parameter shadow handles
-  // bare `process`; this source-check catches the common literal forms; the
-  // same aliasing residual applies as for Bun.
+  // reason: Spindle's `backend-process-runtime.ts` uses the standard process
+  // lifecycle hooks (send / on / exit / signals) to manage the subprocess;
+  // locking process breaks Spindle's own runtime and times out subprocess
+  // startup (verified against Lumiverse 0.9.7). The Layer 1 parameter shadow
+  // handles bare `process`; this source-check catches the common literal
+  // forms; the same aliasing residual applies as for Bun.
   if (/\bglobalThis\s*\.\s*process\b/.test(stripped) ||
       /\bglobalThis\s*\[\s*['"`]\s*process\s*['"`]/.test(stripped)) {
     throw new LumiScriptSecurityError(
@@ -5626,9 +5681,21 @@ export async function dispatchRunScript(
   // Phase 9d.4.x — drop the previous script-body activeRun for this script
   // before installing the new one. The previous run's setInterval / setTimeout
   // / promise-chain continuations are conceptually orphaned by re-execution;
-  // any late dispatches they make should fail with `RunCompletedError` from
-  // here on. ls:startup scripts (single-run-per-lifetime) never trigger this
-  // branch — their map entry only gets dropped via `unregisterScriptFromChild`.
+  // any late dispatches they make either fall back to the script's current
+  // run (persistent-handle methods, handle-returning factory calls — the
+  // common cases that user code cares about), or surface as `RunCompletedError`
+  // (transient-handle methods, void-returning side effects on the originating
+  // run's state — these are correctly orphaned by re-execution). ls:startup
+  // scripts (single-run-per-lifetime) never trigger this branch — their map
+  // entry only gets dropped via `unregisterScriptFromChild`.
+  //
+  // The fallback rule for handle-returning factory calls landed in v1.0.0-rc.7.1
+  // after empirical observation that sub-second cross-run-orphan windows
+  // (10–30 ms apart, produced by chat-driven event pairs like MESSAGE_SENT +
+  // GENERATION_ENDED arriving back-to-back) produced spurious late-call warns
+  // for tracker's `db.collection` factory dispatches even though the script's
+  // actual writes (via persistent Collection handle methods) had landed
+  // correctly. See `notes/known-issue-late-dispatch-tracker.md`.
   const previousScriptBodyRunId = scriptBodyActiveRunByScript.get(script.id);
   if (previousScriptBodyRunId !== undefined) {
     activeRuns.delete(previousScriptBodyRunId);
@@ -6381,7 +6448,7 @@ export function __getActiveRunIdsForTests(): string[] {
  * belongs to; tests don't need the full `ActiveRun` payload.
  */
 export function __resolveActiveRunForTests(
-  ctx:    { scriptId: string; runId: string; runIdSource?: 'context' | 'latest' | 'ctx'; targetHandle?: HandleRef },
+  ctx:    { scriptId: string; runId: string; runIdSource?: 'context' | 'latest' | 'ctx'; targetHandle?: HandleRef; method?: string },
   policy: 'api-request' | 'register-handler',
 ): { resolved: boolean; scriptId?: string } {
   const result = resolveActiveRun(ctx, policy);

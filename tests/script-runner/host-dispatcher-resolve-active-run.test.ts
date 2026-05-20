@@ -106,26 +106,81 @@ describe('resolveActiveRun: api-request fallback policy', () => {
     expect(result.resolved).toBe(true);
   });
 
-  test('context source WITHOUT targetHandle: no fallback (transient-state invariant preserved)', () => {
+  test('context source WITHOUT targetHandle AND non-factory method: no fallback (transient-state invariant preserved)', () => {
     // The rc.5 fix loosened the rule for persistent handles only. Bare
-    // `'context'` dispatches (no targetHandle) — e.g. a top-level api call
-    // from inside a handler body that didn't go through a persistent
-    // handle's method — must still be denied fallback. They legitimately
-    // represent handler-local intent.
+    // `'context'` dispatches (no targetHandle, no handle-returning method)
+    // — e.g. a top-level api call from inside a handler body like
+    // `api.variables.local.set(...)` — must still be denied fallback.
+    // They legitimately represent handler-local intent against per-run state.
     cleanups.push(__installFakeActiveRunForTests('script-A', 'run-body-1', { isScriptBodyRun: true }));
 
     const result = __resolveActiveRunForTests(
-      { scriptId: 'script-A', runId: 'handler-dead-1', runIdSource: 'context' },
+      { scriptId: 'script-A', runId: 'handler-dead-1', runIdSource: 'context', method: 'variables.local.set' },
       'api-request',
     );
     expect(result.resolved).toBe(false);
   });
 
-  test('ctx source WITHOUT targetHandle: no fallback (pre-rc.5 behavior, unchanged)', () => {
+  test('ctx source WITHOUT targetHandle AND non-factory method: no fallback (pre-rc.5 behavior, unchanged)', () => {
     cleanups.push(__installFakeActiveRunForTests('script-A', 'run-body-1', { isScriptBodyRun: true }));
 
     const result = __resolveActiveRunForTests(
-      { scriptId: 'script-A', runId: 'orphan-1', runIdSource: 'ctx' },
+      { scriptId: 'script-A', runId: 'orphan-1', runIdSource: 'ctx', method: 'variables.local.set' },
+      'api-request',
+    );
+    expect(result.resolved).toBe(false);
+  });
+
+  test('rc.7.1 fix — context source + db.collection factory call (no targetHandle) falls back', () => {
+    // Cross-run-orphan window observed in tracker testing: MESSAGE_SENT and
+    // GENERATION_ENDED firing 10 ms apart drop the MESSAGE_SENT run's
+    // activeRun before its trailing `db.collection` factory call reaches the
+    // parent. Pre-rc.7.1, the factory dispatch landed with `runIdSource:
+    // 'context'` and no `targetHandle` (factories CREATE handles), so the
+    // existing persistent-handle fallback didn't apply — even though the
+    // factory's RESULT is a per-script-persistent handle. Now allowed.
+    cleanups.push(__installFakeActiveRunForTests('script-A', 'run-body-1', { isScriptBodyRun: true }));
+
+    const result = __resolveActiveRunForTests(
+      { scriptId: 'script-A', runId: 'orphan-1', runIdSource: 'context', method: 'db.collection' },
+      'api-request',
+    );
+    expect(result.resolved).toBe(true);
+    expect(result.scriptId).toBe('script-A');
+  });
+
+  test('rc.7.1 fix — ctx source + db.collection factory call (no targetHandle) falls back too', () => {
+    // Same loosening for the `'ctx'` source variant — the proxy uses 'ctx'
+    // when both ALS context AND latestRunIdByScript are unset (rare, but
+    // possible for a brand-new proxy on the very first dispatch).
+    cleanups.push(__installFakeActiveRunForTests('script-A', 'run-body-1', { isScriptBodyRun: true }));
+
+    const result = __resolveActiveRunForTests(
+      { scriptId: 'script-A', runId: 'orphan-1', runIdSource: 'ctx', method: 'db.collection' },
+      'api-request',
+    );
+    expect(result.resolved).toBe(true);
+  });
+
+  test('rc.7.1 fix — ui.dom.addStyle factory call also falls back (every handle-returning method counts)', () => {
+    cleanups.push(__installFakeActiveRunForTests('script-A', 'run-body-1', { isScriptBodyRun: true }));
+
+    const result = __resolveActiveRunForTests(
+      { scriptId: 'script-A', runId: 'orphan-1', runIdSource: 'context', method: 'ui.dom.addStyle' },
+      'api-request',
+    );
+    expect(result.resolved).toBe(true);
+  });
+
+  test('rc.7.1 fix — non-factory method on context source still denied (negative case for the new rule)', () => {
+    // The new factory-fallback rule must NOT loosen non-factory dispatches.
+    // `broadcast.emit` is a void-returning side effect — orphaning it is
+    // the correct behaviour (the run that emitted is gone, so the emit
+    // semantics are dead with it).
+    cleanups.push(__installFakeActiveRunForTests('script-A', 'run-body-1', { isScriptBodyRun: true }));
+
+    const result = __resolveActiveRunForTests(
+      { scriptId: 'script-A', runId: 'orphan-1', runIdSource: 'context', method: 'broadcast.emit' },
       'api-request',
     );
     expect(result.resolved).toBe(false);

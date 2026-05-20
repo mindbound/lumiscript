@@ -67,6 +67,20 @@ For state that needs to survive across fires, pick one of:
 - `api.broadcast.*` — real-time *script-to-script* pub/sub between user scripts running inside the same LumiScript extension. Use for custom in-extension messaging.
 - `api.events.*` — *persistent log* of custom events (`track` / `query` / `replay` / `getLatestState`). Use for audit trails, state-resuming scripts, custom analytics. **NOT** for subscribing to host events.
 
+**Sandbox hardening (v1.0.0-rc.7+).** The script-runner sandbox locks down host capabilities that user scripts have no business reaching. Two layers gate this:
+
+- **Dispatch-time source check.** Scripts containing any of the following patterns are REJECTED before they run; the editor console shows a `[security]` entry naming the rejected pattern:
+  - `import('...')` / `await import('...')` — dynamic import. Use `script.require('library-name')` for inter-script dependencies (see the **Libraries** section).
+  - bare `require('...')` — CommonJS-style global require. Same migration: `script.require('library-name')`. Note: `script.require(...)` and method-style `obj.require(...)` are NOT rejected (the source check uses `(?<!\.)` lookbehind to exclude method access).
+  - `new Function('...')` / `Function('...')` — Function constructor. Define functions with normal syntax (`function foo() {}` / `const foo = () => {}`); same lookbehind exempts method-style `obj.Function(...)`.
+  - `.constructor.constructor` — prototype-chain access to the Function constructor.
+  - literal `globalThis.Bun` / `globalThis["Bun"]` — Bun runtime API. Use `api.utils.http.*` for HTTP, `api.files.*` (with `allowDangerous`) for filesystem.
+  - literal `globalThis.process` / `globalThis["process"]` — host process. Use `api.enclave.*` for secrets, never read host env vars from a script.
+
+- **Runtime globalThis lockdown.** At subprocess startup, every globalThis property not on the LumiScript allowlist is replaced with `undefined`. `typeof X` returns `'undefined'`; reading `X.method()` throws `TypeError`. Affects: `fetch`, `Worker`, `WebSocket`, `BroadcastChannel`, `XMLHttpRequest`, `EventSource`, `prompt`, `onerror`, `onmessage`, `postMessage`, `removeEventListener`, and Bun-specific Node-compat module globals (`fs`, `http`, `net`, `os`, `tls`, `vm`, `worker_threads`, `ffi`, `sqlite`, etc.). Standard ES built-ins (Object, Array, Promise, JSON, Math, Date, RegExp, Map, Set, etc.), web data carriers (Blob, File, FileReader, FormData, Headers, Request, Response), event types (Event, EventTarget, CustomEvent), streams (Readable/Writable/Transform), and Web Crypto are all left accessible.
+
+**Console rate-limit.** Unhandled rejections from a single script are rate-limited to **10 per 60s window**; further rejections drop silently with a `"N additional rejection(s) were suppressed"` summary on the next-window rejection. Prevents a runaway loop from filling the editor console + backend stderr with millions of lines. The 10-per-minute cap is intentional — most legitimate scripts produce ≪ 1 rejection/minute under normal operation.
+
 ## Permission model
 
 **DO NOT WRITE `// @permissions` OR `// @permission` IN YOUR SCRIPT.** Neither is a LumiScript directive. **LumiScript does not parse ANY script-header directives currently** — including `// @triggers`, which despite the name is purely a documentary comment with no runtime effect (event wiring happens in the editor UI; see the **Trigger model** section). Writing `@permissions` or `@permission` in a script header is a **no-op** — it looks like it grants permissions but actually does nothing; your script will then fail at runtime when it calls a gated method. This is the single most common script-permission-bug we see; if you find yourself reaching for an `@permission` directive, stop and re-read this section.
@@ -207,6 +221,30 @@ _The same method set applies to each of the 4 namespaces above._
 | async `getPushStatus` | — | Check if push notifications are available. Returns { available, subscriptionCount }. Requires push_notification. [push_notification] |
 
 ## api.ui.dom
+
+> **Concepts:** DOM injection surface. `inject(target, html, position?)` returns a `DOMHandle`; subsequent calls go through the handle (`update`, `remove`, `on`, `injectChild`, `read`, `makeDraggable`). `addStyle(css)` adds a scoped stylesheet (wrapped in `@scope ([data-ls-script="<id>"])` — only matches script-injected DOM, doesn't cascade into the host app shell). `injectAtMessage(messageId, html, options?)` attaches DOM to a specific chat message (header, before, after, footer positions). `delegate(selector, event, handler, options?)` (v0.27.1+) installs a capture-phase event-delegated listener at a known root — use to react to events on host DOM you didn't inject (e.g. LLM-emitted interactive elements inside `.mes_text` content). `cleanup()` removes ALL of this script's DOM in one call. Requires `app_manipulation` permission.
+
+**HTML sanitisation (v1.0.0-rc.7+).** Every HTML payload — `inject`, `update`, `injectChild`, `injectAtMessage` — is run through DOMPurify with strict defaults plus `FORBID_TAGS: ['iframe', 'frame', 'object', 'embed', 'form']` (matching the host's three-layer CSP+DOMPurify+X-Frame-Options policy from commit `dd6d7cd3`). DOMPurify defaults strip all `on*` event handler attributes (`onclick`, `onerror`, `onload`, `onmouseover`, etc.), `<script>` tags, `javascript:` URLs, `data:` URLs on dangerous elements, the `formaction` attribute, and other XSS vectors. **When content is stripped, the affected script's editor console gets a `[security]` entry** naming what was removed (deprecation aid: tells you why your `<button onclick="...">` button stopped working).
+
+**Event handler migration — inline → delegation.** Pre-rc.7 some scripts attached behaviour via inline `onclick="someFn()"` in `update()` HTML. Post-rc.7 those handlers are silently stripped. The replacement is `DOMHandle.on(event, handler)` event delegation with a `data-*` attribute on the trigger element:
+
+```js
+// Pre-rc.7 (handler now stripped, button does nothing):
+handle.update('<button onclick="doThing()">Click</button>');
+
+// rc.7+ (recommended):
+handle.update('<button data-action="do-thing">Click</button>');
+handle.on('click', (ev) => {
+  if (ev.target.dataset.action !== 'do-thing') return;
+  // ...do thing
+});
+```
+
+The delegation reads `event.target.dataset.action` (not a `closest()` walk), so when the visible button content is bigger than its padded text area (icon SVG, `<img>`, decorative `<span>`), the click target can be the inner element — which lacks the `data-*` attribute, so the handler silently no-ops. Standard fix: `pointer-events: none` on the decorative inner content so clicks pass through to the button itself.
+
+**Read access (v1.0.0-rc.6+).** `handle.read(options?)` returns a `SerializedDOMElement` snapshot of the bound element — `tag`, `attrs` (with internal `data-ls-*` and `data-spindle-ext` stripped), `text`, `childCount`, plus optional `html` for the inner markup. Async because it awaits a frontend roundtrip. Multi-root or text-only injections return the LumiScript wrapper snapshot; single-root injections return the user's element directly. Returns `null` if the element vanished on the frontend (live DOM raced ahead of script logic) — distinct from `DomHandleReleasedError` which throws after `handle.remove()`.
+
+**Spindle wrapper nesting (gotcha).** `ctx.dom.inject` wraps every payload in a Spindle wrapper `<div data-spindle-ext>` containing a LumiScript wrapper `<div data-ls-el data-ls-script>` containing your HTML. Two levels of wrapper sit ABOVE your root element. Code that walks down to the user's root must do `wrapper.firstElementChild?.firstElementChild`. The `data-ls-script` attribute is what `addStyle`'s `@scope` rules match.
 
 | Method | Args | Description |
 |---|---|---|
@@ -448,6 +486,8 @@ _The same method set applies to each of the 4 namespaces above._
 ## api.broadcast
 
 > **Concepts:** In-memory real-time pub/sub between scripts. Events are NOT persisted — handlers fire synchronously when an event is emitted, and there's no replay across script reloads. Subscriptions persist between trigger runs (host wipes them at the START of each new run, not the end), so a "subscriber-only" script can watch events from a script it isn't co-triggered with. The `ls:*` prefix is reserved for system events; scripts should namespace their own events with a project-specific prefix. **Distinct from `api.events`** — that one is for persistent event tracking; this one is for real-time messaging.
+
+**Payload size cap + emit rate limit (v1.0.0-rc.7+).** `api.broadcast.emit(event, payload)` synchronously throws if the JSON-serialised payload exceeds **1 MB** (matches the `api.scriptStorage` per-value ceiling), OR if the calling script has emitted more than **100 events/sec sustained** (token bucket with **1000-emit burst capacity**). Errors carry clear migration hints. The caps apply at the `api.broadcast.emit` proxy entry (NOT at the underlying bus, so internal `ls:*` events the engine emits are unaffected). For high-frequency data flow, push the data to `api.db.*` or `api.scriptStorage` and emit a small "data updated" notification on the bus instead.
 
 | Method | Args | Description |
 |---|---|---|

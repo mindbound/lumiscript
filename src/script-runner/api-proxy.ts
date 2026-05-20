@@ -718,13 +718,45 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
 
   async function flush(): Promise<void> {
     // Loop in case a settling chain spawns a new one (e.g. a dispatch's
-    // response triggers a follow-up send). In practice the proxy doesn't
-    // currently have such cascading sends — the loop is defensive
-    // belt-and-braces.
-    let safety = 8;
+    // response triggers a follow-up send). The proxy *does* have such
+    // cascades in practice — e.g. the tracker's per-field extraction
+    // orchestrator chains LLM calls → DB inserts → projection reads → a
+    // final notifyStateChanged broadcast emit. Cascade depth peaks around
+    // 10-12 observed; the prior cap of 8 occasionally exhausted under
+    // load (see `notes/known-issue-late-dispatch-tracker.md`).
+    //
+    // v1.0.0-rc.7.1 — bumped to 32 (comfortably above any legitimate
+    // user-script cascade depth observed). Genuine runaway leaks are
+    // still bounded by the per-run script timeout. Exit-with-pending
+    // emits a diagnostic via `process.stderr.write` so it lands in the
+    // backend log without going through the captured-console route.
+    const FLUSH_ITER_CAP = 32;
+    let safety = FLUSH_ITER_CAP;
     while (outstandingChains.size > 0 && safety-- > 0) {
       const snapshot = [...outstandingChains];
       await Promise.allSettled(snapshot);
+    }
+    if (outstandingChains.size > 0) {
+      // Cap exhausted with chains still pending — they will arrive at
+      // the parent as late dispatches (RunCompletedError). Surface the
+      // exhaustion so an operator can correlate it with the late-call
+      // warn on the parent side and confirm the cascade-depth hypothesis.
+      //
+      // api-proxy runs in module scope (NOT in the user-script AsyncFunction
+      // scope), so `process` resolves to the real Bun process — the Layer 1
+      // parameter shadow only applies inside the user-script body. Writing
+      // to `process.stderr` here surfaces in the backend log via the parent's
+      // child-process stderr capture (without going through the
+      // captured-console / console-entry IPC route reserved for user-script
+      // output).
+      try {
+        process.stderr.write(
+          `[script-runner] proxy.flush exhausted iteration cap (${FLUSH_ITER_CAP}) ` +
+          `with ${outstandingChains.size} chain(s) still pending for script ` +
+          `${ctx.scriptId} / run ${ctx.runId}; subsequent dispatches will arrive ` +
+          `as late-IPC warns on the host side\n`,
+        );
+      } catch { /* defensive — never let logging tank flush */ }
     }
   }
 

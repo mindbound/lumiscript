@@ -44,7 +44,7 @@ import { isHandleRef } from '../types/script-runner-ipc.js';
 // the existing `clearByScriptId` patterns. This module just identifies WHO
 // gets a handle; lifetime is the dispatcher's concern.
 
-const HANDLE_RETURNING_METHODS: Readonly<Record<string, HandleKind>> = {
+export const HANDLE_RETURNING_METHODS: Readonly<Record<string, HandleKind>> = {
   'db.collection':       'Collection',
   'ui.dom.addStyle':     'StyleHandle',
 };

@@ -230,7 +230,7 @@ const SAFE_GLOBALS: ReadonlySet<string> = new Set([
   'URLPattern',
   // Streams API — pure data transforms, no I/O capability themselves.
   // The dangerous part of streams is what you READ FROM or PIPE TO —
-  // those endpoints (fetch responses, Bun.file, etc.) are separately gated.
+  // those endpoints (fetch responses, Bun file-handle, etc.) are separately gated.
   'ReadableStream', 'ReadableStreamBYOBReader', 'ReadableStreamBYOBRequest',
   'ReadableStreamDefaultController', 'ReadableStreamDefaultReader',
   'ReadableByteStreamController',
@@ -266,9 +266,10 @@ const SAFE_GLOBALS: ReadonlySet<string> = new Set([
   // via `beforeEach`. No production exposure — `spindle` simply isn't
   // there for the lockdown to find when it iterates `Object.getOwnPropertyNames`.
   'spindle',
-  // `process` — Spindle's `backend-process-runtime.ts` uses `process.send`,
-  // `process.on`, and `process.exit` internally to manage the subprocess
-  // lifecycle (init handshake, shutdown, IPC). Locking `process` breaks
+  // `process` — Spindle's `backend-process-runtime.ts` uses the standard
+  // process lifecycle hooks (send / on / exit / signals) internally to
+  // manage the subprocess lifecycle (init handshake, shutdown, IPC).
+  // Locking `process` breaks
   // Spindle's own runtime and causes the subprocess to time out at startup
   // (verified empirically against host Lumiverse 0.9.7). Whitelisted on
   // architectural necessity. User-script defence:
@@ -1105,8 +1106,8 @@ ${req.code}
 //      console as an error so the user can see what happened.
 //   3. Always log to backend stderr (server-side `console.error`) for
 //      the audit trail, including the unattributable case.
-//   4. Do NOT call `process.exit`. The worker stays alive; co-located
-//      scripts keep their registered handlers.
+//   4. Do NOT terminate the worker process. The worker stays alive;
+//      co-located scripts keep their registered handlers.
 //
 // Trade-off: bona-fide fatal runtime issues (rare) no longer crash-and-
 // respawn the worker; they leave a noisy log line instead. Right call in

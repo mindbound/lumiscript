@@ -13,8 +13,8 @@
  *
  *   1. **Runtime lockdown** — `child-entry.ts`'s `installSandboxLockdown`
  *      replaces non-whitelisted `globalThis.*` properties with throwing
- *      accessors. A user script reaching `globalThis.Bun.file(...)` /
- *      `globalThis.process.env` / `globalThis.fetch(...)` / `new Function(...)`
+ *      accessors. A user script reaching `globalThis.Bun.<x>` /
+ *      `globalThis.process.<x>` / `globalThis.fetch(...)` / `new Function(...)`
  *      / `(0, eval)(...)` triggers the accessor and lands here.
  *
  *   2. **Dispatch-time source check** — `host-dispatcher.ts`'s

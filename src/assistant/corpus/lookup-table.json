@@ -4968,6 +4968,66 @@
     "attempted": "confirm",
     "message": "Top-level `confirm` (the browser dialog) does not exist in LumiScript. Use `await api.ui.confirm({ title, message, confirmLabel?, cancelLabel?, danger? })` — returns `{ confirmed: boolean }`. Free-tier."
   },
+  "globalThis.Bun": {
+    "kind": "redirect",
+    "attempted": "globalThis.Bun",
+    "message": "`globalThis.Bun` access is rejected at dispatch time (LumiScript v1.0.0-rc.7+); a literal in user-script source produces a `LumiScriptSecurityError` before the script runs. The Bun runtime API is not exposed to user scripts. For the capabilities scripts typically reach for: outbound HTTP — `api.utils.http.*` (requires `cors_proxy` + `allowDangerous`); filesystem — `api.files.*` (per-user / shared / temp tiers, requires `allowDangerous`); subprocess spawn — not available, no replacement (scripts run in a sandboxed Bun subprocess by design); Bun-specific utilities like `deepEquals`, the file-write helper, etc. — use standard JS / pure helpers."
+  },
+  "globalThis.process": {
+    "kind": "redirect",
+    "attempted": "globalThis.process",
+    "message": "`globalThis.process` access is rejected at dispatch time (LumiScript v1.0.0-rc.7+). The host process API is not exposed to user scripts — no env vars, no exit, no IPC. For the patterns scripts typically reach for: secrets — `api.enclave.*` (AES-256-GCM encrypted, per-user-per-extension, requires `allowDangerous`); script-self-info — the `script` global (`script.id`, `script.name`, `script.type`); active context — `api.chat.getChatId()` (sync), `await api.chats.getActive()`, `await api.personas.getActive()`. There is no Node-style env-var access in LumiScript — secrets live in the enclave, configuration lives in `api.variables.global` or script source constants."
+  },
+  "globalThis.fetch": {
+    "kind": "redirect",
+    "attempted": "globalThis.fetch",
+    "message": "`globalThis.fetch` is locked at the runtime sandbox boundary (v1.0.0-rc.7+) — access returns `undefined`. The top-level `fetch` parameter inside an `allowDangerous` script body works (handed in via the AsyncFunction parameter slot), but the recommended path is `api.utils.http.*` (`get` / `post` / `put` / `delete` / `request`), which routes through the host's CORS proxy with SSRF validation + size caps. Requires `cors_proxy` + `allowDangerous`."
+  },
+  "new Function": {
+    "kind": "redirect",
+    "attempted": "new Function",
+    "message": "`new Function('...')` and bare `Function('...')` are rejected at dispatch time (LumiScript v1.0.0-rc.7+); the Function constructor is blocked because it would enable runtime-constructed code that bypasses the dispatch-time source check. Define functions with normal syntax — function declarations, function expressions, arrow functions, async variants. The lookbehind in the source check exempts method-style `obj.Function(...)` (rare but valid), so methods on user objects named `Function` are NOT affected."
+  },
+  "Function": {
+    "kind": "redirect",
+    "attempted": "Function",
+    "message": "The `Function` *constructor* is blocked at dispatch — see `new Function`. `Function` as a *value* (`typeof x === 'function'`, `x instanceof Function`) is fine; `Function.prototype.*` access is fine. Only `Function(...)` invocation in source is rejected."
+  },
+  "eval": {
+    "kind": "redirect",
+    "attempted": "eval",
+    "message": "`eval('...')` is not allowed in LumiScript user scripts (the global `eval` is locked at the runtime sandbox boundary — `globalThis.eval` returns `undefined`). There's no use case for `eval` inside a LumiScript script: dynamic code is rejected at dispatch anyway (`new Function` / `import()` / `require()` all blocked), and the canonical replacements are normal JS — function references, dispatch tables, conditional branches."
+  },
+  ".constructor.constructor": {
+    "kind": "redirect",
+    "attempted": ".constructor.constructor",
+    "message": "`x.constructor.constructor(...)` (the prototype-chain path to the `Function` constructor) is rejected at dispatch time in LumiScript v1.0.0-rc.7+. Like `new Function`, this would enable runtime-constructed code that bypasses the source check. Define functions with normal syntax."
+  },
+  "import": {
+    "kind": "redirect",
+    "attempted": "import",
+    "message": "Dynamic `import('module-name')` is not allowed in LumiScript user scripts — rejected at dispatch time (v1.0.0-rc.7+). User scripts can't import Node modules or NPM packages directly. The two legitimate uses of `import`-style loading in LumiScript: (a) inter-script dependencies via `script.require('library-name')` — see the **Libraries** section; (b) built-in libraries via `script.require('ls:components')` / `script.require('ls:icons')` / `script.require('ls:council-prompt')`. Static `import` declarations at the top of a script body are also a category error — user scripts are bare-top-level bodies (not modules), so `import` syntax is a parse error."
+  },
+  "require": {
+    "kind": "redirect",
+    "attempted": "require",
+    "message": "Bare `require('module-name')` (CommonJS) is rejected at dispatch time in LumiScript v1.0.0-rc.7+. User scripts can't reach Node modules. **`script.require('library-name')` is the LumiScript library-loading API** (loads user library-scripts or built-in `ls:*` libraries) — the source check uses `(?<!\\.)` lookbehind to exempt method-style access, so `script.require(...)` is NOT rejected. See the **Libraries** section."
+  },
+  "onclick": {
+    "kind": "redirect",
+    "attempted": "onclick",
+    "message": "Inline `onclick=\"...\"` event handlers in HTML strings injected via `api.ui.dom.inject` / `update` / `injectChild` are STRIPPED by DOMPurify (LumiScript v1.0.0-rc.7+). Same for `onerror`, `onload`, `onmouseover`, `onsubmit`, and every other `on*` event-handler attribute. **Replacement**: event delegation via `handle.on(event, fn)` with a `data-*` attribute on the trigger element. See the `api.ui.dom` namespace concept for the canonical pattern and the wrapper-nesting gotcha."
+  },
+  "onerror": {
+    "kind": "redirect",
+    "attempted": "onerror",
+    "message": "Same as `onclick`: inline `onerror=\"...\"` handlers in injected HTML are stripped by DOMPurify post-rc.7. Use `handle.on('error', fn)` event delegation. For image-error handling specifically, the pattern is `<img data-image=\"foo\">` + `handle.on('error', (ev) => { if (ev.target.matches('img[data-image]')) ... })`."
+  },
+  "onload": {
+    "kind": "redirect",
+    "attempted": "onload",
+    "message": "Same as `onclick`: inline `onload=\"...\"` handlers in injected HTML are stripped by DOMPurify post-rc.7. Use `handle.on('load', fn)` event delegation. For image-load specifically, `<img data-image=\"foo\">` + `handle.on('load', (ev) => { if (ev.target.matches('img[data-image]')) ... })`."
+  },
   "ChatMessage": {
     "kind": "type",
     "type": "ChatMessage",
