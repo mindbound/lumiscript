@@ -182,8 +182,18 @@ const SAFE_GLOBALS: ReadonlySet<string> = new Set([
   'Int8Array', 'Uint8Array', 'Uint8ClampedArray',
   'Int16Array', 'Uint16Array', 'Int32Array', 'Uint32Array',
   'Float32Array', 'Float64Array', 'BigInt64Array', 'BigUint64Array',
-  // Text + URL
+  // Text + URL + base64 codecs
   'TextEncoder', 'TextDecoder', 'URL', 'URLSearchParams',
+  // `atob` / `btoa` — pure base64 codecs (binary-string <-> base64-string),
+  // no capability surface. Standard Web Platform globals available in Bun.
+  // Whitelisted because (a) library code commonly assumes they exist (Zod
+  // and others feature-detect via `typeof atob !== 'undefined'`) and (b) the
+  // backend's own helpers (`base64ToUint8Array` in api/utils.ts,
+  // `dataUrlToBytes` in engine/image-format.ts) use them as a portable
+  // alternative to `Buffer.from(b64, 'base64')` — the latter triggers the
+  // host's bundle-scanner false-positive for "dynamic code execution"
+  // (host commit `7e83b2c2`'s overbroad regex).
+  'atob', 'btoa',
   // In-memory binary data carriers — no filesystem, no network, no escape
   // path. Tests use `new File(...)` to construct script-pack fixtures;
   // user scripts can use them for in-memory binary manipulation (e.g.

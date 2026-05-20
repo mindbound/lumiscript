@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0-rc.7.1",
+  "version": "1.0.0-rc.7.2",
   "name": "LumiScript",
   "identifier": "lumiscript",
   "author": "mindbound",
@@ -30,8 +30,11 @@
     "image_gen",
     "oauth"
   ],
+  "requested_capabilities": [
+    "dynamic_code_execution"
+  ],
   "entry_backend": "dist/backend.js",
   "entry_frontend": "dist/frontend.js",
-  "minimum_lumiverse_version": "0.9.7",
+  "minimum_lumiverse_version": "0.9.9",
   "interceptorTimeoutMs": 30000
 }
