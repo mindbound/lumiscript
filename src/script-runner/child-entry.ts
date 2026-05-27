@@ -50,6 +50,7 @@ import type { ConsoleEntry, ConsoleEntryType } from '../types/script.js';
 import {
   buildProxiedAPI,
   runIdContext,
+  liveContextStore,
   rejectionAttribution,
   notifyAdvancedModalDismissed,
   notifyFloatWidgetPosition,
@@ -650,8 +651,19 @@ async function handleRunHandlerRequest(
         req.timeoutMs,
       ),
     );
+    // Two nested AsyncLocalStorage scopes:
+    //   1. liveContextStore — fresh per-fire chatId / characterId from
+    //      the parent's binding.ts. Sync getters (api.chat.getChatId)
+    //      read from this so long-lived handlers see live state, not
+    //      the script-load snapshot.
+    //   2. runIdContext — fresh per-fire runId so the proxy's dispatch
+    //      routes api.* calls through the ephemeral activeRun the parent
+    //      registered for this fire.
     value = await Promise.race([
-      runIdContext.run(req.runId, () => Promise.resolve(handler(...req.args))),
+      liveContextStore.run(
+        { chatId: req.chatIdAtFire, characterId: req.characterIdAtFire },
+        () => runIdContext.run(req.runId, () => Promise.resolve(handler(...req.args))),
+      ),
       timeoutPromise,
     ]);
   } catch (err) {

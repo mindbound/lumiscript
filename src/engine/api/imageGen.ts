@@ -27,8 +27,8 @@
  * Integration with rest of api:
  *   - `result.imageId` → `api.images.get(id)` / `api.theme.extractColors(id)`
  *     / `spindle.characters.setAvatar({id})`
- *   - `result.imageUrl` → `api.ui.pushNotification({image: result.imageUrl})`
- *     (public unauthenticated URL — push clients can render without auth)
+ *   - `result.imageUrl` → `api.ui.pushNotification(title, body, { image: result.imageUrl })`
+ *     (positional signature; public unauthenticated URL — push clients render without auth)
  *   - `parameters: { input_images: [imageId, ...] }` for img2img / inpainting
  *     providers (capability schema type `'image_array'`)
  */

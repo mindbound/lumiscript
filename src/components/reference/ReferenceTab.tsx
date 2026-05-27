@@ -1,5 +1,5 @@
 import { FC, useState } from 'react';
-import { Zap, Lock, Radio, List, Braces, Hash, Package, Blocks, Download, ChevronDown, ChevronRight, AtSign } from 'lucide-react';
+import { Zap, Lock, Radio, List, Braces, Hash, Package, Blocks, Download, ChevronDown, ChevronRight, AtSign, Shield, Workflow } from 'lucide-react';
 import { downloadReferenceMarkdown } from './markdown-export.js';
 
 // ─── Section accordion ────────────────────────────────────────────────────────
@@ -60,22 +60,22 @@ const GroupHeader: FC<{ label: React.ReactNode; cols: number }> = ({ label, cols
 export interface EventRow { name: string; group: string; payload: string; fires?: string }
 
 export const EVENTS: EventRow[] = [
-  { group: 'LumiScript', name: 'ls:startup',                 payload: '{ __event: "ls:startup" }', fires: 'Per-script when the script enters the active state: at LumiScript boot (extension enable / app start) AND after the user toggles the script from disabled→enabled. Symmetric partner to `ls:teardown`. Use for tool registration, cache pre-warm, broadcast subscription setup, and other init that should run whenever the script becomes runnable. On re-enable the case body re-runs in full — bottom-of-body `api.broadcast.on(...)` calls also re-execute, re-registering the subscriptions disable\'s cleanup wiped, so the case body itself can be empty if all you need is the body firing.' },
-  { group: 'LumiScript', name: 'ls:teardown',                payload: "{ reason: 'disabled' | 'deleted', scriptId, scriptName }", fires: 'Per-script when the script is disabled or deleted. Use for cleanup.' },
-  { group: 'LumiScript', name: 'ls:reload',                  payload: "{ reason: 'autosave' | 'manual', previousCodeHash, currentCodeHash, previousLength, currentLength, triggeredAt }", fires: 'After a code edit IF the script opts in via the `// @ls:reload-on-edit` directive (~500ms debounce). Body re-runs in its existing worker so registered handlers refresh their closures. Also fires on click of the editor topbar Reload button (manual — bypasses the directive check). Branch on `data.__event === "ls:reload"` to detect.' },
-  { group: 'Chat',       name: 'MESSAGE_SENT',               payload: '{ chatId, message: ChatMessage }', fires: 'Once per **user**-initiated send. Does NOT fire for assistant-side messages — use `GENERATION_ENDED` for those. Note: `message` does NOT carry the active character — resolve via `api.chats.get(chatId).then(c => c.characterId)` then `api.characters.get(characterId)`.' },
+  { group: 'LumiScript', name: 'ls:startup',                 payload: '{ __event: "ls:startup" }', fires: 'Per-script when the script enters the active state: at LumiScript boot (extension enable / app start) AND after the user toggles the script from disabled→enabled. Symmetric partner to `ls:teardown`. Use for tool registration, cache pre-warm, broadcast subscription setup, and other init that should run whenever the script becomes runnable. On re-enable the case body re-runs in full — bottom-of-body `api.broadcast.on(...)` calls also re-execute, re-registering the subscriptions disable\'s cleanup wiped, so the case body itself can be empty if all you need is the body firing. **Use the `if (data.__event === "ls:startup")` branch for code that should run EXCLUSIVELY on cold boot — not on every Reload click.** Common cold-boot-only patterns: seeding a default config into `api.scriptStorage`, logging a boot timestamp, one-shot migrations on persistent data. To make init code ALSO re-run on hot reload, branch on `(data.__event === "ls:startup" || data.__event === "ls:reload")`, or put it at the top of the body un-gated (the body re-runs on every fire including `ls:reload`). See `ls:reload` for the hot-reload counterpart.' },
+  { group: 'LumiScript', name: 'ls:teardown',                payload: "{ reason: 'disabled' | 'deleted', scriptId, scriptName }", fires: 'Per-script when the script is disabled or deleted. Use for cleanup of external state (dynamic world-book entries, persistent storage migrations, etc.). **NOT fired on hot reload — `ls:reload` performs the per-script state wipe silently. ls:teardown is exclusive to disable / delete.**' },
+  { group: 'LumiScript', name: 'ls:reload',                  payload: "{ reason: 'autosave' | 'manual', previousCodeHash, currentCodeHash, previousLength, currentLength, triggeredAt }", fires: 'After a code edit IF the script opts in via the `// @ls:reload-on-edit` directive (~500ms debounce). Body re-runs in its existing worker so registered handlers refresh their closures. Also fires on click of the editor topbar Reload button (manual — bypasses the directive check). Branch on `data.__event === "ls:reload"` to detect. **Pairs with `ls:startup` as the lifecycle distinction**: ls:startup = cold boot (extension boot OR disable→enable transition), ls:reload = hot reload (autosave-with-directive OR manual Reload button click). **Reload performs a full per-script state wipe BEFORE the body re-runs** (DOM injections, modals, float widgets, drawer tabs, input-bar actions, handler closures, broadcast subs, tools, macros, interceptors, injections) while preserving `api.scriptStorage`, `api.theme.*` contributions, and the worker\'s `script.require()` cache. So the body re-running from `ls:reload` lands into a clean slate identical to a fresh `ls:startup` fire — the only difference is `data.__event` + the presence of `data.reason` (`"autosave" | "manual"`). v1.0.0-rc.8+. **NOT in the trigger picker UI**: ls:reload is a deterministic side-effect of the Reload button OR the `@ls:reload-on-edit` directive, not a picker-checkbox subscription (parallel to the Run button, which also has no checkbox).' },
+  { group: 'Chat',       name: 'MESSAGE_SENT',               payload: '{ chatId, message: ChatMessage }', fires: 'Once per **user**-initiated send. Fires **before prompt assembly** for the generation that follows — `api.chat.inject(...)` calls from a `MESSAGE_SENT` handler ARE picked up by the immediate-next generation (host emits via `queueMicrotask`; assembly runs a tick later in the macrotask queue, so the inject lands first). Does NOT fire for assistant-side messages — use `GENERATION_ENDED` for those. Note: `message` does NOT carry the active character — resolve via `api.chats.get(chatId).then(c => c.characterId)` then `api.characters.get(characterId)`.' },
   { group: 'Chat',       name: 'MESSAGE_EDITED',             payload: '{ chatId, message: ChatMessage }' },
   { group: 'Chat',       name: 'MESSAGE_DELETED',            payload: '{ chatId, messageId }' },
   { group: 'Chat',       name: 'MESSAGE_SWIPED',             payload: '{ chatId, message: ChatMessage, action, swipeId, previousSwipeId? }', fires: 'Twice per swipe-with-regen (initiation + completion); once for swipe-without-regen.' },
   { group: 'Chat',       name: 'SWIPE_EDITED',               payload: '{ chatId, message: ChatMessage, previousSwipeId }' },
   { group: 'Chat',       name: 'CHARACTER_MESSAGE_RENDERED', payload: '{ chatId, messageId }' },
   { group: 'Chat',       name: 'USER_MESSAGE_RENDERED',      payload: '{ chatId, messageId }' },
-  { group: 'Generation', name: 'GENERATION_STARTED',         payload: '{ generationId, chatId, model }' },
-  { group: 'Generation', name: 'GENERATION_ENDED',           payload: '{ generationId, chatId, messageId, content }', fires: 'Assistant-side message arrival (the counterpart to `MESSAGE_SENT` for user messages). Payload has no `swipeId` — look it up via `api.chat.getMessages` if needed.' },
+  { group: 'Generation', name: 'GENERATION_STARTED',         payload: '{ generationId, chatId, model }', fires: 'At the start of a new generation, **before prompt assembly + interceptor invocation** in the same generation pipeline. `api.chat.inject(...)` calls from this handler ARE picked up by this generation. Symmetric pre-assembly hook to `MESSAGE_SENT` — use whichever fits the script flow.' },
+  { group: 'Generation', name: 'GENERATION_ENDED',           payload: '{ generationId, chatId, messageId, content }', fires: 'Assistant-side message arrival (the counterpart to `MESSAGE_SENT` for user messages). Fires **after** the generation completes — `api.chat.inject(...)` calls from this handler are too late for the just-finished generation but WILL be picked up by the next one. Payload has no `swipeId` — look it up via `api.chat.getMessages` if needed.' },
   { group: 'Generation', name: 'GENERATION_STOPPED',         payload: '{ generationId, chatId, content }' },
   { group: 'Generation', name: 'STREAM_TOKEN_RECEIVED',      payload: '{ generationId, chatId, token }' },
   { group: 'Entities',   name: 'CHAT_CHANGED',               payload: '{ chatId }', fires: 'Chat **metadata** mutations only (rename, etc.). Does NOT fire on chat open/switch — use `CHAT_SWITCHED` for that.' },
-  { group: 'Entities',   name: 'CHAT_SWITCHED',              payload: '{ chatId: string | null }  // null on return-to-home — NO characterId on the payload', fires: 'Active chat opens, switches, or closes (chatId becomes null on return-to-home). **Important — Phase-1/Phase-2 character resolution**: triggers fire during Phase 1 (chatId set sync); characterId is resolved Phase-2 ~10–15 ms later via async lookup. So `data.characterId` does NOT exist on the payload, and reading the active-context characterId at trigger-fire time can see null/stale. **Pattern**: call `api.chats.getActive()` and read `chat.characterId` — that hits the host\'s live state which has it populated regardless of Phase-2 status. Caught during v1.0.0-rc.5 manual testing.' },
+  { group: 'Entities',   name: 'CHAT_SWITCHED',              payload: '{ chatId: string | null }  // null on return-to-home — NO characterId on the payload', fires: 'Active chat opens, switches, or closes (chatId becomes null on return-to-home). **Important — Phase-1/Phase-2 character resolution**: triggers fire during Phase 1 (chatId set sync); characterId is resolved Phase-2 ~10–15 ms later via async lookup. So `data.characterId` does NOT exist on the payload, and reading the active-context characterId at trigger-fire time can see null/stale. **Pattern**: call `api.chats.getActive()` and read `chat.characterId` — that hits the host\'s live state which has it populated regardless of Phase-2 status.' },
   { group: 'Entities',   name: 'CHARACTER_EDITED',           payload: '{ id, character: Character }' },
   { group: 'Entities',   name: 'CHARACTER_DELETED',          payload: '{ id }' },
   { group: 'Entities',   name: 'CHARACTER_DUPLICATED',       payload: '{ id, newId }' },
@@ -88,8 +88,8 @@ export const EVENTS: EventRow[] = [
   { group: 'Settings',   name: 'SETTINGS_UPDATED',           payload: '{ key, value }' },
   { group: 'Settings',   name: 'PRESET_CHANGED',             payload: '{ presetId }' },
   { group: 'Settings',   name: 'CONNECTION_PROFILE_LOADED',  payload: '{ connectionId }' },
-  { group: 'Settings',   name: 'REGEX_SCRIPT_CHANGED',       payload: '{ id, script: RegexScriptInfo }  // create / update / duplicate / reorder / enable / disable. v0.27.0+ — requires regex_scripts permission' },
-  { group: 'Settings',   name: 'REGEX_SCRIPT_DELETED',       payload: '{ id }  // v0.27.0+ — requires regex_scripts permission' },
+  { group: 'Settings',   name: 'REGEX_SCRIPT_CHANGED',       payload: '{ id, script: RegexScriptInfo }  // create / update / duplicate / reorder / enable / disable. Requires regex_scripts permission.' },
+  { group: 'Settings',   name: 'REGEX_SCRIPT_DELETED',       payload: '{ id }  // Requires regex_scripts permission.' },
   { group: 'Tools',      name: 'TOOL_INVOCATION',            payload: '{ toolName, requestId, args }' },
 ];
 
@@ -268,6 +268,227 @@ const PermsTable: FC = () => (
   </table>
 );
 
+// ─── Sandbox hardening ────────────────────────────────────────────────────────
+//
+// Two-layer sandbox protecting the script-runner subprocess from user-script
+// reach into host capabilities. The data here mirrors the rendered UI section
+// AND seeds the Lisa corpus via TRIGGER_MODEL_INTRO's sandbox subsection (the
+// LLM-facing copy lives there for narrative cohesion; the tables here are the
+// user-visible canonical form). When the rejected-patterns set in
+// `host-dispatcher.ts:checkUserScriptSecurity` changes, or when SAFE_GLOBALS
+// in `child-entry.ts` gains/loses categories, update both surfaces.
+
+/** One row in the dispatch-time source-check rejected-patterns table. */
+export interface SandboxRejectedPattern {
+  /** The literal pattern shape rejected before the script runs. */
+  pattern:     string;
+  /** Why it's rejected — one-line explanation. */
+  why:         string;
+  /** What to use instead — the canonical replacement. */
+  replacement: string;
+}
+
+/**
+ * Patterns rejected by `host-dispatcher.ts:checkUserScriptSecurity` before
+ * the script's body ever executes. Source check fires at dispatch time;
+ * the editor console shows a `[security]` entry naming the rejected
+ * pattern. See the `Sandbox hardening` Reference section.
+ */
+export const SANDBOX_REJECTED_PATTERNS: SandboxRejectedPattern[] = [
+  {
+    pattern:     "import('...')",
+    why:         "Dynamic import lets scripts pull untrusted modules at runtime, bypassing every other check.",
+    replacement: "`script.require('library-name')` for inter-script libraries — see the Built-in Libraries section.",
+  },
+  {
+    pattern:     "require('...')",
+    why:         "Bare CommonJS `require` would reach Node modules directly.",
+    replacement: "`script.require('library-name')`. Method-style access — `obj.require(...)` — is exempt via the source check's `(?<!\\.)` lookbehind.",
+  },
+  {
+    pattern:     "new Function('...') / Function('...')",
+    why:         "Runtime-constructed code bypasses the dispatch-time source check.",
+    replacement: "Normal function syntax: `function foo() {}` / `const foo = () => {}`. Method-style `obj.Function(...)` is exempt.",
+  },
+  {
+    pattern:     ".constructor.constructor",
+    why:         "Prototype-chain path that reaches the Function constructor.",
+    replacement: "Same as above — define functions with normal syntax.",
+  },
+  {
+    pattern:     "globalThis.Bun / globalThis[\"Bun\"]",
+    why:         "Direct access to the Bun runtime API.",
+    replacement: "`api.utils.http.*` for HTTP, `api.files.*` (with `allowDangerous`) for filesystem.",
+  },
+  {
+    pattern:     "globalThis.process / globalThis[\"process\"]",
+    why:         "Direct access to the host process (env vars, exit, signals).",
+    replacement: "`api.enclave.*` for secrets, the `script.*` global for self-info. No script should ever read host env vars directly.",
+  },
+];
+
+/** One row in the runtime-lockdown accessible-globals table. */
+export interface SandboxAccessibleGroup {
+  /** Short category label (e.g. "ES built-ins", "Streams"). */
+  category: string;
+  /** Globals available to user scripts in this category. */
+  globals:  string[];
+  /** Optional one-line note for the category (rationale, caveat). */
+  note?:    string;
+}
+
+/**
+ * Categorised view of `child-entry.ts:SAFE_GLOBALS` — the allowlist that the
+ * runtime sandbox preserves. Every globalThis property NOT in this allowlist
+ * is replaced with `undefined` at subprocess startup; reading the absent
+ * global returns `undefined` (so `typeof X === 'undefined'` evaluates
+ * naturally for feature-detect paths) and reaching through to a method
+ * throws `TypeError: Cannot read properties of undefined`.
+ *
+ * The canonical list is `SAFE_GLOBALS` in `src/script-runner/child-entry.ts`
+ * — when adding to that set, mirror the addition here so the Reference UI
+ * stays accurate.
+ */
+export const SANDBOX_ACCESSIBLE_GROUPS: SandboxAccessibleGroup[] = [
+  {
+    category: 'ES standard',
+    globals:  ['isNaN', 'isFinite', 'parseInt', 'parseFloat', 'NaN', 'Infinity', 'undefined', 'encodeURI', 'encodeURIComponent', 'decodeURI', 'decodeURIComponent', 'escape', 'unescape'],
+    note:     'Standard ES global functions + value constants. Pure, no capability surface.',
+  },
+  {
+    category: 'Core built-ins',
+    globals:  ['Object', 'Array', 'Number', 'Boolean', 'String', 'Symbol', 'Date', 'RegExp', 'Map', 'Set', 'WeakMap', 'WeakSet', 'WeakRef', 'Promise', 'Proxy', 'Reflect', 'JSON', 'Math', 'Intl', 'BigInt'],
+  },
+  {
+    category: 'Typed arrays + binary',
+    globals:  ['ArrayBuffer', 'SharedArrayBuffer', 'DataView', 'Atomics', 'Int8Array', 'Uint8Array', 'Uint8ClampedArray', 'Int16Array', 'Uint16Array', 'Int32Array', 'Uint32Array', 'Float16Array', 'Float32Array', 'Float64Array', 'BigInt64Array', 'BigUint64Array'],
+  },
+  {
+    category: 'Text + URL + base64',
+    globals:  ['TextEncoder', 'TextDecoder', 'URL', 'URLSearchParams', 'URLPattern', 'atob', 'btoa'],
+    note:     'Pure codecs and URL parsing — no I/O surface.',
+  },
+  {
+    category: 'Binary data carriers',
+    globals:  ['Blob', 'File', 'FileReader', 'FormData'],
+    note:     'In-memory only; filesystem access still gated by `api.files.*` + `allowDangerous`.',
+  },
+  {
+    category: 'HTTP message types',
+    globals:  ['Headers', 'Request', 'Response'],
+    note:     'Structural types only. Outbound HTTP capability is `api.utils.http.*` (requires `cors_proxy` + `allowDangerous`).',
+  },
+  {
+    category: 'Streams',
+    globals:  ['ReadableStream', 'WritableStream', 'TransformStream', 'ByteLengthQueuingStrategy', 'CountQueuingStrategy', 'CompressionStream', 'DecompressionStream', 'TextEncoderStream', 'TextDecoderStream'],
+    note:     'Pure data transforms. The dangerous part of streams is what you READ FROM or PIPE TO; those endpoints are separately gated.',
+  },
+  {
+    category: 'Web Crypto',
+    globals:  ['crypto', 'Crypto', 'CryptoKey', 'SubtleCrypto'],
+    note:     'Random bytes + `crypto.subtle.*` for signing / encryption. Also powers `api.utils.shortId` / `uuid`.',
+  },
+  {
+    category: 'Async + timers',
+    globals:  ['setTimeout', 'setInterval', 'clearTimeout', 'clearInterval', 'queueMicrotask', 'setImmediate', 'clearImmediate', 'structuredClone', 'reportError'],
+    note:     'String-form `setTimeout(\'code\', ms)` is rejected at the wrapper — must pass a function.',
+  },
+  {
+    category: 'Cancellation',
+    globals:  ['AbortController', 'AbortSignal'],
+  },
+  {
+    category: 'Errors + iteration',
+    globals:  ['Error', 'TypeError', 'RangeError', 'ReferenceError', 'SyntaxError', 'URIError', 'EvalError', 'AggregateError', 'Iterator', 'DisposableStack', 'AsyncDisposableStack', 'SuppressedError'],
+  },
+  {
+    category: 'Event types',
+    globals:  ['Event', 'EventTarget', 'CustomEvent', 'MessageEvent', 'ErrorEvent', 'CloseEvent', 'DOMException'],
+    note:     'Pure data carriers, no capability.',
+  },
+  {
+    category: 'Function constructor',
+    globals:  ['Function'],
+    note:     'Whitelisted on architectural necessity — Zod\'s schema compiler and Handlebars\' template compiler both invoke `new Function(...)`. The dispatch-time source check still rejects literal `new Function(...)` / `Function(...)` in user-script source as defence-in-depth.',
+  },
+  {
+    category: 'Buffer',
+    globals:  ['Buffer'],
+    note:     'Node-compat — user scripts can manipulate bytes; doesn\'t enable escape.',
+  },
+  {
+    category: 'Performance + measurement',
+    globals:  ['performance', 'Performance', 'PerformanceEntry', 'PerformanceMark', 'PerformanceMeasure', 'PerformanceObserver', 'PerformanceObserverEntryList', 'PerformanceResourceTiming', 'PerformanceServerTiming', 'PerformanceTiming'],
+  },
+  {
+    category: 'Realm + messaging',
+    globals:  ['ShadowRealm', 'MessageChannel', 'MessagePort'],
+    note:     '`ShadowRealm` is whitelisted for experimentation; within a single subprocess `MessageChannel`/`MessagePort` can\'t reach anything dangerous.',
+  },
+  {
+    category: 'Misc benign',
+    globals:  ['globalThis', 'console', 'navigator', 'WebAssembly', 'FinalizationRegistry', 'HTMLRewriter', 'BuildError', 'BuildMessage', 'ResolveError', 'ResolveMessage'],
+    note:     '`navigator` is the read-only Bun metadata object (`userAgent`, `platform`, etc.) — library code feature-detects via it. `console` is per-run shadowed for capture, but kept on the allowlist so the binding exists in the brief window before the per-run preamble.',
+  },
+  {
+    category: 'Architectural necessity',
+    globals:  ['spindle', 'process'],
+    note:     'Both have known aliasing residuals documented in the security audit response. `spindle` is the host gateway — not present on the script-runner subprocess in production (only on the backend worker); whitelisted for test-infrastructure shape. `process` is whitelisted because Spindle\'s subprocess runtime uses the standard process lifecycle hooks internally; user-script access to bare `process` is closed by AsyncFunction parameter shadowing (Layer 1) and the dispatch-time source check (Layer 4).',
+  },
+];
+
+const SandboxRejectedPatternsTable: FC = () => (
+  <table className="ls-ref-table">
+    <thead>
+      <tr>
+        <th>Pattern</th>
+        <th>Why</th>
+        <th>Use instead</th>
+      </tr>
+    </thead>
+    <tbody>
+      {SANDBOX_REJECTED_PATTERNS.map(row => (
+        <tr key={row.pattern}>
+          <td><Code>{row.pattern}</Code></td>
+          <td><span className="ls-ref-muted">{row.why}</span></td>
+          <td><span className="ls-ref-muted">{row.replacement}</span></td>
+        </tr>
+      ))}
+    </tbody>
+  </table>
+);
+
+const SandboxAccessibleGlobalsTable: FC = () => (
+  <table className="ls-ref-table">
+    <thead>
+      <tr>
+        <th>Category</th>
+        <th>Available globals</th>
+      </tr>
+    </thead>
+    <tbody>
+      {SANDBOX_ACCESSIBLE_GROUPS.map(row => (
+        <tr key={row.category}>
+          <td>{row.category}</td>
+          <td>
+            <div>
+              {row.globals.map((g, i) => (
+                <span key={g}>
+                  <Code>{g}</Code>
+                  {i < row.globals.length - 1 ? ' ' : ''}
+                </span>
+              ))}
+            </div>
+            {row.note
+              ? <div className="ls-ref-muted" style={{ marginTop: 4, fontSize: '0.95em' }}>{row.note}</div>
+              : null}
+          </td>
+        </tr>
+      ))}
+    </tbody>
+  </table>
+);
+
 // ─── Broadcast built-in events ────────────────────────────────────────────────
 
 export interface BroadcastEventRow {
@@ -331,6 +552,21 @@ export const BROADCAST_EVENTS: BroadcastEventRow[] = [
     name:      'ls:collection:size-warning',
     payload:   '{ name, scope, scriptId, bytes }',
     emittedBy: 'auto — collection exceeds 10 MB soft threshold',
+  },
+  {
+    name:      'ls:scriptStorage:set',
+    payload:   '{ scriptId, key, value }',
+    emittedBy: 'api.scriptStorage.set()',
+  },
+  {
+    name:      'ls:scriptStorage:delete',
+    payload:   '{ scriptId, key }',
+    emittedBy: 'api.scriptStorage.delete() (only when the key existed)',
+  },
+  {
+    name:      'ls:scriptStorage:clear',
+    payload:   '{ scriptId }',
+    emittedBy: 'api.scriptStorage.clear() / auto-cleanup on script disable / delete (only when the script HAD entries)',
   },
 ];
 
@@ -566,7 +802,7 @@ export const KEY_TYPES: TypeDoc[] = [
       { field: 'metadata?',  type: 'Record<string, unknown>',         optional: true,  desc: 'Arbitrary metadata attached to the message.' },
       { field: 'swipeId',    type: 'number',                          optional: false, desc: 'Index of the active swipe variant. 0 when the message has no alternates.' },
       { field: 'swipes',     type: 'string[]',                        optional: false, desc: 'All swipe variants. swipes[swipeId] equals content.' },
-      { field: 'swipeDates', type: 'number[]',                        optional: false, desc: 'Per-swipe creation timestamps (unix epoch seconds), aligned with swipes. Empty array on older hosts (pre-spindle-types 0.4.27).' },
+      { field: 'swipeDates', type: 'number[]',                        optional: false, desc: 'Per-swipe creation timestamps (unix epoch seconds), aligned with swipes.' },
       { field: 'extra',      type: 'Record<string, unknown>',         optional: false, desc: 'Host-maintained bag: reasoning text/duration, attachments, hidden flag, etc. Keys depend on host build — treat as opaque. Empty object on older hosts.' },
     ],
   },
@@ -584,13 +820,13 @@ export const KEY_TYPES: TypeDoc[] = [
     fields: [
       { field: 'role?',     type: "'user' | 'assistant' | 'system'", optional: true, desc: "Sender role. Default 'user'." },
       { field: 'metadata?', type: 'Record<string, unknown>',         optional: true, desc: 'Arbitrary metadata to attach.' },
-      { field: 'triggerGeneration?', type: 'boolean',                optional: true, desc: 'When true, the host triggers a normal LLM continuation after the message is appended (full preset / persona / world info / regex / character card / streaming pipeline — same as the user pressing Enter on an empty input bar). Use for click-to-respond UIs where the script wants the LLM to immediately reply to its appended message. Requires Lumiverse host >= 0.9.x with triggerGeneration support (lumiverse-spindle-types >= 0.4.66); silently ignored on older hosts. v0.27.4+.' },
-      { field: 'generation?', type: 'ChatGenerationOptions',         optional: true, desc: 'Per-call overrides for the triggered generation (connection / persona / preset / parameters / target character / council retention). Only consulted when triggerGeneration is true; silently ignored otherwise. Each field is optional and falls through to the active chat\'s defaults when omitted. v0.27.4+.' },
+      { field: 'triggerGeneration?', type: 'boolean',                optional: true, desc: 'When true, the host triggers a normal LLM continuation after the message is appended (full preset / persona / world info / regex / character card / streaming pipeline — same as the user pressing Enter on an empty input bar). Use for click-to-respond UIs where the script wants the LLM to immediately reply to its appended message.' },
+      { field: 'generation?', type: 'ChatGenerationOptions',         optional: true, desc: 'Per-call overrides for the triggered generation (connection / persona / preset / parameters / target character / council retention). Only consulted when triggerGeneration is true; silently ignored otherwise. Each field is optional and falls through to the active chat\'s defaults when omitted.' },
     ],
   },
   {
     name: 'ChatGenerationOptions',
-    note: 'Per-call generation overrides for api.chat.sendMessage(content, { triggerGeneration: true, generation: ... }). Mirrors the host\'s ChatAppendGenerationOptionsDTO 1:1 in camelCase. Each field is optional; omitted fields fall through to the active chat\'s resolved defaults (same as a manual UI generation). Use this when a tool script needs to deviate from the user\'s normal chat configuration for a single triggered generation. v0.27.4+.',
+    note: 'Per-call generation overrides for api.chat.sendMessage(content, { triggerGeneration: true, generation: ... }). Mirrors the host\'s ChatAppendGenerationOptionsDTO 1:1 in camelCase. Each field is optional; omitted fields fall through to the active chat\'s resolved defaults (same as a manual UI generation). Use this when a tool script needs to deviate from the user\'s normal chat configuration for a single triggered generation.',
     fields: [
       { field: 'connectionId?',       type: 'string',                          optional: true, desc: 'Override which connection profile to use. Falls back to the user\'s default connection.' },
       { field: 'personaId?',          type: 'string',                          optional: true, desc: 'Override which persona to use. Falls back to the user\'s active persona setting.' },
@@ -656,14 +892,14 @@ export const KEY_TYPES: TypeDoc[] = [
       { field: 'messageId?',  type: 'string',                          optional: true,  desc: "Undefined for 'create' origins (the row doesn't exist yet)." },
       { field: 'content',     type: 'string',                          optional: false, desc: 'Current content (already transformed by any earlier processors in the chain).' },
       { field: 'extra?',      type: 'Record<string, unknown>',         optional: true,  desc: 'Current extra map (initial.extra + delta-so-far from prior processors). Threaded through the chain even on swipe origins.' },
-      { field: 'origin',      type: "'create' | 'update' | 'swipe_add' | 'swipe_update' | 'render'", optional: false, desc: "Which path triggered this invocation. 'create' includes auto-greetings. 'render' (host ≥0.9.7) fires on per-message display rendering — non-persisting, fires often, returned extra ignored." },
+      { field: 'origin',      type: "'create' | 'update' | 'swipe_add' | 'swipe_update' | 'render'", optional: false, desc: "Which path triggered this invocation. 'create' includes auto-greetings. 'render' fires on per-message display rendering — non-persisting, fires often, returned extra ignored." },
       { field: 'swipeIndex?', type: 'number',                          optional: true,  desc: "Set for 'swipe_update' only — zero-based index of the swipe being rewritten." },
       { field: 'userId',      type: 'string',                          optional: false, desc: 'Owning user id for the write.' },
     ],
   },
   {
     name: 'MessageContentProcessorResult',
-    note: "Return value of a registerContentProcessor handler. Return undefined / void to pass through, or a partial patch. content replaces the stored content. extra shallow-merges into existing — keys you omit are PRESERVED. extra is IGNORED on swipe origins (swipes share the parent message's extra) and on 'render' (no row to mutate; host ≥0.9.7). Return ONLY keys you mutated; pristine initial.extra keys are NOT round-tripped to avoid re-stamping unchanged keys on every write.",
+    note: "Return value of a registerContentProcessor handler. Return undefined / void to pass through, or a partial patch. content replaces the stored content. extra shallow-merges into existing — keys you omit are PRESERVED. extra is IGNORED on swipe origins (swipes share the parent message's extra) and on 'render' (no row to mutate). Return ONLY keys you mutated; pristine initial.extra keys are NOT round-tripped to avoid re-stamping unchanged keys on every write.",
     fields: [
       { field: 'content?', type: 'string',                  optional: true, desc: "Replaces the stored content for downstream processors and the DB write. On 'render', feeds the display-regex pass before paint." },
       { field: 'extra?',   type: 'Record<string, unknown>', optional: true, desc: "Delta keys to shallow-merge. Ignored on swipe origins and 'render'." },
@@ -879,17 +1115,17 @@ export const KEY_TYPES: TypeDoc[] = [
   },
   {
     name: 'DOMDelegateOptions',
-    note: 'Options for api.ui.dom.delegate(selector, event, handler, options?). v0.27.1+.',
+    note: 'Options for api.ui.dom.delegate(selector, event, handler, options?).',
     fields: [
       { field: 'root?',            type: "'chat' | 'document'", optional: true, desc: "Where to attach the actual host-side capture listener. 'chat' (default): restricts matching to chat content; matches descendants of [data-message-id]. 'document': matches anywhere in the page (including Lumiverse's own UI surfaces). Both gate on app_manipulation." },
       { field: 'messageId?',       type: 'string',              optional: true, desc: 'Limit matching to a specific message id. Has no effect when root is "document".' },
-      { field: 'preventDefault?',  type: 'boolean | ConditionalPreventDefault', optional: true, desc: "When true, the frontend listener calls event.preventDefault() before dispatching on every selector match. v0.27.5+: can also be a ConditionalPreventDefault object to fire only on specific key / button / modifier combinations (e.g. plain Enter on textarea while letting Shift+Enter through). Default: false." },
+      { field: 'preventDefault?',  type: 'boolean | ConditionalPreventDefault', optional: true, desc: "When true, the frontend listener calls event.preventDefault() before dispatching on every selector match. Can also be a ConditionalPreventDefault object to fire only on specific key / button / modifier combinations (e.g. plain Enter on textarea while letting Shift+Enter through). Default: false." },
       { field: 'stopPropagation?', type: 'boolean',             optional: true, desc: "When true, the frontend listener calls event.stopPropagation() after dispatching, preventing host-side and other delegation listeners from also reacting. Default: false." },
     ],
   },
   {
     name: 'DOMDelegatedEventData',
-    note: 'Event data delivered to handlers registered via api.ui.dom.delegate(). Extends DOMEventData with a serialized snapshot of the matched element + modifier-key state + optional message context. v0.27.1+.',
+    note: 'Event data delivered to handlers registered via api.ui.dom.delegate(). Extends DOMEventData with a serialized snapshot of the matched element + modifier-key state + optional message context.',
     fields: [
       { field: 'matched',                  type: '{ tagName, classList, dataset, attributes, textContent, id?, value?, checked?, selectedIndex?, selectedText?, label? }', optional: false, desc: 'Snapshot of the element matched by event.target.closest(selector). May be an ancestor of the literal event.target. Form-input fields (value/checked/selectedIndex/selectedText/label) populated only for matching element types. label is the trimmed text of the first associated <label> (input / textarea / select only — explicit "for=" or implicit wrapping).' },
       { field: 'modifiers',                type: '{ ctrl, shift, alt, meta, button? }',                                                                              optional: false, desc: 'Modifier-key state at event time. button is populated for click events (0=left, 1=middle, 2=right).' },
@@ -902,12 +1138,12 @@ export const KEY_TYPES: TypeDoc[] = [
     note: 'Returned by api.ui.dom.inject() and api.ui.dom.injectAtMessage(). Most methods are fire-and-forget; the exception is `read(options?)` which is async (it awaits a frontend roundtrip).',
     fields: [
       { field: 'id',          type: 'string',                                   optional: false, desc: 'Unique element ID (generated or from stable ID).' },
-      { field: 'update(html)', type: 'void',                                    optional: false, desc: "Replace the inner HTML of the injected element. **Does NOT run DOMPurify** — unlike `api.ui.dom.inject()`, this path writes `innerHTML` directly. Fine for script-authored template strings; sanitize manually before passing HTML built from LLM output, external HTTP fetches, or user input. v1.0.0-rc.7 doc clarification." },
+      { field: 'update(html)', type: 'void',                                    optional: false, desc: 'Replace the inner HTML of the injected element. Sanitised via DOMPurify on the same FORBID_TAGS config as `api.ui.dom.inject` (`iframe` / `frame` / `object` / `embed` / `form` + default `on*` / `formaction` / `srcdoc` / `javascript:` strip). DOMPurify blocks XSS-via-tag-injection, but is not a substitute for thinking about trust — be deliberate about LLM-generated or externally-fetched HTML.' },
       { field: 'remove()',    type: 'void',                                     optional: false, desc: 'Remove the element from the DOM and detach all listeners.' },
-      { field: 'on(event, handler, options?)', type: '() => void',              optional: false, desc: 'Attach a DOM event listener. Handler receives DOMEventData. Pass { preventDefault: true } to suppress the browser default synchronously (e.g. to block the native context menu on right-click). Returns an unsubscribe function.' },
+      { field: 'on(event, handler, options?)', type: '() => void',              optional: false, desc: 'Attach a DOM event listener. Handler receives DOMEventData. Pass { preventDefault: true } to suppress the browser default synchronously (e.g. to block the native context menu on right-click). Returns an unsubscribe function. **For handlers that do async work, make the handler `async` and `await` everything** — the host keeps the per-fire activeRun alive across the handler\'s await chain, so dispatches inside the awaited chain land cleanly. A SYNC handler that kicks off async work fire-and-forget (e.g. `(ev) => { doAsync(); }` with no `await`) returns `undefined` immediately, the activeRun closes, and any `api.*` calls the lingering async work tries to make fail with `RunCompletedError: late api call … runIdSource=context`. Write `async (ev) => { await doAsync(); }` instead.' },
       { field: 'makeDraggable(handleSelector?)', type: 'void',               optional: false, desc: 'Enable frontend-only drag. Optional CSS selector picks a drag handle child; the root element moves. Without a selector, the whole element is draggable.' },
-      { field: 'injectChild(target, html, options?)', type: 'DOMHandle',     optional: false, desc: 'Inject HTML as a descendant of this handle\'s bound element. Target selector resolved RELATIVE to this element via the backend\'s element-map ref. Use when the parent may be orphaned at inject time (drawer tabs, modal bodies pre-mount). NOTE: bypasses host DOMPurify sanitization — sanitize untrusted HTML yourself before passing it.' },
-      { field: 'read(options?)', type: 'Promise<SerializedDOMElement | null>', optional: false, desc: 'v1.0.0-rc.6+. Read a snapshot of this element\'s current DOM state (tag, attrs, text, childCount, optionally innerHTML). Returns `null` when the FE no longer has the element (host shell tore down a parent, etc.). Throws DomHandleReleasedError if the handle was already removed (`.remove()` or `api.ui.dom.cleanup()`). Async — uses the same request-response IPC pattern as api.ui.showContextMenu. Common uses: verify an injection rendered as expected, inspect script-controlled widget state, walk markup via `{ html: true }`. For form-control live values use `delegate(selector, \'input\', ...)` instead — `.value` is a DOM property, not an attribute.' },
+      { field: 'injectChild(target, html, options?)', type: 'DOMHandle',     optional: false, desc: 'Inject HTML as a descendant of this handle\'s bound element. Target selector resolved RELATIVE to this element via the backend\'s element-map ref. Use when the parent may be orphaned at inject time (drawer tabs, modal bodies pre-mount). Sanitised via DOMPurify on the same FORBID_TAGS config as `api.ui.dom.inject` (`iframe` / `frame` / `object` / `embed` / `form` + default `on*` / `formaction` / `srcdoc` / `javascript:` strip).' },
+      { field: 'read(options?)', type: 'Promise<SerializedDOMElement | null>', optional: false, desc: 'Read a snapshot of this element\'s current DOM state (tag, attrs, text, childCount, optionally innerHTML). Returns `null` when the FE no longer has the element (host shell tore down a parent, etc.). Throws DomHandleReleasedError if the handle was already removed (`.remove()` or `api.ui.dom.cleanup()`). Async — uses the same request-response IPC pattern as api.ui.showContextMenu. Common uses: verify an injection rendered as expected, inspect script-controlled widget state, walk markup via `{ html: true }`. For form-control live values use `delegate(selector, \'input\', ...)` instead — `.value` is a DOM property, not an attribute.' },
     ],
   },
   {
@@ -930,19 +1166,19 @@ export const KEY_TYPES: TypeDoc[] = [
     name: 'DOMListenOptions',
     note: 'Options bag for DOMHandle.on(event, handler, options?).',
     fields: [
-      { field: 'preventDefault?', type: 'boolean | ConditionalPreventDefault', optional: true, desc: "When true, the frontend listener calls event.preventDefault() synchronously before dispatching to the script handler. Must be set at registration time — the async worker-boundary dispatch returns too late to preventDefault from inside the handler body. v0.27.5+: can also be a ConditionalPreventDefault object to fire only on specific key / button / modifier combinations. Default: false." },
+      { field: 'preventDefault?', type: 'boolean | ConditionalPreventDefault', optional: true, desc: "When true, the frontend listener calls event.preventDefault() synchronously before dispatching to the script handler. Must be set at registration time — the async worker-boundary dispatch returns too late to preventDefault from inside the handler body. Can also be a ConditionalPreventDefault object to fire only on specific key / button / modifier combinations. Default: false." },
     ],
   },
   {
     name: 'DOMReadOptions',
-    note: 'Options bag for DOMHandle.read(options?). All fields optional — `read()` with no argument returns a baseline snapshot. v1.0.0-rc.6+.',
+    note: 'Options bag for DOMHandle.read(options?). All fields optional — `read()` with no argument returns a baseline snapshot.',
     fields: [
       { field: 'html?', type: 'boolean', optional: true, desc: 'Also include `innerHTML` in the returned snapshot. Default false — keeps the IPC payload small for the common case (verify attrs, check text content). Set true when the script needs to traverse the descendant markup (e.g. parse a rendered subtree via DOMParser).' },
     ],
   },
   {
     name: 'SerializedDOMElement',
-    note: 'Snapshot returned by DOMHandle.read(). Frontend-built serialization of the element bound to the handle. v1.0.0-rc.6+.\n\nWhich element gets snapshotted depends on the shape of what the script injected: for the common single-root case the user\'s root element is returned directly (e.g. `inject(\'<button class="x">Hi</button>\')` → `tag: \'button\'`); for multi-root or text-only content the snapshot falls back to LumiScript\'s wrapper (`tag: \'div\'`, accurate `childCount`). Either way, internal `data-ls-*` and `data-spindle-ext` wrapper attributes are stripped from the `attrs` map.\n\nDeliberate omissions for v1.0: computed styles, bounding rect, recursive child snapshots, property snapshots (`.value` / `.checked`). Form-control live values can be read via `delegate(selector, \'input\', ...)` event handlers; for deep markup traversal, request `{ html: true }` and parse client-side.',
+    note: 'Snapshot returned by DOMHandle.read(). Frontend-built serialization of the element bound to the handle.\n\nWhich element gets snapshotted depends on the shape of what the script injected: for the common single-root case the user\'s root element is returned directly (e.g. `inject(\'<button class="x">Hi</button>\')` → `tag: \'button\'`); for multi-root or text-only content the snapshot falls back to LumiScript\'s wrapper (`tag: \'div\'`, accurate `childCount`). Either way, internal `data-ls-*` and `data-spindle-ext` wrapper attributes are stripped from the `attrs` map.\n\nDeliberate omissions: computed styles, bounding rect, recursive child snapshots, property snapshots (`.value` / `.checked`). Form-control live values can be read via `delegate(selector, \'input\', ...)` event handlers; for deep markup traversal, request `{ html: true }` and parse client-side.',
     fields: [
       { field: 'tag',        type: 'string',                  optional: false, desc: "Lowercase tag name (e.g. 'div', 'button')." },
       { field: 'attrs',      type: 'Record<string, string>',  optional: false, desc: 'All attributes set on the element, keyed by lowercased attribute name. Includes class, id, style, data-*, aria-*, etc. Internal `data-ls-*` / `data-spindle-ext` wrapper attributes are stripped. Empty object if no attributes set.' },
@@ -953,7 +1189,7 @@ export const KEY_TYPES: TypeDoc[] = [
   },
   {
     name: 'ConditionalPreventDefault',
-    note: "Predicate-based preventDefault rule for DOMDelegateOptions / DOMListenOptions (v0.27.5+). Fires event.preventDefault() only when the event matches all provided filters (AND semantics). Each filter is optional; empty {} = always match (equivalent to `preventDefault: true`). Filters are evaluated synchronously frontend-side at fire time. Common shapes: { onKeys: ['Enter'], whenModifiers: { exclude: ['shift'] } } (plain Enter, not Shift+Enter); { onKeys: ['s', 'S'], whenModifiers: { require: ['ctrl'] } } (Ctrl+S override); { onButtons: [2] } (right-click only).",
+    note: "Predicate-based preventDefault rule for DOMDelegateOptions / DOMListenOptions. Fires event.preventDefault() only when the event matches all provided filters (AND semantics). Each filter is optional; empty {} = always match (equivalent to `preventDefault: true`). Filters are evaluated synchronously frontend-side at fire time. Common shapes: { onKeys: ['Enter'], whenModifiers: { exclude: ['shift'] } } (plain Enter, not Shift+Enter); { onKeys: ['s', 'S'], whenModifiers: { require: ['ctrl'] } } (Ctrl+S override); { onButtons: [2] } (right-click only).",
     fields: [
       { field: 'onKeys?',       type: 'string[]',                       optional: true, desc: 'KeyboardEvent.key value(s) — OR-matched within the array. Non-keyboard events skipped (preventDefault does NOT fire) when this is set.' },
       { field: 'onCodes?',      type: 'string[]',                       optional: true, desc: 'KeyboardEvent.code value(s) — physical key, layout-independent. Same keyboard-only semantics as onKeys. Use for physical-position bindings (e.g. WASD).' },
@@ -967,13 +1203,13 @@ export const KEY_TYPES: TypeDoc[] = [
     note: 'A single message in the messages array passed to api.llm.generate / generateStructured / generateWithTools.',
     fields: [
       { field: 'role',    type: "'system' | 'user' | 'assistant'",      optional: false, desc: 'Message sender role.' },
-      { field: 'content', type: 'string | LlmMessagePart[]',            optional: false, desc: 'Plain string (simple case) OR an array of parts. Parts let scripts thread native tool_use / tool_result payloads through an agentic loop instead of text-encoding them. Available since v0.29.0.' },
-      { field: 'reasoning_content?', type: 'string',                    optional: true,  desc: "Thinking-mode reasoning content from the previous assistant turn, echoed back on the next request. REQUIRED by DeepSeek thinking-mode models on tool-call continuations (the API returns 400 invalid_request_error: \"The 'reasoning_content' in the thinking mode must be passed back to the API.\" without it). Plain-text continuations and non-thinking models don't need it. Other providers routing DeepSeek (NanoGPT, OpenRouter) inherit the requirement; providers without thinking mode ignore the field. Copy from LLMRawResult.reasoning_content after each generateWithTools call. Available since v0.30.2 / lumiverse-spindle-types ≥0.4.72." },
+      { field: 'content', type: 'string | LlmMessagePart[]',            optional: false, desc: 'Plain string (simple case) OR an array of parts. Parts let scripts thread native tool_use / tool_result payloads through an agentic loop instead of text-encoding them.' },
+      { field: 'reasoning_content?', type: 'string',                    optional: true,  desc: "Thinking-mode reasoning content from the previous assistant turn, echoed back on the next request. REQUIRED by DeepSeek thinking-mode models on tool-call continuations (the API returns 400 invalid_request_error: \"The 'reasoning_content' in the thinking mode must be passed back to the API.\" without it). Plain-text continuations and non-thinking models don't need it. Other providers routing DeepSeek (NanoGPT, OpenRouter) inherit the requirement; providers without thinking mode ignore the field. Copy from LLMRawResult.reasoning_content after each generateWithTools call." },
     ],
   },
   {
     name: 'LlmMessagePart',
-    note: 'A single content part inside an LLMMessage. Discriminated union — switch on the `type` field. Mirrors the host\'s LlmMessagePartDTO; available since v0.29.0 / lumiverse-spindle-types ≥0.4.71.',
+    note: 'A single content part inside an LLMMessage. Discriminated union — switch on the `type` field. Mirrors the host\'s LlmMessagePartDTO.',
     fields: [
       { field: "{ type: 'text', text }",                                                                   type: '', optional: false, desc: 'A plain text segment.' },
       { field: "{ type: 'image', data, mime_type }",                                                       type: '', optional: false, desc: 'Base64-encoded image. Consumed only by connections whose model supports image input.' },
@@ -1015,7 +1251,7 @@ export const KEY_TYPES: TypeDoc[] = [
     fields: [
       { field: 'content',     type: 'string',     optional: false, desc: 'Text generated by the LLM. Empty string when tool_calls is present.' },
       { field: 'tool_calls?', type: 'ToolCall[]', optional: true,  desc: 'Function calls requested by the LLM. When present, content is typically empty.' },
-      { field: 'reasoning_content?', type: 'string', optional: true, desc: "Thinking-mode reasoning content from this turn. Present on tool-call iterations against DeepSeek-thinking models. Copy onto the assistant turn you append to history before the next call (set LLMMessage.reasoning_content). Other providers ignore it. Available since v0.30.2." },
+      { field: 'reasoning_content?', type: 'string', optional: true, desc: "Thinking-mode reasoning content from this turn. Present on tool-call iterations against DeepSeek-thinking models. Copy onto the assistant turn you append to history before the next call (set LLMMessage.reasoning_content). Other providers ignore it." },
     ],
   },
   {
@@ -1024,7 +1260,7 @@ export const KEY_TYPES: TypeDoc[] = [
     fields: [
       { field: 'content?',    type: 'T',          optional: true, desc: 'Final step: JSON-parsed and Zod-validated result typed as T (the schema you passed as the 4th arg to generateWithTools).' },
       { field: 'tool_calls?', type: 'ToolCall[]', optional: true, desc: 'Intermediate steps: function calls requested by the LLM. When present, content is absent.' },
-      { field: 'reasoning_content?', type: 'string', optional: true, desc: "Thinking-mode reasoning content from this turn. Same semantics as LLMRawResult.reasoning_content — copy onto the next assistant turn for DeepSeek-thinking tool loops. Available since v0.30.2." },
+      { field: 'reasoning_content?', type: 'string', optional: true, desc: "Thinking-mode reasoning content from this turn. Same semantics as LLMRawResult.reasoning_content — copy onto the next assistant turn for DeepSeek-thinking tool loops." },
     ],
   },
   {
@@ -1159,10 +1395,13 @@ export const KEY_TYPES: TypeDoc[] = [
       { field: 'personality',             type: 'string',   optional: false, desc: 'Personality summary.' },
       { field: 'scenario',                type: 'string',   optional: false, desc: 'Scenario / setting.' },
       { field: 'firstMessage',            type: 'string',   optional: false, desc: 'Opening message / greeting.' },
+      { field: 'mesExample',              type: 'string',   optional: false, desc: 'Example dialogue. Free-form text shown to the LLM as an example of how the character speaks.' },
+      { field: 'creatorNotes',            type: 'string',   optional: false, desc: 'Free-form notes from the character author (usage guidance, change history, etc.). Not shown to the LLM.' },
       { field: 'systemPrompt',            type: 'string',   optional: false, desc: 'Character-level system prompt.' },
       { field: 'postHistoryInstructions', type: 'string',   optional: false, desc: 'Instructions appended after chat history.' },
       { field: 'tags',                    type: 'string[]', optional: false, desc: 'Searchable tags.' },
       { field: 'alternateGreetings',      type: 'string[]', optional: false, desc: 'Additional greeting variants.' },
+      { field: 'creator',                 type: 'string',   optional: false, desc: 'Creator name / attribution string.' },
       { field: 'imageId',                 type: 'string | null', optional: false, desc: 'Avatar image ID. Null if no avatar.' },
       { field: 'worldBookIds',            type: 'string[]',     optional: false, desc: 'World book IDs attached to this character.' },
       { field: 'extensions',              type: 'Record<string, unknown>', optional: false, desc: 'Free-form extension data attached to the character (per-character analog of message.extra). Namespace your keys (e.g. "my-script:state") to avoid collisions with other extensions / Lumiverse-internal fields. Reads return the full blob; writes via update() shallow-merge into existing — top-level keys overwrite, omitted keys preserved, nested objects replaced wholesale (NOT recursively merged). Keep values JSON-serializable.' },
@@ -1179,6 +1418,8 @@ export const KEY_TYPES: TypeDoc[] = [
       { field: 'personality?',            type: 'string',   optional: true,  desc: 'Personality summary.' },
       { field: 'scenario?',               type: 'string',   optional: true,  desc: 'Scenario / setting.' },
       { field: 'firstMessage?',           type: 'string',   optional: true,  desc: 'Opening message.' },
+      { field: 'mesExample?',             type: 'string',   optional: true,  desc: 'Example dialogue.' },
+      { field: 'creatorNotes?',           type: 'string',   optional: true,  desc: 'Free-form notes from the character author (not shown to the LLM).' },
       { field: 'systemPrompt?',           type: 'string',   optional: true,  desc: 'Character-level system prompt.' },
       { field: 'postHistoryInstructions?', type: 'string',  optional: true,  desc: 'Post-history instructions.' },
       { field: 'tags?',                   type: 'string[]', optional: true,  desc: 'Searchable tags.' },
@@ -1197,6 +1438,8 @@ export const KEY_TYPES: TypeDoc[] = [
       { field: 'personality?',            type: 'string',   optional: true,  desc: 'Personality summary.' },
       { field: 'scenario?',               type: 'string',   optional: true,  desc: 'Scenario / setting.' },
       { field: 'firstMessage?',           type: 'string',   optional: true,  desc: 'Opening message.' },
+      { field: 'mesExample?',             type: 'string',   optional: true,  desc: 'Example dialogue.' },
+      { field: 'creatorNotes?',           type: 'string',   optional: true,  desc: 'Free-form notes from the character author (not shown to the LLM).' },
       { field: 'systemPrompt?',           type: 'string',   optional: true,  desc: 'Character-level system prompt.' },
       { field: 'postHistoryInstructions?', type: 'string',  optional: true,  desc: 'Post-history instructions.' },
       { field: 'tags?',                   type: 'string[]', optional: true,  desc: 'Searchable tags.' },
@@ -1325,7 +1568,7 @@ export const KEY_TYPES: TypeDoc[] = [
       { field: 'score?',                      type: 'number',                      optional: true,  desc: 'Cosine similarity score for vector-activated entries. Absent for keyword-activated entries.' },
     ],
   },
-  // ─── World Info Interceptor (v0.27.0+) ──────────────────────────────────────
+  // ─── World Info Interceptor ─────────────────────────────────────────────────
   {
     name: 'WorldInfoInterceptorEntry',
     note: 'Subset of WorldInfoEntry exposed to a registerInterceptor handler. Read-only — to mutate, return a result patch from the handler.',
@@ -1397,7 +1640,7 @@ export const KEY_TYPES: TypeDoc[] = [
       { field: 'timeoutMs',  type: 'number', optional: false, desc: 'Effective per-invocation timeout (ms).' },
     ],
   },
-  // ─── Regex Scripts (v0.27.0+) ──────────────────────────────────────────────
+  // ─── Regex Scripts ─────────────────────────────────────────────────────────
   {
     name: 'RegexScriptInfo',
     note: "Snapshot of a regex find/replace script. Returned by api.regexScripts.list / get / findByName / getActive / create / update. Field names are camelCase translations of the underlying snake_case host DTO.",
@@ -1570,7 +1813,7 @@ export const KEY_TYPES: TypeDoc[] = [
       { field: 'definition',     type: 'string',                 optional: false, desc: 'Lumia "definition" field — physical / identity description.' },
       { field: 'personality',    type: 'string',                 optional: false, desc: 'Lumia "personality" field.' },
       { field: 'behavior',       type: 'string',                 optional: false, desc: 'Lumia "behavior" field — behavioural patterns.' },
-      { field: 'genderIdentity', type: '0 | 1 | 2',              optional: false, desc: '0 = unspecified, 1 = feminine, 2 = masculine. (Note: upstream council.md docs describe a wider 4-value range; LumiScript matches the typed surface in spindle-types 0.4.40 — type-vs-doc inconsistency tracked.)' },
+      { field: 'genderIdentity', type: '0 | 1 | 2',              optional: false, desc: '0 = unspecified, 1 = feminine, 2 = masculine. (Note: upstream council.md docs describe a wider 4-value range; LumiScript matches the actual typed surface — type-vs-doc inconsistency tracked upstream.)' },
     ],
   },
   {
@@ -1631,29 +1874,11 @@ export const KEY_TYPES: TypeDoc[] = [
   },
   {
     name: 'ToolInvocationContext',
-    note: 'Optional third parameter passed to tool handlers. Populated when invoked via Lumiverse TOOL_INVOCATION; undefined when invoked via api.tools.invoke() (script-to-script). Field-level host requirements: requestId/councilMember require Lumiverse 8d310f8+ (spindle-types 0.4.25+); contextMessages require Lumiverse 993544c8+ (spindle-types 0.4.26+). Older hosts leave the corresponding fields undefined and the helper gracefully falls back.',
+    note: 'Optional third parameter passed to tool handlers. Populated when invoked via Lumiverse TOOL_INVOCATION; undefined when invoked via api.tools.invoke() (script-to-script). The Council-path fields (requestId, councilMember, contextMessages) are populated together; the script-to-script path leaves them all undefined.',
     fields: [
       { field: 'requestId?',       type: 'string',                optional: true, desc: 'Host-side correlation id for this invocation. Useful for matching handler-side logs against Lumiverse server logs.' },
       { field: 'councilMember?',   type: 'CouncilMemberContext',  optional: true, desc: 'Personality snapshot of the Council member that triggered the invocation. Populated only when the tool ran as part of a Council execution cycle; undefined for inline function-calling, api.tools.invoke(), and older hosts.' },
       { field: 'contextMessages?', type: 'LLMMessage[]',          optional: true, desc: "Structured chat context for Council invocations — same content as args.context but with role boundaries preserved. Prefer this over args.context when available — the ls:council-prompt helper's buildCouncilMessages uses it automatically when passed via the contextMessages option. Multi-part (text+image) content is flattened to its text portion before delivery. Undefined for non-Council paths / older hosts." },
-    ],
-  },
-  {
-    name: 'CouncilMemberContext',
-    note: 'Re-exported from lumiverse-spindle-types. Personality snapshot of the Council member that triggered a tool invocation — identity, role, avatar, and Lumia personality fields. Delivered on ToolInvocationContext.councilMember.',
-    fields: [
-      { field: 'memberId',       type: 'string',  optional: false, desc: 'Unique Council member id (Council settings row id).' },
-      { field: 'itemId',         type: 'string',  optional: false, desc: 'Source Lumia item id this member is backed by.' },
-      { field: 'packId',         type: 'string',  optional: false, desc: 'Pack id the Lumia item lives in.' },
-      { field: 'packName',       type: 'string',  optional: false, desc: 'Pack name the Lumia item lives in.' },
-      { field: 'name',           type: 'string',  optional: false, desc: 'Display name of the Lumia item (also used as the member name).' },
-      { field: 'role',           type: 'string',  optional: false, desc: 'Freeform role description assigned by the user (e.g. "Plot Enforcer", "Comic Relief").' },
-      { field: 'chance',         type: 'number',  optional: false, desc: 'Probability (0–100) that this member participates in each generation.' },
-      { field: 'avatarUrl',      type: 'string | null', optional: false, desc: 'Relative URL to the member\'s avatar (e.g. "/api/v1/images/{id}"), or null.' },
-      { field: 'definition',     type: 'string',  optional: false, desc: 'Lumia "definition" field — physical/identity description.' },
-      { field: 'personality',    type: 'string',  optional: false, desc: 'Lumia "personality" field.' },
-      { field: 'behavior',       type: 'string',  optional: false, desc: 'Lumia "behavior" field — behavioural patterns.' },
-      { field: 'genderIdentity', type: '0 | 1 | 2', optional: false, desc: 'Gender identity marker (0=unspecified, 1=feminine, 2=masculine).' },
     ],
   },
   {
@@ -1919,7 +2144,7 @@ export const KEY_TYPES: TypeDoc[] = [
     ],
   },
 
-  // ─── Images (v1.0.0-rc.5+) ───────────────────────────────────────────────────
+  // ─── Images ──────────────────────────────────────────────────────────────────
   {
     name: 'ImageInfo',
     note: 'Returned by api.images.upload / uploadFromDataUrl / get. Camel-case mirror of ImageDTO from Spindle.',
@@ -1959,7 +2184,7 @@ export const KEY_TYPES: TypeDoc[] = [
     ],
   },
 
-  // ─── Image generation (v1.0.0-rc.5+) ─────────────────────────────────────────
+  // ─── Image generation ────────────────────────────────────────────────────────
   {
     name: 'ImageGenInput',
     note: 'Passed to api.imageGen.generate(input). Mirrors ImageGenRequestDTO with camel-case field names on the LumiScript surface.',
@@ -1981,7 +2206,7 @@ export const KEY_TYPES: TypeDoc[] = [
       { field: 'model',        type: 'string',  optional: false, desc: "Model that was actually used (may differ from input if `model` was omitted and the connection's default applied)." },
       { field: 'provider',     type: 'string',  optional: false, desc: 'Provider id that handled the generation.' },
       { field: 'imageId?',     type: 'string',  optional: true,  desc: 'Canonical image id in Lumiverse\'s image table. Pass to api.images.get, api.theme.extractColors, spindle.characters.setAvatar, etc. Present when host-side persistence succeeded (the typical case). When absent, use imageDataUrl for inline rendering.' },
-      { field: 'imageUrl?',    type: 'string',  optional: true,  desc: 'Public unauthenticated URL for the persisted image. Auth-free so push-notification clients can render it without an auth header: api.ui.pushNotification({ image: result.imageUrl, ... }).' },
+      { field: 'imageUrl?',    type: 'string',  optional: true,  desc: 'Public unauthenticated URL for the persisted image. Auth-free so push-notification clients can render it without an auth header: api.ui.pushNotification(title, body, { image: result.imageUrl }) — pushNotification is positional (title, body, options?), NOT object-form.' },
     ],
   },
   {
@@ -2030,7 +2255,7 @@ export const KEY_TYPES: TypeDoc[] = [
     ],
   },
 
-  // ─── Theme (v1.0.0-rc.5+) ────────────────────────────────────────────────────
+  // ─── Theme ───────────────────────────────────────────────────────────────────
   {
     name: 'ColorRGB',
     note: 'RGB color value, 0–255 per channel. Used in ColorExtractionInfo.dominant / regions.* / average.',
@@ -2151,19 +2376,19 @@ export const API_GROUPS: FnGroup[] = [
   {
     group: 'api.chat',
     rows: [
-      { name: 'getMessages',       args: 'options?',              desc: 'Get messages in the current chat. Pass { last: N } for the N most recent.' },
-      { name: 'sendMessage',       args: 'content, options?',     desc: 'Append a new message. Options: role, metadata.' },
+      { name: 'getMessages',       args: 'options?',              desc: 'Get messages in the current chat. Pass `{ last: N }` for the N most recent or `{ first: N }` for the N oldest (omit for the full message list). Requires chat_mutation permission.' },
+      { name: 'sendMessage',       args: 'content, options?',     desc: 'Append a new message. Options: role, metadata, triggerGeneration (when true, fires the host\'s full chat-orchestration pipeline after the append — same effect as the user pressing Enter on an empty input bar), generation (per-call ChatGenerationOptions overrides — connectionId / personaId / presetId / parameters / etc., consulted only when triggerGeneration is true). Requires chat_mutation permission.' },
       { name: 'editMessage',       args: 'id, contentOrPatch',    desc: 'Edit a message by ID. Pass a string to replace the active swipe\'s content, or a MessagePatch to update swipes / swipeId / swipeDates / reasoning / metadata. Patches touching swipe-shaped fields fire SWIPE_EDITED alongside MESSAGE_EDITED.' },
       { name: 'deleteMessage',     args: 'id',                    desc: 'Delete a message by ID.' },
       { name: 'getChatId',         args: '—',                     desc: 'Return the active chat ID, or null.' },
-      { name: 'getMetadata',       args: 'key',                   desc: 'Get a metadata value from the current chat.' },
-      { name: 'setMetadata',       args: 'key, value',            desc: 'Set a metadata key (read-modify-write).' },
+      { name: 'getMetadata',       args: 'key',                   desc: 'Get a metadata value from the current chat. Requires chats permission (note: distinct from chat_mutation — chats gates session-level fields, chat_mutation gates message content).' },
+      { name: 'setMetadata',       args: 'key, value',            desc: 'Set a metadata key (read-modify-write). Requires chats permission.' },
       { name: 'inject',            args: 'id, content, options?', desc: 'Register a prompt injection. Options: mode, role, depth, ephemeral.' },
       { name: 'removeInjection',   args: 'id',                    desc: 'Remove one injection by ID.' },
       { name: 'getInjections',     args: '—',                     desc: 'List all active injections across all scripts.' },
-      { name: 'clearInjections',   args: '—',                     desc: "Remove all injections from this script." },
-      { name: 'clearAllInjections', args: '—',                   desc: 'Remove ALL injections across all scripts.' },
-      { name: 'registerContentProcessor', args: 'handler, options?', desc: 'Register a handler that fires before a user-initiated message write hits SQLite. Returns a patch { content?, extra? } to transform what gets stored. Options: id, priority (default 100), origin filter, timeoutMs (default 2000). NOT invoked for api.chat.* mutations (loop safety). Returns handle { id, remove }. Requires chat_mutation.' },
+      { name: 'clearInjections',   args: '—',                     desc: "Remove all injections from this script. Requires interceptor permission." },
+      { name: 'clearAllInjections', args: '—',                   desc: 'Remove ALL injections across all scripts (cross-script wipe — use sparingly). Requires interceptor permission + allowDangerous.' },
+      { name: 'registerContentProcessor', args: 'handler, options?', desc: 'Register a handler that fires on chat message origin events — `create` (user/assistant message write), `update`, `swipe_add`, `swipe_update`, auto-inserted greetings on the write side, AND on per-message display rendering (`render`). Return a patch { content?, extra? } to transform what gets stored or shown. Options: id, priority (default 100), origin filter, timeoutMs (default 2000). NOT invoked for api.chat.* mutations (loop safety). `extra` is IGNORED on swipe origins (swipes share the parent message\'s extra) and on `render` (no row to mutate). Returns handle { id, remove }. Requires chat_mutation permission.' },
       { name: 'listContentProcessors', args: '—',                  desc: 'List all currently registered message content processors across all scripts.' },
       { name: 'setMessageHidden',  args: 'id, hidden',              desc: 'Mark a single message as hidden or visible. Hidden messages are excluded from vector retrieval but still included in prompt assembly. Toggle pattern: pass `true` to hide, `false` to unhide. Persists on the message — survives reloads. Requires chat_mutation permission.' },
       { name: 'setMessagesHidden', args: 'ids, hidden',             desc: 'Bulk variant of `setMessageHidden`. Max 500 IDs per call. Same hidden-flag semantics (excluded from vector retrieval, still included in prompt assembly). Requires chat_mutation permission.' },
@@ -2252,11 +2477,11 @@ export const API_GROUPS: FnGroup[] = [
   {
     group: 'api.ui.dom',
     rows: [
-      { name: 'inject',          args: 'target, html, options?',     desc: 'Inject sanitized HTML at a CSS selector. Returns DOMHandle { id, update, remove, on }. Options: position (default "beforeend"), id (stable ID for idempotent injection). Requires app_manipulation.' },
+      { name: 'inject',          args: 'target, html, options?',     desc: 'Inject sanitized HTML at a CSS selector. Returns DOMHandle { id, update, remove, on }. Options object (single arg — NOT `inject(target, html, position, options)`): `position` (default "beforeend"), `id` (stable ID for idempotent injection — re-firing with the same id triggers in-place innerHTML update via dom_update IPC instead of a fresh insert). **Note**: when the injected HTML contains an inline `<style>` block (the host-CSS-targeting pattern — see api.ui.dom NAMESPACE_CONCEPTS), do NOT use `id`-dedup. The dom_update path replaces wrapper innerHTML, and browsers don\'t reliably reactivate `<style>` blocks added that way — second fire silently loses every CSS rule. Pattern for inline-style scripts that re-fire: drop `id`, call `api.ui.dom.cleanup()` at body start instead. Requires app_manipulation.' },
       { name: 'injectAtMessage', args: 'messageId, html, options?', desc: 'Inject sanitized HTML into a message bubble. Waits up to 5 s for the element if not yet rendered. Options: position ("footer" default / "header"), id (stable ID). Returns DOMHandle. Requires app_manipulation.' },
-      { name: 'addStyle',         args: 'css',                      desc: 'Add a <style> element scoped to this script via @scope. Returns { remove() }. Use --lumiverse-* CSS variables for theming. Requires app_manipulation.' },
-      { name: 'delegate',         args: 'selector, event, handler, options?', desc: 'Attach an event-delegated listener at a known root, matching descendants by CSS selector. Lets scripts react to clicks/changes on DOM the script didn\'t inject — e.g. interactive elements emitted by the LLM in chat-message content. Single host-side capture listener per (root, event) tuple regardless of how many scripts subscribe; selector matching happens frontend-side via event.target.closest(). Default scope (options.root: "chat") restricts matching to chat content; "document" matches anywhere on the page. Returns an unsubscribe function. v0.27.1+. Requires app_manipulation.' },
-      { name: 'cleanup',          args: '—',                        desc: 'Remove all DOM injections, styles, and delegations created by this script. Requires app_manipulation.' },
+      { name: 'addStyle',         args: 'css, opts?',               desc: 'Add a `<style>` element scoped to this script via `@scope ([data-ls-script="<id>"])`. Returns `{ remove() }`. Use `--lumiverse-*` CSS variables for theming. Pass `{ id: \'foo\' }` for idempotent re-injection — calling `addStyle` again with the same id removes the prior stylesheet first (useful for dev-iteration where the CSS source changes between fires). Without an id, every call adds a fresh stylesheet. **Scope limitation**: rules ONLY match descendants of script-injected DOM. Cannot reach host elements (chat input bar, message bubbles, toolbar buttons, the body, etc.) because `@scope` excludes everything outside the script\'s wrappers. To style host UI, include an inline `<style>` block inside an `inject()` HTML payload instead — CSS rules in a `<style>` element are document-global regardless of where the tag sits. See api.ui.dom NAMESPACE_CONCEPTS for the full pattern. Requires app_manipulation permission.' },
+      { name: 'delegate',         args: 'selector, event, handler, options?', desc: 'Attach an event-delegated listener at a known root, matching descendants by CSS selector. Lets scripts react to clicks/changes on DOM the script didn\'t inject — e.g. interactive elements emitted by the LLM in chat-message content. Single host-side capture listener per (root, event) tuple regardless of how many scripts subscribe; selector matching happens frontend-side via event.target.closest(). Default scope (options.root: "chat") restricts matching to chat content; "document" matches anywhere on the page. Returns an unsubscribe function. Requires app_manipulation.' },
+      { name: 'cleanup',          args: '—',                        desc: 'Remove all DOM injections, styles, and delegations created by THIS script (other scripts\' DOM is untouched). Auto-fired on script disable / delete — manual call is for re-fire scenarios where you want to wipe and rebuild from scratch. **Canonical use**: at the top of a script body that combines re-firing triggers (`ls:startup` + `CHAT_SWITCHED` + manual Run) with inline `<style>` blocks in injected HTML. Calling `cleanup()` then `inject(...)` guarantees a fresh-inject path on every fire — which parses `<style>` correctly — instead of dom_update-via-id-dedup which doesn\'t reactivate inline styles. Requires app_manipulation.' },
     ],
   },
   {
@@ -2332,8 +2557,8 @@ export const API_GROUPS: FnGroup[] = [
       { name: 'entries.delete',      args: 'entryId',           desc: 'Delete an entry by ID.' },
       { name: 'entries.listByAutomationIdPrefix', args: 'prefix', desc: 'Find all entries across all world books whose automationId starts with the given prefix. Useful for enumerating / cleaning up entries a script owns (e.g. "lumiscript:<scriptId>:" convention). Returns WorldInfoEntry[]; O(books × entries-per-book).' },
       { name: 'getCapturedActive',   args: 'chatId?',           desc: 'Get all entries that would activate for the current chat (full pipeline).' },
-      { name: 'registerInterceptor', args: 'handler, options?', desc: 'Register a handler that runs BEFORE world info activation. Returns disable / enable / force / mutate decisions for the candidate entries. Returns handle { id, remove }. Multiple handlers compose by priority; vote-off precedence on disabled. 2s soft timeout (configurable). Requires generation. v0.27.0+.' },
-      { name: 'listInterceptors',    args: '—',                 desc: 'Sync read of all currently-registered world-info interceptors. Diagnostic surface. Returns RegisteredWorldInfoInterceptorInfo[]. v0.27.0+.' },
+      { name: 'registerInterceptor', args: 'handler, options?', desc: 'Register a handler that runs BEFORE world info activation. Returns disable / enable / force / mutate decisions for the candidate entries. Returns handle { id, remove }. Multiple handlers compose by priority; vote-off precedence on disabled. 2s soft timeout (configurable). Requires generation.' },
+      { name: 'listInterceptors',    args: '—',                 desc: 'Sync read of all currently-registered world-info interceptors. Diagnostic surface. Returns RegisteredWorldInfoInterceptorInfo[].' },
     ],
   },
   {
@@ -2351,7 +2576,7 @@ export const API_GROUPS: FnGroup[] = [
       { name: 'documents.create',           args: 'databankId, input',         desc: 'Upload a document. **Required input fields**: `data` (`string | Uint8Array` — NOT `content`) and `filename` (string with extension, e.g. `\'notes.md\'`). **Optional**: `mimeType`, `name` (display override). Returns immediately with `status: \'pending\'` — ingestion (chunking + vectorisation) runs async. Use `waitUntilReady()` or poll `get()` to await completion. Max size 10 MB; supported extensions in DatabankDocumentCreateInput. Requires databanks permission.' },
       { name: 'documents.update',           args: 'documentId, input',         desc: 'Update document display name (URL slug regenerates). Requires databanks permission.' },
       { name: 'documents.delete',           args: 'documentId',                desc: 'Delete a document. Returns true if deleted. Requires databanks permission.' },
-      { name: 'documents.getContent',       args: 'documentId',                desc: 'Read the document\'s ingested text content. Returns null if the document does not exist OR has not finished processing — check `status === \'ready\'` via `get()` first, or call `waitUntilReady()` to block. Requires databanks permission.' },
+      { name: 'documents.getContent',       args: 'documentId',                desc: 'Read the document\'s ingested text content. Returns `{ content: string }` on success, or `null` if the document does not exist OR has not finished processing — check `status === \'ready\'` via `get()` first, or call `waitUntilReady()` to block. Requires databanks permission.' },
       { name: 'documents.reprocess',        args: 'documentId',                desc: 'Reset a document to `status: \'pending\'`, drop its vectors, and re-queue for full reingestion. Useful after upstream content changes or when ingestion errored. Requires databanks permission.' },
       { name: 'documents.waitUntilReady',   args: 'documentId, options?',      desc: 'Poll until the document reaches `status: \'ready\'`. Throws on error/timeout/deletion. Default 60s timeout, 500ms poll interval — override via DatabankWaitUntilReadyOptions. Use after `create()` or `reprocess()` to await ingestion. Requires databanks permission.' },
     ],
@@ -2410,7 +2635,7 @@ export const API_GROUPS: FnGroup[] = [
   {
     group: 'api.imageGen',
     rows: [
-      { name: 'generate',        args: 'input',         desc: "Generate an image. `input.prompt` required; optional: connectionId (default: user's default connection), negativePrompt, model, parameters (provider-specific — validate against the provider's `parameters` schema from getProviders() if your script accepts user input), ownerCharacterId, ownerChatId. Returns ImageGenResult { imageDataUrl, model, provider, imageId?, imageUrl? } — `imageId` is the canonical handle accepted by api.images.get / api.theme.extractColors / characters.setAvatar; `imageUrl` is an auth-free public URL suitable for api.ui.pushNotification({image:...}). For img2img / inpainting, pass `parameters: { input_images: [imageId, ...] }`. Requires image_gen permission." },
+      { name: 'generate',        args: 'input',         desc: "Generate an image. `input.prompt` required; optional: connectionId (default: user's default connection), negativePrompt, model, parameters (provider-specific — validate against the provider's `parameters` schema from getProviders() if your script accepts user input), ownerCharacterId, ownerChatId. Returns ImageGenResult { imageDataUrl, model, provider, imageId?, imageUrl? } — `imageId` is the canonical handle accepted by api.images.get / api.theme.extractColors / characters.setAvatar; `imageUrl` is an auth-free public URL suitable for api.ui.pushNotification(title, body, { image: result.imageUrl }) — pushNotification is positional, NOT object-form. For img2img / inpainting, pass `parameters: { input_images: [imageId, ...] }`. Requires image_gen permission." },
       { name: 'getProviders',    args: '—',             desc: "List all image-generation providers available on this Lumiverse install along with their capability schemas. Each provider's `capabilities.parameters` describes the supported `parameters` for generate() calls against that provider's connections — use to drive dynamic parameter UIs. Requires image_gen permission." },
       { name: 'listConnections', args: '—',             desc: "List the user's image-gen connection profiles. API keys are never exposed — only `hasApiKey: boolean`. Use to populate a connection picker UI. Requires image_gen permission." },
       { name: 'getConnection',   args: 'connectionId',  desc: 'Get a single image-gen connection profile by id. Returns ImageGenConnectionInfo or null. Requires image_gen permission.' },
@@ -2420,7 +2645,7 @@ export const API_GROUPS: FnGroup[] = [
   {
     group: 'api.oauth',
     rows: [
-      { name: 'onCallback',     args: 'handler',        desc: "Register a callback handler for this extension's OAuth redirect URL. Handler receives the URL query params as Record<string, string>; optional return { html } becomes the response body shown in the user's browser tab. **Single handler per extension** (host stores in a module-scope ref; last-wins). LumiScript emits a `spindle.log.warn` on cross-script or same-script-re-register collisions — non-terminating; the host's last-wins behavior is preserved. Returns a sync unsubscribe fn (wrapped in Promise per the IPC boundary). Requires oauth permission." },
+      { name: 'onCallback',     args: 'handler',        desc: "Register a callback handler for this extension's OAuth redirect URL. Handler receives the URL query params as Record<string, string>; optional return { html } becomes the response body shown in the user's browser tab. **Single handler per extension** (host stores in a module-scope ref; last-wins). LumiScript emits a `spindle.log.warn` on cross-script or same-script-re-register collisions — non-terminating; the host's last-wins behavior is preserved. Returns a sync unsubscribe fn. Requires oauth permission." },
       { name: 'getCallbackUrl', args: '—',              desc: "Get the host-relative callback URL path (e.g. `/api/spindle-oauth/lumiscript/callback`). Stable per-extension; use as the `redirect_uri` in your authorize URL construction. Async on the LumiScript side due to IPC boundary even though the host method is sync. Requires oauth permission." },
       { name: 'createState',    args: '—',              desc: 'Mint a CSRF state nonce. Pass to your authorize URL as `state=...`; the host verifies the returned state at callback time and rejects mismatches before invoking your handler. Requires oauth permission.' },
     ],
@@ -2536,7 +2761,7 @@ export const API_GROUPS: FnGroup[] = [
   {
     group: 'api.scriptStorage',
     rows: [
-      { name: 'get',    args: 'key, defaultValue?', desc: "Read a value. Returns `defaultValue` (or `undefined` if not provided) when the key is missing. Generic type hint via `get<T>(...)` for IDE completion — the runtime doesn't enforce T. v1.0.0-rc.6+." },
+      { name: 'get',    args: 'key, defaultValue?', desc: "Read a value. Returns `defaultValue` (or `undefined` if not provided) when the key is missing. Generic type hint via `get<T>(...)` for IDE completion — the runtime doesn't enforce T." },
       { name: 'set',    args: 'key, value',        desc: 'Write a value. Overwrites any prior value at the key. Fires `ls:scriptStorage:set` with `{ scriptId, key, value }`. Throws "capacity exceeded" if the JSON-serialised total would cross the 1 MB per-script cap (use `api.variables.*` or `api.db.*` for storage at this scale). Value must be JSON-serialisable.' },
       { name: 'delete', args: 'key',               desc: 'Remove a key. Returns `true` if it existed (and fires `ls:scriptStorage:delete` with `{ scriptId, key }`), `false` if it didn\'t (no broadcast).' },
       { name: 'has',    args: 'key',               desc: 'Check whether a key exists. Returns true for keys with any value including 0 / false / null / "".' },
@@ -2587,7 +2812,7 @@ export const BUILTIN_COMPONENTS: FnRow[] = [
   { name: 'messageFooter',  args: 'messageId, html, options?',  desc: 'Attach a styled footer below a message bubble. Returns DOMHandle, or CollapsibleDOMHandle when options.collapsible is true. Options: { id?, className?, collapsible?, title?, defaultCollapsed? }.' },
   { name: 'messageHeader',  args: 'messageId, html, options?',  desc: 'Attach a styled header above message content. Returns DOMHandle, or CollapsibleDOMHandle when options.collapsible is true. Options: { id?, className?, collapsible?, title?, defaultCollapsed? }.' },
   { name: 'progressBar',    args: 'target, options?',           desc: 'Inject a progress bar with live setValue(). Returns ProgressBarHandle. Options: { value?, label?, color?, showPercent?, height?, id?, className? }.' },
-  { name: 'floatingButton', args: 'label, options?',            desc: 'Fixed-position action button. Returns DOMHandle. Options: { position?, icon?, variant?, size?, id?, className? }.' },
+  { name: 'floatingButton', args: 'label, options?',            desc: 'Fixed-position action button. Returns DOMHandle. Options: { position?, icon?, variant?, size?, draggable?, id?, className? }. Pass `draggable: true` to make the button user-repositionable; the new position persists per-script via api.scriptStorage.' },
   { name: 'badgeHtml',      args: 'text, options?',             desc: 'Returns badge/pill HTML string for composing inside other injections.' },
   { name: 'statBarHtml',    args: 'label, value, options?',     desc: 'Returns labeled stat bar HTML string. Options: { max?, color?, showValue?, height?, className? }.' },
   { name: 'keyValueHtml',   args: 'label, value, options?',     desc: 'Returns label-value pair HTML string. Options: { muted?, className? }.' },
@@ -2840,10 +3065,10 @@ export const NAMESPACE_CONCEPTS: Record<string, string> = {
     'Per-script schema-validated JSON collections. Each collection is a typed array of records persisted under the owning script\'s storage path; collections never leak across scripts. Optional Zod schema validates writes (insert + update). Built-in fields `id` / `createdAt` / `updatedAt` are reserved and auto-managed; Zod\'s `.strict()` / unknown-key stripping preserves them. Use for structured per-script data; for cross-script shared state see `api.variables.global`.',
 
   'api.scriptStorage':
-    'Per-script in-memory key/value store for session state. Closes the "where does my script keep its session state?" UX gap that was previously covered by the `globalThis.__lumiscript_script_<id>_*` convention (verbose, easy to forget the prefix). **Free tier — no permission required.** v1.0.0-rc.6+.\n\n**Picking the right storage primitive** — the LumiScript storage story now has three tiers, picked by intent:\n  - `api.scriptStorage` — in-memory, session-scoped, free-tier. Best for "remember this for the session" flags (tracker rerun-inflight, current selection, transient cache).\n  - `api.variables.*` — disk-persisted, scope-tiered (local/global/character/chat), free-tier. Best for "remember this across restarts" state.\n  - `api.db.*` — disk-persisted, structured collections with schema + filters + queries. Best for record-shaped data you want to search / aggregate.\n\n**Lifecycle**: in-memory only — values live in a parent-side `Map<scriptId, Map<key, value>>`, no disk write. Survives worker eviction / respawn (parent-side state, not in worker memory). Survives script edit / hot-reload (matches the `globalThis` convention — preserves dev iteration state). Cleared on script disable / delete via the `teardownDisabledScript` path. Lost on full backend restart.\n\n**Size cap**: 1 MB per script on the JSON-serialised size of the full map. `set()` throws `"capacity exceeded"` cleanly when a write would cross the cap, with a migration hint pointing to `api.variables.*` / `api.db.*`. The cap is intentional — scriptStorage is a "small bag of session flags" surface, not bulk storage.\n\n**Broadcasts**: every mutation fires an `ls:scriptStorage:*` event on the broadcast bus. `ls:scriptStorage:set` carries `{ scriptId, key, value }`; `ls:scriptStorage:delete` carries `{ scriptId, key }`; `ls:scriptStorage:clear` carries `{ scriptId }`. No-op `delete` / empty `clear` calls don\'t fire. The `ls:*` prefix avoids the eviction-pinning policy. Useful for debug / admin tooling; user scripts typically don\'t need to subscribe.\n\n**Values must be JSON-serialisable.** Passing functions / symbols / DOM elements throws at the IPC boundary — same posture as `api.broadcast.emit` and `api.variables.*`.\n\n**Cross-script isolation**: per-script via `scriptId`-keyed outer Map. Script A\'s writes never appear in Script B\'s reads. (Cross-script visibility for debug tooling is available via the broadcast events above.)',
+    'Per-script in-memory key/value store for session state. Closes the "where does my script keep its session state?" UX gap that was previously covered by the `globalThis.__lumiscript_script_<id>_*` convention (verbose, easy to forget the prefix). **Free tier — no permission required.**\n\n**Picking the right storage primitive** — the LumiScript storage story now has three tiers, picked by intent:\n  - `api.scriptStorage` — in-memory, session-scoped, free-tier. Best for "remember this for the session" flags (tracker rerun-inflight, current selection, transient cache).\n  - `api.variables.*` — disk-persisted, scope-tiered (local/global/character/chat), free-tier. Best for "remember this across restarts" state.\n  - `api.db.*` — disk-persisted, structured collections with schema + filters + queries. Best for record-shaped data you want to search / aggregate.\n\n**Lifecycle**: in-memory only — values live in a parent-side `Map<scriptId, Map<key, value>>`, no disk write. Survives worker eviction / respawn (parent-side state, not in worker memory). Survives script edit / hot-reload (matches the `globalThis` convention — preserves dev iteration state). Cleared on script disable / delete via the `teardownDisabledScript` path. Lost on full backend restart.\n\n**Size cap**: 1 MB per script on the JSON-serialised size of the full map. `set()` throws `"capacity exceeded"` cleanly when a write would cross the cap, with a migration hint pointing to `api.variables.*` / `api.db.*`. The cap is intentional — scriptStorage is a "small bag of session flags" surface, not bulk storage.\n\n**Broadcasts**: every mutation fires an `ls:scriptStorage:*` event on the broadcast bus. `ls:scriptStorage:set` carries `{ scriptId, key, value }`; `ls:scriptStorage:delete` carries `{ scriptId, key }`; `ls:scriptStorage:clear` carries `{ scriptId }`. No-op `delete` / empty `clear` calls don\'t fire. The `ls:*` prefix avoids the eviction-pinning policy. Useful for debug / admin tooling; user scripts typically don\'t need to subscribe.\n\n**Values must be JSON-serialisable.** Passing functions / symbols / DOM elements throws at the IPC boundary — same posture as `api.broadcast.emit` and `api.variables.*`.\n\n**Cross-script isolation**: per-script via `scriptId`-keyed outer Map. Script A\'s writes never appear in Script B\'s reads. (Cross-script visibility for debug tooling is available via the broadcast events above.)',
 
   'api.broadcast':
-    'In-memory real-time pub/sub between scripts. Events are NOT persisted — handlers fire synchronously when an event is emitted, and there\'s no replay across script reloads. Subscriptions persist between trigger runs (host wipes them at the START of each new run, not the end), so a "subscriber-only" script can watch events from a script it isn\'t co-triggered with. The `ls:*` prefix is reserved for system events; scripts should namespace their own events with a project-specific prefix. **Distinct from `api.events`** — that one is for persistent event tracking; this one is for real-time messaging.\n\n**Payload size cap + emit rate limit (v1.0.0-rc.7+).** `api.broadcast.emit(event, payload)` synchronously throws if the JSON-serialised payload exceeds **1 MB** (matches the `api.scriptStorage` per-value ceiling), OR if the calling script has emitted more than **100 events/sec sustained** (token bucket with **1000-emit burst capacity**). Errors carry clear migration hints. The caps apply at the `api.broadcast.emit` proxy entry (NOT at the underlying bus, so internal `ls:*` events the engine emits are unaffected). For high-frequency data flow, push the data to `api.db.*` or `api.scriptStorage` and emit a small "data updated" notification on the bus instead.',
+    'In-memory real-time pub/sub between scripts. Events are NOT persisted — handlers fire synchronously when an event is emitted, and there\'s no replay across script reloads. Subscriptions persist between trigger runs (host wipes them at the START of each new run, not the end), so a "subscriber-only" script can watch events from a script it isn\'t co-triggered with. The `ls:*` prefix is reserved for system events; scripts should namespace their own events with a project-specific prefix. **Distinct from `api.events`** — that one is for persistent event tracking; this one is for real-time messaging.\n\n**Payload size cap + emit rate limit.** `api.broadcast.emit(event, payload)` synchronously throws if the JSON-serialised payload exceeds **1 MB** (matches the `api.scriptStorage` per-value ceiling), OR if the calling script has emitted more than **100 events/sec sustained** (token bucket with **1000-emit burst capacity**). Errors carry clear migration hints. The caps apply at the `api.broadcast.emit` proxy entry (NOT at the underlying bus, so internal `ls:*` events the engine emits are unaffected). For high-frequency data flow, push the data to `api.db.*` or `api.scriptStorage` and emit a small "data updated" notification on the bus instead.',
 
   'api.rpc':
     'Cross-extension shared RPC pool. Wraps Spindle\'s `spindle.rpcPool` with two-tier namespacing: every endpoint is fully-qualified as `lumiscript.<scriptSlug>.<channel>` where `scriptSlug` auto-derives from the calling script\'s name (overridable via `options.as`). Use `sync(channel, value)` to publish a latest-value snapshot and `handle(channel, fn)` to register on-demand handlers — other LumiScript scripts AND other Lumiverse extensions can `read(endpoint)` from these channels. Free tier (no permission). Endpoints auto-unregister on script disable / delete / stale-after-re-run. **Permission delegation**: `options.policy` controls how owner permissions flow to readers. Omit for the legacy "requester inherits every owner permission" guard; pass `{ requires: [] }` for intentionally narrow / public endpoints; pass `{ requires: [\'name\'] }` to scope delegated permissions explicitly. Handlers receive `effectivePermissions` on the `RpcRequestContext` so they can branch on what\'s actually delegated to this call. **Distinct from `api.broadcast`** — broadcast is in-process pub/sub between LumiScript user-scripts; rpc is cross-extension, asks-the-pool RPC where the caller knows the target endpoint by name. Backend-console logs registrations for cross-extension exposure visibility.',
@@ -2858,7 +3083,7 @@ export const NAMESPACE_CONCEPTS: Record<string, string> = {
     'Two registration modes. **Pull mode** (`register(name, handler)`): handler runs at macro-resolution time, can be sync or async (function-reference form; string-handler form is sync-only). **Push mode** (`register(name)` + `updateMacroValue(name, value)`): register once with no handler, push values whenever they change — avoids RPC latency at generation time. Pull is simpler but pays per-resolve cost; push is faster but requires upstream "value changed" knowledge. Pick based on whether macro resolution is hot.',
 
   'api.tools':
-    'Two execution paths for tool registration. **Council tools** go through a sidecar LLM with the tool\'s description-as-prompt — the sidecar reasons about which tools to invoke. **Extension tools** bypass the LLM entirely and receive `{context, __deadlineMs}` directly from the Council pipeline. For extension tools, do your own analysis inside the handler (`generateStructured` against a fast connection is the common pattern). One-line tool descriptions are sufficient for extension tools — the description doesn\'t prompt anything; it\'s purely a human label.',
+    'Tool-registration surface. All tools you register via `api.tools.register` are **extension tools** — they bypass any sidecar LLM and are invoked directly by the host with `(args, ctx?)` where `ctx` carries `{councilMember?, contextMessages?, requestId?, __deadlineMs}` on Council-driven invocations. The "two execution paths" framing applies to **Lumiverse built-in tools** (which DO go through a sidecar LLM with description-as-prompt — that\'s how the Council reasons about which to invoke); LumiScript scripts can\'t register sidecar-LLM-driven tools. Practical implication: do your own analysis inside the handler — `generateStructured` against a fast connection is the canonical pattern. One-line tool descriptions are sufficient for extension tools — the description doesn\'t prompt anything; it\'s purely a human label shown in the tool inspector. Set `council_eligible: true` on the definition to make the tool selectable for Council `chance` rolls (the tool then receives Council context on invocation); leave it false for tools only invoked via `api.tools.invoke` or `api.llm.generateWithTools`.',
 
   'api.databanks':
     'Three ownership scopes — `global` (no owner key), `character` (owned by character UUID), `chat` (owned by chat UUID). Documents within a databank inherit their parent\'s scope. Document ingestion is **asynchronous**: `documents.create()` returns immediately with `status: \'pending\'`; use `documents.waitUntilReady(docId)` to await chunking + vectorization. For input-bar actions or other UI surfaces that need ready-state confirmation, prefer `waitUntilReady` over manual polling.\n\n**File-type constraint**: Lumiverse accepts text-oriented uploads only — `.txt`, `.md`, `.markdown`, `.csv`, `.tsv`, `.json`, `.xml`, `.html`, `.htm`, `.yaml`, `.yml`, `.log`, `.rst`, `.rtf`. PDFs, images, archives, audio, and other binary payloads are rejected at ingestion even though `DatabankDocumentCreateInput.data` is typed `string | Uint8Array`. For non-text persistence, use `api.files.*` (UTF-8 strings — base64-encode binary first) or `api.images.*` (raw image bytes). Max 10 MB per document.',
@@ -2867,16 +3092,16 @@ export const NAMESPACE_CONCEPTS: Record<string, string> = {
     'Thin wrapper over Lumiverse\'s image store. Use cases: persist generated / fetched / pasted images and obtain an `imageId` that can be passed to `api.theme.extractColors` for palette derivation, stored on a character avatar, or attached to a databank document. **Two upload paths**: `upload({data: Uint8Array, ...})` for raw bytes (sourceable from `api.utils.http.*` with `responseType: \'arraybuffer\'`, `api.utils.image.dataUrlToBytes(...).data`, `api.files.*`, etc.); `uploadFromDataUrl(dataUrl, options?)` for `data:image/...;base64,...` URLs. Both return `ImageInfo` whose `id` is the persisted UUID. **Distinct from `api.utils.image.*`** — those are CHILD-side byte-manipulation helpers (mime sniff, dataUrl ↔ bytes conversion); `api.images.*` is HOST-side persistence. Requires `images` permission.',
 
   'api.imageGen':
-    'Image-generation surface. `generate({prompt, ...})` fires against the user\'s configured connection profiles (the same profiles the Lumiverse UI uses for image generation) and returns `ImageGenResult { imageDataUrl, model, provider, imageId?, imageUrl? }`. **`imageId` is the integration seam** — pass to `api.images.get`, `api.theme.extractColors`, or `spindle.characters.setAvatar` to compose with the rest of the API. `imageUrl` is an auth-free public URL suitable for `api.ui.pushNotification({image: result.imageUrl})`. **Provider/connection metadata** via `getProviders` (capability schemas — drive parameter UIs), `listConnections` / `getConnection` (connection picker UIs; API keys masked), `getModels` (model picker; dynamic providers fetch live from upstream). **Provider-specific parameters** flow opaquely through `input.parameters` — validate against the provider\'s `parameters` schema from `getProviders()` if your script accepts user input. **img2img / inpainting** via the `image_array` parameter type: pass arrays of `imageId` strings (`parameters: { input_images: [id1, id2] }`). **Distinct from `api.images.*`** — that one is raw-byte CRUD on already-stored images; this one creates new ones. Requires `image_gen` permission.',
+    'Image-generation surface. `generate({prompt, ...})` fires against the user\'s configured connection profiles (the same profiles the Lumiverse UI uses for image generation) and returns `ImageGenResult { imageDataUrl, model, provider, imageId?, imageUrl? }`. **`imageId` is the integration seam** — pass to `api.images.get`, `api.theme.extractColors`, or `spindle.characters.setAvatar` to compose with the rest of the API. `imageUrl` is an auth-free public URL suitable for `api.ui.pushNotification(title, body, { image: result.imageUrl })` (positional signature, NOT object-form). **Provider/connection metadata** via `getProviders` (capability schemas — drive parameter UIs), `listConnections` / `getConnection` (connection picker UIs; API keys masked), `getModels` (model picker; dynamic providers fetch live from upstream). **Provider-specific parameters** flow opaquely through `input.parameters` — validate against the provider\'s `parameters` schema from `getProviders()` if your script accepts user input. **img2img / inpainting** via the `image_array` parameter type: pass arrays of `imageId` strings (`parameters: { input_images: [id1, id2] }`). **Distinct from `api.images.*`** — that one is raw-byte CRUD on already-stored images; this one creates new ones. Requires `image_gen` permission.',
 
   'api.oauth':
-    'OAuth callback surface — the **only inbound-HTTP hook** Spindle exposes to extensions. Three primitives: `onCallback(handler)` registers a handler for this extension\'s OAuth redirect URL, `getCallbackUrl()` returns the URL path to use as `redirect_uri`, `createState()` mints a CSRF state nonce. **Single handler per extension** (host stores in a module-scope ref; last-wins). LumiScript adds a `spindle.log.warn` on cross-script or same-script-re-register collisions — non-terminating; the host\'s behavior is preserved, only the silent overwrite is surfaced. **Wrapper is intentionally thin** — everything beyond these primitives (constructing the authorize URL, exchanging the code for a token, persisting + refreshing the token) is the script\'s responsibility. Pair with `api.utils.http` (`cors_proxy` + `allowDangerous`) for token-endpoint POSTs and `api.enclave` for encrypted token persistence. PKCE cookbook recipe deferred to v1.0 docs pass. Requires `oauth` permission.\n\n**Surfacing the authorize URL.** Scripts run server-side in the Bun subprocess — there is NO `window.open` and no programmatic browser-tab control. To prompt the user to visit the authorize URL, use one of: (a) `api.ui.showAdvancedModal({title:\'Authorize\', items:[{kind:\'html\', html:\'<a href=\"...\" target=\"_blank\">Click to authorize</a>\'}]})` (requires `app_manipulation`); (b) `api.ui.toast(\'Open this URL: \'+authorizeUrl, \'info\')` for a passive notice; (c) `api.ui.pushNotification({title:\'Authorize required\', body:authorizeUrl, actionUrl: authorizeUrl})` for an OS notification (requires `push_notification`); (d) inject a button into the host shell via `api.ui.dom.inject` (requires `app_manipulation`).\n\n**Composing the full `redirect_uri`.** `getCallbackUrl()` returns a host-relative path (e.g. `/api/spindle-oauth/lumiscript/callback`); the OAuth provider needs the absolute URL. Scripts can\'t introspect the Lumiverse origin at runtime — pass it as a config constant in the script source, or store via `api.variables.global` from a one-time setup script.',
+    'OAuth callback surface — the **only inbound-HTTP hook** Spindle exposes to extensions. Three primitives: `onCallback(handler)` registers a handler for this extension\'s OAuth redirect URL, `getCallbackUrl()` returns the URL path to use as `redirect_uri`, `createState()` mints a CSRF state nonce. **Single handler per extension** (host stores in a module-scope ref; last-wins). LumiScript adds a `spindle.log.warn` on cross-script or same-script-re-register collisions — non-terminating; the host\'s behavior is preserved, only the silent overwrite is surfaced. **Wrapper is intentionally thin** — everything beyond these primitives (constructing the authorize URL, exchanging the code for a token, persisting + refreshing the token) is the script\'s responsibility. Pair with `api.utils.http` (`cors_proxy` + `allowDangerous`) for token-endpoint POSTs and `api.enclave` for encrypted token persistence. PKCE cookbook recipe deferred to v1.0 docs pass. Requires `oauth` permission.\n\n**Surfacing the authorize URL.** Scripts run server-side in the Bun subprocess — there is NO `window.open` and no programmatic browser-tab control. To prompt the user to visit the authorize URL, use one of: (a) `api.ui.showAdvancedModal({title:\'Authorize\', items:[{kind:\'html\', html:\'<a href=\"...\" target=\"_blank\">Click to authorize</a>\'}]})` (requires `app_manipulation`); (b) `api.ui.toast(\'Open this URL: \'+authorizeUrl, \'info\')` for a passive notice; (c) `api.ui.pushNotification(\'Authorize required\', authorizeUrl, { url: authorizeUrl })` for an OS notification (positional: title, body, options; the `url` option opens-on-click) (requires `push_notification`); (d) inject a button into the host shell via `api.ui.dom.inject` (requires `app_manipulation`).\n\n**Composing the full `redirect_uri`.** `getCallbackUrl()` returns a host-relative path (e.g. `/api/spindle-oauth/lumiscript/callback`); the OAuth provider needs the absolute URL. Scripts can\'t introspect the Lumiverse origin at runtime — pass it as a config constant in the script source, or store via `api.variables.global` from a one-time setup script.',
 
   'api.theme':
     'Lumiverse theme manipulation surface. Three usage tiers, increasing in flexibility: **simple** — `applyPalette({accent: {h, s, l}})` and let Lumiverse generate the full coherent ~80+ CSS variable set; **mode-aware** — `apply({variablesByMode: {dark: {...}, light: {...}}})` and the host dispatches per-mode at apply time; **expert** — `generateVariables(config)` → tweak → `apply({variables: ...})` for full programmatic control. **Per-script attribution**: multiple LumiScript scripts can apply themes concurrently — LumiScript maintains a per-script override registry and merges before pushing to spindle. Conflict resolution: per-key last-applied-wins for variables, most-recent-script-wins for palette. Auto-cleared on script disable / delete (no manual `clear()` needed for normal disable flows). **Cookbook pattern for interactive UI scripts**: scripts that combine theme apply with interactive DOM should clear their theme in the close / dismiss handler symmetric to DOM removal — `clear()` drops just this script\'s contributions, other scripts\' themes survive. `extractColors(imageId)` pairs cleanly with `applyPalette({accent: result.dominantHsl})` for image-driven theming (avatar-themed UI, dynamic mood theming, etc.). Requires `app_manipulation` permission.',
 
   'api.ui.dom':
-    'DOM injection surface. `inject(target, html, position?)` returns a `DOMHandle`; subsequent calls go through the handle (`update`, `remove`, `on`, `injectChild`, `read`, `makeDraggable`). `addStyle(css)` adds a scoped stylesheet (wrapped in `@scope ([data-ls-script="<id>"])` — only matches script-injected DOM, doesn\'t cascade into the host app shell). `injectAtMessage(messageId, html, options?)` attaches DOM to a specific chat message (header, before, after, footer positions). `delegate(selector, event, handler, options?)` (v0.27.1+) installs a capture-phase event-delegated listener at a known root — use to react to events on host DOM you didn\'t inject (e.g. LLM-emitted interactive elements inside `.mes_text` content). `cleanup()` removes ALL of this script\'s DOM in one call. Requires `app_manipulation` permission.\n\n**HTML sanitisation (v1.0.0-rc.7+).** Every HTML payload — `inject`, `update`, `injectChild`, `injectAtMessage` — is run through DOMPurify with strict defaults plus `FORBID_TAGS: [\'iframe\', \'frame\', \'object\', \'embed\', \'form\']` (matching the host\'s three-layer CSP+DOMPurify+X-Frame-Options policy from commit `dd6d7cd3`). DOMPurify defaults strip all `on*` event handler attributes (`onclick`, `onerror`, `onload`, `onmouseover`, etc.), `<script>` tags, `javascript:` URLs, `data:` URLs on dangerous elements, the `formaction` attribute, and other XSS vectors. **When content is stripped, the affected script\'s editor console gets a `[security]` entry** naming what was removed (deprecation aid: tells you why your `<button onclick="...">` button stopped working).\n\n**Event handler migration — inline → delegation.** Pre-rc.7 some scripts attached behaviour via inline `onclick="someFn()"` in `update()` HTML. Post-rc.7 those handlers are silently stripped. The replacement is `DOMHandle.on(event, handler)` event delegation with a `data-*` attribute on the trigger element:\n\n```js\n// Pre-rc.7 (handler now stripped, button does nothing):\nhandle.update(\'<button onclick="doThing()">Click</button>\');\n\n// rc.7+ (recommended):\nhandle.update(\'<button data-action="do-thing">Click</button>\');\nhandle.on(\'click\', (ev) => {\n  if (ev.target.dataset.action !== \'do-thing\') return;\n  // ...do thing\n});\n```\n\nThe delegation reads `event.target.dataset.action` (not a `closest()` walk), so when the visible button content is bigger than its padded text area (icon SVG, `<img>`, decorative `<span>`), the click target can be the inner element — which lacks the `data-*` attribute, so the handler silently no-ops. Standard fix: `pointer-events: none` on the decorative inner content so clicks pass through to the button itself.\n\n**Read access (v1.0.0-rc.6+).** `handle.read(options?)` returns a `SerializedDOMElement` snapshot of the bound element — `tag`, `attrs` (with internal `data-ls-*` and `data-spindle-ext` stripped), `text`, `childCount`, plus optional `html` for the inner markup. Async because it awaits a frontend roundtrip. Multi-root or text-only injections return the LumiScript wrapper snapshot; single-root injections return the user\'s element directly. Returns `null` if the element vanished on the frontend (live DOM raced ahead of script logic) — distinct from `DomHandleReleasedError` which throws after `handle.remove()`.\n\n**Spindle wrapper nesting (gotcha).** `ctx.dom.inject` wraps every payload in a Spindle wrapper `<div data-spindle-ext>` containing a LumiScript wrapper `<div data-ls-el data-ls-script>` containing your HTML. Two levels of wrapper sit ABOVE your root element. Code that walks down to the user\'s root must do `wrapper.firstElementChild?.firstElementChild`. The `data-ls-script` attribute is what `addStyle`\'s `@scope` rules match.',
+    'DOM injection surface. `inject(target, html, position?)` returns a `DOMHandle`; subsequent calls go through the handle (`update`, `remove`, `on`, `injectChild`, `read`, `makeDraggable`). `addStyle(css)` adds a scoped stylesheet (wrapped in `@scope ([data-ls-script="<id>"])` — only matches script-injected DOM, doesn\'t cascade into the host app shell). `injectAtMessage(messageId, html, options?)` attaches DOM to a specific chat message (header, before, after, footer positions). `delegate(selector, event, handler, options?)` installs a capture-phase event-delegated listener at a known root — use to react to events on host DOM you didn\'t inject (e.g. LLM-emitted interactive elements inside `.mes_text` content). `cleanup()` removes ALL of this script\'s DOM in one call. Requires `app_manipulation` permission.\n\n**Styling host UI requires inline `<style>` injection, NOT `addStyle`.** Because `addStyle` wraps its CSS in `@scope ([data-ls-script="<id>"])`, every rule only matches descendants of script-injected DOM — host elements (chat input bar, message bubbles, toolbar buttons, the body itself) are unreachable. To style host DOM (`button[aria-label="..."]`, `[class*="hostClass"]`, `body:has(.my-toggle:checked) ...` selectors, etc.), include a `<style>` block in your `inject()` HTML. CSS rules inside a `<style>` element are document-global regardless of where the tag sits in the DOM, so they reach host elements. The wrapper (`data-ls-script="<id>"`) still carries cleanup attribution — script disable removes the wrapper, the `<style>` goes with it, host UI returns to baseline. Same lifecycle as `addStyle`; different reach.\n\n**Inline `<style>` blocks and `opts.id`-dedup DON\'T MIX.** Re-firing `inject(target, html, { id })` with an `id` that already exists triggers the `dom_update` IPC path on the frontend, which replaces the wrapper\'s `innerHTML` in place. Browsers don\'t reliably reactivate `<style>` elements added via `innerHTML` — the tag is in the DOM but its rules don\'t register into the active stylesheet list. Net effect: first fire works, second fire silently loses every CSS rule from the inline `<style>` (host elements re-appear; the script\'s own UI loses its styling too). For scripts that combine inline `<style>` blocks with re-firing triggers (`ls:startup` + `CHAT_SWITCHED` + manual Run-button), DROP the `id` and call `api.ui.dom.cleanup()` at the top of the body instead. `cleanup()` removes only THIS script\'s DOM + styles, leaves other scripts untouched, and forces every fire to take the fresh-inject path which parses `<style>` correctly.\n\n**HTML sanitisation.** Every HTML payload — `inject`, `update`, `injectChild`, `injectAtMessage` — is run through DOMPurify with strict defaults plus `FORBID_TAGS: [\'iframe\', \'frame\', \'object\', \'embed\', \'form\']` (matching the host\'s three-layer CSP + DOMPurify + X-Frame-Options policy). DOMPurify defaults strip all `on*` event handler attributes (`onclick`, `onerror`, `onload`, `onmouseover`, etc.), `<script>` tags, `javascript:` URLs, `data:` URLs on dangerous elements, the `formaction` attribute, and other XSS vectors. **When content is stripped, the affected script\'s editor console gets a `[security]` entry** naming what was removed (tells you why your `<button onclick="...">` button doesn\'t work).\n\n**Event handlers — use delegation, not inline.** Inline `onclick="..."` attributes are stripped by sanitisation. The replacement is `DOMHandle.on(event, handler)` event delegation with a `data-*` attribute on the trigger element:\n\n```js\n// Stripped at injection — button does nothing:\nhandle.update(\'<button onclick="doThing()">Click</button>\');\n\n// Recommended:\nhandle.update(\'<button data-action="do-thing">Click</button>\');\nhandle.on(\'click\', (ev) => {\n  if (ev.target.dataset.action !== \'do-thing\') return;\n  // ...do thing\n});\n```\n\nThe delegation reads `event.target.dataset.action` (not a `closest()` walk), so when the visible button content is bigger than its padded text area (icon SVG, `<img>`, decorative `<span>`), the click target can be the inner element — which lacks the `data-*` attribute, so the handler silently no-ops. Standard fix: `pointer-events: none` on the decorative inner content so clicks pass through to the button itself.\n\n**Read access.** `handle.read(options?)` returns a `SerializedDOMElement` snapshot of the bound element — `tag`, `attrs` (with internal `data-ls-*` and `data-spindle-ext` stripped), `text`, `childCount`, plus optional `html` for the inner markup. Async because it awaits a frontend roundtrip. Multi-root or text-only injections return the LumiScript wrapper snapshot; single-root injections return the user\'s element directly. Returns `null` if the element vanished on the frontend (live DOM raced ahead of script logic) — distinct from `DomHandleReleasedError` which throws after `handle.remove()`.\n\n**Spindle wrapper nesting (gotcha).** `ctx.dom.inject` wraps every payload in a Spindle wrapper `<div data-spindle-ext>` containing a LumiScript wrapper `<div data-ls-el data-ls-script>` containing your HTML. Two levels of wrapper sit ABOVE your root element. Code that walks down to the user\'s root must do `wrapper.firstElementChild?.firstElementChild`. The `data-ls-script` attribute is what `addStyle`\'s `@scope` rules match.',
 };
 
 /**
@@ -2917,11 +3142,12 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   world_books:       'CRUD on world books and entries via `api.worldInfo.*`.',
   regex_scripts:     'CRUD on regex find/replace scripts via `api.regexScripts.*`.',
   generation:        'Call LLM providers via `api.llm.*`. Also required to register world-info interceptors that touch the assembled prompt.',
-  interceptor:       'Register prompt injections, content processors, world-info interceptors — anything that mutates host data mid-flight.',
+  interceptor:       'Register prompt injections (`api.chat.inject`) and content processors (`api.chat.registerContentProcessor`) — anything that mutates host data mid-flight. **Note**: world-info interceptors (`api.worldInfo.registerInterceptor`) are gated by `generation` instead, since they run at prompt-assembly time.',
+  context_handler:   'Paired with `interceptor` for `api.chat.inject`. Gates the host\'s context-handler stage where `mode: \'context\'` injections are prepended at index 0 of the assembled prompt. LumiScript declares both by default.',
   macro_interceptor: 'Register macro-resolution interceptors (`api.macros.registerInterceptor`). Performance-sensitive; gated separately from `interceptor`.',
   cors_proxy:        'Outbound HTTP via `api.utils.http.*`. Paired with `allowDangerous` (both gates required).',
   ui_panels:         'Float widgets / dock panels — surfaces that hold their own persistent UI region in the app shell.',
-  app_manipulation:  'Gates ONLY `api.ui.dom.*` (DOM injection, `addStyle`, delegation), `api.ui.showAdvancedModal`, `api.ui.showContextMenu`, and `api.theme.*`. Does NOT gate `api.chats.*` (use `chats`), `api.characters.*` (use `characters`), `api.ui.toast`, `api.ui.pushNotification`, or any other UI primitive — those have their own permissions. Mental model: this is the "script-owns-its-own-shell-pixels" gate.',
+  app_manipulation:  'Gates ONLY `api.ui.dom.*` (DOM injection, `addStyle`, delegation), `api.ui.showAdvancedModal`, and `api.theme.*`. Does NOT gate `api.chats.*` (use `chats`), `api.characters.*` (use `characters`), `api.ui.showContextMenu` (free-tier, system-themed), `api.ui.toast`, `api.ui.pushNotification`, or any other UI primitive — those have their own permissions. Mental model: this is the "script-owns-its-own-shell-pixels" gate.',
   push_notification: 'OS-level push notifications via `api.ui.pushNotification` (delivered when the app is unfocused).',
   ephemeral_storage: 'TTL-bound `api.files.temp*` file storage with auto-expiry.',
   tools:             'Register Council-eligible LLM tools via `api.tools.*`.',
@@ -2946,7 +3172,7 @@ export const TRIGGER_MODEL_INTRO: string =
   "**LumiScript does NOT use runtime event subscription.** There is no `api.on()`, no `api.events.on()`, no `api.subscribe()`, no `api.listen()`, no `api.triggers.on()` — and no, you don't write `event.on('message', handler)` either. None of those exist. **Do not lookup_api on any of them.** The paradigm is completely different from Node.js EventEmitter or DOM event listeners.\n\n" +
   '**Event wiring is configured in the editor UI, not in the script source.** When you create or edit a script in LumiScript\'s script editor, an event-selector control lets you pick which Lumiverse events should run this script\'s body. There is no script-side syntax that subscribes — the wiring lives in the script\'s editor config, alongside its name, enabled flag, and binding.\n\n' +
   '**`// @triggers EVENT_NAME[, ...]` in a script header is INFORMATIVE ONLY.** It\'s a comment convention you may write at the top of your script to document which events the script is *intended* to be wired to. The host does not parse it — writing `@triggers` has zero runtime effect. The actual events that fire your script come from the editor-UI wiring, not from this comment. (A future LumiScript version may add a programmatic-subscription API; current versions do not.)\n\n' +
-  'When a wired event fires, the **script body itself runs as the handler** — the entire body executes top-to-bottom with the event\'s payload available as the `data` global. No callback, no subscription object, no listener registry. `data.__event` carries the event name (e.g. `"MESSAGE_SENT"`); the rest of `data` is the event-specific payload (see the **Events** section for per-event payload shapes).\n\n' +
+  'When a wired event fires, the **script body itself runs as the handler** — the entire body executes top-to-bottom with the event\'s payload available as the `data` global. No callback, no subscription object, no listener registry. `data.__event` carries the event name (e.g. `"MESSAGE_SENT"`); the rest of `data` is the event-specific payload (see the **Lumiverse Events** section for per-event payload shapes).\n\n' +
   '```js\n' +
   '// Optional documentary comment — has no effect on what triggers the script.\n' +
   '// Actual wiring (e.g. "MESSAGE_SENT, MESSAGE_EDITED") is set in the editor UI.\n' +
@@ -2962,7 +3188,7 @@ export const TRIGGER_MODEL_INTRO: string =
   '  });\n' +
   '}\n' +
   '```\n\n' +
-  'The full list of available event names + their payload shapes + firing semantics is in the **Events** section below. To make a script react to one of those events, open it in the editor and select the event in the UI.\n\n' +
+  'The full list of available event names + their payload shapes + firing semantics is in the **Lumiverse Events** section below. To make a script react to one of those events, open it in the editor and select the event in the UI.\n\n' +
   '**Execution isolation — every fire is a fresh function scope.** When a wired event fires, the host wraps your script body in a brand-new `AsyncFunction` and invokes it ONCE. Module-scope `let` / `const` / `var` declarations at the top of your script body are LOCAL to that one invocation — they do NOT survive to the next fire of the same script. A pattern like:\n\n' +
   '```js\n' +
   'let bankId = null;\n' +
@@ -2979,15 +3205,17 @@ export const TRIGGER_MODEL_INTRO: string =
   "- **Editor-UI event wiring** — react to Lumiverse host *lifecycle* events (MESSAGE_SENT, GENERATION_ENDED, CHAT_CHANGED, ...). Configured per-script in the script editor.\n" +
   "- `api.broadcast.*` — real-time *script-to-script* pub/sub between user scripts running inside the same LumiScript extension. Use for custom in-extension messaging.\n" +
   "- `api.events.*` — *persistent log* of custom events (`track` / `query` / `replay` / `getLatestState`). Use for audit trails, state-resuming scripts, custom analytics. **NOT** for subscribing to host events.\n\n" +
-  "**Sandbox hardening (v1.0.0-rc.7+).** The script-runner sandbox locks down host capabilities that user scripts have no business reaching. Two layers gate this:\n\n" +
+  "**Lifecycle events (`ls:startup` / `ls:teardown` / `ls:reload`).** Three LumiScript-synthetic events that mark script-state transitions. `ls:startup` fires on cold-boot entry into active state (extension boot OR disable→enable transition). `ls:teardown` fires on exit (disable / delete). `ls:reload` fires on hot in-place body refresh (autosave-with-`// @ls:reload-on-edit`-directive OR manual Reload button click). The first two are symmetric subscription events — opt in via the editor's event-picker checkbox. **`ls:reload` is the exception**: it is NOT in the picker — it fires deterministically as a side-effect of the Reload button (always) or the autosave directive (always, for scripts that declared it). Parallel to the Run button: a user action, not a subscription. The body re-runs on all three events; branch on `data.__event` to differentiate handling. **Reload also wipes per-script state** (DOM, modals, widgets, drawer tabs, handler closures, interceptors, injections, ...) BEFORE the body re-runs, while preserving `api.scriptStorage`, `api.theme.*` contributions, and the worker's `script.require()` cache — so an `ls:reload` body run lands into a clean slate equivalent to a fresh `ls:startup`. Use `if (data.__event === \"ls:startup\")` branches for code that should run EXCLUSIVELY on cold boot (default-config seeding, persistent-data migrations) — those fires once per active-state entry, not on every Reload click. To make init code re-run on both events, branch on `(data.__event === \"ls:startup\" || data.__event === \"ls:reload\")` or put it at the top of the body un-gated. v1.0.0-rc.8+ for the wipe semantics.\n\n" +
+  "**Sandbox hardening.** The script-runner sandbox locks down host capabilities that user scripts have no business reaching. Two layers gate this:\n\n" +
   "- **Dispatch-time source check.** Scripts containing any of the following patterns are REJECTED before they run; the editor console shows a `[security]` entry naming the rejected pattern:\n" +
-  "  - `import('...')` / `await import('...')` — dynamic import. Use `script.require('library-name')` for inter-script dependencies (see the **Libraries** section).\n" +
+  "  - `import('...')` / `await import('...')` — dynamic import. Use `script.require('library-name')` for inter-script dependencies (see the **Built-in Libraries** section).\n" +
   "  - bare `require('...')` — CommonJS-style global require. Same migration: `script.require('library-name')`. Note: `script.require(...)` and method-style `obj.require(...)` are NOT rejected (the source check uses `(?<!\\.)` lookbehind to exclude method access).\n" +
   "  - `new Function('...')` / `Function('...')` — Function constructor. Define functions with normal syntax (`function foo() {}` / `const foo = () => {}`); same lookbehind exempts method-style `obj.Function(...)`.\n" +
   "  - `.constructor.constructor` — prototype-chain access to the Function constructor.\n" +
   "  - literal `globalThis.Bun` / `globalThis[\"Bun\"]` — Bun runtime API. Use `api.utils.http.*` for HTTP, `api.files.*` (with `allowDangerous`) for filesystem.\n" +
   "  - literal `globalThis.process` / `globalThis[\"process\"]` — host process. Use `api.enclave.*` for secrets, never read host env vars from a script.\n\n" +
-  "- **Runtime globalThis lockdown.** At subprocess startup, every globalThis property not on the LumiScript allowlist is replaced with `undefined`. `typeof X` returns `'undefined'`; reading `X.method()` throws `TypeError`. Affects: `fetch`, `Worker`, `WebSocket`, `BroadcastChannel`, `XMLHttpRequest`, `EventSource`, `prompt`, `onerror`, `onmessage`, `postMessage`, `removeEventListener`, and Bun-specific Node-compat module globals (`fs`, `http`, `net`, `os`, `tls`, `vm`, `worker_threads`, `ffi`, `sqlite`, etc.). Standard ES built-ins (Object, Array, Promise, JSON, Math, Date, RegExp, Map, Set, etc.), web data carriers (Blob, File, FileReader, FormData, Headers, Request, Response), event types (Event, EventTarget, CustomEvent), streams (Readable/Writable/Transform), and Web Crypto are all left accessible.\n\n" +
+  "- **Runtime globalThis lockdown.** At subprocess startup, every globalThis property not on the LumiScript allowlist is replaced with `undefined`. `typeof X` returns `'undefined'`; reading `X.method()` throws `TypeError`. Affects: `fetch`, `Worker`, `WebSocket`, `BroadcastChannel`, `XMLHttpRequest`, `EventSource`, `prompt`, `onerror`, `onmessage`, `postMessage`, `removeEventListener`, and Bun-specific Node-compat module globals (`fs`, `http`, `net`, `os`, `tls`, `vm`, `worker_threads`, `child_process`, `ffi`, `sqlite`, etc.). Standard ES built-ins (Object, Array, Promise, JSON, Math, Date, RegExp, Map, Set, etc.), timers (`setTimeout`, `setInterval`, `clearTimeout`, `clearInterval`, `queueMicrotask`, `structuredClone`), cancellation primitives (`AbortController`, `AbortSignal`), `crypto`, `WebAssembly`, `performance`, `Buffer`, base64 codecs (`atob`, `btoa`), web data carriers (Blob, File, FileReader, FormData, Headers, Request, Response), event types (Event, EventTarget, CustomEvent), and streams (ReadableStream/WritableStream/TransformStream) are all left accessible. The canonical list is `SAFE_GLOBALS` in `src/script-runner/child-entry.ts`.\n\n" +
+  "- **Layer-2 setTimeout/setInterval string-form rejection.** `setTimeout` and `setInterval` are whitelisted but monkey-patched to reject the string-form callback (the legacy `setTimeout('foo()', 100)` API that some runtimes still honour). Passing a string throws `TypeError: setTimeout requires a function callback (string form is not supported in the LumiScript sandbox)`. Always pass a function.\n\n" +
   "**Console rate-limit.** Unhandled rejections from a single script are rate-limited to **10 per 60s window**; further rejections drop silently with a `\"N additional rejection(s) were suppressed\"` summary on the next-window rejection. Prevents a runaway loop from filling the editor console + backend stderr with millions of lines. The 10-per-minute cap is intentional — most legitimate scripts produce ≪ 1 rejection/minute under normal operation.";
 
 /**
@@ -3053,7 +3281,7 @@ export const REDIRECTS: Record<string, string> = {
 
   // ─── Event-name hallucinations (real events live in the Events table) ───
   'MESSAGE_RECEIVED':
-    "`MESSAGE_RECEIVED` is not a Lumiverse event. The correct events for incoming messages are `MESSAGE_SENT` (user-initiated sends) and `GENERATION_ENDED` (assistant-side message arrival). Wire the script to one or both via the editor UI (event-wiring control in the script editor — not a script-source directive). See the **Events** table in the cheat-sheet for the full list with firing semantics.",
+    "`MESSAGE_RECEIVED` is not a Lumiverse event. The correct events for incoming messages are `MESSAGE_SENT` (user-initiated sends) and `GENERATION_ENDED` (assistant-side message arrival). Wire the script to one or both via the editor UI (event-wiring control in the script editor — not a script-source directive). See the **Lumiverse Events** table in the cheat-sheet for the full list with firing semantics.",
   'MESSAGE_RECEIVE':
     "`MESSAGE_RECEIVE` is not a Lumiverse event. See the `MESSAGE_RECEIVED` redirect — real events are `MESSAGE_SENT` (user) and `GENERATION_ENDED` (assistant).",
   'MESSAGE_NEW':
@@ -3091,7 +3319,7 @@ export const REDIRECTS: Record<string, string> = {
   'window.location.origin':
     "Same as `window.location` — does not exist server-side. See the `window.location` redirect for the OAuth-redirect-URI pattern.",
   'window.open':
-    "`window.open` does not exist in LumiScript (scripts run server-side, not in the user's browser). To prompt the user to navigate to a URL — for OAuth authorize URLs, external dashboards, etc. — surface the URL via a UI primitive: `api.ui.showAdvancedModal({title:'Authorize', items:[{kind:'html', html:'<a href=\"...\" target=\"_blank\">Click to authorize</a>'}]})` (requires `app_manipulation`); or `api.ui.toast('Open this URL: '+url, 'info')` for a passive notice the user can click; or `api.ui.pushNotification({title:'Authorize', body:url})` (requires `push_notification`). There is no programmatic browser-tab control from the script side.",
+    "`window.open` does not exist in LumiScript (scripts run server-side, not in the user's browser). To prompt the user to navigate to a URL — for OAuth authorize URLs, external dashboards, etc. — surface the URL via a UI primitive: `api.ui.showAdvancedModal({title:'Authorize', items:[{kind:'html', html:'<a href=\"...\" target=\"_blank\">Click to authorize</a>'}]})` (requires `app_manipulation`); or `api.ui.toast('Open this URL: '+url, 'info')` for a passive notice the user can click; or `api.ui.pushNotification('Authorize', url, { url })` (positional: title, body, options) (requires `push_notification`). There is no programmatic browser-tab control from the script side.",
   'document':
     "`document` does not exist in LumiScript — scripts run server-side in a Bun subprocess. For DOM manipulation in the host frontend, use `api.ui.dom.*` (`inject`, `addStyle`, `injectAtMessage`, `delegate`, `cleanup` — all gated on `app_manipulation` permission). The returned `DOMHandle` from `inject` lets you `.update(html)` / `.remove()` / `.on(event, handler)` etc. across the IPC boundary. There is no direct DOM access.",
   'localStorage':
@@ -3111,36 +3339,36 @@ export const REDIRECTS: Record<string, string> = {
   'confirm':
     "Top-level `confirm` (the browser dialog) does not exist in LumiScript. Use `await api.ui.confirm({ title, message, confirmLabel?, cancelLabel?, danger? })` — returns `{ confirmed: boolean }`. Free-tier.",
 
-  // ─── Sandbox lockdown — rc.7+ rejected patterns ─────────────────────────
-  // LumiScript v1.0.0-rc.7 hardens the AsyncFunction sandbox against direct
-  // host-capability access. The dispatch-time source check rejects scripts
+  // ─── Sandbox lockdown — rejected patterns ───────────────────────────────
+  // The script-runner sandbox hardens the AsyncFunction environment against
+  // direct host-capability access. The dispatch-time source check rejects scripts
   // containing literal forms of these patterns; the runtime globalThis
   // lockdown turns most non-whitelisted globals into `undefined`. Models
   // trained on Node / browser code reach for these by default — redirect.
   'globalThis.Bun':
-    "`globalThis.Bun` access is rejected at dispatch time (LumiScript v1.0.0-rc.7+); a literal in user-script source produces a `LumiScriptSecurityError` before the script runs. The Bun runtime API is not exposed to user scripts. For the capabilities scripts typically reach for: outbound HTTP — `api.utils.http.*` (requires `cors_proxy` + `allowDangerous`); filesystem — `api.files.*` (per-user / shared / temp tiers, requires `allowDangerous`); subprocess spawn — not available, no replacement (scripts run in a sandboxed Bun subprocess by design); Bun-specific utilities like `deepEquals`, the file-write helper, etc. — use standard JS / pure helpers.",
+    "`globalThis.Bun` access is rejected at dispatch time; a literal in user-script source produces a `LumiScriptSecurityError` before the script runs. The Bun runtime API is not exposed to user scripts. For the capabilities scripts typically reach for: outbound HTTP — `api.utils.http.*` (requires `cors_proxy` + `allowDangerous`); filesystem — `api.files.*` (per-user / shared / temp tiers, requires `allowDangerous`); subprocess spawn — not available, no replacement (scripts run in a sandboxed Bun subprocess by design); Bun-specific utilities like `deepEquals`, the file-write helper, etc. — use standard JS / pure helpers.",
   'globalThis.process':
-    "`globalThis.process` access is rejected at dispatch time (LumiScript v1.0.0-rc.7+). The host process API is not exposed to user scripts — no env vars, no exit, no IPC. For the patterns scripts typically reach for: secrets — `api.enclave.*` (AES-256-GCM encrypted, per-user-per-extension, requires `allowDangerous`); script-self-info — the `script` global (`script.id`, `script.name`, `script.type`); active context — `api.chat.getChatId()` (sync), `await api.chats.getActive()`, `await api.personas.getActive()`. There is no Node-style env-var access in LumiScript — secrets live in the enclave, configuration lives in `api.variables.global` or script source constants.",
+    "`globalThis.process` access is rejected at dispatch time. The host process API is not exposed to user scripts — no env vars, no exit, no IPC. For the patterns scripts typically reach for: secrets — `api.enclave.*` (AES-256-GCM encrypted, per-user-per-extension, requires `allowDangerous`); script-self-info — the `script` global (`script.id`, `script.name`, `script.type`); active context — `api.chat.getChatId()` (sync), `await api.chats.getActive()`, `await api.personas.getActive()`. There is no Node-style env-var access in LumiScript — secrets live in the enclave, configuration lives in `api.variables.global` or script source constants.",
   'globalThis.fetch':
-    "`globalThis.fetch` is locked at the runtime sandbox boundary (v1.0.0-rc.7+) — access returns `undefined`. The top-level `fetch` parameter inside an `allowDangerous` script body works (handed in via the AsyncFunction parameter slot), but the recommended path is `api.utils.http.*` (`get` / `post` / `put` / `delete` / `request`), which routes through the host's CORS proxy with SSRF validation + size caps. Requires `cors_proxy` + `allowDangerous`.",
+    "`globalThis.fetch` is locked at the runtime sandbox boundary — access returns `undefined`. The top-level `fetch` parameter inside an `allowDangerous` script body works (handed in via the AsyncFunction parameter slot), but the recommended path is `api.utils.http.*` (`get` / `post` / `put` / `delete` / `request`), which routes through the host's CORS proxy with SSRF validation + size caps. Requires `cors_proxy` + `allowDangerous`.",
   'new Function':
-    "`new Function('...')` and bare `Function('...')` are rejected at dispatch time (LumiScript v1.0.0-rc.7+); the Function constructor is blocked because it would enable runtime-constructed code that bypasses the dispatch-time source check. Define functions with normal syntax — function declarations, function expressions, arrow functions, async variants. The lookbehind in the source check exempts method-style `obj.Function(...)` (rare but valid), so methods on user objects named `Function` are NOT affected.",
+    "`new Function('...')` and bare `Function('...')` are rejected at dispatch time; the Function constructor is blocked because it would enable runtime-constructed code that bypasses the dispatch-time source check. Define functions with normal syntax — function declarations, function expressions, arrow functions, async variants. The lookbehind in the source check exempts method-style `obj.Function(...)` (rare but valid), so methods on user objects named `Function` are NOT affected.",
   'Function':
     "The `Function` *constructor* is blocked at dispatch — see `new Function`. `Function` as a *value* (`typeof x === 'function'`, `x instanceof Function`) is fine; `Function.prototype.*` access is fine. Only `Function(...)` invocation in source is rejected.",
   'eval':
     "`eval('...')` is not allowed in LumiScript user scripts (the global `eval` is locked at the runtime sandbox boundary — `globalThis.eval` returns `undefined`). There's no use case for `eval` inside a LumiScript script: dynamic code is rejected at dispatch anyway (`new Function` / `import()` / `require()` all blocked), and the canonical replacements are normal JS — function references, dispatch tables, conditional branches.",
   '.constructor.constructor':
-    "`x.constructor.constructor(...)` (the prototype-chain path to the `Function` constructor) is rejected at dispatch time in LumiScript v1.0.0-rc.7+. Like `new Function`, this would enable runtime-constructed code that bypasses the source check. Define functions with normal syntax.",
+    "`x.constructor.constructor(...)` (the prototype-chain path to the `Function` constructor) is rejected at dispatch time. Like `new Function`, this would enable runtime-constructed code that bypasses the source check. Define functions with normal syntax.",
   'import':
-    "Dynamic `import('module-name')` is not allowed in LumiScript user scripts — rejected at dispatch time (v1.0.0-rc.7+). User scripts can't import Node modules or NPM packages directly. The two legitimate uses of `import`-style loading in LumiScript: (a) inter-script dependencies via `script.require('library-name')` — see the **Libraries** section; (b) built-in libraries via `script.require('ls:components')` / `script.require('ls:icons')` / `script.require('ls:council-prompt')`. Static `import` declarations at the top of a script body are also a category error — user scripts are bare-top-level bodies (not modules), so `import` syntax is a parse error.",
+    "Dynamic `import('module-name')` is not allowed in LumiScript user scripts — rejected at dispatch time. User scripts can't import Node modules or NPM packages directly. The two legitimate uses of `import`-style loading in LumiScript: (a) inter-script dependencies via `script.require('library-name')` — see the **Built-in Libraries** section; (b) built-in libraries via `script.require('ls:components')` / `script.require('ls:icons')` / `script.require('ls:council-prompt')`. Static `import` declarations at the top of a script body are also a category error — user scripts are bare-top-level bodies (not modules), so `import` syntax is a parse error.",
   'require':
-    "Bare `require('module-name')` (CommonJS) is rejected at dispatch time in LumiScript v1.0.0-rc.7+. User scripts can't reach Node modules. **`script.require('library-name')` is the LumiScript library-loading API** (loads user library-scripts or built-in `ls:*` libraries) — the source check uses `(?<!\\.)` lookbehind to exempt method-style access, so `script.require(...)` is NOT rejected. See the **Libraries** section.",
+    "Bare `require('module-name')` (CommonJS) is rejected at dispatch time. User scripts can't reach Node modules. **`script.require('library-name')` is the LumiScript library-loading API** (loads user library-scripts or built-in `ls:*` libraries) — the source check uses `(?<!\\.)` lookbehind to exempt method-style access, so `script.require(...)` is NOT rejected. See the **Built-in Libraries** section.",
   'onclick':
-    "Inline `onclick=\"...\"` event handlers in HTML strings injected via `api.ui.dom.inject` / `update` / `injectChild` are STRIPPED by DOMPurify (LumiScript v1.0.0-rc.7+). Same for `onerror`, `onload`, `onmouseover`, `onsubmit`, and every other `on*` event-handler attribute. **Replacement**: event delegation via `handle.on(event, fn)` with a `data-*` attribute on the trigger element. See the `api.ui.dom` namespace concept for the canonical pattern and the wrapper-nesting gotcha.",
+    "Inline `onclick=\"...\"` event handlers in HTML strings injected via `api.ui.dom.inject` / `update` / `injectChild` are STRIPPED by DOMPurify. Same for `onerror`, `onload`, `onmouseover`, `onsubmit`, and every other `on*` event-handler attribute. **Replacement**: event delegation via `handle.on(event, fn)` with a `data-*` attribute on the trigger element. See the `api.ui.dom` namespace concept for the canonical pattern and the wrapper-nesting gotcha.",
   'onerror':
-    "Same as `onclick`: inline `onerror=\"...\"` handlers in injected HTML are stripped by DOMPurify post-rc.7. Use `handle.on('error', fn)` event delegation. For image-error handling specifically, the pattern is `<img data-image=\"foo\">` + `handle.on('error', (ev) => { if (ev.target.matches('img[data-image]')) ... })`.",
+    "Same as `onclick`: inline `onerror=\"...\"` handlers in injected HTML are stripped by DOMPurify. Use `handle.on('error', fn)` event delegation. For image-error handling specifically, the pattern is `<img data-image=\"foo\">` + `handle.on('error', (ev) => { if (ev.target.matches('img[data-image]')) ... })`.",
   'onload':
-    "Same as `onclick`: inline `onload=\"...\"` handlers in injected HTML are stripped by DOMPurify post-rc.7. Use `handle.on('load', fn)` event delegation. For image-load specifically, `<img data-image=\"foo\">` + `handle.on('load', (ev) => { if (ev.target.matches('img[data-image]')) ... })`.",
+    "Same as `onclick`: inline `onload=\"...\"` handlers in injected HTML are stripped by DOMPurify. Use `handle.on('load', fn)` event delegation. For image-load specifically, `<img data-image=\"foo\">` + `handle.on('load', (ev) => { if (ev.target.matches('img[data-image]')) ... })`.",
 };
 
 // ─── Reference tab root ───────────────────────────────────────────────────────
@@ -3159,12 +3387,175 @@ export const ReferenceTab: FC = () => (
       </button>
     </div>
 
-    <Section icon={<Zap size={11} />} title="Lumiverse Events" defaultOpen>
+    <Section icon={<Workflow size={11} />} title="Trigger model" defaultOpen>
+      <p style={{ marginBottom: 8 }}>
+        <strong>LumiScript does NOT use runtime event subscription.</strong> There is no
+        {' '}<Code>api.on()</Code>, no <Code>api.events.on()</Code>, no
+        {' '}<Code>api.subscribe()</Code>, no <Code>api.listen()</Code>, no
+        {' '}<Code>api.triggers.on()</Code> — and no, you don't write
+        {' '}<Code>event.on('message', handler)</Code> either. None of those exist.
+        The paradigm is completely different from Node.js EventEmitter or DOM event listeners.
+      </p>
+
+      <p style={{ marginBottom: 8 }}>
+        <strong>Event wiring is configured in the editor UI, not in the script
+        source.</strong> When you create or edit a script, the event-selector control
+        in the script editor lets you pick which Lumiverse events run this script's
+        body. There is no script-side syntax for subscription — the wiring lives in
+        the script's editor config, alongside its name, enabled flag, and binding.
+      </p>
+
+      <p style={{ marginBottom: 8 }}>
+        <Code>{'// @triggers EVENT_NAME[, ...]'}</Code> <strong>in a script header is
+        informative only.</strong> It's a comment convention you may use to document
+        which events the script is <em>intended</em> to be wired to. The host does not
+        parse it — writing <Code>@triggers</Code> has zero runtime effect. A future
+        LumiScript version may add a programmatic-subscription API; current versions
+        do not.
+      </p>
+
+      <p style={{ marginBottom: 8 }}>
+        When a wired event fires, the <strong>script body itself runs as the
+        handler</strong> — the entire body executes top-to-bottom with the event's
+        payload available as the <Code>data</Code> global. No callback, no subscription
+        object, no listener registry. <Code>data.__event</Code> carries the event name
+        (e.g. <Code>"MESSAGE_SENT"</Code>); the rest of <Code>data</Code> is the
+        event-specific payload (see the <strong>Lumiverse Events</strong> section
+        below for per-event payload shapes).
+      </p>
+
+      <pre className="ls-ref-pre">{`// Optional documentary comment — has no effect on what triggers the script.
+// Actual wiring (e.g. "MESSAGE_SENT, MESSAGE_EDITED") is set in the editor UI.
+// @triggers MESSAGE_SENT, MESSAGE_EDITED
+
+// The body runs every time a wired event fires.
+// \`data.__event\` identifies which event triggered this invocation;
+// the rest of \`data\` is the event-specific payload.
+if (data.__event === 'MESSAGE_SENT') {
+  const score = await api.llm.generateStructured(/* ... */);
+  await api.databanks.documents.create('reviews-databank-id', {
+    data: JSON.stringify(score),
+    filename: \`score-\${data.message.id}.json\`,
+  });
+}`}</pre>
+
+      <p style={{ marginBottom: 8, marginTop: 10 }}>
+        <strong>Execution isolation — every fire is a fresh function scope.</strong>
+        {' '}When a wired event fires, the host wraps your script body in a brand-new
+        {' '}<Code>AsyncFunction</Code> and invokes it ONCE. Module-scope
+        {' '}<Code>let</Code> / <Code>const</Code> / <Code>var</Code> declarations at
+        the top of your body are LOCAL to that one invocation — they do NOT survive
+        to the next fire of the same script. A pattern like
+        {' '}<Code>{'let bankId = null;'}</Code> at the top followed by branching on
+        {' '}<Code>data.__event</Code> does <strong>not</strong> work; the two fires
+        share no local state. For state that needs to persist across fires:
+      </p>
+
+      <ul style={{ marginBottom: 8, paddingLeft: 18 }}>
+        <li>
+          <Code>{'globalThis.<key>'}</Code> — process-scoped, persists for the
+          lifetime of the script-runner subprocess (i.e. until the extension reloads).
+          Cheapest option; ideal for in-memory caches.
+        </li>
+        <li>
+          <Code>{'api.variables.{local,global,character,chat}'}</Code> — durable
+          JSON-serialised stores with explicit scope semantics. Survive extension
+          reloads.
+        </li>
+        <li>
+          Registered handlers (<Code>api.broadcast.on</Code>,
+          {' '}<Code>api.macros.register</Code>, <Code>api.tools.register</Code>,
+          {' '}<Code>api.chat.registerContentProcessor</Code>, …) — capture closures
+          over the proxy and survive across fires until the script is disabled or
+          deleted. Useful for "subscriber-only" patterns where a script registers a
+          handler in one fire and that handler fires later from a different source.
+        </li>
+      </ul>
+
+      <p style={{ marginBottom: 8 }}>
+        <strong>Three similar-sounding systems, three different problems</strong> —
+        keep them straight:
+      </p>
+
+      <ul style={{ marginBottom: 8, paddingLeft: 18 }}>
+        <li>
+          <strong>Editor-UI event wiring</strong> — react to Lumiverse host
+          {' '}<em>lifecycle</em> events (MESSAGE_SENT, GENERATION_ENDED,
+          {' '}CHAT_CHANGED, …). Configured per-script in the script editor.
+        </li>
+        <li>
+          <Code>api.broadcast.*</Code> — real-time <em>script-to-script</em> pub/sub
+          between user scripts running inside the same LumiScript extension. Use for
+          custom in-extension messaging.
+        </li>
+        <li>
+          <Code>api.events.*</Code> — <em>persistent log</em> of custom events
+          ({' '}<Code>track</Code> / <Code>query</Code> / <Code>replay</Code> /
+          {' '}<Code>getLatestState</Code>). Use for audit trails, state-resuming
+          scripts, custom analytics. <strong>NOT</strong> for subscribing to host
+          events.
+        </li>
+      </ul>
+
+      <p className="ls-ref-muted" style={{ marginTop: 10 }}>
+        The script-runner sandbox enforces dispatch-time + runtime guards on what
+        scripts can reach — see the <strong>Sandbox hardening</strong> section below
+        for the full layer-by-layer breakdown. Unhandled rejections from a single
+        script are rate-limited to <strong>10 per 60s window</strong>; further
+        rejections drop silently with a summary count on the next-window rejection.
+      </p>
+    </Section>
+
+    <Section icon={<Zap size={11} />} title="Lumiverse Events">
       <EventsTable />
     </Section>
 
     <Section icon={<Lock size={11} />} title="Permission Matrix">
       <PermsTable />
+    </Section>
+
+    <Section icon={<Shield size={11} />} title="Sandbox hardening">
+      <p className="ls-ref-muted" style={{ marginBottom: 8 }}>
+        The script-runner subprocess locks down host capabilities that user
+        scripts have no business reaching. Two layers gate this — both are
+        always on; there is no per-script opt-out. Cross-references:
+        the <Code>app_manipulation</Code> and <Code>cors_proxy</Code>
+        permissions in the <strong>Permission Matrix</strong> are how
+        scripts <em>opt in</em> to specific surfaces that the sandbox
+        otherwise denies.
+      </p>
+
+      <p style={{ marginBottom: 6, marginTop: 8 }}>
+        <strong>Layer 1 — dispatch-time source check.</strong> Scripts
+        containing any of the patterns below are <strong>rejected before
+        they run</strong>; the editor console shows
+        a <Code>[security]</Code> entry naming the rejected pattern.
+      </p>
+      <SandboxRejectedPatternsTable />
+
+      <p style={{ marginBottom: 6, marginTop: 14 }}>
+        <strong>Layer 2 — runtime <Code>globalThis</Code> lockdown.</strong> At
+        subprocess startup, every <Code>globalThis</Code> property NOT on
+        the allowlist below is replaced with <Code>undefined</Code>. Reading
+        a locked global returns <Code>undefined</Code> (so
+        {' '}<Code>typeof X === 'undefined'</Code> evaluates naturally for
+        feature-detect paths); reaching through to a method throws
+        {' '}<Code>TypeError: Cannot read properties of undefined</Code>.
+      </p>
+      <SandboxAccessibleGlobalsTable />
+      <p className="ls-ref-muted" style={{ marginTop: 8 }}>
+        Notable globals that are <em>not</em> on the allowlist (representative,
+        not exhaustive): <Code>fetch</Code> (use <Code>api.utils.http.*</Code>),
+        {' '}<Code>Worker</Code>, <Code>WebSocket</Code>, <Code>EventSource</Code>,
+        {' '}<Code>BroadcastChannel</Code>, <Code>XMLHttpRequest</Code>, browser
+        dialogs (<Code>alert</Code> / <Code>prompt</Code> / <Code>confirm</Code>),
+        and Node-compat module globals reached via <Code>globalThis</Code>
+        {' '}(<Code>fs</Code>, <Code>http</Code>, <Code>net</Code>,
+        {' '}<Code>tls</Code>, <Code>vm</Code>, <Code>worker_threads</Code>,
+        {' '}<Code>child_process</Code>, <Code>sqlite</Code>, etc.). The canonical
+        list of accessible globals is <Code>SAFE_GLOBALS</Code>
+        {' '}in <Code>src/script-runner/child-entry.ts</Code>.
+      </p>
     </Section>
 
     <Section icon={<Radio size={11} />} title="LumiScript Events">

@@ -19,6 +19,8 @@ import {
   DIRECTIVES_INTRO,
   EVENTS,
   PERM_GROUPS,
+  SANDBOX_REJECTED_PATTERNS,
+  SANDBOX_ACCESSIBLE_GROUPS,
   BROADCAST_EVENTS,
   LS_MACRO_GROUPS,
   KEY_TYPES,
@@ -26,6 +28,7 @@ import {
   BUILTIN_COMPONENTS,
   BUILTIN_COUNCIL_PROMPT,
   BUILTIN_TYPES,
+  TRIGGER_MODEL_INTRO,
   type PermRow,
   type LsMacroRow,
   type MacroReturns,
@@ -120,6 +123,10 @@ function permsLabel(row: PermRow): string {
 
 // ─── Section renderers ───────────────────────────────────────────────────────
 
+function renderTriggerModel(): string {
+  return `## Trigger model\n\n${TRIGGER_MODEL_INTRO}`;
+}
+
 function renderLumiverseEvents(): string {
   const body = table(
     ['Event', 'Group', 'Payload shape'],
@@ -137,6 +144,42 @@ function renderPermissionMatrix(): string {
     return `### ${group.group}\n\n${body}`;
   });
   return `## Permission Matrix\n\n${sections.join('\n\n')}`;
+}
+
+function renderSandboxHardening(): string {
+  const rejectedTable = table(
+    ['Pattern', 'Why', 'Use instead'],
+    SANDBOX_REJECTED_PATTERNS.map(row => [`\`${row.pattern}\``, row.why, row.replacement]),
+  );
+
+  const accessibleTable = table(
+    ['Category', 'Available globals'],
+    SANDBOX_ACCESSIBLE_GROUPS.map(row => {
+      const globalsCell = row.globals.map(g => `\`${g}\``).join(' ');
+      const cell = row.note ? `${globalsCell}<br><br>*${row.note}*` : globalsCell;
+      return [row.category, cell];
+    }),
+  );
+
+  return [
+    '## Sandbox hardening',
+    '',
+    'The script-runner subprocess locks down host capabilities that user scripts have no business reaching. Two layers gate this — both are always on; there is no per-script opt-out. Cross-reference the `app_manipulation` and `cors_proxy` permissions in the **Permission Matrix** for how scripts opt in to specific surfaces that the sandbox otherwise denies.',
+    '',
+    '### Layer 1 — dispatch-time source check',
+    '',
+    'Scripts containing any of the patterns below are **rejected before they run**; the editor console shows a `[security]` entry naming the rejected pattern.',
+    '',
+    rejectedTable,
+    '',
+    '### Layer 2 — runtime `globalThis` lockdown',
+    '',
+    'At subprocess startup, every `globalThis` property NOT on the allowlist below is replaced with `undefined`. Reading a locked global returns `undefined` (so `typeof X === \'undefined\'` evaluates naturally for feature-detect paths); reaching through to a method throws `TypeError: Cannot read properties of undefined`.',
+    '',
+    accessibleTable,
+    '',
+    'Notable globals that are *not* on the allowlist (representative, not exhaustive): `fetch` (use `api.utils.http.*`), `Worker`, `WebSocket`, `EventSource`, `BroadcastChannel`, `XMLHttpRequest`, browser dialogs (`alert` / `prompt` / `confirm`), and Node-compat module globals reached via `globalThis` (`fs`, `http`, `net`, `tls`, `vm`, `worker_threads`, `child_process`, `sqlite`, etc.). The canonical list of accessible globals is `SAFE_GLOBALS` in `src/script-runner/child-entry.ts`.',
+  ].join('\n');
 }
 
 function renderLumiScriptEvents(): string {
@@ -260,8 +303,10 @@ export function renderReferenceMarkdown(): string {
   const header = `# LumiScript Reference\n\n*Exported ${today}*`;
 
   const sections = [
+    renderTriggerModel(),
     renderLumiverseEvents(),
     renderPermissionMatrix(),
+    renderSandboxHardening(),
     renderLumiScriptEvents(),
     renderDirectives(),
     renderLumiScriptMacros(),

@@ -140,8 +140,6 @@ interface SendMessageOptions {
    * When true, asks the host to trigger a normal LLM continuation after
    * the message is appended. Fires the full chat-orchestration pipeline
    * (preset + persona + world info + regex + character card + streaming).
-   * Requires Lumiverse host >= 0.9.x with triggerGeneration support;
-   * silently ignored on older hosts.
    */
   triggerGeneration?: boolean;
   /**
@@ -217,10 +215,10 @@ type MessageContentProcessorOrigin =
   | 'swipe_add'
   | 'swipe_update'
   /**
-   * Per-message display rendering (Lumiverse host ≥0.9.7). Non-persisting:
-   * fires once per visible message paint, returned \`content\` feeds the
-   * display-regex pass, returned \`extra\` is ignored (no row to mutate).
-   * Use for per-render transforms that depend on transient context.
+   * Per-message display rendering — non-persisting: fires once per visible
+   * message paint, returned \`content\` feeds the display-regex pass,
+   * returned \`extra\` is ignored (no row to mutate). Use for per-render
+   * transforms that depend on transient context.
    */
   | 'render';
 
@@ -311,7 +309,20 @@ interface ChatAPI {
   editMessage(id: string, contentOrPatch: string | MessagePatch): Promise<void>;
   /** Delete a message by ID. Requires chat_mutation permission. */
   deleteMessage(id: string): Promise<void>;
-  /** Get the current chat ID. Returns null if no chat is active. */
+  /**
+   * Get the current chat ID. Returns null if no chat is active.
+   *
+   * Sync — returns immediately. Lives across fires: when called from a
+   * long-lived registered handler (widget click, modal \`onDismiss\`,
+   * drawer-tab \`onActivate\`, input-bar \`onClick\`, tool fires, etc.) the
+   * result reflects the active chat at HANDLER-FIRE time, not the time
+   * the handler was registered. Trigger-fire callers (script body
+   * running for \`MESSAGE_SENT\` / \`CHAT_SWITCHED\` / etc.) get the
+   * snapshot taken at trigger-fire time.
+   *
+   * For the full active-chat object (characterId and other metadata),
+   * use \`await api.chats.getActive()\`.
+   */
   getChatId(): string | null;
   /**
    * Get a single metadata value from the current chat.
@@ -350,7 +361,7 @@ interface ChatAPI {
    * Register a message content processor — handler fires before a
    * user-initiated message write hits SQLite (create, update, swipe_add,
    * swipe_update, and auto-greetings) AND on per-message display rendering
-   * (render, host ≥0.9.7). Return a patch \`{ content?, extra? }\` to
+   * (render). Return a patch \`{ content?, extra? }\` to
    * transform the stored row, or \`void\` to pass through. Returned \`extra\`
    * is ignored on swipe origins and on \`render\`. Requires \`chat_mutation\`.
    *
@@ -443,6 +454,16 @@ interface LLMOptions {
   maxTokens?: number;
   /** When false, forces single tool call per turn (parallel_tool_calls: false). Useful for Mistral and other providers that require serialised multi-step tool use. Only meaningful in generateWithTools(). */
   parallelToolCalls?: boolean;
+  /**
+   * Optional \`AbortSignal\` to cancel an in-flight generation. When aborted,
+   * the upstream LLM request is torn down and the returned promise rejects
+   * with an \`AbortError\` (\`err.name === 'AbortError'\`). Composes with
+   * \`AbortSignal.timeout()\` / \`AbortSignal.any([...])\`. The worker host
+   * automatically aborts in-flight generations on extension teardown — thread
+   * a signal only for script-level cancellation (user-cancellable actions,
+   * per-request timeouts, racing multiple calls).
+   */
+  signal?: AbortSignal;
 }
 
 interface ZodLike<T> {
@@ -1235,9 +1256,21 @@ interface DOMHandle {
   remove(): void;
   /**
    * Attach a DOM event listener. Returns an unsubscribe function.
+   *
+   * **For handlers that do async work, make the handler \`async\` and
+   * \`await\` everything.** The host keeps the per-fire activeRun alive
+   * across the handler's await chain, so dispatches inside the awaited
+   * chain land cleanly. A SYNC handler that kicks off async work
+   * fire-and-forget (e.g. \`(ev) => { doAsync(); }\` with no \`await\`)
+   * returns \`undefined\` immediately, the activeRun closes, and any
+   * \`api.*\` calls the lingering async work tries to make fail with
+   * \`RunCompletedError: late api call ... runIdSource=context\`. Write
+   * \`async (ev) => { await doAsync(); }\` instead.
+   *
    * @example
-   * const unsub = handle.on('click', (data) => {
-   *   console.log('Clicked element:', data.targetId, data.dataset);
+   * const unsub = handle.on('click', async (data) => {
+   *   if (data.dataset?.action !== 'open') return;
+   *   await openModal();
    * });
    * // Later: unsub();
    */
@@ -1268,13 +1301,14 @@ interface DOMHandle {
    * For document-scoped (host-wide) injection, keep using
    * \`api.ui.dom.inject(target, html, opts)\` — it bypasses this scoping.
    *
-   * **Sanitization note.** Unlike \`api.ui.dom.inject\`, the scoped path
-   * does NOT run the host's DOMPurify sanitization pass on \`html\` (the
-   * manual insert can't reach into orphaned parents via the host API).
-   * If your script passes untrusted HTML — e.g. fetched from an external
-   * source — sanitize it yourself BEFORE calling \`injectChild\`.
-   * Script-generated markup (template literals with safe interpolation)
-   * is fine.
+   * **Sanitisation** (v1.0.0-rc.7+): the scoped path runs HTML through
+   * the host's DOMPurify pass with the same FORBID_TAGS set as
+   * \`api.ui.dom.inject\` — \`iframe\` / \`frame\` / \`object\` / \`embed\` /
+   * \`form\` tags and inline \`on*\` / \`formaction\` / \`javascript:\`
+   * attributes are stripped here too. (The scoped path runs its own
+   * DOMPurify call rather than delegating to \`ctx.dom.inject\` because
+   * the manual scoped-insert can't reach orphaned parents via the host
+   * API; the config and threat model match exactly.)
    *
    * @example
    * // Inside a drawer tab — render shell once, then update the grid
@@ -1290,6 +1324,45 @@ interface DOMHandle {
    * tab.root.on('input', (d) => { if (d.dataset?.action === 'filter') renderGrid(); });
    */
   injectChild(target: string, html: string, options?: DOMInjectOptions): DOMHandle;
+  /**
+   * Read a snapshot of the element's current state from the frontend.
+   * Returns \`null\` if the element no longer exists. Async because it
+   * routes through a frontend roundtrip (the DOM lives there, not on
+   * the backend).
+   * @example
+   * const snap = await handle.read({ html: true });
+   * if (snap) console.log(snap.attrs['data-state'], snap.text);
+   */
+  read(options?: DOMReadOptions): Promise<SerializedDOMElement | null>;
+}
+
+/** Options for \`DOMHandle.read()\`. */
+interface DOMReadOptions {
+  /**
+   * Also include \`innerHTML\` in the snapshot. Default \`false\` — most use
+   * cases (verify attrs, check text, structural inspection) don't need
+   * the full markup, and the omission keeps the IPC payload small. Set
+   * \`true\` when the script needs to traverse descendant markup.
+   */
+  html?: boolean;
+}
+
+/** Snapshot returned by \`DOMHandle.read()\`. */
+interface SerializedDOMElement {
+  /** Lowercase tag name (e.g. \`'div'\`, \`'button'\`). */
+  tag: string;
+  /**
+   * All attributes set on the element, keyed by lowercased attribute name.
+   * Includes \`id\`, \`class\`, \`style\`, \`data-*\`, \`aria-*\`, etc. Empty
+   * object if no attributes are set.
+   */
+  attrs: Record<string, string>;
+  /** \`textContent\` — concatenated text from this element and all descendants. */
+  text: string;
+  /** Number of direct element children (text + comment nodes excluded). */
+  childCount: number;
+  /** \`innerHTML\` — present only when \`read({ html: true })\` was passed. */
+  html?: string;
 }
 
 type ModalItem =
@@ -1921,16 +1994,37 @@ interface WorldInfoAPI {
 interface Persona {
   id: string; name: string; title: string; description: string;
   imageId: string | null; attachedWorldBookId: string | null;
-  folder: string; isDefault: boolean; metadata: Record<string, unknown>;
+  folder: string; isDefault: boolean;
+  /** Subjective pronoun (e.g. "he", "she", "they"). Optional. */
+  subjectivePronoun?: string;
+  /** Objective pronoun (e.g. "him", "her", "them"). Optional. */
+  objectivePronoun?: string;
+  /** Possessive pronoun (e.g. "his", "her", "their"). Optional. */
+  possessivePronoun?: string;
+  metadata: Record<string, unknown>;
   createdAt: number; updatedAt: number;
 }
 interface PersonaCreateInput {
   name: string; title?: string; description?: string; folder?: string;
-  isDefault?: boolean; attachedWorldBookId?: string; metadata?: Record<string, unknown>;
+  isDefault?: boolean; attachedWorldBookId?: string;
+  /** Subjective pronoun (e.g. "he", "she", "they"). */
+  subjectivePronoun?: string;
+  /** Objective pronoun (e.g. "him", "her", "them"). */
+  objectivePronoun?: string;
+  /** Possessive pronoun (e.g. "his", "her", "their"). */
+  possessivePronoun?: string;
+  metadata?: Record<string, unknown>;
 }
 interface PersonaUpdateInput {
   name?: string; title?: string; description?: string; folder?: string;
-  isDefault?: boolean; attachedWorldBookId?: string; metadata?: Record<string, unknown>;
+  isDefault?: boolean; attachedWorldBookId?: string;
+  /** Subjective pronoun (e.g. "he", "she", "they"). */
+  subjectivePronoun?: string;
+  /** Objective pronoun (e.g. "him", "her", "them"). */
+  objectivePronoun?: string;
+  /** Possessive pronoun (e.g. "his", "her", "their"). */
+  possessivePronoun?: string;
+  metadata?: Record<string, unknown>;
 }
 
 interface PersonasAPI {
@@ -2222,7 +2316,7 @@ interface CouncilMemberContext {
   personality: string;
   /** Lumia "behavior" field — behavioural patterns. */
   behavior: string;
-  /** \`0\` = unspecified, \`1\` = feminine, \`2\` = masculine (per spindle-types 0.4.40). */
+  /** \`0\` = unspecified, \`1\` = feminine, \`2\` = masculine. */
   genderIdentity: 0 | 1 | 2;
 }
 
@@ -2363,7 +2457,7 @@ interface ImageGenResult {
   provider:      string;
   /** Canonical image id — accepted by \`api.images.get\` / \`api.theme.extractColors\` / \`spindle.characters.setAvatar\`. */
   imageId?:      string;
-  /** Public unauthenticated URL — suitable for \`api.ui.pushNotification({image: result.imageUrl})\`. */
+  /** Public unauthenticated URL — suitable for \`api.ui.pushNotification(title, body, { image: result.imageUrl })\` (positional signature). */
   imageUrl?:     string;
 }
 
@@ -2499,52 +2593,21 @@ interface ToolInvocationArgs {
 }
 
 /**
- * Personality snapshot of the Council member that triggered a tool invocation.
- * Populated on \`ToolInvocationContext.councilMember\` only for Council paths.
- */
-interface CouncilMemberContext {
-  /** Unique Council member id (Council settings row id). */
-  memberId: string;
-  /** Source Lumia item id this member is backed by. */
-  itemId: string;
-  /** Pack id the Lumia item lives in. */
-  packId: string;
-  /** Pack name the Lumia item lives in. */
-  packName: string;
-  /** Display name of the Lumia item (also used as the member name). */
-  name: string;
-  /** Freeform role description (e.g. "Plot Enforcer"). */
-  role: string;
-  /** Probability (0-100) that this member participates in each generation. */
-  chance: number;
-  /** Relative URL to the member's avatar, or null. */
-  avatarUrl: string | null;
-  /** Lumia "definition" field — physical/identity description. */
-  definition: string;
-  /** Lumia "personality" field. */
-  personality: string;
-  /** Lumia "behavior" field — behavioural patterns. */
-  behavior: string;
-  /** Gender identity marker (0=unspecified, 1=feminine, 2=masculine). */
-  genderIdentity: 0 | 1 | 2;
-}
-
-/**
  * Third argument to tool handlers — invocation context delivered by the host.
- * Populated on Lumiverse hosts with spindle-types 0.4.18+; undefined on older.
+ * \`councilMember\` is a \`CouncilMemberContext\` (defined above in the Council
+ * types section) — populated only for Council-path invocations.
  */
 interface ToolInvocationContext {
   /**
    * Council-member snapshot when the tool was invoked via a Council cycle.
-   * Undefined for inline function-calling, \`api.tools.invoke()\`, or older hosts.
+   * Undefined for inline function-calling and \`api.tools.invoke()\`.
    * Pass this to \`buildCouncilMessages\` from \`ls:council-prompt\`.
    */
   councilMember?: CouncilMemberContext;
   /**
    * Structured chat context for Council invocations — same content as
    * \`args.context\` but with role boundaries preserved. Prefer this over the
-   * flattened string when available. Requires host commit 993544c8+ / spindle-
-   * types 0.4.26+; undefined on older hosts.
+   * flattened string when available.
    */
   contextMessages?: LLMMessage[];
 }
@@ -2820,7 +2883,15 @@ interface MacroContext {
   name: string;
   /** Argument tokens parsed from the macro invocation. */
   args: string[];
-  /** Environment context populated by the macro engine. */
+  /**
+   * Environment context populated by the macro engine.
+   *
+   * **Note on \`env.character.id\`:** Lumiverse populates \`env.character\` with
+   * card data (name, description, etc.) but the \`id\` field is NOT reliably
+   * present here. For the active character UUID, prefer
+   * \`await api.chats.getActive()\` (canonical) or read \`globalThis.__lsActiveCharId\`
+   * (sync shortcut set by the engine).
+   */
   env?: {
     character?: { id?: string; name?: string; [k: string]: unknown };
     chat?:      { id?: string; [k: string]: unknown };
@@ -2832,6 +2903,14 @@ interface MacroContext {
   isScoped?: boolean;
   /** Body text for scoped macros. */
   body?: string;
+  /**
+   * \`false\` when the host is performing a dry / non-committing macro
+   * resolution (prompt previews, chat-title regen, etc.). Handlers with
+   * side effects MUST skip them when \`commit === false\`. Guard writes
+   * with \`ctx.commit !== false\`, not \`ctx.commit === true\` (undefined
+   * also means "commit").
+   */
+  commit?: boolean;
 }
 
 type MacroHandler = (ctx: MacroContext) => string | Promise<string>;
@@ -2860,8 +2939,6 @@ interface MacroDefinition {
    *
    * Set explicit \`false\` only when you know the handler is pure-from-args
    * (no api.* reads, no Date / Math.random, no mutable closure state).
-   *
-   * Available on Lumiverse host ≥0.9.7. Older builds silently ignore.
    */
   volatile?: boolean;
 }
@@ -2912,7 +2989,6 @@ interface MacroInterceptorEnv {
    * Per-call macro overrides supplied by the caller. The display-regex
    * pipeline (\`phase === 'display'\`) sets \`chat_index\` to the rendered
    * message's index in the chat. Other callers may set additional fields.
-   * Available on Lumiverse host ≥0.9.7; guard with \`?? {}\` for older builds.
    */
   readonly dynamicMacros?: Record<string, string>;
   readonly extra: Record<string, unknown>;
@@ -3064,8 +3140,14 @@ interface TokenCountOptions {
 interface TokenCountResult {
   totalTokens: number;
   model: string;
-  modelSource: 'main' | 'sidecar';
-  tokenizerId: string;
+  /**
+   * Where the tokenizer model came from: \`'main'\` (main connection),
+   * \`'sidecar'\` (sidecar selection), or \`'explicit'\` (emitted when
+   * \`options.model\` was supplied directly).
+   */
+  modelSource: 'main' | 'sidecar' | 'explicit';
+  /** \`null\` when no exact tokenizer match was found and an approximate fallback was used. */
+  tokenizerId: string | null;
   tokenizerName: string;
   /** \`true\` when no tokenizer matched; count fell back to char/4 heuristic. */
   approximate: boolean;
@@ -3129,9 +3211,33 @@ type DbScope = 'script' | 'character' | 'chat';
  *     \`{ $regex: 'pat', $options?: 'i' }\`. Direct \`RegExp\` value is
  *     also accepted as a shorthand: \`{ name: /alice/i }\`.
  */
+/**
+ * Operator envelope for \`DbFilter<T>\`. Each \`$op\` key maps to its argument
+ * type. All keys inside a single envelope must start with \`$\`; mixed-key
+ * envelopes (mix of \`$op\` and plain field keys) throw at filter-parse time.
+ *
+ * @example
+ *   { ts:     { $gte: Date.now() - 3600_000 } }
+ *   { tags:   { $in:  ['a', 'b'] } }
+ *   { author: { $exists: true } }
+ *   { name:   { $regex: /alice/i } }
+ */
+interface DbFilterOperators<V = unknown> {
+  $eq?:     V;
+  $ne?:     V;
+  $gt?:     V;
+  $gte?:    V;
+  $lt?:     V;
+  $lte?:    V;
+  $in?:     readonly V[];
+  $nin?:    readonly V[];
+  $exists?: boolean;
+  $regex?:  RegExp | { $regex: string; $options?: string };
+}
+
 type DbFilter<T = DbRecord> =
   | undefined
-  | Partial<T>
+  | { [K in keyof T]?: T[K] | RegExp | DbFilterOperators<T[K]> }
   | ((record: T) => boolean);
 
 interface CollectionOpts<T extends DbRecord = DbRecord> {
@@ -3600,7 +3706,7 @@ interface CouncilMessagesOptions extends CouncilSystemPromptOptions {
   /**
    * Structured chat context from \`ToolInvocationContext.contextMessages\`.
    * Preferred when available (preserves role boundaries for better voice
-   * continuity). Requires Lumiverse host 993544c8+ / spindle-types 0.4.26+.
+   * continuity).
    */
   contextMessages?: LLMMessage[];
 }

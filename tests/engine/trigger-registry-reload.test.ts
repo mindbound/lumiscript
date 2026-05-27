@@ -440,3 +440,236 @@ describe('TriggerRegistry.fireReload — broadcast-handler-in-flight gating', ()
     expect((h.captured[0]!.data as { reason: string }).reason).toBe('autosave');
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// v1.0.0-rc.8 — wipeScriptStateForReload hook
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Pre-rc.8, `fireReload` only wiped broadcasts + commands and did a post-run
+// diff-cleanup for tools/macros/interceptors/processors/RPC. 7 of the 13
+// pinning surfaces (DOM listeners, modals, float widgets, drawer tabs,
+// input-bar actions, world-info interceptors, injections) leaked across
+// reloads, leaving stale handler closures from the previous run firing
+// alongside the freshly-registered ones — the "Reload button doesn't pick
+// up changes" symptom. rc.8 closes the gap via the `wipeScriptStateForReload`
+// hook on `TriggerDeps`, wired by `backend.ts` to a full per-script wipe.
+//
+// These tests pin down the hook contract:
+//   - `fireReload` calls `wipeScriptStateForReload(script.id)` before the
+//     runner. A regression that calls the runner first would let the old
+//     handler closures fire one more time before getting wiped.
+//   - `fireReload` does NOT call the hook when in-flight defers/drops fire
+//     (autosave dropped, manual queued). Calling it on the deferred path
+//     would tear down state out from under the in-flight handler.
+//   - The deferred manual reload that drains later DOES call the hook
+//     before its run.
+
+describe('TriggerRegistry.fireReload — wipeScriptStateForReload hook (rc.8)', () => {
+  /**
+   * Extended harness — captures the order in which the wipe hook and the
+   * runner are invoked relative to each other. Both record into a single
+   * `callOrder` array so tests can assert "wipe before run" with one check.
+   */
+  async function setupWipeHookHarness(): Promise<{
+    registry:       TriggerRegistry;
+    seeded:         Script;
+    callOrder:      string[];
+    wipeCalledWith: string[];
+    runnerData:     unknown[];
+    unblockRun:     () => void;
+  }> {
+    const adapter = new InMemoryStorageAdapter();
+    const storage = new ScriptStorage(adapter, () => 'test-user');
+    await storage.load();
+
+    const seeded: Script = {
+      id:             'wipe-hook-test',
+      name:           'Wipe Hook Test',
+      code:           '/* body */',
+      enabled:        true,
+      allowDangerous: false,
+      type:           'trigger',
+      bindings:       [],
+      triggers:       ['TEST_EVENT'],
+      createdAt:      Date.now(),
+      updatedAt:      Date.now(),
+    };
+    await storage.store.create(seeded);
+
+    const callOrder:      string[] = [];
+    const wipeCalledWith: string[] = [];
+    const runnerData:     unknown[] = [];
+
+    let nextResolve: (() => void) | null = null;
+    const orderRecordingRunner: ScriptRunner = async (_script, request) => {
+      callOrder.push('runner');
+      runnerData.push(request.data);
+      await new Promise<void>((r) => { nextResolve = r; });
+      return { success: true, duration: 1 };
+    };
+
+    const deps: TriggerDeps = {
+      grantedPermissions:       new Set(),
+      userId:                   'test-user',
+      scriptStorage:            storage,
+      scriptTimeoutMs:          5_000,
+      wipeScriptStateForReload: async (scriptId: string) => {
+        callOrder.push('wipe');
+        wipeCalledWith.push(scriptId);
+      },
+    };
+    const sendToFrontend = mock((_msg: BackendToFrontend) => {});
+    const registry       = new TriggerRegistry(() => deps, sendToFrontend, orderRecordingRunner);
+
+    setActiveContext({ chatId: 'test-chat', characterId: 'test-char' });
+
+    return {
+      registry,
+      seeded,
+      callOrder,
+      wipeCalledWith,
+      runnerData,
+      unblockRun: () => {
+        const r = nextResolve;
+        nextResolve = null;
+        r?.();
+      },
+    };
+  }
+
+  test('idle-path fireReload calls wipe BEFORE the runner', async () => {
+    const h = await setupWipeHookHarness();
+    const fireP = h.registry.fireReload(h.seeded, {
+      reason:           'manual',
+      previousCodeHash: 'a',
+      currentCodeHash:  'b',
+      previousLength:   1,
+      currentLength:    2,
+    });
+    await Promise.resolve();
+    h.unblockRun();
+    await fireP;
+
+    // The critical regression check — wipe must precede runner so the old
+    // handler closures get torn down before the new body fires (otherwise
+    // they'd see one more event with old code captured in their closure).
+    expect(h.callOrder).toEqual(['wipe', 'runner']);
+    expect(h.wipeCalledWith).toEqual([h.seeded.id]);
+    expect(h.runnerData).toHaveLength(1);
+  });
+
+  test('idle-path autosave fireReload also calls wipe BEFORE the runner', async () => {
+    const h = await setupWipeHookHarness();
+    const fireP = h.registry.fireReload(h.seeded, {
+      reason:           'autosave',
+      previousCodeHash: 'a',
+      currentCodeHash:  'b',
+      previousLength:   1,
+      currentLength:    2,
+    });
+    await Promise.resolve();
+    h.unblockRun();
+    await fireP;
+
+    expect(h.callOrder).toEqual(['wipe', 'runner']);
+    expect(h.wipeCalledWith).toEqual([h.seeded.id]);
+  });
+
+  test('autosave fireReload dropped on in-flight DOES NOT call wipe', async () => {
+    const h = await setupWipeHookHarness();
+    // Manually bump the running-count via a real trigger fire — easier than
+    // re-creating the withRegisteredHandler helper here. Register, then
+    // grab + invoke the handler.
+    await h.registry.register(h.seeded);
+    const onMock = (globalThis as unknown as {
+      spindle: { on: { mock: { calls: unknown[][] } } };
+    }).spindle.on;
+    const handler = onMock.mock.calls.slice(-1)[0]![1] as (p: unknown) => Promise<void>;
+
+    // Drive a real run — it'll capture the resolver and block.
+    const runP = handler({ messageId: 'm1' });
+    await Promise.resolve();
+    expect(h.callOrder).toEqual(['runner']);    // runner kicked off, wipe untouched
+
+    // Autosave reload while the real run is in flight → dropped.
+    await h.registry.fireReload(h.seeded, {
+      reason:           'autosave',
+      previousCodeHash: 'a',
+      currentCodeHash:  'b',
+      previousLength:   1,
+      currentLength:    2,
+    });
+
+    // Wipe must NOT have been called — calling it would tear down state
+    // out from under the in-flight handler.
+    expect(h.callOrder).toEqual(['runner']);
+
+    // Drain the real run + nothing queued after.
+    h.unblockRun();
+    await runP;
+    await Promise.resolve();
+    expect(h.callOrder).toEqual(['runner']);
+  });
+
+  test('manual fireReload deferred on in-flight calls wipe when it fires later', async () => {
+    const h = await setupWipeHookHarness();
+    await h.registry.register(h.seeded);
+    const onMock = (globalThis as unknown as {
+      spindle: { on: { mock: { calls: unknown[][] } } };
+    }).spindle.on;
+    const handler = onMock.mock.calls.slice(-1)[0]![1] as (p: unknown) => Promise<void>;
+
+    const runP = handler({ messageId: 'm1' });
+    await Promise.resolve();
+    expect(h.callOrder).toEqual(['runner']);
+
+    // Manual reload while in-flight → deferred (queued).
+    const reloadP = h.registry.fireReload(h.seeded, {
+      reason:           'manual',
+      previousCodeHash: 'a',
+      currentCodeHash:  'b',
+      previousLength:   1,
+      currentLength:    2,
+    });
+    await reloadP;                  // fireReload returns immediately after queueing
+    expect(h.callOrder).toEqual(['runner']);   // wipe NOT yet called
+
+    // Drain the real run; the deferred reload fires.
+    h.unblockRun();
+    await runP;
+    // Pump microtasks + macrotask boundary for the pendingReload drain.
+    await Promise.resolve();
+    await Promise.resolve();
+    await new Promise(r => setTimeout(r, 50));
+
+    // Once the deferred reload eventually fires, wipe runs before its runner.
+    // Sequence: real-run's `runner` → drain → `wipe` → reload's `runner`.
+    expect(h.callOrder).toEqual(['runner', 'wipe', 'runner']);
+    expect(h.wipeCalledWith).toEqual([h.seeded.id]);
+
+    // Unblock the deferred reload's run too.
+    h.unblockRun();
+  });
+
+  test('falls back to partial wipe when hook is absent (back-compat)', async () => {
+    // Mirror the standard setupReloadHarness shape — deps WITHOUT
+    // wipeScriptStateForReload — and assert fireReload still completes
+    // cleanly. The existing reload tests (above describe blocks) rely on
+    // this back-compat path; this test makes the contract explicit.
+    const h = await setupReloadHarness();
+    const fireP = h.registry.fireReload(h.seeded, {
+      reason:           'manual',
+      previousCodeHash: 'a',
+      currentCodeHash:  'b',
+      previousLength:   1,
+      currentLength:    2,
+    });
+    await Promise.resolve();
+    h.unblockRun();
+    await fireP;
+
+    // Runner fired with the reload payload — same as pre-rc.8 behaviour.
+    expect(h.captured).toHaveLength(1);
+    expect((h.captured[0]!.data as { __event: string }).__event).toBe('ls:reload');
+  });
+});

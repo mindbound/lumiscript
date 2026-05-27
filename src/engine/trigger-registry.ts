@@ -71,6 +71,22 @@ export interface TriggerDeps {
    * `LumiScriptSettings.scriptTimeoutMs`. Defaults to `SCRIPT_TIMEOUT_MS` when absent.
    */
   scriptTimeoutMs?: number;
+  /**
+   * v1.0.0-rc.8 — full per-script state wipe used by `fireReload` to
+   * bring the script back to a clean slate before the body re-runs.
+   * Wired by `backend.ts` to `wipeScriptStateForReload`. Wipes every
+   * pinning registry the disable path tears down (DOM listeners, UI
+   * elements, modals, widgets, drawer tabs, input-bar actions,
+   * world-info interceptors, injections, etc.) while preserving the
+   * bits that should survive a reload (script storage, theme overrides,
+   * collection handle cache).
+   *
+   * Optional for test rigs — when absent, `fireReload` falls back to
+   * the pre-rc.8 partial wipe (broadcasts + commands + diff-cleaned
+   * tools/macros/interceptors/processors/RPC). In-process tests that
+   * don't exercise the missing surfaces don't need to wire this.
+   */
+  wipeScriptStateForReload?: (scriptId: string) => Promise<void>;
 }
 
 // ─── Script-runner strategy (Phase 9c) ────────────────────────────────────────
@@ -1125,7 +1141,27 @@ export class TriggerRegistry {
       return;
     }
 
-    const { grantedPermissions, userId, scriptStorage, onToolsChanged, onInjectionsChanged, scriptTimeoutMs } = this.getDeps();
+    const deps = this.getDeps();
+
+    // v1.0.0-rc.8 — full per-script state wipe BEFORE the body re-runs.
+    // Pre-rc.8 fireReload only cleared broadcasts + commands and did a
+    // diff-cleanup post-run for tools/macros/interceptors/processors/RPC;
+    // 7 of the 13 pinning surfaces (DOM listeners, modals, float widgets,
+    // drawer tabs, input-bar actions, world-info interceptors, injections)
+    // leaked across reloads — stale handler closures from the previous
+    // run kept firing alongside the freshly-registered ones, producing
+    // the "Reload button doesn't pick up changes" symptom users had to
+    // work around by toggling the extension off/on. The wipe — wired by
+    // backend.ts via `wipeScriptStateForReload` — covers all 13 surfaces
+    // while preserving the bits that should survive a reload (script
+    // storage, theme overrides, collection handle cache). Falls back to
+    // the pre-rc.8 partial path when the hook is absent (test rigs that
+    // don't exercise the missing surfaces).
+    if (deps.wipeScriptStateForReload) {
+      await deps.wipeScriptStateForReload(script.id);
+    }
+
+    const { grantedPermissions, userId, scriptStorage, onToolsChanged, onInjectionsChanged, scriptTimeoutMs } = deps;
     const runId = generateUUID();
 
     executionStatusStore.markRunning(script.id);
@@ -1136,6 +1172,10 @@ export class TriggerRegistry {
       runId,
     });
 
+    // Belt-and-suspenders: when the wipe ran, these are no-ops. When the
+    // wipe was absent (test rig), these preserve the pre-rc.8 partial
+    // cleanup so existing in-process trigger-registry tests stay green
+    // without needing to wire the wipe stub.
     clearBroadcastByScriptId(script.id);
     clearCommandHandlerByScriptId(script.id);
 

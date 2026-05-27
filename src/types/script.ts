@@ -402,8 +402,7 @@ export interface ChatMessage {
   swipes: string[];
   /**
    * Per-swipe creation timestamps (unix epoch seconds), aligned index-wise
-   * with `swipes`. Populated by Lumiverse hosts at the commit that shipped
-   * spindle-types 0.4.27; older hosts deliver an empty array.
+   * with `swipes`.
    */
   swipeDates: number[];
   /**
@@ -418,10 +417,10 @@ export interface ChatMessage {
 
 /**
  * Patch shape accepted by `api.chat.editMessage(id, patch)`. Mirrors the
- * upstream `spindle.chat.updateMessage` signature in spindle-types 0.4.27
- * with camelCase field names matching the rest of the `ChatMessage` surface
- * (`swipeId` → `swipe_id`, `swipeDates` → `swipe_dates` are mapped at the
- * chat API boundary).
+ * upstream `spindle.chat.updateMessage` signature with camelCase field
+ * names matching the rest of the `ChatMessage` surface (`swipeId` →
+ * `swipe_id`, `swipeDates` → `swipe_dates` are mapped at the chat API
+ * boundary).
  *
  * Only the fields you provide get updated. Writing `swipes`, `swipeId`,
  * or `swipeDates` fires Lumiverse's `SWIPE_EDITED` event in addition to
@@ -480,11 +479,6 @@ export interface SendMessageOptions {
    * inputs / form-submit UIs / tool-result follow-ups. Without this, the
    * appended message just sits in history until the user manually
    * triggers a continuation.
-   *
-   * Requires Lumiverse host ≥ 0.9.x with `triggerGeneration` support
-   * (lumiverse-spindle-types ≥ 0.4.66). On older hosts the option is
-   * silently ignored — the message is still appended, but no generation
-   * fires.
    *
    * Generation defaults (connection / persona / preset / parameters)
    * follow the active chat's resolved settings. Use `generation` to
@@ -615,7 +609,7 @@ export interface InjectionInfo {
  * a content-processor invocation. `'create'` covers both ordinary
  * `POST .../messages` writes and auto-inserted greeting rows.
  *
- * `'render'` (host ≥0.9.7) is a non-persisting per-render variant — fires
+ * `'render'` is a non-persisting per-render variant — fires
  * once per visible message paint, returned `content` feeds into the display-
  * regex pass before paint, returned `extra` is ignored (no row to mutate).
  * Use it for per-render rewrites that depend on transient context (chat-var
@@ -791,7 +785,7 @@ export interface ChatAPI {
    * Register a message content processor — a handler that fires before a
    * user-initiated message write reaches SQLite (create, update, swipe_add,
    * swipe_update, auto-inserted greetings) AND on per-message display
-   * rendering (render, host ≥0.9.7). Handlers can transform `content` and
+   * rendering (render). Handlers can transform `content` and
    * / or shallow-merge `extra`. Returned `extra` is ignored on swipe
    * origins (swipes share the parent message's `extra`) and on `render`
    * (no row to mutate). Requires `chat_mutation` permission.
@@ -851,9 +845,6 @@ export interface ChatAPI {
  * an agentic loop (preferable to text-encoded `[Tool: X]` / `[Result]: ...`
  * pseudo-turns — providers understand parts as first-class signals).
  *
- * Available since LumiScript v0.29.0 / Lumiverse host commit `c67dcdf6`
- * + lumiverse-spindle-types ≥0.4.71.
- *
  * Mirrors `LlmMessagePartDTO` from `lumiverse-spindle-types`. Image and
  * audio parts are accepted by the host but most providers will only consume
  * them when the connection's model supports the modality.
@@ -886,13 +877,10 @@ export interface LLMMessage {
    * ignore the field harmlessly.
    *
    * Pattern: after each `generateWithTools` call that returns `tool_calls`,
-   * copy the result's `reasoning_content` (also added by this release) onto
-   * the assistant turn you append to your message history before the next
-   * iteration. Lisa's own agent loop does this automatically; for
-   * user-script tool loops it's now your responsibility.
-   *
-   * Available since LumiScript v0.30.2 / Lumiverse host commit
-   * `9fe172899a` + lumiverse-spindle-types ≥0.4.72.
+   * copy the result's `reasoning_content` onto the assistant turn you append
+   * to your message history before the next iteration. Lisa's own agent
+   * loop does this automatically; for user-script tool loops it's your
+   * responsibility.
    */
   reasoning_content?: string;
 }
@@ -1675,8 +1663,7 @@ export interface Character {
    * Raw extensions blob — a free-form map of namespaced keys for extension-
    * specific state attached directly to the character row. Complements the
    * `extra` bag on chat messages: that one is per-message, this one is
-   * per-character. Reads return the full object (host no longer redacts as
-   * of spindle-types 0.4.39).
+   * per-character. Reads return the full object.
    *
    * **Best practices:**
    *  - **Namespace your keys.** Use a unique prefix (your script id, or a
@@ -2250,8 +2237,7 @@ export type ActivatedWorldInfoEntry = WorldInfoEntry & {
 //
 // Full CRUD over user generation presets + nested prompt-block CRUD + a
 // host-derived category grouping view. Maps onto Lumiverse's
-// `spindle.presets.*` surface (lumiverse-spindle-types ≥0.4.74 / host
-// 1.0.0+). Requires the `presets` permission.
+// `spindle.presets.*` surface. Requires the `presets` permission.
 //
 // A preset is the complete generation configuration: sampler/provider
 // parameters, ordered prompt blocks (with roles, positions, depth),
@@ -2474,8 +2460,7 @@ export interface PresetsAPI {
 //
 // Full CRUD over the user's regex find/replace scripts plus a context-aware
 // `getActive` resolver. Maps onto Lumiverse's `spindle.regex_scripts.*`
-// surface (lumiverse-spindle-types ≥0.4.62 / Lumiverse ≥0.9.7). Requires
-// the `regex_scripts` permission.
+// surface. Requires the `regex_scripts` permission.
 //
 // Targets and where they fire:
 //   - `'prompt'`   — runs during prompt assembly, against each message
@@ -2766,8 +2751,9 @@ export interface ImagesAPI {
 // handle type accepted by `api.images.get(imageId)`,
 // `api.theme.extractColors(imageId)`, and `spindle.characters.setAvatar`.
 // The `imageUrl` field is a public unauthenticated URL suitable for
-// `api.ui.pushNotification({ image: result.imageUrl, ... })` — auth-free
-// so push-notification clients can render it without an auth header.
+// `api.ui.pushNotification(title, body, { image: result.imageUrl })` —
+// auth-free so push-notification clients can render it without an auth
+// header. (Note: pushNotification is positional, NOT object-form.)
 
 /** Camel-case mirror of `ImageGenParameterSchemaDTO` — one parameter's contract within a provider's capability schema. */
 export interface ImageGenParameterSchema {
@@ -2865,7 +2851,8 @@ export interface ImageGenResult {
   /**
    * Public unauthenticated URL for the persisted image. Auth-free so
    * push-notification clients can render it without an auth header:
-   * `api.ui.pushNotification({ image: result.imageUrl, ... })`.
+   * `api.ui.pushNotification(title, body, { image: result.imageUrl })`.
+   * (pushNotification is positional, NOT object-form.)
    */
   imageUrl?:     string;
 }
@@ -4443,21 +4430,19 @@ export interface DOMHandle {
   /**
    * Replace the element's inner HTML.
    *
-   * **Sanitisation note** (v1.0.0-rc.7 doc update — F-M5): unlike
-   * `api.ui.dom.inject()` (which runs the host's DOMPurify pass on the
-   * initial HTML), `handle.update()` writes `innerHTML` directly. This
-   * matches `DOMHandle.injectChild`'s posture and is fine for the
-   * common case where `html` is built from script-authored template
-   * strings — the trust model already runs user-written script code.
+   * **Sanitisation** (v1.0.0-rc.7+): `handle.update()` routes through
+   * the host's DOMPurify pass with the same `FORBID_TAGS` set as
+   * `api.ui.dom.inject()` (`iframe`, `frame`, `object`, `embed`,
+   * `form`) and the same default attribute strip — inline `on*`
+   * handlers, `formaction`, `srcdoc`, and `javascript:` URLs are all
+   * removed. XSS-via-tag-injection is blocked at the frontend boundary
+   * regardless of how `html` was constructed.
    *
-   * It is **not** safe when `html` is constructed from untrusted input:
-   * - LLM responses fetched via `api.llm.generate*`
-   * - HTML fetched from external URLs via `api.utils.http.get`
-   * - User text from `api.ui.prompt` / chat-input handlers
-   *
-   * For those cases, escape the untrusted parts yourself (template-tag
-   * helpers, manual entity-encoding, or piping through a sanitiser
-   * library bundled into your script) before calling `update()`.
+   * Sanitisation is not a substitute for thinking about trust, though.
+   * Injecting LLM-generated or remotely-fetched HTML is still worth
+   * being deliberate about — DOMPurify blocks XSS vectors but not
+   * socially-engineered text content, hostile inline `<style>` rules,
+   * or misleading link text.
    */
   update(html: string): void;
   /** Remove the element from the DOM and clean up listeners. */
@@ -4499,11 +4484,15 @@ export interface DOMHandle {
    * For document-scoped injection outside a handle's subtree, keep
    * using `api.ui.dom.inject` directly.
    *
-   * **Sanitization note.** The scoped path does NOT run the host's
-   * DOMPurify sanitization on `html` (the manual insert can't reach
-   * orphaned parents via the host API). Sanitize untrusted HTML
-   * yourself before calling `injectChild`; script-generated markup
-   * with safe interpolation is fine.
+   * **Sanitisation** (v1.0.0-rc.7+): the scoped path runs `html`
+   * through the host's DOMPurify pass with the same `FORBID_TAGS` set
+   * as `api.ui.dom.inject()` (`iframe`, `frame`, `object`, `embed`,
+   * `form`) and the same default attribute strip (inline `on*`
+   * handlers, `formaction`, `srcdoc`, `javascript:` URLs). Because
+   * the manual scoped-insert can't reach orphaned parents via the
+   * host's `ctx.dom.inject` API, the scoped path runs its own
+   * DOMPurify call rather than delegating — but the threat model and
+   * config match the host-API path exactly.
    */
   injectChild(target: string, html: string, options?: DOMInjectOptions): DOMHandle;
   /**
@@ -4927,9 +4916,6 @@ export interface ToolDefinition {
  * upstream's Council implementation: if upstream adds/changes fields, scripts
  * should see those changes automatically rather than drift silently against
  * a local copy.
- *
- * Requires Lumiverse host commit `8d310f8` or later for the `councilMember`
- * field to be populated; older hosts omit it and scripts see `undefined`.
  */
 import type {
   CouncilMember as CouncilMember_,
@@ -4975,11 +4961,10 @@ export interface LumiaItem {
   /** Behavioural patterns (free-form text). */
   behavior: string;
   /**
-   * Gender identity marker. Per spindle-types 0.4.40 council types:
-   * `0` = unspecified, `1` = feminine, `2` = masculine. Note: upstream
-   * docs (council.md) describe a wider four-value range
+   * Gender identity marker: `0` = unspecified, `1` = feminine, `2` = masculine.
+   * Note: upstream docs (council.md) describe a wider four-value range
    * (0=feminine, 1=masculine, 2=neutral, 3=any) — this is a documented
-   * type-vs-doc inconsistency in 0.4.40; LumiScript matches the typed
+   * type-vs-doc inconsistency upstream; LumiScript matches the actual typed
    * surface for now and will widen if/when upstream reconciles.
    */
   genderIdentity: 0 | 1 | 2;
@@ -5051,31 +5036,27 @@ export interface CouncilAPI {
  * so upstream can add future correlation fields without another arg.
  */
 export interface ToolInvocationContext {
-  /**
-   * Host-side correlation id for this invocation. Populated by Lumiverse
-   * hosts at commit `8d310f8` or later; `undefined` on older hosts.
-   */
+  /** Host-side correlation id for this invocation. Populated on the Council path. */
   requestId?: string;
   /**
    * Personality snapshot of the Council member that triggered the invocation.
    * Populated only when the tool was invoked as part of a Council execution
-   * cycle (and the host supports it). `undefined` for all other paths —
-   * inline function-calling, `api.tools.invoke()`, older hosts.
+   * cycle. `undefined` for all other paths — inline function-calling and
+   * `api.tools.invoke()`.
    */
   councilMember?: import('lumiverse-spindle-types').CouncilMemberContext;
   /**
    * Structured chat context for Council invocations — the same content the
    * host flattens into `args.context`, but as a typed `LLMMessage[]` with
-   * role boundaries preserved. Populated by Lumiverse hosts at commit
-   * `993544c8` or later (spindle-types 0.4.26+); `undefined` for
-   * non-Council paths and older hosts. Multi-part (text+image) message
-   * content is flattened to its text portion before delivery.
+   * role boundaries preserved. Populated on the Council path; `undefined`
+   * for non-Council paths. Multi-part (text+image) message content is
+   * flattened to its text portion before delivery.
    *
    * Prefer this over `args.context` when available — the structured form
    * gives the analyst LLM real turn-taking boundaries and voice precedent
    * from prior assistant messages, closing most of the behavioural gap
    * between extension tools and the built-in sidecar tools. The
-   * `ls:council-prompt` helper's `buildCouncilMessages` will use these
+   * `ls:council-prompt` helper's `buildCouncilMessages` uses these
    * automatically when you pass them through via the `contextMessages`
    * option.
    */
@@ -5203,7 +5184,17 @@ export interface MacroContext {
   name: string;
   /** Argument tokens parsed from the macro invocation. */
   args: string[];
-  /** Environment context populated by the macro engine at resolution time. */
+  /**
+   * Environment context populated by the macro engine at resolution time.
+   *
+   * **Note on `env.character.id`:** Lumiverse populates `env.character` with
+   * card data (name, description, etc.) but the `id` field is NOT reliably
+   * present here — it's character-card metadata, not chat-level state. For
+   * the active character UUID, prefer `await api.chats.getActive()` and read
+   * `chat.characterId`. LumiScript's built-in macros use the sync shortcut
+   * `globalThis.__lsActiveCharId` (set by the engine after every active-
+   * context refresh) when an `await` would slow down a tight handler.
+   */
   env?: {
     character?: { id?: string; name?: string; [k: string]: unknown };
     chat?:      { id?: string; [k: string]: unknown };
@@ -5215,6 +5206,18 @@ export interface MacroContext {
   isScoped?: boolean;
   /** Body text for scoped macros. */
   body?: string;
+  /**
+   * `false` when the host is performing a dry / non-committing macro
+   * resolution (e.g. prompt previews, chat-title regeneration). Handlers
+   * with side effects (disk writes, event emissions, external HTTP, mutating
+   * `api.*` calls) MUST skip those when `commit === false` — the resolved
+   * value isn't going to be used, and side effects would happen against an
+   * imaginary timeline.
+   *
+   * Only an explicit `false` signals a dry resolve — guard writes with
+   * `ctx.commit !== false`, not `ctx.commit === true`.
+   */
+  commit?: boolean;
 }
 
 /** Pull-model handler signature. May be sync or async. */
@@ -5259,9 +5262,6 @@ export interface MacroDefinition {
    * returns whatever string was last `updateValue`'d, which is pure
    * relative to push events; the host already invalidates the cache on
    * macro-value updates.
-   *
-   * Available on host builds Lumiverse ≥0.9.7 (lumiverse-spindle-types
-   * ≥0.4.62). Older builds silently ignore the flag.
    */
   volatile?: boolean;
 }
@@ -5431,9 +5431,7 @@ export interface MacroInterceptorEnv {
     readonly chat: Record<string, string>;
   };
   /**
-   * Per-call macro overrides supplied by the caller. Available on Lumiverse
-   * host ≥0.9.7 (lumiverse-spindle-types ≥0.4.62). Older builds omit the
-   * field, so handlers must guard with `?? {}` if they read it.
+   * Per-call macro overrides supplied by the caller.
    *
    * The display-regex pipeline (`phase === 'display'`) sets
    * `chat_index` to the rendered message's index in the chat — useful for
@@ -5579,19 +5577,69 @@ export interface DbRecord {
 export type DbScope = 'script' | 'character' | 'chat';
 
 /**
+ * Operator envelope for `DbFilter<T>`. Each `$op` key maps to its argument
+ * type. All keys inside a single envelope must start with `$`; mixed-key
+ * envelopes (mix of `$op` and plain field keys) throw at filter-parse time.
+ *
+ * Available from LumiScript 0.20.0+.
+ *
+ * @example
+ *   { ts:     { $gte: Date.now() - 3600_000 } }
+ *   { tags:   { $in:  ['a', 'b'] } }
+ *   { author: { $exists: true } }
+ *   { name:   { $regex: /alice/i } }
+ */
+export interface DbFilterOperators<V = unknown> {
+  /** Structural equality. */
+  $eq?:     V;
+  /** Structural inequality. */
+  $ne?:     V;
+  /** Numeric `>` — type-mismatch evaluates to false (never throws). */
+  $gt?:     V;
+  /** Numeric `>=` — type-mismatch evaluates to false (never throws). */
+  $gte?:    V;
+  /** Numeric `<` — type-mismatch evaluates to false (never throws). */
+  $lt?:     V;
+  /** Numeric `<=` — type-mismatch evaluates to false (never throws). */
+  $lte?:    V;
+  /** Membership in an array. Empty array → matches nothing. */
+  $in?:     readonly V[];
+  /** Non-membership in an array. Empty array → matches everything (sans missing field). */
+  $nin?:    readonly V[];
+  /** Field presence — `null` counts as present. */
+  $exists?: boolean;
+  /**
+   * String pattern. Accepts a `RegExp` instance, or `{ $regex: 'pat', $options?: 'i' }`.
+   * Direct `RegExp` at the field-value level is also accepted as a shorthand:
+   * `{ name: /alice/i }`.
+   */
+  $regex?:  RegExp | { $regex: string; $options?: string };
+}
+
+/**
  * Filter shapes accepted by `find()` / `findOne()` / `update()` / `delete()` /
  * `count()`:
  *
  * - `undefined` → matches all records (sugar for "operate on everything").
  * - Function `(r) => boolean` → caller predicate. Full expressive power,
  *   but not serialisable across the worker↔host boundary (runs in-script).
- * - Object `{ 'a.b': value }` → deep-equality match with dot-notation
- *   path resolution. Arrays compared via `JSON.stringify`. No Mongo-style
- *   `$gt` / `$in` operators — use a function filter or `query()` for those.
+ * - Object literal — two flavours, can NOT be mixed in a single envelope:
+ *   - **Plain equality**: `{ 'a.b': value }` matches deep-equally with
+ *     dot-notation path resolution. Arrays compared via `JSON.stringify`.
+ *   - **Operator envelope**: `{ field: { $gt: 5 } }` / `{ tags: { $in: [...] } }` /
+ *     etc. All keys inside the envelope must start with `$` (mixed-key
+ *     envelopes throw).
+ *
+ * Supported operators (LumiScript 0.20.0+): `$eq`, `$ne`, `$gt`, `$gte`,
+ * `$lt`, `$lte`, `$in`, `$nin`, `$exists`, `$regex` — see `DbFilterOperators`.
+ *
+ * `RegExp` is accepted at the field-value level as a shorthand for
+ * `{ $regex: <re> }` — `{ name: /alice/i }` is equivalent to
+ * `{ name: { $regex: /alice/i } }`.
  */
 export type DbFilter<T = DbRecord> =
   | undefined
-  | Partial<T>
+  | { [K in keyof T]?: T[K] | RegExp | DbFilterOperators<T[K]> }
   | ((record: T) => boolean);
 
 /**
@@ -6386,10 +6434,9 @@ export interface CouncilMessagesOptions extends CouncilSystemPromptOptions {
    * `args.context` string — preserves role boundaries from the host's chat
    * history for better LLM voice continuity and turn-taking awareness.
    *
-   * Pass through as `contextMessages: ctx.contextMessages` from your handler.
-   * Requires Lumiverse host commit `993544c8` or later (spindle-types
-   * 0.4.26+). Older hosts don't populate the field; the helper gracefully
-   * falls back to the flattened-string path.
+   * Pass through as `contextMessages: ctx.contextMessages` from your
+   * handler; the helper falls back to the flattened-string path when not
+   * provided.
    */
   contextMessages?: LLMMessage[];
 }

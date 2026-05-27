@@ -288,6 +288,23 @@ export interface RunHandlerRequest {
   args:        unknown[];
   /** Async-loop timeout for this handler invocation (mirrors RunScriptRequest.timeoutMs). */
   timeoutMs:   number;
+  /**
+   * Live activeContext snapshot taken at handler-fire time (parent-side, from
+   * `binding.ts`). Used by the child to override sync getters
+   * (`api.chat.getChatId()`, future symmetric `characterId` getters) for
+   * the duration of this handler invocation via a per-fire AsyncLocalStorage
+   * scope (`liveContextStore.run(...)` in `child-entry.ts`).
+   *
+   * Why this exists: without these fields, the child's sync getters fall
+   * back to `ctx.chatIdAtStart` / `ctx.characterIdAtStart` — values
+   * snapshotted at SCRIPT-LOAD time and never refreshed. Long-lived
+   * handlers (widget click, modal `onDismiss`, drawer-tab `onActivate`,
+   * input-bar `onClick`, tool fires, etc.) that run after the user has
+   * switched chats would otherwise see stale `null`s. Closes the residual
+   * the v0.23.2 stale-active-context fix left on the sync-API path.
+   */
+  chatIdAtFire:      string | null;
+  characterIdAtFire: string | null;
 }
 
 /**

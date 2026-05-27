@@ -891,6 +891,12 @@ async function sendRunHandlerRequest(
     kind,
     args,
     timeoutMs,
+    // Live activeContext at fire time — child wraps the handler in
+    // `liveContextStore.run({ chatId, characterId }, ...)` so sync
+    // getters (`api.chat.getChatId()` etc.) return live values for
+    // long-lived registered handlers, not the script-load snapshot.
+    chatIdAtFire:      getActiveChatId(),
+    characterIdAtFire: getActiveCharacterId(),
   };
 
   return new Promise<HandlerResult>((resolve, reject) => {

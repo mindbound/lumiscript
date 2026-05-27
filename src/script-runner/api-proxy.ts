@@ -152,6 +152,31 @@ import { AsyncLocalStorage } from 'async_hooks';
  */
 export const runIdContext = new AsyncLocalStorage<string>();
 
+/**
+ * Per-fire live activeContext for sync getters (`api.chat.getChatId`,
+ * future symmetric `characterId` getters). The parent populates the
+ * payload on each `RunHandlerRequest` from the live `binding.ts` state,
+ * and `child-entry.ts`'s `handleRunHandlerRequest` wraps the user
+ * handler in `liveContextStore.run({ chatId, characterId }, ...)`.
+ *
+ * Why this exists: `ctx.chatIdAtStart` / `ctx.characterIdAtStart` are
+ * snapshotted ONCE at script-load time and never refreshed. Long-lived
+ * registered handlers (widget click, modal `onDismiss`, drawer-tab
+ * `onActivate`, input-bar `onClick`, tool fires, etc.) that fire after
+ * the user has switched chats would otherwise return stale values from
+ * the load-time snapshot. Reading from this store first, with the
+ * load-time snapshot as fallback, makes sync getters always-live in
+ * handler contexts while keeping trigger-fire semantics unchanged
+ * (those don't wrap in `liveContextStore.run`, so the fallback fires).
+ *
+ * Module-level singleton (one per child runtime). Exposed for use by
+ * `child-entry.ts`'s `run-handler` handler.
+ */
+export const liveContextStore = new AsyncLocalStorage<{
+  chatId:      string | null;
+  characterId: string | null;
+}>();
+
 // ─── Unhandled-rejection attribution (v1.0.0-rc.2+) ─────────────────────────
 //
 // WeakMap keyed on the rejecting error object, valued by the originating
@@ -1749,8 +1774,13 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
       on: ((event, handler, options) => {
         const handlerId = generateHandlerId('domEventListener');
         ctx.registerHandlerClosure(handlerId, async (...handlerArgs: unknown[]) => {
-          // IPC args shape: [data: DOMEventData]. Handler returns void.
-          handler(handlerArgs[0] as Parameters<typeof handler>[0]);
+          // IPC args shape: [data: DOMEventData]. Handler return type is
+          // `void` per the public surface, but the user is free to pass an
+          // async function (TS's `void` return accepts `Promise<void>`).
+          // `await` keeps the handler-IPC's activeRun alive for the entire
+          // handler chain so dispatches from inside an async handler don't
+          // arrive after the run was closed.
+          await handler(handlerArgs[0] as Parameters<typeof handler>[0]);
         });
 
         const buildAndSend = (): void => {
@@ -2207,9 +2237,10 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
           const handlerId = generateHandlerId('inputBarActionClick');
           ctx.registerHandlerClosure(handlerId, async (..._handlerArgs: unknown[]) => {
             // IPC args shape: [] (canonical click is a no-arg callback).
-            // Wrap in a Promise-returning closure so HandlerResult can
-            // capture sync-throws from the user closure cleanly.
-            handler();
+            // `await` keeps the handler-IPC's activeRun alive across any
+            // async work the user closure does — without it, an async user
+            // handler's dispatches arrive after the run is closed.
+            await handler();
           });
 
           const buildAndSend = (): void => {
@@ -2399,8 +2430,11 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
 
           const handlerId = generateHandlerId('floatWidgetDragEnd');
           ctx.registerHandlerClosure(handlerId, async (...handlerArgs: unknown[]) => {
-            // IPC args shape: [pos: {x, y}]. Handler returns void.
-            handler(handlerArgs[0] as { x: number; y: number });
+            // IPC args shape: [pos: {x, y}]. `await` keeps the handler-IPC's
+            // activeRun alive across any async work the user closure does
+            // — without it, an async user handler's dispatches arrive after
+            // the run is closed.
+            await handler(handlerArgs[0] as { x: number; y: number });
           });
 
           const buildAndSend = (): void => {
@@ -2565,7 +2599,10 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
           const handlerId = generateHandlerId('drawerTabActivate');
           ctx.registerHandlerClosure(handlerId, async (..._handlerArgs: unknown[]) => {
             // IPC args shape: [] (canonical onActivate is no-arg).
-            handler();
+            // `await` keeps the handler-IPC's activeRun alive across any
+            // async work the user closure does — without it, an async user
+            // handler's dispatches arrive after the run is closed.
+            await handler();
           });
 
           const buildAndSend = (): void => {
@@ -2816,10 +2853,16 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
     setMessagesHidden:  mkAsync<ChatAPI['setMessagesHidden']>(dispatch,  'chat.setMessagesHidden'),
     isMessageHidden:    mkAsync<ChatAPI['isMessageHidden']>(dispatch,    'chat.isMessageHidden'),
 
-    // Sync local — read from the run-start activeContext snapshot.
-    // For long-lived registered handlers (Phase 9d.3) the live context
-    // gets delivered with each fire, not snapshotted here.
-    getChatId: () => ctx.chatIdAtStart,
+    // Sync local — prefer the per-fire `liveContextStore` (populated
+    // by `handleRunHandlerRequest` on each handler IPC), fall back to
+    // the run-start activeContext snapshot. Trigger fires take the
+    // fallback (the snapshot is fresh at trigger-fire time); long-lived
+    // handlers fired after a chat switch get the live `chatId` from the
+    // store. Without this fallback hierarchy, sync getters would return
+    // the SCRIPT-LOAD snapshot in handlers — stale `null`s after the
+    // first chat-open. See `liveContextStore` JSDoc above for the full
+    // rationale.
+    getChatId: () => liveContextStore.getStore()?.chatId ?? ctx.chatIdAtStart,
 
     // Sync void fire-and-forget — parent state mutation, no return value.
     // Phase 9d.X — also update local snapshot for list() consistency.

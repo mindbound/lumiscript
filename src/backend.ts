@@ -105,7 +105,8 @@ import {
   deleteRecord,
   isValidCollectionPath,
 } from './engine/db-admin.js';
-import { on as busOn } from './engine/broadcast-bus.js';
+import { on as busOn, clearByScriptId as clearBroadcastByScriptId } from './engine/broadcast-bus.js';
+import { clearCommandHandlerByScriptId } from './engine/api/commands.js';
 import { buildReplayMessages } from './engine/replay.js';
 import {
   spawnScriptRunner,
@@ -703,11 +704,15 @@ spindle.on('TOOL_INVOCATION', dispatchToolInvocation);
 const triggerRegistry = new TriggerRegistry(
   () => ({
     grantedPermissions,
-    userId: activeUserId,
+    userId:                   activeUserId,
     scriptStorage,
-    onToolsChanged:      pushTools,
-    onInjectionsChanged: pushInjections,
-    scriptTimeoutMs:     settingsStore.get().scriptTimeoutMs,
+    onToolsChanged:           pushTools,
+    onInjectionsChanged:      pushInjections,
+    scriptTimeoutMs:          settingsStore.get().scriptTimeoutMs,
+    // v1.0.0-rc.8 — full state wipe for `fireReload`. Closes the
+    // pre-rc.8 gap where 7 of 13 pinning surfaces leaked across
+    // reloads. See `wipeScriptStateForReload` JSDoc.
+    wipeScriptStateForReload,
   }),
   send,
 );
@@ -927,6 +932,104 @@ async function teardownDisabledScript(scriptId: string, disabledScript: Script |
     duration:   0,
     idleAfter:  true,
   });
+}
+
+/**
+ * v1.0.0-rc.8 — full per-script state wipe invoked by `fireReload`
+ * (manual editor Reload button + autosave-driven reload-on-edit) so the
+ * body re-runs into a clean slate. Distinct from `teardownDisabledScript`
+ * in three ways:
+ *
+ *   1. Does NOT fire `ls:teardown` — reload is not a disable; the user
+ *      wants the script to keep running, just with new code.
+ *   2. Preserves `api.scriptStorage` data — schedulers, persisted UI
+ *      state, etc. must survive a reload click. Wiping it would
+ *      surprise users (e.g. Lisa scheduler's saved events vanishing
+ *      when the author bumps a typo).
+ *   3. Preserves `api.theme.*` overrides — body re-run will re-apply
+ *      them if it calls `api.theme.*` again; preserving here avoids a
+ *      visible flash of base theme between wipe and re-apply.
+ *   4. Preserves `collection-handle-cache` — a pure dedup cache that's
+ *      cheap to rebuild; preserving avoids unnecessary churn.
+ *
+ * Pre-rc.8 the partial `clearBroadcastByScriptId` + `clearCommandHandlerByScriptId`
+ * + post-run diff cleanup inside `fireReload` left 7 of 13 pinning
+ * surfaces leaking across reloads (DOM listeners, modals, float widgets,
+ * drawer tabs, input-bar actions, world-info interceptors, injections).
+ * Stale handler closures kept firing alongside the freshly-registered
+ * ones from the new body — net effect: "Reload doesn't pick up changes,
+ * had to toggle the extension to see new code take effect." This helper
+ * closes that gap.
+ *
+ * Mirrors the bulk of `teardownDisabledScript`'s registry sweeps. Future
+ * additions to the disable path that introduce new pinning surfaces
+ * SHOULD also be added here (with a preserve-across-reload decision).
+ */
+async function wipeScriptStateForReload(scriptId: string): Promise<void> {
+  // Broadcast subs (engine-lifecycle `ls:*` AND user events). Pre-rc.8
+  // fireReload already cleared these; folded into the wipe so the
+  // sequence is "one helper, one truth" for what reload wipes.
+  clearBroadcastByScriptId(scriptId);
+  clearCommandHandlerByScriptId(scriptId);
+  // Injections — old `api.chat.inject` entries from the previous run
+  // would otherwise leak into the next prompt assembly.
+  clearByScriptId(scriptId);
+  pushInjections();
+  // Tools — body re-run will re-register from new code.
+  const clearedTools = clearToolsByScriptId(scriptId);
+  for (const name of clearedTools) spindle.unregisterTool(name);
+  pushTools();
+  // Macros.
+  const clearedMacros = clearMacrosByScriptId(scriptId);
+  for (const name of clearedMacros) {
+    try { spindle.unregisterMacro(name); } catch { /* swallow */ }
+  }
+  // Interceptors + content processors — LumiScript-internal registries,
+  // host-side single-registration stays live.
+  clearMacroInterceptorsByScriptId(scriptId);
+  clearMessageContentProcessorsByScriptId(scriptId);
+  clearWorldInfoInterceptorsByScriptId(scriptId);
+  // RPC endpoints.
+  const clearedRpcEndpoints = clearRpcEndpointsByScriptId(scriptId);
+  for (const endpoint of clearedRpcEndpoints) {
+    try { spindle.rpcPool.unregister(endpoint); } catch { /* swallow */ }
+  }
+  // Advanced modals — mirror teardownDisabledScript's
+  // mark-pending-then-dismiss pattern. The 'teardown' reason on the
+  // dismissal echo lets any still-live onDismiss handlers branch on
+  // reload-vs-user-dismiss.
+  for (const modalId of advancedModalsByScript(scriptId)) {
+    markModalPendingDismissal(modalId, 'teardown');
+    send({ type: 'ls_modal_dismiss', modalId });
+  }
+  // Input-bar actions, float widgets, drawer tabs — destroy then drop
+  // from the per-script registry.
+  for (const actionId of listActionsByScript(scriptId)) {
+    send({ type: 'ls_input_bar_action_destroy', scriptId, actionId });
+  }
+  clearActionsByScript(scriptId);
+  for (const widgetId of liveWidgetsByScript(scriptId)) {
+    destroyWidgetInRegistry(widgetId);
+    send({ type: 'ls_float_widget_destroy', widgetId });
+    dropWidgetEntry(widgetId);
+  }
+  for (const tabId of listTabsByScript(scriptId)) {
+    send({ type: 'ls_drawer_tab_destroy', scriptId, tabId });
+  }
+  clearTabsByScript(scriptId);
+  // DOM — old injected elements + their listeners from the previous run.
+  cleanupDOMScript(scriptId);
+  send({ type: 'dom_cleanup_script', scriptId });
+  // Script-runner child side — send `script-unregister` so the child
+  // wipes its handler closure tables, DOMHandle aliases, and per-script
+  // state. The next `runScript` call re-establishes everything fresh.
+  // The worker subprocess itself survives: `spawnScriptRunner` is
+  // idempotent and the eviction sweep runs on a 60s interval, so the
+  // immediate re-dispatch reuses the same worker (preserving its
+  // module-init captures + module-level imports for any libraries
+  // `script.require()`'d during the previous run — those re-execute
+  // anyway if the body re-loads them).
+  unregisterScriptFromChild(scriptId);
 }
 
 /**

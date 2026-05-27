@@ -243,13 +243,15 @@ describe('child-entry: script-unregister routing', () => {
     ipc.childHandle.send({ type: 'script-unregister', scriptId: 'script-A' });
 
     ipc.childHandle.send({
-      type:      'run-handler',
-      runId:     'handler-fire-1',
-      scriptId:  'script-A',
-      handlerId: 'unknown-handler-id',
-      kind:      'macro',
-      args:      [],
-      timeoutMs: 1_000,
+      type:              'run-handler',
+      runId:             'handler-fire-1',
+      scriptId:          'script-A',
+      handlerId:         'unknown-handler-id',
+      kind:              'macro',
+      args:              [],
+      timeoutMs:         1_000,
+      chatIdAtFire:      null,
+      characterIdAtFire: null,
     });
 
     type HandlerResult = {
