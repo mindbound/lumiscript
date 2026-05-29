@@ -31,6 +31,7 @@
  */
 
 import * as z from 'zod';
+import type { ChildToParentMessage } from './script-runner-ipc.js';
 
 // ─── Shared primitive schemas ───────────────────────────────────────────────
 
@@ -54,6 +55,7 @@ const HandleKindSchema = z.enum([
   'ContentProcessorHandle',
   'StyleHandle',
   'EnclaveHandle',
+  'MountedComponent',
 ]);
 
 /**
@@ -75,6 +77,10 @@ const HandlerKindSchema = z.enum([
   'drawerTabActivate',
   'rpc',
   'oauthCallback',
+  'componentCallback',
+  'uiKeyboardChange',
+  'uiDrawerChange',
+  'uiSettingsChange',
 ]);
 
 /** Wire format for a host-resident object handle. Mirrors `HandleRef`. */
@@ -132,6 +138,25 @@ const ApiProxyRequestSchema = z.object({
 
 const AbortRequestSchema = z.object({
   type:      z.literal('abort-request'),
+  requestId: z.string(),
+}).strict();
+
+// v1.0.0-rc.9 — streaming-IPC (api.llm.generateStream). `stream-request`
+// mirrors `api-request` minus `targetHandle` (streaming has no handle-method
+// form). `stream-cancel` mirrors `abort-request` (bare requestId envelope).
+const StreamRequestSchema = z.object({
+  type:          z.literal('stream-request'),
+  requestId:     z.string(),
+  runId:         z.string(),
+  scriptId:      z.string(),
+  method:        z.string(),
+  args:          z.array(z.unknown()),
+  hasSignal:     z.boolean().optional(),
+  _runIdSource:  z.enum(['context', 'latest', 'ctx']).optional(),
+}).strict();
+
+const StreamCancelRequestSchema = z.object({
+  type:      z.literal('stream-cancel'),
   requestId: z.string(),
 }).strict();
 
@@ -342,6 +367,36 @@ const RegisterHandlerOauthCallbackSchema = z.object({
   hasHandler: z.literal(true),
 }).strict();
 
+// v1.0.0-rc.9 — api.ui.events.on*Change subscriptions. Same envelope as
+// commandsOnInvoked (no per-handle id); the fired handler receives the changed
+// UI state as its arg.
+const RegisterHandlerUiKeyboardChangeSchema = z.object({
+  type:       z.literal('register-handler'),
+  kind:       z.literal('uiKeyboardChange'),
+  runId:      z.string(),
+  scriptId:   z.string(),
+  handlerId:  z.string(),
+  hasHandler: z.literal(true),
+}).strict();
+
+const RegisterHandlerUiDrawerChangeSchema = z.object({
+  type:       z.literal('register-handler'),
+  kind:       z.literal('uiDrawerChange'),
+  runId:      z.string(),
+  scriptId:   z.string(),
+  handlerId:  z.string(),
+  hasHandler: z.literal(true),
+}).strict();
+
+const RegisterHandlerUiSettingsChangeSchema = z.object({
+  type:       z.literal('register-handler'),
+  kind:       z.literal('uiSettingsChange'),
+  runId:      z.string(),
+  scriptId:   z.string(),
+  handlerId:  z.string(),
+  hasHandler: z.literal(true),
+}).strict();
+
 const RegisterHandlerSchema = z.discriminatedUnion('kind', [
   RegisterHandlerMacroSchema,
   RegisterHandlerToolSchema,
@@ -355,6 +410,9 @@ const RegisterHandlerSchema = z.discriminatedUnion('kind', [
   RegisterHandlerFloatWidgetDragEndSchema,
   RegisterHandlerDrawerTabActivateSchema,
   RegisterHandlerOauthCallbackSchema,
+  RegisterHandlerUiKeyboardChangeSchema,
+  RegisterHandlerUiDrawerChangeSchema,
+  RegisterHandlerUiSettingsChangeSchema,
 ]);
 
 // ─── Top-level ChildToParentMessage discriminated union ─────────────────────
@@ -438,6 +496,8 @@ export const ChildToParentMessageSchema = z.union([
   RunScriptResultSchema,
   ApiProxyRequestSchema,
   AbortRequestSchema,
+  StreamRequestSchema,
+  StreamCancelRequestSchema,
   BroadcastSubscribeMessageSchema,
   BroadcastUnsubscribeMessageSchema,
   BroadcastHandlerStartedSchema,
@@ -449,3 +509,41 @@ export const ChildToParentMessageSchema = z.union([
   DiagnosticStatsResponseSchema,
   HandlerResultSchema,
 ]);
+
+// ─── Compile-time drift guard (v1.0.0-rc.9) ─────────────────────────────────
+//
+// `ChildToParentMessageSchema` is a SEPARATE source of truth from the
+// `ChildToParentMessage` TS union in `script-runner-ipc.ts`. A union member
+// that lacks a matching schema branch is DROPPED at runtime by
+// `handleChildMessage`'s `safeParse` gate — a silent hang (request dropped →
+// no response → consumer awaits forever), invisible to both `tsc` and
+// `bun test`. This exact gap shipped in rc.9 Track B: `stream-request` was
+// added to the union + the message switch + everything else, but not this
+// schema, so every `api.llm.generateStream` consumer hung on first iteration.
+//
+// The assertion below closes the gap by forcing the set of `type`
+// discriminators the schema covers to EXACTLY equal the set the TS union
+// declares. Add a `ChildToParentMessage` variant without a schema (or a
+// schema branch without a union member) and this line fails to compile —
+// drift becomes a `bun run typecheck` error instead of a runtime hang.
+//
+// If you land here via a compile error ("Type 'true' is not assignable to
+// type 'never'"), the two sets have drifted: cross-check the union members
+// in `ChildToParentMessageSchema` above against the `ChildToParentMessage`
+// union in `script-runner-ipc.ts`. The missing/extra `type` literal is the
+// culprit. Also add a happy-path case to
+// `tests/script-runner/host-dispatcher-ipc-validation.test.ts`.
+type SchemaCoveredMessageTypes = z.infer<typeof ChildToParentMessageSchema>['type'];
+type UnionDeclaredMessageTypes = ChildToParentMessage['type'];
+
+// `[A] extends [B]` is tuple-wrapped to suppress union distribution, so it
+// asks "is every member of A also a member of B" as a whole-set comparison.
+// The bidirectional form is exact set-equality.
+type ExactlyEqual<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never;
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+const _childToParentSchemaExhaustive: ExactlyEqual<
+  SchemaCoveredMessageTypes,
+  UnionDeclaredMessageTypes
+> = true;
+void _childToParentSchemaExhaustive;

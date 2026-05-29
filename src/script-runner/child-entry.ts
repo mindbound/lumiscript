@@ -45,6 +45,8 @@ import type {
   ScriptUnregisterMessage,
   AdvancedModalDismissedNotice,
   FloatWidgetPositionNotice,
+  StreamChunkMessage,
+  StreamEndMessage,
 } from '../types/script-runner-ipc.js';
 import type { ConsoleEntry, ConsoleEntryType } from '../types/script.js';
 import {
@@ -813,6 +815,23 @@ function routeApiResponse(msg: ApiProxyResponse): void {
 }
 
 /**
+ * Same broadcast-to-all-active-proxies pattern as `routeApiResponse`, but
+ * for the v1.0.0-rc.9 streaming-IPC envelope kinds. Each proxy's
+ * `handleStreamChunk` / `handleStreamEnd` silently drops requestIds it
+ * doesn't own; the right one wins.
+ */
+function routeStreamChunk(msg: StreamChunkMessage): void {
+  for (const entry of activeProxies.values()) {
+    entry.proxy.handleStreamChunk(msg);
+  }
+}
+function routeStreamEnd(msg: StreamEndMessage): void {
+  for (const entry of activeProxies.values()) {
+    entry.proxy.handleStreamEnd(msg);
+  }
+}
+
+/**
  * Convert a thrown value into a serializable error shape. Errors don't
  * survive structured-clone over IPC intact (the prototype chain and
  * non-enumerable fields like `stack` get stripped), so we capture
@@ -1394,6 +1413,14 @@ export default function (proc: SpindleBackendProcessContext): () => void {
 
       case 'api-response':
         routeApiResponse(msg);
+        break;
+
+      case 'stream-chunk':
+        routeStreamChunk(msg);
+        break;
+
+      case 'stream-end':
+        routeStreamEnd(msg);
         break;
 
       case 'broadcast-fire':

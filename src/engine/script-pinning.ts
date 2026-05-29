@@ -92,6 +92,7 @@ import { countByScriptId     as countMessageProcessors }       from './message-c
 import { countByScriptId     as countMacroInterceptors }       from './macro-interceptor-registry.js';
 import { listEndpointsByScriptId }                             from './rpc-store.js';
 import { countLiveWidgetsByScript }                            from './float-widget-registry.js';
+import { countLiveAppMountsByScript }                          from './app-mount-registry.js';
 import { countLiveModalsByScript }                             from './advanced-modal-registry.js';
 
 /**
@@ -118,6 +119,7 @@ export interface ScriptRegistrationCounts {
   macroInterceptors:     number;
   rpcEndpoints:          number;
   floatWidgets:          number;
+  appMounts:             number;
   advancedModals:        number;
   /**
    * v1.0.0-rc.4+ — count of active `handlerCleanups` entries for the
@@ -207,18 +209,19 @@ export function getRegistrationCountsForScript(scriptId: string): ScriptRegistra
   const macroInterceptors     = countMacroInterceptors(scriptId);
   const rpcEndpoints          = listEndpointsByScriptId(scriptId).length;
   const floatWidgets          = countLiveWidgetsByScript(scriptId);
+  const appMounts             = countLiveAppMountsByScript(scriptId);
   const advancedModals        = countLiveModalsByScript(scriptId);
   const handlerClosures       = pinningHooks.handlerCleanupCount(scriptId);
   const userBroadcastSubs     = pinningHooks.userBroadcastSubCount(scriptId);
   const total =
     tools + macros + injections + drawerTabs + inputBarActions +
     worldInfoInterceptors + messageProcessors + macroInterceptors +
-    rpcEndpoints + floatWidgets + advancedModals +
+    rpcEndpoints + floatWidgets + appMounts + advancedModals +
     handlerClosures + userBroadcastSubs;
   return {
     tools, macros, injections, drawerTabs, inputBarActions,
     worldInfoInterceptors, messageProcessors, macroInterceptors,
-    rpcEndpoints, floatWidgets, advancedModals,
+    rpcEndpoints, floatWidgets, appMounts, advancedModals,
     handlerClosures, userBroadcastSubs, total,
   };
 }
@@ -241,6 +244,7 @@ export function scriptHasPinningRegistrations(scriptId: string): boolean {
   if (countMacroInterceptors(scriptId) > 0)            return true;
   if (listEndpointsByScriptId(scriptId).length > 0)    return true;
   if (countLiveWidgetsByScript(scriptId) > 0)          return true;
+  if (countLiveAppMountsByScript(scriptId) > 0)        return true;
   if (countLiveModalsByScript(scriptId) > 0)           return true;
   // v1.0.0-rc.4+ — handler closures (DOM listeners, command handlers,
   // delegates) + non-`ls:*` broadcast subs. See module-level JSDoc.

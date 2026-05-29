@@ -22,6 +22,9 @@ import type {
   DOMDelegatedEventData,
   ConditionalPreventDefault,
   DbRecord,
+  UIKeyboardState,
+  UIDrawerState,
+  UISettingsState,
 } from './script.js';
 import type { CollectionSummary, CollectionStats } from '../engine/db-admin.js';
 
@@ -99,9 +102,9 @@ export type FrontendToBackend =
   | {
       /**
        * Phase F (v1.0 runtime-isolation) — manual "Reload script" action
-       * from the script editor topbar. Bypasses the
-       * `// @no-reload-on-edit` directive opt-out (manual reloads always
-       * fire). Library scripts are silently ignored (no body to re-run;
+       * from the script editor topbar. Fires regardless of the
+       * `// @ls:reload-on-edit` directive (manual reloads always fire,
+       * present or not). Library scripts are silently ignored (no body to re-run;
        * libraries are loaded on demand via `script.require()`).
        */
       type: 'reload_script';
@@ -185,6 +188,25 @@ export type FrontendToBackend =
       delegationId: string;
       data: DOMDelegatedEventData;
     }
+  // ─── Shared host components (api.ui.components.*, v1.0.0-rc.9) ──────
+  | {
+      /**
+       * Fired by the frontend when a mounted component invokes one of its
+       * registered callbacks (e.g. a switch's onChange). The backend resolves
+       * `(componentId, callbackName)` → the script's handler-id via the
+       * dispatcher's callback-route registry and fires `sendRunHandlerRequest`.
+       */
+      type: 'component_callback';
+      componentId: string;
+      callbackName: string;
+      value: unknown;
+    }
+  | {
+      /** Reply to `comp_get_value`. Carries the component's current value. */
+      type: 'comp_value_result';
+      requestId: string;
+      value: unknown;
+    }
   // ─── Advanced modal lifecycle (frontend → backend) ─────────────────
   | {
       /**
@@ -233,6 +255,30 @@ export type FrontendToBackend =
       requestId: string;
       selectedKey: string | null;
     }
+  // ─── File picker result (frontend → backend) ──────────────────────
+  | {
+      /**
+       * Fired by the frontend after `ctx.uploads.pickFile` settles. On
+       * success `files` carries each picked file with its bytes base64-encoded
+       * for the JSON bus (the backend decodes to Uint8Array before resolving).
+       * User-cancel resolves with an empty `files` array. On host error (e.g. a
+       * file exceeded `maxSizeBytes` — the host throws) `error` is set and the
+       * backend rejects the awaiting `api.ui.pickFile` promise. Correlated to
+       * the request via `requestId`.
+       */
+      type: 'ls_pick_file_result';
+      requestId: string;
+      files?: Array<{ name: string; mimeType: string; sizeBytes: number; dataBase64: string }>;
+      error?: string;
+    }
+  // ─── UI state changes (frontend → backend) ────────────────────────
+  // The frontend subscribes once to `ctx.ui.events.on*Change`, pushes the
+  // initial snapshot on connect, and forwards every change. The backend caches
+  // the latest (for `api.ui.events.getX`) and fans out to subscribers. Global
+  // (not per-script) — the host event source is shared.
+  | { type: 'ls_ui_keyboard_changed'; state: UIKeyboardState; }
+  | { type: 'ls_ui_drawer_changed';   state: UIDrawerState; }
+  | { type: 'ls_ui_settings_changed'; state: UISettingsState; }
   // ─── DOM read response (frontend → backend) ───────────────────────
   | {
       /**
@@ -316,6 +362,18 @@ export type FrontendToBackend =
        */
       type: 'ls_float_widget_created';
       widgetId: string;
+    }
+  // ─── App mount confirm (frontend → backend) ────────────────────────
+  | {
+      /**
+       * Echoed after the frontend creates the `ctx.ui.mountApp` portal and
+       * binds its `.root`. Same Option-B role as `ls_float_widget_created`:
+       * gates the create IPC's api-response on real FE confirmation so the
+       * child can't fire setVisible / destroy / root.update before the mount
+       * (and its bound `.root` element) exists.
+       */
+      type: 'ls_app_mount_created';
+      mountId: string;
     }
   // ─── Drawer tab activation (frontend → backend) ────────────────────
   | {
@@ -496,6 +554,26 @@ export type FrontendToBackend =
       content: string;
       /** Lumiverse LLM connection ID. */
       connectionId?: string;
+      /**
+       * Retry of a turn whose previous attempt failed. The failed attempt was
+       * never persisted and its user bubble is still shown, so the backend
+       * skips the `assistant_user_turn` echo to avoid duplicating it.
+       */
+      isRetry?: boolean;
+      /**
+       * IDs of the user's own scripts (@-mentioned in the composer) to attach
+       * as read-context for this turn. The backend resolves each ID to its
+       * current name/type/code and the agent folds them into the (ephemeral,
+       * never-persisted) system prompt — so the code is always fresh and never
+       * bloats the chat bubble or saved history. Unknown IDs are skipped.
+       */
+      contextScriptIds?: string[];
+      /**
+       * Reserved-folder ("userfiles/") file paths attached as read-context for
+       * this turn. Resolved + injected alongside scripts; never persisted to
+       * history. Ineligible / missing / oversized paths are skipped.
+       */
+      contextFilePaths?: string[];
     }
   // "New chat" — creates a new thread and switches the active thread to it.
   | { type: 'assistant_reset' }
@@ -514,6 +592,35 @@ export type FrontendToBackend =
   // Create a brand-new thread + switch to it. Equivalent to `assistant_reset`
   // semantically but explicit about intent for the sidebar "New chat" button.
   | { type: 'assistant_new_thread' }
+  // Persist the active thread's attached-script context set (the @-mention
+  // chips). Fired on attach/detach so the chip tray survives reload independent
+  // of sending. Backend updates the active thread + persists if it has content.
+  | { type: 'assistant_set_context'; scriptIds: string[]; filePaths?: string[] }
+  // ─── Attachable user files (the "Lisa files" reserved folder) ────────────
+  // List the user's attachable reference files (picker open / refresh). Backend
+  // replies with `user_files`.
+  | { type: 'request_user_files' }
+  // Add a reference file to the reserved folder (the picker's "add file" form).
+  // `name` is a within-folder name (extension validated); backend writes it then
+  // replies with a refreshed `user_files` (carrying `error` on a validation fail).
+  | { type: 'add_user_file'; name: string; content: string }
+  // Delete a reference file from the reserved folder; backend deletes
+  // (eligibility-checked) and replies with a refreshed `user_files`.
+  | { type: 'delete_user_file'; path: string }
+  // ─── Lisa memory (the editable Memory panel) ────────────────────────────
+  // Request the current memory notes (panel open / refresh). Backend replies
+  // with `assistant_memory`.
+  | { type: 'request_assistant_memory' }
+  // User adds a note via the panel (stored with source: 'user').
+  | { type: 'assistant_memory_add'; hook: string; detail?: string; category?: string }
+  // User edits a note's editable fields in place (empty detail/category clears).
+  | { type: 'assistant_memory_edit'; id: string; hook: string; detail?: string; category?: string }
+  // User deletes a note by id.
+  | { type: 'assistant_memory_delete'; id: string }
+  // Trigger a consolidation pass (merge/dedupe/prune via the LLM). Uses the
+  // modal's current connection. Backend replies with `assistant_memory_consolidated`
+  // and (on success) a refreshed `assistant_memory`.
+  | { type: 'assistant_memory_consolidate'; connectionId?: string }
   // Rename a thread. Updates the in-memory thread (if active), the on-disk
   // file, and the index. Backend pushes an updated `assistant_threads`.
   | { type: 'assistant_rename_thread'; threadId: string; title: string }
@@ -530,7 +637,10 @@ export type FrontendToBackend =
   // `assistant_apply_success` (or `assistant_apply_error` on failure).
   // `languageHint` is the markdown fence language tag (`js`, `ts`, etc.) —
   // not strictly required but useful for the heuristic.
-  | { type: 'assistant_apply_to_script'; code: string; languageHint?: string }
+  // `targetScriptId` (Phase 3): when set, UPDATE that existing script's code in
+  // place (the user picked "Update «script»" from the apply menu — only offered
+  // for @-attached scripts). When absent, create a new script (original path).
+  | { type: 'assistant_apply_to_script'; code: string; languageHint?: string; targetScriptId?: string }
   // ─── Conversation management (v0.30.x — gap #10) ────────────────────────
   // Delete every thread (with confirm). Backend pops a Spindle-native modal
   // for confirmation; on confirm, deletes all per-thread files, clears the
@@ -681,6 +791,44 @@ export type BackendToFrontend =
   | { type: 'dom_delegate_unregister'; delegationId: string; event: string }
   | { type: 'dom_cleanup_script';  scriptId: string }
   | { type: 'dom_make_draggable';  elementId: string; handleSelector?: string }
+  // ─── Shared host components (api.ui.components.*, v1.0.0-rc.9) ─────────
+  // Mount a Lumiverse first-party React component (`ctx.components.mountX`)
+  // into a script-owned element (`targetElementId`, a DOMHandle's id). The
+  // frontend maps `kind` → the matching `ctx.components.mount*` helper and
+  // stores the returned handle by `componentId`. `props` is the mount
+  // options with any callback functions stripped (replaced by handler ids
+  // in `callbacks` — wired in the Phase-1b interactive path).
+  | {
+      type:            'comp_mount';
+      scriptId:        string;
+      componentId:     string;
+      targetElementId: string;
+      kind:            string;
+      props:           Record<string, unknown>;
+      /**
+       * Names of the callbacks the user registered (e.g. `['onChange']`). The
+       * frontend wires each into the mount props so the corresponding user
+       * interaction sends a `component_callback` back. Handler-ids stay
+       * host-side (in the dispatcher's callback-route registry); the FE only
+       * needs the names. Empty/absent for display-only components.
+       */
+      callbackNames?:  string[];
+      /**
+       * For body-slot components (mountCollapsibleSection): the elementId to
+       * bind the host handle's `.body` element to, so the script's body
+       * `DOMHandle` resolves through the normal DOM pipeline. v1.0.0-rc.9.
+       */
+      bodyElementId?:  string;
+    }
+  | { type: 'comp_update';  componentId: string; props: Record<string, unknown> }
+  | { type: 'comp_destroy'; componentId: string }
+  // Value-returning method round-trip (mirrors dom_read_request). `method`
+  // names the component method to read (default `'getValue'`; also used for
+  // `isExpanded`). FE replies with comp_value_result.
+  | { type: 'comp_get_value'; requestId: string; componentId: string; method?: string }
+  // Void method invoke (fire-and-forget): expand/collapse/toggle (+ future
+  // focus/blur/open/close/refresh). FE calls componentMountMap[componentId][method](...args).
+  | { type: 'comp_invoke';  componentId: string; method: string; args?: unknown[] }
   // ─── Advanced modal commands (backend → frontend) ──────────────────
   | {
       /**
@@ -758,6 +906,23 @@ export type BackendToFrontend =
           danger?: boolean;
           active?: boolean;
         }>;
+      };
+    }
+  // ─── File picker request (backend → frontend) ──────────────────────
+  | {
+      /**
+       * Request the frontend to open the native file picker via
+       * `ctx.uploads.pickFile(options)`. The frontend base64-encodes each
+       * selected file's bytes and echoes them back via `ls_pick_file_result`
+       * using the same `requestId` so the backend can resolve (or reject) the
+       * awaiting `api.ui.pickFile` promise.
+       */
+      type: 'ls_pick_file_request';
+      requestId: string;
+      options: {
+        accept?: string[];
+        multiple?: boolean;
+        maxSizeBytes?: number;
       };
     }
   // ─── Input bar action lifecycle (backend → frontend) ───────────────
@@ -861,6 +1026,34 @@ export type BackendToFrontend =
       /** Destroy a widget — removes it from the viewport. Idempotent frontend-side. */
       type: 'ls_float_widget_destroy';
       widgetId: string;
+    }
+  // ─── App mount lifecycle (backend → frontend) ──────────────────────
+  | {
+      /**
+       * Create a full-bleed app-shell portal via `ctx.ui.mountApp(options)`.
+       * The frontend binds the returned handle's `.root` into the shared DOM
+       * element map (so `dom_*` ops targeting `rootElementId` flow through the
+       * existing pipeline) and echoes `ls_app_mount_created` back.
+       */
+      type: 'ls_app_mount_create';
+      scriptId: string;
+      mountId: string;
+      rootElementId: string;
+      options: {
+        className?: string;
+        position?: 'start' | 'end' | 'app-overlay';
+      };
+    }
+  | {
+      /** Show or hide a mounted app without destroying it. */
+      type: 'ls_app_mount_set_visible';
+      mountId: string;
+      visible: boolean;
+    }
+  | {
+      /** Destroy a mounted app — removes it from the app shell. Idempotent frontend-side. */
+      type: 'ls_app_mount_destroy';
+      mountId: string;
     }
   // ─── Drawer tab lifecycle (backend → frontend) ─────────────────────
   | {
@@ -1068,6 +1261,15 @@ export type BackendToFrontend =
       threadId: string;
       title: string;
       messages: import('lumiverse-spindle-types').LlmMessageDTO[];
+      /** Attached-script context IDs to restore into the chip tray. Empty for
+       *  new threads or threads persisted before context-persistence shipped. */
+      contextScriptIds: string[];
+      /** Reserved-folder file paths to restore into the chip tray (file
+       *  attachments). Empty for new threads or threads persisted before this. */
+      contextFilePaths: string[];
+      /** Apply markers to interleave into the reconstructed transcript. Empty
+       *  for threads with no applies (or persisted before this shipped). */
+      appliedEvents: import('../assistant/types.js').AppliedEvent[];
     }
   // Success confirmation for `assistant_apply_to_script` — carries the
   // generated script name + classified type so the modal can render a
@@ -1077,9 +1279,25 @@ export type BackendToFrontend =
       type: 'assistant_apply_success';
       scriptName: string;
       scriptType: import('./script.js').ScriptType;
+      /** True when an existing script was updated in place; false/absent when a
+       *  new script was created. Drives the toast wording ("Updated" vs "Created"). */
+      updated?: boolean;
     }
   // Failure path — surfaced as an error toast inline in the modal.
   | { type: 'assistant_apply_error'; error: string }
+  // Current Lisa memory notes — pushed on request + after every add/edit/delete
+  // so the Memory panel stays in sync.
+  | { type: 'assistant_memory'; notes: import('../engine/assistant-memory.js').MemoryNote[] }
+  // Result of a consolidation pass — `before`/`after` note counts for the toast,
+  // or `error` when the pass was a no-op / failed (memory left unchanged).
+  | { type: 'assistant_memory_consolidated'; before: number; after: number; error?: string }
+  // Attachable user files for the picker (reply to request_user_files / add /
+  // delete). `error` carries a validation or I/O message from an add attempt.
+  | {
+      type: 'user_files';
+      files: Array<{ path: string; name: string; sizeBytes: number }>;
+      error?: string;
+    }
   // Thread export payload — backend assembled the Markdown; frontend
   // triggers the actual user-facing download via a temporary blob URL.
   | {

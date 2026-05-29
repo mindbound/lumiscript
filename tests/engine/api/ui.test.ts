@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach } from 'bun:test';
-import { buildUIAPI } from '../../../src/engine/api/ui.js';
+import { buildUIAPI, resolvePickFile } from '../../../src/engine/api/ui.js';
 import { createTestDeps } from '../../_infra/mock-deps.js';
 
 let mockSpindle: any;
@@ -216,5 +216,111 @@ describe('getPushStatus', () => {
   test('throws when push_notification permission denied', () => {
     const api = buildApi({ hasPerm: () => false });
     expect(() => api.getPushStatus()).toThrow('PERMISSION_DENIED');
+  });
+});
+
+// ─── navigation (free tier) ────────────────────────────────────────────────────
+
+describe('navigation', () => {
+  test('getDrawerTabs passes the tab list through + forwards userId', async () => {
+    mockSpindle.ui.getDrawerTabs.mockReturnValueOnce(Promise.resolve([
+      { id: 'connections', shortName: 'Conn', tabName: 'Connections', tabDescription: 'd', keywords: [], source: 'builtin' },
+    ]));
+    const api = buildApi({ userId: 'u-1' });
+    const tabs = await api.getDrawerTabs();
+    expect(tabs).toHaveLength(1);
+    expect(tabs[0]!.id).toBe('connections');
+    expect(mockSpindle.ui.getDrawerTabs.mock.calls[0][0]).toEqual({ userId: 'u-1' });
+  });
+
+  test('getSettingsTabs passes the tab list through', async () => {
+    mockSpindle.ui.getSettingsTabs.mockReturnValueOnce(Promise.resolve([
+      { id: 'display', shortName: 'Disp', tabName: 'Display', tabDescription: 'd', keywords: [] },
+    ]));
+    const api = buildApi();
+    const tabs = await api.getSettingsTabs();
+    expect(tabs[0]!.id).toBe('display');
+  });
+
+  test('openDrawerTab forwards tabId + userId', async () => {
+    const api = buildApi({ userId: 'u-2' });
+    await api.openDrawerTab('connections');
+    expect(mockSpindle.ui.openDrawerTab.mock.calls[0][0]).toBe('connections');
+    expect(mockSpindle.ui.openDrawerTab.mock.calls[0][1]).toEqual({ userId: 'u-2' });
+  });
+
+  test('openSettings forwards viewId + userId; undefined viewId is passed through', async () => {
+    const api = buildApi({ userId: 'u-3' });
+    await api.openSettings('connections');
+    expect(mockSpindle.ui.openSettings.mock.calls[0][0]).toBe('connections');
+    expect(mockSpindle.ui.openSettings.mock.calls[0][1]).toEqual({ userId: 'u-3' });
+
+    await api.openSettings();
+    expect(mockSpindle.ui.openSettings.mock.calls[1][0]).toBeUndefined();
+  });
+
+  test('closeDrawer / closeSettings / openCommandPalette / closeCommandPalette forward userId', async () => {
+    const api = buildApi({ userId: 'u-4' });
+    await api.closeDrawer();
+    await api.closeSettings();
+    await api.openCommandPalette();
+    await api.closeCommandPalette();
+    expect(mockSpindle.ui.closeDrawer.mock.calls[0][0]).toEqual({ userId: 'u-4' });
+    expect(mockSpindle.ui.closeSettings.mock.calls[0][0]).toEqual({ userId: 'u-4' });
+    expect(mockSpindle.ui.openCommandPalette.mock.calls[0][0]).toEqual({ userId: 'u-4' });
+    expect(mockSpindle.ui.closeCommandPalette.mock.calls[0][0]).toEqual({ userId: 'u-4' });
+  });
+});
+
+// ─── pickFile (frontend round-trip) ─────────────────────────────────────────────
+
+describe('pickFile', () => {
+  // Grab the most recent ls_pick_file_request the canonical sent to the frontend.
+  function lastPickRequest(): any {
+    const calls = mockSpindle.sendToFrontend.mock.calls;
+    for (let i = calls.length - 1; i >= 0; i--) {
+      if (calls[i][0]?.type === 'ls_pick_file_request') return calls[i][0];
+    }
+    return undefined;
+  }
+
+  test('sends ls_pick_file_request with the options, then resolves with decoded files', async () => {
+    const api = buildApi();
+    const p = api.pickFile({ accept: ['.json'], multiple: true, maxSizeBytes: 1000 });
+
+    const req = lastPickRequest();
+    expect(req.type).toBe('ls_pick_file_request');
+    expect(req.options).toEqual({ accept: ['.json'], multiple: true, maxSizeBytes: 1000 });
+    expect(typeof req.requestId).toBe('string');
+
+    // Simulate the frontend echo. 'aGk=' is base64 for the bytes [104, 105] = "hi".
+    resolvePickFile(req.requestId, {
+      files: [{ name: 'a.txt', mimeType: 'text/plain', sizeBytes: 2, dataBase64: 'aGk=' }],
+    });
+
+    const files = await p;
+    expect(files).toHaveLength(1);
+    expect(files[0]!.name).toBe('a.txt');
+    expect(files[0]!.mimeType).toBe('text/plain');
+    expect(Array.from(files[0]!.bytes)).toEqual([104, 105]);
+    expect(new TextDecoder().decode(files[0]!.bytes)).toBe('hi');
+  });
+
+  test('resolves with [] when the user cancels (empty files)', async () => {
+    const api = buildApi();
+    const p = api.pickFile();
+    resolvePickFile(lastPickRequest().requestId, { files: [] });
+    expect(await p).toEqual([]);
+  });
+
+  test('rejects when the host reports an error (e.g. oversize)', async () => {
+    const api = buildApi();
+    const p = api.pickFile({ maxSizeBytes: 1 });
+    resolvePickFile(lastPickRequest().requestId, { error: 'File exceeds the maximum size' });
+    await expect(p).rejects.toThrow('File exceeds the maximum size');
+  });
+
+  test('resolvePickFile no-ops on an unknown requestId', () => {
+    expect(() => resolvePickFile('does-not-exist', { files: [] })).not.toThrow();
   });
 });

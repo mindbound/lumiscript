@@ -148,6 +148,22 @@ export interface RedirectLookupEntry {
  * content, aborted flag, usage). Those are ephemeral — relevant only to
  * the in-flight turn, not the thread's historical record.
  */
+/**
+ * A record that the user applied assistant-proposed code to a script — either
+ * created a new one or updated an existing one in place. Stored parallel to
+ * `messages` (NEVER sent to the LLM) and rendered as an inline transcript marker
+ * so the user can see provenance. `afterMessageCount` anchors it after the Nth
+ * message so it reconstructs in the right spot on reload.
+ */
+export interface AppliedEvent {
+  /** Count of messages in the thread (`messages.length`) when the apply happened. */
+  afterMessageCount: number;
+  scriptName: string;
+  scriptType: import('../types/script.js').ScriptType;
+  /** True = updated an existing script in place; false = created a new one. */
+  updated: boolean;
+}
+
 export interface AssistantThread {
   /** UUID v4. Stable across renames / edits. */
   id: string;
@@ -164,6 +180,35 @@ export interface AssistantThread {
    *  exactly — what the agent module would feed into the next turn's
    *  `runAssistantTurn` call. */
   messages: import('lumiverse-spindle-types').LlmMessageDTO[];
+  /** IDs of the user's scripts attached as persistent read-context for this
+   *  conversation (@-mentioned in the composer). Re-resolved to fresh code on
+   *  every send and folded into the ephemeral system prompt, so the code stays
+   *  current and never bloats `messages`. Persisting just the IDs lets the chip
+   *  tray restore on thread reload / switch. Optional — threads persisted before
+   *  this field shipped load as `undefined` (treated as no context). */
+  contextScriptIds?: string[];
+  /** Per-attached-script code hashes as of the last turn Lisa was shown them
+   *  (scriptId → cheap hash). Lets the next turn detect that an attached script's
+   *  code changed since she last saw it (her own Apply, or a manual edit) and flag
+   *  it in-context, so she isn't confused by code shifting under her. Only
+   *  currently-attached scripts are tracked; persisted so detection survives
+   *  reload. Optional — older threads load as `undefined` (no baseline → no flag). */
+  seenScriptHashes?: Record<string, string>;
+  /** Reserved-folder ("userfiles/") file paths attached as persistent read-
+   *  context for this conversation (the file equivalent of contextScriptIds).
+   *  Re-resolved to fresh text on every send; persisting the paths restores the
+   *  chips on reload. Optional — older threads load as `undefined` (no files). */
+  contextFilePaths?: string[];
+  /** Per-attached-file content hashes as of the last turn Lisa saw them
+   *  (path → hash) — the file analogue of seenScriptHashes, driving the
+   *  "file changed since your last message" note. Optional; older threads
+   *  load as `undefined` (no baseline → no flag). */
+  seenFileHashes?: Record<string, string>;
+  /** "Apply to script" events (create/update from a code block's Apply button)
+   *  recorded for this conversation, rendered as inline transcript markers.
+   *  Parallel to `messages` — never sent to the LLM. Optional; older threads
+   *  load without it. */
+  appliedEvents?: AppliedEvent[];
 }
 
 /**

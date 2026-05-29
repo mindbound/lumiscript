@@ -518,6 +518,223 @@ if (unexpectedApiOnly.length > 0 || unexpectedEditorOnly.length > 0) {
   process.exit(1);
 }
 
+// ─── Phase 2 drift validation: signature shape ──────────────────────────────
+//
+// Phase 1 catches name-level drift (method in one source, not the other).
+// Phase 2 catches SIGNATURE-shape drift: API_GROUPS' `args` field vs the
+// arg list in editor-lib's declared TypeScript signature.
+//
+// Catches:
+//   - Arg count mismatch (docs say 2 args, source has 3)
+//   - Arg name drift (docs say `opts`, source uses `options`)
+//   - Optionality drift (docs say required, source declares optional, or vice versa)
+//
+// Doesn't catch (yet — out of scope for this pass):
+//   - Type-shape drift inside option objects (would need a deeper script.ts walk)
+//   - Object-form-vs-positional drift in worked examples inside guide markdown
+//     (docs guides are markdown; signature drift check operates on API_GROUPS rows)
+//   - Return-type drift (API_GROUPS args field doesn't carry return info)
+//
+// Adopted v1.0.0-rc.9 — flagged as "post-RC9 backlog" in the rc.8 Lisa-corpus QA;
+// promoted to in-scope after the rc.8 docs cycle caught 15 signature-shape bugs
+// in worked examples that this gate would have caught at source-of-truth level.
+
+interface ParsedArg {
+  name:     string;
+  optional: boolean;
+  isRest:   boolean;
+}
+
+interface SignatureDrift {
+  fqName:    string;
+  reason:    string;       // one-line human-readable explanation
+  docFormat: string;       // normalized rendering of API_GROUPS args
+  sigFormat: string;       // normalized rendering of editor-lib signature args
+}
+
+const SIGNATURE_DRIFT_ALLOWLIST: Allowlist = [
+  // `api.llm.generateWithTools` has two overloads — the 3-arg form
+  // `(messages, tools, options?)` returns LLMRawResult; the 4-arg form
+  // `(messages, tools, options, schema)` returns LLMRawResultStructured<T>
+  // and requires both `options` and `schema` (options accepts `undefined`
+  // explicitly to skip overload-1's options-less shape). The editor-lib
+  // walker captures the LAST overload (the 4-arg structured form), so the
+  // parsed signature shows `(messages, tools, options, schema)` with both
+  // required. The API_GROUPS row presents the docs-side union
+  // `(messages, tools, options?, schema?)` to communicate that both
+  // tail-args are user-omissible at the call site (overload-1 path drops
+  // them; overload-2 path accepts `undefined` for options). The drift here
+  // is real but is fundamentally a "method has overloads, docs flatten
+  // them" presentation issue rather than a signature-correctness issue.
+  // Both surfaces are accurate against the underlying overload set.
+  { match: 'api.llm.generateWithTools', reason: 'Method has two overloads (3-arg + 4-arg structured). Docs args field unions them as `(messages, tools, options?, schema?)`; the editor-lib walker captures only the last (structured) overload as `(messages, tools, options, schema)`. Semantic equivalence verified against script.ts:LLMAPI.' },
+];
+
+/**
+ * Parse the `args` field of an API_GROUPS row. Examples:
+ *   '—'                         → []   (no args; em-dash convention)
+ *   'foo'                       → [{name:'foo',  optional:false}]
+ *   'foo?'                      → [{name:'foo',  optional:true}]
+ *   'target, html, options?'    → 3 args, last optional
+ *   '...args'                   → [{name:'args', optional:true, isRest:true}]
+ *   'keys[]'                    → [{name:'keys'}] (the [] suffix is descriptive)
+ */
+function parseDocArgs(args: string): ParsedArg[] {
+  const trimmed = args.trim();
+  if (trimmed === '' || trimmed === '—' || trimmed === '-') return [];
+  return trimmed.split(',').map((raw) => {
+    let core = raw.trim();
+    const isRest = core.startsWith('...');
+    if (isRest) core = core.slice(3);
+    // Strip trailing optional marker.
+    const optional = core.endsWith('?');
+    if (optional) core = core.slice(0, -1);
+    // Strip docs-only array suffix like `keys[]`.
+    if (core.endsWith('[]')) core = core.slice(0, -2);
+    // Strip type annotation if present: `foo: SomeType` → `foo`.
+    const colonIdx = core.indexOf(':');
+    if (colonIdx !== -1) core = core.slice(0, colonIdx);
+    return { name: core.trim(), optional: optional || isRest, isRest };
+  });
+}
+
+/**
+ * Parse the arg list out of an editor-lib TypeScript method signature
+ * (e.g., `inject(target: string, html: string, options?: DOMInjectOptions): DOMHandle`).
+ *
+ * Bracket-depth-aware to handle nested generics + object-literal types
+ * + function-type args, all of which contain commas that aren't arg
+ * separators.
+ */
+function parseSigArgs(signature: string): ParsedArg[] {
+  // Find the START of the outer arg list — first `(` AFTER any leading
+  // identifier + generic params. We just find the first `(` since editor-
+  // lib signatures start with the method name.
+  const start = signature.indexOf('(');
+  if (start === -1) return [];
+
+  // Walk forward tracking bracket depth across `()`, `<>`, `{}`, `[]` to
+  // find the matching close paren of the outer arg list.
+  //
+  // GOTCHA: `=>` in function-type args contains `>` which is NOT a
+  // closing bracket — it's part of an arrow-token. The depth tracking
+  // skips a `>` immediately preceded by `=`. Same logic in both passes.
+  let depth = 1;
+  let i = start + 1;
+  while (i < signature.length && depth > 0) {
+    const ch = signature[i]!;
+    const prev = i > 0 ? signature[i - 1] : '';
+    if (ch === '(' || ch === '<' || ch === '{' || ch === '[') depth++;
+    else if (ch === ')' || ch === '}' || ch === ']') depth--;
+    else if (ch === '>' && prev !== '=') depth--;
+    i++;
+  }
+  if (depth !== 0) return [];
+
+  const argListRaw = signature.slice(start + 1, i - 1).trim();
+  if (argListRaw === '') return [];
+
+  // Split at depth-0 commas (same `=>` skip rule).
+  const argChunks: string[] = [];
+  let curDepth = 0;
+  let lastSplit = 0;
+  for (let j = 0; j < argListRaw.length; j++) {
+    const ch = argListRaw[j]!;
+    const prev = j > 0 ? argListRaw[j - 1] : '';
+    if (ch === '(' || ch === '<' || ch === '{' || ch === '[') curDepth++;
+    else if (ch === ')' || ch === '}' || ch === ']') curDepth--;
+    else if (ch === '>' && prev !== '=') curDepth--;
+    else if (ch === ',' && curDepth === 0) {
+      argChunks.push(argListRaw.slice(lastSplit, j).trim());
+      lastSplit = j + 1;
+    }
+  }
+  argChunks.push(argListRaw.slice(lastSplit).trim());
+
+  // Filter out empty chunks — produced by trailing commas in multi-line
+  // signatures (TS allows them, and editor-lib's regex walk preserves them).
+  const filtered = argChunks.filter((c) => c !== '');
+
+  return filtered.map((chunk) => {
+    const isRest = chunk.startsWith('...');
+    let core = isRest ? chunk.slice(3) : chunk;
+    // Name is everything before the first `:` (after stripping rest).
+    const colonIdx = core.indexOf(':');
+    let namePart = colonIdx === -1 ? core : core.slice(0, colonIdx);
+    const optional = namePart.endsWith('?');
+    if (optional) namePart = namePart.slice(0, -1);
+    return { name: namePart.trim(), optional: optional || isRest, isRest };
+  });
+}
+
+function renderArgs(args: ParsedArg[]): string {
+  return args.map((a) => `${a.isRest ? '...' : ''}${a.name}${a.optional && !a.isRest ? '?' : ''}`).join(', ') || '—';
+}
+
+function compareSignatures(fqName: string, docArgs: ParsedArg[], sigArgs: ParsedArg[]): SignatureDrift | null {
+  const docFormat = renderArgs(docArgs);
+  const sigFormat = renderArgs(sigArgs);
+
+  if (docArgs.length !== sigArgs.length) {
+    return {
+      fqName,
+      reason:    `arg count mismatch — docs say ${docArgs.length}, source has ${sigArgs.length}`,
+      docFormat,
+      sigFormat,
+    };
+  }
+  for (let i = 0; i < docArgs.length; i++) {
+    const d = docArgs[i]!;
+    const s = sigArgs[i]!;
+    if (d.name !== s.name) {
+      return {
+        fqName,
+        reason:    `arg-name mismatch at position ${i} — docs "${d.name}", source "${s.name}"`,
+        docFormat,
+        sigFormat,
+      };
+    }
+    if (d.optional !== s.optional) {
+      return {
+        fqName,
+        reason:    `arg-optionality mismatch at position ${i} ("${d.name}") — docs ${d.optional ? 'optional' : 'required'}, source ${s.optional ? 'optional' : 'required'}`,
+        docFormat,
+        sigFormat,
+      };
+    }
+  }
+  return null;
+}
+
+const signatureDrifts: SignatureDrift[] = [];
+for (const [fqName, api] of apiIndex) {
+  const editor = editorLibIndex.get(fqName);
+  if (!editor) continue;     // name-level drift already caught by Phase 1
+  const docArgs = parseDocArgs(api.args);
+  const sigArgs = parseSigArgs(editor.signature);
+  const drift = compareSignatures(fqName, docArgs, sigArgs);
+  if (drift) signatureDrifts.push(drift);
+}
+
+const unexpectedSigDrifts = signatureDrifts.filter(
+  (d) => !isAllowlisted(d.fqName, SIGNATURE_DRIFT_ALLOWLIST)
+);
+
+console.log(`         · signature drift:           ${signatureDrifts.length} row(s) (${unexpectedSigDrifts.length} unexpected)`);
+
+if (unexpectedSigDrifts.length > 0) {
+  console.error('[corpus] Unexpected signature drift — failing the build.');
+  for (const d of unexpectedSigDrifts) {
+    console.error(`           - ${d.fqName}: ${d.reason}`);
+    console.error(`               docs:   (${d.docFormat})`);
+    console.error(`               source: (${d.sigFormat})`);
+  }
+  console.error("         Either align API_GROUPS' `args` field with the editor-lib signature,");
+  console.error('         OR add the entry to SIGNATURE_DRIFT_ALLOWLIST in scripts/gen-assistant-corpus.ts');
+  console.error('         with a rationale (e.g., known doc-side abbreviation that should stay).');
+  process.exit(1);
+}
+
 // Permission descriptions coverage check.
 const declaredPerms = new Set<string>();
 for (const g of PERM_GROUPS) {

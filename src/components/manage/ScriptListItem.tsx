@@ -1,7 +1,8 @@
-import { FC } from 'react';
-import { Copy, Trash2, ToggleLeft, ToggleRight, UserRound, MessageSquare, Pencil, Play, Loader2 } from 'lucide-react';
+import { FC, useState } from 'react';
+import { Copy, Trash2, ToggleLeft, ToggleRight, UserRound, MessageSquare, Pencil, Play, Loader2, AlertTriangle } from 'lucide-react';
 import type { Script } from '../../types/script.js';
 import type { FrontendToBackend } from '../../types/messages.js';
+import { ConfirmDialog } from '../common/ConfirmDialog.js';
 
 export type ExecutionDot = 'idle' | 'running' | 'success' | 'error';
 
@@ -31,6 +32,8 @@ export const ScriptListItem: FC<ScriptListItemProps> = ({
   onEdit,
   sendToBackend,
 }) => {
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
   const handleToggle = (e: React.MouseEvent) => {
     e.stopPropagation();
     sendToBackend({ type: 'update_script', id: script.id, patch: { enabled: !script.enabled } });
@@ -43,7 +46,11 @@ export const ScriptListItem: FC<ScriptListItemProps> = ({
 
   const handleDelete = (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (!window.confirm(`Delete "${script.name}"?`)) return;
+    setConfirmDelete(true);
+  };
+
+  const confirmDeleteNow = () => {
+    setConfirmDelete(false);
     sendToBackend({ type: 'delete_script', id: script.id });
   };
 
@@ -63,6 +70,7 @@ export const ScriptListItem: FC<ScriptListItemProps> = ({
   const bindingCount = script.bindings?.length ?? 0;
 
   return (
+    <>
     <div
       className={`ls-item${selected ? ' ls-selected' : ''}${!script.enabled && script.type !== 'library' ? ' ls-disabled' : ''}`}
       onClick={onSelect}
@@ -146,5 +154,27 @@ export const ScriptListItem: FC<ScriptListItemProps> = ({
         </button>
       </div>
     </div>
+
+    {confirmDelete && (
+      <ConfirmDialog
+        title={`Delete ${script.type === 'library' ? 'library' : 'script'}?`}
+        icon={<Trash2 size={15} style={{ color: 'var(--lumiverse-danger, rgb(246, 130, 130))' }} />}
+        variant="danger"
+        confirmLabel="Delete"
+        confirmIcon={<Trash2 size={12} />}
+        onConfirm={confirmDeleteNow}
+        onCancel={() => setConfirmDelete(false)}
+      >
+        <p className="ls-confirm-message">
+          This will permanently delete the {script.type === 'library' ? 'library' : 'script'}{' '}
+          <strong>{script.name}</strong>.
+        </p>
+        <div className="ls-confirm-warning">
+          <AlertTriangle size={12} />
+          <span>This action cannot be undone.</span>
+        </div>
+      </ConfirmDialog>
+    )}
+    </>
   );
 };

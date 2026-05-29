@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0-rc.8",
+  "version": "1.0.0-rc.9",
   "name": "LumiScript",
   "identifier": "lumiscript",
   "author": "mindbound",
@@ -28,7 +28,9 @@
     "app_manipulation",
     "images",
     "image_gen",
-    "oauth"
+    "oauth",
+    "web_search",
+    "memories"
   ],
   "requested_capabilities": [
     "dynamic_code_execution"

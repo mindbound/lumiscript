@@ -94,6 +94,37 @@ describe('ChildToParentMessageSchema — happy paths (every variant)', () => {
     }).success).toBe(true);
   });
 
+  test('accepts StreamRequest (minimal — no optional fields)', () => {
+    expect(ChildToParentMessageSchema.safeParse({
+      type:      'stream-request',
+      requestId: 'req-1',
+      runId:     'r-1',
+      scriptId:  's-1',
+      method:    'llm.generateStream',
+      args:      [[{ role: 'user', content: 'hi' }]],
+    }).success).toBe(true);
+  });
+
+  test('accepts StreamRequest (with hasSignal + _runIdSource)', () => {
+    expect(ChildToParentMessageSchema.safeParse({
+      type:         'stream-request',
+      requestId:    'req-1',
+      runId:        'r-1',
+      scriptId:     's-1',
+      method:       'llm.generateStream',
+      args:         [[{ role: 'user', content: 'hi' }], { maxTokens: 100 }],
+      hasSignal:    true,
+      _runIdSource: 'context',
+    }).success).toBe(true);
+  });
+
+  test('accepts StreamCancelRequest', () => {
+    expect(ChildToParentMessageSchema.safeParse({
+      type:      'stream-cancel',
+      requestId: 'req-1',
+    }).success).toBe(true);
+  });
+
   test('accepts BroadcastSubscribeMessage', () => {
     expect(ChildToParentMessageSchema.safeParse({
       type:     'broadcast-subscribe',
@@ -271,6 +302,29 @@ describe('ChildToParentMessageSchema — rejects malformed inputs', () => {
       scriptId:  's-1',
       method:    'find',
       args:      'not-an-array',
+    }).success).toBe(false);
+  });
+
+  test('rejects StreamRequest missing required runId', () => {
+    expect(ChildToParentMessageSchema.safeParse({
+      type:      'stream-request',
+      requestId: 'req-1',
+      scriptId:  's-1',
+      method:    'llm.generateStream',
+      args:      [],
+      // runId missing
+    }).success).toBe(false);
+  });
+
+  test('rejects StreamRequest with unknown top-level key (strict)', () => {
+    expect(ChildToParentMessageSchema.safeParse({
+      type:        'stream-request',
+      requestId:   'req-1',
+      runId:       'r-1',
+      scriptId:    's-1',
+      method:      'llm.generateStream',
+      args:        [],
+      targetHandle: { __handleRef: true, id: 'h', kind: 'Collection' }, // streams have no handle form
     }).success).toBe(false);
   });
 

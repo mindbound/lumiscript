@@ -515,7 +515,8 @@ interface DryRunMemoryStats {
   chunksAvailable: number;
   chunksPending: number;
   injectionMethod: 'macro' | 'fallback' | 'disabled';
-  retrievedChunks: Array<{ score: number; tokenEstimate: number; messageRange: [number, number]; preview: string }>;
+  retrievalMode?: 'vector' | 'recency' | 'empty' | 'disabled';
+  retrievedChunks: Array<{ score: number | null; tokenEstimate: number; messageRange: [number, number]; preview: string }>;
   queryPreview: string;
   settingsSource: 'global' | 'per_chat';
 }
@@ -563,6 +564,54 @@ interface LLMRawResultStructured<T> {
   reasoning_content?: string;
 }
 
+/**
+ * One chunk yielded by \`api.llm.generateStream\`. Three variants:
+ *  - \`'token'\`     — incremental visible content chunk
+ *  - \`'reasoning'\` — incremental chain-of-thought chunk (thinking-mode models only)
+ *  - \`'done'\`      — terminal chunk emitted exactly once on successful completion
+ *
+ * The \`'done'\` chunk carries the full aggregated content, \`finish_reason\`,
+ * optional \`tool_calls\`, and optional \`usage\` token counts. Stream-only
+ * surface — non-streaming methods don't currently expose \`usage\`.
+ *
+ * Cancellation: breaking out of the consumer's \`for await\` loop calls
+ * \`.return()\` on the iterator, which propagates to the upstream stream and
+ * tears down the HTTP request. You can also pass an \`AbortSignal\` via
+ * \`options.signal\` for external cancellation.
+ *
+ * Field-naming: snake_case throughout, mirroring \`LLMRawResult\` and the
+ * upstream \`StreamChunkDTO\`. No DTO translation at the boundary.
+ */
+type StreamChunk =
+  | { type: 'token';     token: string }
+  | { type: 'reasoning'; token: string }
+  | {
+      type:           'done';
+      /** Full aggregated content (concatenation of all \`token\` chunks). */
+      content:        string;
+      /** Aggregated reasoning content (concatenation of all \`reasoning\` chunks). Absent when the model didn't produce reasoning. */
+      reasoning?:     string;
+      /** Why the generation stopped: \`'stop'\`, \`'length'\`, \`'tool_calls'\`, \`'content_filter'\`, provider-specific. */
+      finish_reason:  string;
+      /** Function calls requested by the LLM. Present when \`finish_reason === 'tool_calls'\` (or provider-equivalent). */
+      tool_calls?:    ToolCall[];
+      /**
+       * Token-count statistics. Present when the provider reports them
+       * (most do; some self-hosted providers don't, and some report all
+       * zeros which is functionally equivalent to "didn't report").
+       *
+       * Stream-only — the non-stream \`generate\` / \`generateStructured\` /
+       * \`generateWithTools\` methods don't currently surface \`usage\`.
+       * Breaking out of the stream before the \`'done'\` chunk arrives
+       * means you won't see usage at all.
+       */
+      usage?: {
+        prompt_tokens:     number;
+        completion_tokens: number;
+        total_tokens:      number;
+      };
+    };
+
 interface LLMAPI {
   /**
    * Generate a text response from the LLM. Requires generation permission.
@@ -573,6 +622,41 @@ interface LLMAPI {
    * ], { connectionName: 'My GPT-4o' });
    */
   generate(messages: LLMMessage[], options?: LLMOptions): Promise<string>;
+
+  /**
+   * Streaming variant of \`generate\`. Returns an async iterator yielding
+   * \`StreamChunk\` values: incremental \`'token'\` and \`'reasoning'\` chunks
+   * followed by exactly one terminal \`'done'\` chunk with the full aggregated
+   * content + \`finish_reason\` + optional \`tool_calls\` + optional \`usage\`.
+   *
+   * Same connection-resolution, provider/model-override, and \`options.signal\`
+   * cancellation semantics as \`generate\`.
+   *
+   * Cancellation:
+   *  - Breaking out of the \`for await\` loop calls \`.return()\` on the iterator,
+   *    which propagates to the upstream stream and tears down the HTTP request.
+   *  - Passing an \`AbortSignal\` via \`options.signal\` cancels externally. After
+   *    abort, the iterator rejects on the next \`.next()\` with an \`AbortError\`.
+   *
+   * Requires generation permission.
+   *
+   * @example basic streaming consumer
+   * let content = '';
+   * for await (const chunk of api.llm.generateStream(messages)) {
+   *   if (chunk.type === 'token')     content += chunk.token;
+   *   else if (chunk.type === 'done') console.log('done:', chunk.finish_reason);
+   * }
+   *
+   * @example partial-output-informed abort — stop early when banned content appears
+   * const ctrl = new AbortController();
+   * for await (const chunk of api.llm.generateStream(messages, { signal: ctrl.signal })) {
+   *   if (chunk.type === 'token' && chunk.token.toLowerCase().includes('banned-word')) {
+   *     ctrl.abort();
+   *     break;
+   *   }
+   * }
+   */
+  generateStream(messages: LLMMessage[], options?: LLMOptions): AsyncGenerator<StreamChunk, void, void>;
 
   /**
    * Generate and parse a structured JSON response. Requires generation permission.
@@ -638,6 +722,111 @@ interface LLMAPI {
    * Useful for inspecting what the LLM would receive. Requires generation permission.
    */
   dryRun(options?: DryRunOptions): Promise<DryRunResult>;
+}
+
+// ─── Connections API ────────────────────────────────────────────────────────────
+
+/** Read-only view of an LLM connection profile. NEVER contains the API key (only has_api_key). */
+interface Connection {
+  id: string;
+  name: string;
+  provider: string;
+  api_url: string;
+  model: string;
+  preset_id: string | null;
+  is_default: boolean;
+  has_api_key: boolean;
+  metadata: Record<string, unknown>;
+  reasoning_bindings: Record<string, unknown> | null;
+  created_at: number;
+  updated_at: number;
+}
+
+/** Read-only access to the user's LLM connection profiles. Free tier. No create/update/delete (connections hold credentials). */
+interface ConnectionsAPI {
+  /** List all of the user's connection profiles. */
+  list(): Promise<Connection[]>;
+  /** Get a connection profile by ID, or null. */
+  get(connectionId: string): Promise<Connection | null>;
+  /** Get the user's default connection (is_default, or first available), or null. */
+  getDefault(): Promise<Connection | null>;
+  /** Find a connection by name (case-insensitive), or null. */
+  findByName(name: string): Promise<Connection | null>;
+}
+
+// ─── Web Search API ───────────────────────────────────────────────────────────
+
+/** Safe view of the user's web-search config. NEVER contains the API key (only hasApiKey). */
+interface WebSearchSettings {
+  enabled: boolean;
+  provider: string;
+  apiUrl: string;
+  requestTimeoutMs: number;
+  defaultResultCount: number;
+  maxResultCount: number;
+  maxPagesToScrape: number;
+  maxCharsPerPage: number;
+  language: string;
+  safeSearch: 0 | 1 | 2;
+  engines: string[];
+  hasApiKey: boolean;
+}
+interface WebSearchResult {
+  title: string;
+  url: string;
+  snippet: string;
+  engine?: string;
+  score?: number;
+}
+interface WebSearchDocument {
+  title: string;
+  url: string;
+  snippet: string;
+  sourceType?: string;
+  content?: string;
+  contentLength?: number;
+  error?: string;
+}
+interface WebSearchOptions {
+  query: string;
+  count?: number;
+  scrape?: boolean;
+}
+interface WebSearchResponse {
+  query: string;
+  results: WebSearchResult[];
+  documents?: WebSearchDocument[];
+  context?: string;
+}
+/** Web search against the user's configured provider. Requires web_search permission. */
+interface WebSearchAPI {
+  /** Run a search. With scrape (default) you also get scraped documents + a prompt-ready context. */
+  query(options: WebSearchOptions): Promise<WebSearchResponse>;
+  /** Read the safe web-search config (never the API key). */
+  getSettings(): Promise<WebSearchSettings>;
+}
+
+// ─── Users API ────────────────────────────────────────────────────────────────
+
+/** The active user's Lumiverse role. Internal owners report as 'operator'. */
+type UserRole = 'operator' | 'admin' | 'user';
+
+/** Active-user context queries: session visibility + Lumiverse role. Free tier. */
+interface UsersAPI {
+  /** True if the active user has the app visible in at least one session. */
+  isVisible(): Promise<boolean>;
+  /** The active user's role: 'operator' | 'admin' | 'user'. */
+  getRole(): Promise<UserRole>;
+}
+
+// ─── Version API ────────────────────────────────────────────────────────────────
+
+/** Running Lumiverse backend + frontend versions. Free tier. */
+interface VersionAPI {
+  /** The running backend server's semantic version (e.g. '1.2.0'). */
+  getBackend(): Promise<string>;
+  /** The running frontend bundle's semantic version. */
+  getFrontend(): Promise<string>;
 }
 
 // ─── Variables API ────────────────────────────────────────────────────────────
@@ -874,6 +1063,308 @@ interface MacrosResolveResult {
 
 type UINotificationType = 'info' | 'success' | 'warning' | 'error';
 
+// ─── Shared host components (api.ui.components.*) ──────────────────────────────
+
+/** Handle to a mounted host shared-component. Returned synchronously by mount*. */
+interface MountedComponentHandle<TOptions = Record<string, unknown>> {
+  /** Unique component ID (host-assigned). */
+  readonly id: string;
+  /** Merge a partial of the mount options into the live component. Fire-and-forget. */
+  update(patch: Partial<TOptions>): void;
+  /** Unmount the component and release host resources. Idempotent. */
+  destroy(): void;
+}
+
+/** Handle to a mounted interactive component — adds an async getValue(). */
+interface MountedValueComponentHandle<TOptions = Record<string, unknown>, TValue = unknown>
+  extends MountedComponentHandle<TOptions> {
+  /** Read the current value. Async here (a frontend round-trip), unlike the host's sync getValue(). */
+  getValue(): Promise<TValue>;
+}
+
+/** Handle to a mounted collapsible section. The host owns the chrome; the body is a DOMHandle you fill. */
+interface MountedCollapsibleSectionHandle extends MountedComponentHandle<SpindleCollapsibleSectionOptions> {
+  /** The section body — a DOMHandle your script owns. Inject/update content into it. */
+  readonly body: DOMHandle;
+  /** Read the current expanded state. Async (a frontend round-trip). */
+  isExpanded(): Promise<boolean>;
+  /** Open the section. Fire-and-forget. */
+  expand(): void;
+  /** Close the section. Fire-and-forget. */
+  collapse(): void;
+  /** Flip the section. Fire-and-forget. */
+  toggle(): void;
+}
+
+interface SpindleBadgeOptions {
+  text?: string;
+  color?: 'neutral' | 'primary' | 'success' | 'warning' | 'danger' | 'info';
+  size?: 'sm' | 'md' | 'pill';
+}
+interface SpindleSpinnerOptions {
+  size?: number;
+  fast?: boolean;
+}
+interface SpindleSwitchOptions {
+  checked?: boolean;
+  onChange?: (checked: boolean) => void;
+  size?: 'sm' | 'md';
+  disabled?: boolean;
+  ariaLabel?: string;
+}
+interface SpindleTextInputOptions {
+  value?: string;
+  onChange?: (value: string) => void;
+  placeholder?: string;
+  autoFocus?: boolean;
+  disabled?: boolean;
+  className?: string;
+  ariaLabel?: string;
+}
+interface SpindleTextAreaOptions {
+  value?: string;
+  onChange?: (value: string) => void;
+  placeholder?: string;
+  rows?: number;
+  disabled?: boolean;
+  className?: string;
+  ariaLabel?: string;
+}
+interface SpindleNumericInputOptions {
+  value?: number | null;
+  onChange?: (value: number | null) => void;
+  allowEmpty?: boolean;
+  integer?: boolean;
+  min?: number;
+  max?: number;
+  step?: number;
+  placeholder?: string;
+  disabled?: boolean;
+}
+interface SpindleNumberStepperOptions {
+  value?: number | null;
+  onChange?: (value: number | null) => void;
+  allowEmpty?: boolean;
+  min?: number;
+  max?: number;
+  step?: number;
+  placeholder?: string;
+  disabled?: boolean;
+}
+interface SpindleCheckboxOptions {
+  checked?: boolean;
+  onChange?: (checked: boolean) => void;
+  label?: string;
+  hint?: string;
+  disabled?: boolean;
+}
+interface SpindleRangeSliderFormat {
+  decimals?: number;
+  prefix?: string;
+  suffix?: string;
+}
+interface SpindleRangeSliderOptions {
+  min: number;
+  max: number;
+  value?: number;
+  step?: number;
+  integer?: boolean;
+  onCommit?: (value: number) => void;
+  onDragValue?: (value: number | null) => void;
+  label?: string;
+  hint?: string;
+  format?: SpindleRangeSliderFormat;
+  disabled?: boolean;
+  className?: string;
+}
+type SpindleSelectOptionLeading =
+  | { type: 'image';    src: string; rounded?: boolean; fallback?: { text?: string; background?: string } }
+  | { type: 'icon-svg'; svg: string; color?: string }
+  | { type: 'icon-url'; url: string }
+  | { type: 'swatch';   color: string }
+  | { type: 'initial';  text: string; background?: string; color?: string };
+interface SpindleSelectOption {
+  value: string;
+  label: string;
+  sublabel?: string;
+  group?: string;
+  leading?: SpindleSelectOptionLeading;
+  disabled?: boolean;
+}
+interface SpindleSelectOptionsBase {
+  options?: SpindleSelectOption[];
+  placeholder?: string;
+  searchPlaceholder?: string;
+  searchThreshold?: number;
+  emptyMessage?: string;
+  noResultsMessage?: string;
+  triggerLabel?: string;
+  triggerIcon?: SpindleSelectOptionLeading;
+  triggerClassName?: string;
+  ariaLabel?: string;
+  portal?: boolean;
+  align?: 'left' | 'right';
+  maxHeight?: number;
+  minWidth?: number;
+  disabled?: boolean;
+  className?: string;
+}
+interface SpindleSelectOptions extends SpindleSelectOptionsBase {
+  value?: string;
+  onChange?: (value: string) => void;
+  clearable?: boolean;
+  clearLabel?: string;
+}
+interface SpindleMultiSelectOptions extends SpindleSelectOptionsBase {
+  value?: string[];
+  onChange?: (value: string[]) => void;
+}
+interface SpindleFolderDropdownOptions {
+  folders?: string[];
+  value?: string;
+  onChange?: (folder: string) => void;
+  onCreateFolder?: (name: string) => void;
+  placeholder?: string;
+  disabled?: boolean;
+}
+interface SpindleModelComboboxConnection {
+  kind: 'llm' | 'image' | 'tts' | 'embedding';
+  id?: string;
+}
+interface SpindleModelComboboxOptions {
+  value?: string;
+  onChange?: (value: string) => void;
+  connection?: SpindleModelComboboxConnection;
+  models?: string[];
+  modelLabels?: Record<string, string>;
+  loading?: boolean;
+  onRefresh?: () => void;
+  autoRefreshOnFocus?: boolean;
+  refreshKey?: string;
+  appearance?: 'compact' | 'standard' | 'editor';
+  placeholder?: string;
+  emptyMessage?: string;
+  loadingMessage?: string;
+  browseHint?: string;
+  disabled?: boolean;
+}
+interface SpindlePaginationOptions {
+  currentPage: number;
+  totalPages: number;
+  onPageChange: (page: number) => void;
+  perPage?: number;
+  perPageOptions?: number[];
+  onPerPageChange?: (n: number) => void;
+  totalItems?: number;
+}
+interface SpindleCloseButtonOptions {
+  onClick?: () => void;
+  size?: 'sm' | 'md';
+  variant?: 'subtle' | 'solid';
+  position?: 'static' | 'absolute';
+  iconSize?: number;
+}
+interface SpindleCollapsibleSectionOptions {
+  title: string;
+  iconSvg?: string;
+  iconUrl?: string;
+  badge?: string | number;
+  defaultExpanded?: boolean;
+  onToggle?: (expanded: boolean) => void;
+}
+
+/** A drawer tab discoverable via api.ui.getDrawerTabs() — built-in or extension-contributed. */
+interface UIDrawerTab {
+  /** Stable id to pass to api.ui.openDrawerTab(). */
+  id: string;
+  /** Short label shown beneath the sidebar icon. */
+  shortName: string;
+  /** Full title shown in menus and the command palette. */
+  tabName: string;
+  /** One-line description shown in the command palette. */
+  tabDescription: string;
+  /** Keywords used for command-palette fuzzy search. */
+  keywords: string[];
+  /** Whether the tab is built into Lumiverse or contributed by an extension. */
+  source: 'builtin' | 'extension';
+  /** For extension-contributed tabs, the owning extension's identifier. */
+  extensionId?: string;
+}
+
+/** A settings tab discoverable via api.ui.getSettingsTabs(). Role-restricted tabs are filtered out. */
+interface UISettingsTab {
+  /** Stable id to pass to api.ui.openSettings(). */
+  id: string;
+  /** Short label shown in the settings sidebar. */
+  shortName: string;
+  /** Full title shown in the settings header / command palette. */
+  tabName: string;
+  /** One-line description shown in the command palette. */
+  tabDescription: string;
+  /** Keywords used for command-palette fuzzy search. */
+  keywords: string[];
+  /** Set when the tab is only visible to certain roles. */
+  role?: 'admin' | 'owner';
+}
+
+/** Options for api.ui.pickFile(). */
+interface PickFileOptions {
+  /** File-type filters — extensions and/or MIME types (e.g. ['.json', 'application/json']). */
+  accept?: string[];
+  /** Allow selecting more than one file. Default: false. */
+  multiple?: boolean;
+  /** Maximum size per file in bytes. pickFile() rejects if a selected file exceeds this. */
+  maxSizeBytes?: number;
+}
+
+/** A file returned by api.ui.pickFile(). */
+interface PickedFile {
+  /** Original file name. */
+  name: string;
+  /** MIME type (falls back to 'application/octet-stream'). */
+  mimeType: string;
+  /** File size in bytes. */
+  sizeBytes: number;
+  /** Raw file contents. */
+  bytes: Uint8Array;
+}
+
+/** Virtual-keyboard snapshot from api.ui.events. */
+interface UIKeyboardState {
+  visible: boolean;
+  insetBottom: number;
+  viewportWidth: number;
+  viewportHeight: number;
+}
+
+/** Side-drawer snapshot from api.ui.events. */
+interface UIDrawerState {
+  open: boolean;
+  tabId: string | null;
+}
+
+/** Settings-modal snapshot from api.ui.events. */
+interface UISettingsState {
+  open: boolean;
+  view: string;
+}
+
+/** Reactive Lumiverse UI state — keyboard / drawer / settings. Free tier. */
+interface UIEventsAPI {
+  /** The current virtual-keyboard snapshot. */
+  getKeyboardState(): Promise<UIKeyboardState>;
+  /** Subscribe to keyboard changes. Returns an unsubscribe fn. */
+  onKeyboardChange(handler: (state: UIKeyboardState) => void): () => void;
+  /** The current side-drawer snapshot. */
+  getDrawerState(): Promise<UIDrawerState>;
+  /** Subscribe to drawer changes. Returns an unsubscribe fn. */
+  onDrawerChange(handler: (state: UIDrawerState) => void): () => void;
+  /** The current settings-modal snapshot. */
+  getSettingsState(): Promise<UISettingsState>;
+  /** Subscribe to settings changes. Returns an unsubscribe fn. */
+  onSettingsChange(handler: (state: UISettingsState) => void): () => void;
+}
+
 interface UIAPI {
   /**
    * Show a native Lumiverse toast notification. Fire-and-forget.
@@ -1000,6 +1491,8 @@ interface UIAPI {
    * w.onDragEnd(pos => console.log('dropped at', pos));
    */
   createFloatWidget(options: FloatWidgetOptions): FloatWidgetHandle;
+  /** Mount a route-persistent full-bleed document.body portal. Requires app_manipulation. */
+  mountApp(options?: MountAppOptions): MountedAppHandle;
 
   /**
    * Register a tab in the ViewportDrawer sidebar. The tab body is script-owned
@@ -1026,6 +1519,76 @@ interface UIAPI {
 
   /** Check if push notifications are available. Requires push_notification permission. */
   getPushStatus(): Promise<{ available: boolean; subscriptionCount: number }>;
+
+  // ── Navigation (free tier) ───────────────────────────────────────────────
+  /** List discoverable drawer tabs (built-in + extension-contributed) visible to the user. */
+  getDrawerTabs(): Promise<UIDrawerTab[]>;
+  /** List discoverable settings tabs visible to the user (role-restricted tabs filtered out). */
+  getSettingsTabs(): Promise<UISettingsTab[]>;
+  /** Open the drawer to a specific tab id (built-in or extension-contributed). */
+  openDrawerTab(tabId: string): Promise<void>;
+  /** Close the drawer if it is currently open. */
+  closeDrawer(): Promise<void>;
+  /** Open the settings modal to a tab id (e.g. 'connections', 'display'); omit to land on 'display'. */
+  openSettings(viewId?: string): Promise<void>;
+  /** Close the settings modal if it is currently open. */
+  closeSettings(): Promise<void>;
+  /** Open the command palette overlay. */
+  openCommandPalette(): Promise<void>;
+  /** Close the command palette overlay if it is currently open. */
+  closeCommandPalette(): Promise<void>;
+
+  /**
+   * Open the browser's native file picker and return the selected file(s).
+   * Free tier (the native dialog is the user-action gate). Resolves [] if the
+   * user cancels; rejects if a file exceeds maxSizeBytes. Feed bytes into
+   * api.images.upload / api.db / api.files, or decode text via TextDecoder.
+   */
+  pickFile(options?: PickFileOptions): Promise<PickedFile[]>;
+
+  /** Reactive UI state: keyboard / drawer / settings snapshots + subscriptions. Free tier. */
+  events: UIEventsAPI;
+
+  /**
+   * Shared host-component sub-API. Mounts Lumiverse's first-party themed React
+   * components into a script-owned container element (inject a slot via
+   * api.ui.dom.inject first, then mount into it). Components inherit the active
+   * Lumiverse theme automatically. Requires the app_manipulation permission.
+   */
+  components: {
+    /** Mount an inline status/label badge. */
+    mountBadge(target: DOMHandle, options?: SpindleBadgeOptions): MountedComponentHandle<SpindleBadgeOptions>;
+    /** Mount a loading spinner. */
+    mountSpinner(target: DOMHandle, options?: SpindleSpinnerOptions): MountedComponentHandle<SpindleSpinnerOptions>;
+    /** Mount a toggle switch. onChange fires with the new boolean; getValue() reads the current state. */
+    mountSwitch(target: DOMHandle, options?: SpindleSwitchOptions): MountedValueComponentHandle<SpindleSwitchOptions, boolean>;
+    /** Mount a single-line text input. onChange fires with the current text; getValue() reads it. */
+    mountTextInput(target: DOMHandle, options?: SpindleTextInputOptions): MountedValueComponentHandle<SpindleTextInputOptions, string>;
+    /** Mount a multi-line text editor. onChange fires with the current text; getValue() reads it. */
+    mountTextArea(target: DOMHandle, options?: SpindleTextAreaOptions): MountedValueComponentHandle<SpindleTextAreaOptions, string>;
+    /** Mount a validated number input. onChange/getValue() use number | null. */
+    mountNumericInput(target: DOMHandle, options?: SpindleNumericInputOptions): MountedValueComponentHandle<SpindleNumericInputOptions, number | null>;
+    /** Mount a number input with +/- steppers. onChange/getValue() use number | null. */
+    mountNumberStepper(target: DOMHandle, options?: SpindleNumberStepperOptions): MountedValueComponentHandle<SpindleNumberStepperOptions, number | null>;
+    /** Mount a checkbox. onChange fires with the new boolean; getValue() reads the checked state. */
+    mountCheckbox(target: DOMHandle, options?: SpindleCheckboxOptions): MountedValueComponentHandle<SpindleCheckboxOptions, boolean>;
+    /** Mount a range slider. options.min/options.max required; onCommit fires once per gesture; onDragValue fires live; getValue() reads the committed value. */
+    mountRangeSlider(target: DOMHandle, options: SpindleRangeSliderOptions): MountedValueComponentHandle<SpindleRangeSliderOptions, number>;
+    /** Mount a searchable single-select. onChange fires with the value; getValue() reads it. */
+    mountSelect(target: DOMHandle, options?: SpindleSelectOptions): MountedValueComponentHandle<SpindleSelectOptions, string>;
+    /** Mount a searchable multi-select. onChange/getValue() use string[]. */
+    mountMultiSelect(target: DOMHandle, options?: SpindleMultiSelectOptions): MountedValueComponentHandle<SpindleMultiSelectOptions, string[]>;
+    /** Mount a folder picker with inline create-folder. onChange fires with the folder; getValue() reads it. */
+    mountFolderDropdown(target: DOMHandle, options?: SpindleFolderDropdownOptions): MountedValueComponentHandle<SpindleFolderDropdownOptions, string>;
+    /** Mount the connection-aware model picker. onChange fires with the model id; getValue() reads it. */
+    mountModelCombobox(target: DOMHandle, options?: SpindleModelComboboxOptions): MountedValueComponentHandle<SpindleModelComboboxOptions, string>;
+    /** Mount page navigation (fully controlled; onPageChange required). No getValue(). */
+    mountPagination(target: DOMHandle, options: SpindlePaginationOptions): MountedComponentHandle<SpindlePaginationOptions>;
+    /** Mount a themed close (X) button. onClick fires on click. No getValue(). */
+    mountCloseButton(target: DOMHandle, options?: SpindleCloseButtonOptions): MountedComponentHandle<SpindleCloseButtonOptions>;
+    /** Mount a collapsible section. Host owns the chrome; handle.body is a DOMHandle you fill. options.title required. */
+    mountCollapsibleSection(target: DOMHandle, options: SpindleCollapsibleSectionOptions): MountedCollapsibleSectionHandle;
+  };
 
   /**
    * DOM injection sub-API. Inject HTML and CSS into the Lumiverse frontend and
@@ -1582,6 +2145,26 @@ interface FloatWidgetHandle {
   destroy(): void;
 }
 
+/** Options for api.ui.mountApp(). All optional. */
+interface MountAppOptions {
+  /** CSS class applied to the mount container. */
+  className?: string;
+  /** Where the full-bleed portal sits: 'start' / 'end' / 'app-overlay'. */
+  position?: 'start' | 'end' | 'app-overlay';
+}
+
+/** Handle returned by api.ui.mountApp() — a route-persistent full-bleed portal. */
+interface MountedAppHandle {
+  /** UUID identifying this mount instance. */
+  readonly mountId: string;
+  /** DOMHandle bound to the mount's content container. Fill via api.ui.dom.*. */
+  readonly root: DOMHandle;
+  /** Show or hide the mount without destroying it. */
+  setVisible(visible: boolean): void;
+  /** Remove the mount. Idempotent — subsequent calls are no-ops. */
+  destroy(): void;
+}
+
 // ─── Drawer tabs (lifecycle, DOM-owned) ──────────────────────────────────────
 
 /** Options for \`api.ui.registerDrawerTab()\`. */
@@ -1656,6 +2239,37 @@ interface TempStatResult {
 interface TempWriteOptions {
   /** Time-to-live in milliseconds. Omit for no expiry. */
   ttlMs?: number;
+  /** Charge this write against a tempRequestBlock reservation. */
+  reservationId?: string;
+}
+
+interface TempRequestBlockOptions {
+  /** Time-to-live for the reservation in milliseconds. */
+  ttlMs?: number;
+  /** Free-text reason recorded with the reservation (diagnostics only). */
+  reason?: string;
+}
+
+interface TempReservation {
+  /** Pass to tempWrite/tempWriteBinary options.reservationId, or to tempReleaseBlock. */
+  reservationId: string;
+  /** The reserved size in bytes. */
+  sizeBytes: number;
+  /** ISO 8601 timestamp when the reservation expires if unused. */
+  expiresAt: string;
+}
+
+interface TempPoolStatus {
+  globalMaxBytes: number;
+  globalUsedBytes: number;
+  globalReservedBytes: number;
+  globalAvailableBytes: number;
+  extensionMaxBytes: number;
+  extensionUsedBytes: number;
+  extensionReservedBytes: number;
+  extensionAvailableBytes: number;
+  fileCount: number;
+  fileCountMax: number;
 }
 
 /**
@@ -1681,10 +2295,15 @@ interface FilesAPI {
   sharedMove(from: string, to: string): Promise<void>;
   tempRead(path: string): Promise<string>;
   tempWrite(path: string, data: string, options?: TempWriteOptions): Promise<void>;
+  tempReadBinary(path: string): Promise<Uint8Array>;
+  tempWriteBinary(path: string, data: Uint8Array, options?: TempWriteOptions): Promise<void>;
   tempDelete(path: string): Promise<void>;
   tempList(prefix?: string): Promise<string[]>;
   tempStat(path: string): Promise<TempStatResult>;
   tempClearExpired(): Promise<number>;
+  tempGetPoolStatus(): Promise<TempPoolStatus>;
+  tempRequestBlock(sizeBytes: number, options?: TempRequestBlockOptions): Promise<TempReservation>;
+  tempReleaseBlock(reservationId: string): Promise<void>;
 }
 
 // ─── Enclave API ──────────────────────────────────────────────────────────────
@@ -1788,11 +2407,12 @@ interface ChatSession {
   metadata: Record<string, unknown>; createdAt: number; updatedAt: number;
 }
 interface ChatSessionUpdateInput { name?: string; metadata?: Record<string, unknown>; }
-interface ChatMemoryChunk { content: string; score: number; metadata: Record<string, unknown>; }
+interface ChatMemoryChunk { content: string; score: number | null; metadata: Record<string, unknown>; }
 interface ChatMemoryResult {
   chunks: ChatMemoryChunk[]; formatted: string; count: number; enabled: boolean;
   queryPreview: string; settingsSource: 'global' | 'per_chat';
   chunksAvailable: number; chunksPending: number;
+  retrievalMode?: 'vector' | 'recency' | 'empty' | 'disabled';
 }
 
 interface ChatsAPI {
@@ -2245,6 +2865,364 @@ interface DatabanksAPI {
     /** Polls until status === 'ready'. Throws on error/timeout/deletion. */
     waitUntilReady(documentId: string, options?: DatabankWaitUntilReadyOptions): Promise<DatabankDocumentInfo>;
   };
+}
+
+// ─── Memories API (Memory Cortex + Long-Term Chat Memory) — requires 'memories' ──
+
+type EmotionalTag = 'grief'|'joy'|'tension'|'dread'|'intimacy'|'betrayal'|'revelation'|'resolve'|'humor'|'melancholy'|'awe'|'fury';
+type EntityType = 'character'|'location'|'item'|'faction'|'concept'|'event';
+type EntityStatus = 'active'|'inactive'|'deceased'|'destroyed'|'unknown';
+type RelationType = 'ally'|'enemy'|'lover'|'parent'|'child'|'sibling'|'mentor'|'rival'|'owns'|'member_of'|'located_in'|'fears'|'serves'|'custom';
+
+/** Input to api.memories.cortex.query(). chatId + queryText required; userId folded in by LumiScript. */
+interface CortexQuery {
+  chatId: string;
+  queryText: string;
+  entityFilter?: string[];
+  timeRange?: { start?: number; end?: number };
+  emotionalContext?: EmotionalTag[];
+  generationType?: string;
+  topK?: number;
+  includeConsolidations?: boolean;
+  includeRelationships?: boolean;
+  excludeMessageIds?: string[];
+}
+interface CortexMemoryComponents { semantic: number; salience: number; recency: number; reinforcement: number; emotional: number; entity: number }
+interface CortexMemory {
+  source: 'chunk' | 'consolidation';
+  sourceId: string;
+  content: string;
+  finalScore: number;
+  components: CortexMemoryComponents;
+  emotionalTags: EmotionalTag[];
+  entityNames: string[];
+  messageRange: [number, number];
+  timeRange: [number, number];
+}
+interface EntitySnapshotRelationship { targetName: string; type: RelationType; label: string | null; strength: number; sentiment: number }
+interface EntitySnapshot {
+  id: string;
+  name: string;
+  type: EntityType;
+  status: EntityStatus;
+  description: string;
+  lastSeenAt: number | null;
+  mentionCount: number;
+  topFacts: string[];
+  emotionalProfile: Record<string, number>;
+  relationships: EntitySnapshotRelationship[];
+}
+interface RelationEdge { sourceName: string; targetName: string; type: RelationType; label: string | null; strength: number; sentiment: number }
+interface CortexStats {
+  candidatePoolSize: number;
+  vectorSearchResults: number;
+  entitiesMatched: number;
+  scoreFusionApplied: boolean;
+  topScore: number;
+  retrievalTimeMs: number;
+  timedOut?: boolean;
+  aborted?: boolean;
+}
+/** Fused-score cortex retrieval result. */
+interface CortexResult {
+  memories: CortexMemory[];
+  entityContext: EntitySnapshot[];
+  activeRelationships: RelationEdge[];
+  arcContext: string | null;
+  stats: CortexStats;
+}
+interface VaultCortexData {
+  vaultId: string;
+  vaultName: string;
+  sourceChatId?: string;
+  entities: EntitySnapshot[];
+  relations: RelationEdge[];
+  memories?: CortexMemory[];
+  arcContext?: string | null;
+}
+interface InterlinkCortexData { targetChatId: string; targetChatName: string; result: CortexResult }
+/** Linked-cortex result — attached vaults + interlink targets. */
+interface LinkedCortexResult { vaults: VaultCortexData[]; interlinks: InterlinkCortexData[] }
+/** Memory Cortex configuration. Permissive — advanced + host-added fields pass through. */
+interface MemoryCortexConfig {
+  enabled: boolean;
+  entityTracking: boolean;
+  entityExtractionMode: string;
+  salienceScoring: boolean;
+  [key: string]: unknown;
+}
+/** A vectorized chat chunk — the {{memories}} retrieval unit. */
+interface ChatChunk {
+  id: string;
+  chatId: string;
+  startMessageId: string;
+  endMessageId: string;
+  messageIds: string[];
+  content: string;
+  tokenCount: number;
+  messageCount: number;
+  vectorizedAt: number | null;
+  vectorModel: string | null;
+  retrievalCount: number;
+  lastRetrievedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+// ChatMemoryChunk + ChatMemoryResult are already declared above (shared with
+// api.chats.getMemories) — chatMemory.get reuses them.
+interface ChatMemoryWarmupResult {
+  status: 'skipped' | 'complete' | 'rebuilding' | 'queued' | 'error';
+  reason?: string;
+  rebuilt?: boolean;
+  vectorizationsQueued?: number;
+}
+interface CortexUsageStats {
+  entityCount: number;
+  relationCount: number;
+  salienceRecordCount: number;
+  consolidationCount: number;
+  [key: string]: number | string | boolean | null | undefined;
+}
+interface CortexIngestionTimings {
+  mode: 'heuristic' | 'sidecar' | 'mixed';
+  totalMs: number;
+  completedAt: number;
+  chunkId: string;
+  [key: string]: unknown;
+}
+interface CortexIngestionStatus {
+  chatId: string;
+  status: 'idle' | 'processing' | 'complete' | 'error';
+  phase: 'queued' | 'font' | 'heuristics' | 'sidecar' | 'persisting' | 'complete' | 'error';
+  chunkId: string | null;
+  startedAt: number | null;
+  updatedAt: number;
+  pendingJobs: number;
+  error?: string;
+  timings?: CortexIngestionTimings | null;
+}
+interface CortexIngestionTelemetry {
+  samples: number;
+  last: CortexIngestionTimings | null;
+  averages: { fontMs: number; heuristicMs: number; sidecarMs: number; graphMs: number; dbMs: number; totalMs: number };
+}
+
+interface MemoriesCortexAPI {
+  getConfig(): Promise<MemoryCortexConfig>;
+  putConfig(patch: Partial<MemoryCortexConfig>): Promise<MemoryCortexConfig>;
+  query(query: CortexQuery): Promise<CortexResult>;
+  queryLinked(chatId: string, options?: { queryText?: string }): Promise<LinkedCortexResult>;
+  getCached(chatId: string): Promise<CortexResult | null>;
+  getCachedLinked(chatId: string): Promise<LinkedCortexResult | null>;
+  invalidateCache(chatId: string): Promise<void>;
+  invalidateLinkedCache(chatId: string): Promise<void>;
+}
+interface MemoriesChatMemoryAPI {
+  listChunks(chatId: string): Promise<ChatChunk[]>;
+  get(chatId: string, options?: { topK?: number }): Promise<ChatMemoryResult>;
+  warm(chatId: string, options?: { force?: boolean }): Promise<ChatMemoryWarmupResult>;
+  invalidate(chatId: string): Promise<void>;
+}
+interface MemoriesStatsAPI {
+  usage(chatId: string): Promise<CortexUsageStats>;
+  ingestionStatus(chatId: string): Promise<CortexIngestionStatus | null>;
+  ingestionTelemetry(chatId: string): Promise<CortexIngestionTelemetry>;
+}
+
+type MentionRole = 'subject' | 'object' | 'present' | 'referenced' | 'absent';
+type RelationStatus = 'active' | 'broken' | 'dormant' | 'former';
+
+/** A tracked entity in the cortex graph. */
+interface MemoryEntity {
+  id: string;
+  chatId: string;
+  name: string;
+  entityType: EntityType;
+  aliases: string[];
+  description: string;
+  status: EntityStatus;
+  facts: string[];
+  emotionalValence: Record<string, number>;
+  mentionCount: number;
+  salienceAvg: number;
+  confidence: 'confirmed' | 'provisional';
+  createdAt: number;
+  updatedAt: number;
+  [key: string]: unknown;
+}
+/** Input for upserting an entity (smart-merge against canonical name + aliases). */
+interface MemoryEntityUpsert {
+  name: string;
+  type: EntityType;
+  aliases?: string[];
+  confidence?: number;
+  role?: MentionRole;
+  provisional?: boolean;
+}
+interface MemoryEntityStatusUpdate { status: EntityStatus; statusChangedAt?: number }
+/** A typed relation edge between two entities. */
+interface MemoryRelation {
+  id: string;
+  chatId: string;
+  sourceEntityId: string;
+  targetEntityId: string;
+  relationType: RelationType;
+  relationLabel: string | null;
+  strength: number;
+  sentiment: number;
+  status: RelationStatus;
+  createdAt: number;
+  updatedAt: number;
+  [key: string]: unknown;
+}
+/** Input for upserting a relation (uses entity NAMES; both endpoints must already exist). */
+interface MemoryRelationUpsert {
+  source: string;
+  target: string;
+  type: RelationType;
+  label: string;
+  sentiment: number;
+}
+
+interface MemoriesEntitiesAPI {
+  list(chatId: string, options?: { activeOnly?: boolean; limit?: number }): Promise<MemoryEntity[]>;
+  get(entityId: string): Promise<MemoryEntity | null>;
+  findByName(chatId: string, name: string): Promise<MemoryEntity | null>;
+  upsert(chatId: string, entity: MemoryEntityUpsert, options?: { chunkId?: string | null; createdAt?: number }): Promise<MemoryEntity>;
+  updateStatus(entityId: string, patch: MemoryEntityStatusUpdate): Promise<MemoryEntity>;
+  addFacts(entityId: string, facts: string[]): Promise<MemoryEntity>;
+  getFacts(entityId: string): Promise<string[]>;
+  updateEmotionalValence(entityId: string, valence: Record<string, number>): Promise<MemoryEntity>;
+}
+interface MemoriesRelationsAPI {
+  list(chatId: string): Promise<MemoryRelation[]>;
+  listAll(chatId: string): Promise<MemoryRelation[]>;
+  forEntity(chatId: string, entityId: string): Promise<MemoryRelation[]>;
+  forEntities(chatId: string, entityIds: string[], options?: { limit?: number }): Promise<MemoryRelation[]>;
+  upsert(chatId: string, relation: MemoryRelationUpsert, options?: { chunkId?: string | null }): Promise<MemoryRelation | null>;
+}
+
+type NarrativeFlag = 'first_meeting'|'death'|'promise'|'confession'|'departure'|'transformation'|'battle'|'discovery'|'reunion'|'loss';
+type ChatLinkType = 'vault' | 'interlink';
+
+/** A narrative-arc consolidation (compressed summary). */
+interface MemoryConsolidation {
+  id: string;
+  chatId: string;
+  tier: number;
+  title: string | null;
+  summary: string;
+  entityIds: string[];
+  emotionalTags: EmotionalTag[];
+  createdAt: number;
+  updatedAt: number;
+  [key: string]: unknown;
+}
+/** A per-chunk salience record. */
+interface MemorySalience {
+  chunkId: string;
+  chatId: string;
+  score: number;
+  scoreSource: 'heuristic' | 'sidecar';
+  emotionalTags: EmotionalTag[];
+  narrativeFlags: NarrativeFlag[];
+  statusChanges: { entity: string; change: string; detail: string }[];
+  hasDialogue: boolean;
+  hasAction: boolean;
+  hasInternalThought: boolean;
+  wordCount: number;
+  scoredAt: number;
+}
+/** A frozen cortex snapshot. */
+interface Vault {
+  id: string;
+  userId: string;
+  sourceChatId: string | null;
+  sourceChatName: string | null;
+  name: string;
+  description: string;
+  entityCount: number;
+  relationCount: number;
+  chunkCount: number;
+  createdAt: number;
+}
+interface VaultEntity {
+  id: string; vaultId: string; name: string; entityType: EntityType; aliases: string[];
+  description: string; status: EntityStatus; facts: string[]; emotionalValence: Record<string, number>; salienceAvg: number;
+}
+interface VaultRelation {
+  id: string; vaultId: string; sourceEntityName: string; targetEntityName: string;
+  relationType: RelationType; relationLabel: string | null; strength: number; sentiment: number; status: RelationStatus;
+}
+interface VaultWithContents { vault: Vault; entities: VaultEntity[]; relations: VaultRelation[] }
+interface VaultChunk {
+  id: string; vaultId: string; sourceChunkId: string; content: string;
+  salienceScore: number | null; emotionalTags: string[]; entityNames: string[]; sourceCreatedAt: number; copiedAt: number;
+}
+interface VaultCreate { chatId: string; name: string; description?: string }
+interface VaultReindexResult { mode: string; chunkCount: number }
+/** A vault attach or chat interlink. */
+interface ChatLink {
+  id: string;
+  userId: string;
+  chatId: string;
+  linkType: ChatLinkType;
+  vaultId: string | null;
+  vaultName: string | null;
+  vaultEntityCount: number | null;
+  vaultRelationCount: number | null;
+  targetChatId: string | null;
+  targetChatName: string | null;
+  targetChatExists: boolean;
+  label: string;
+  enabled: boolean;
+  priority: number;
+  createdAt: number;
+}
+interface ChatLinkAttach {
+  chatId: string;
+  linkType: ChatLinkType;
+  vaultId?: string;
+  targetChatId?: string;
+  label?: string;
+  bidirectional?: boolean;
+}
+
+interface MemoriesConsolidationsAPI {
+  list(chatId: string, options?: { tier?: number }): Promise<MemoryConsolidation[]>;
+  latestArc(chatId: string): Promise<MemoryConsolidation | null>;
+  run(chatId: string): Promise<void>;
+}
+interface MemoriesSalienceAPI {
+  list(chatId: string, options?: { limit?: number; offset?: number }): Promise<MemorySalience[]>;
+}
+interface MemoriesVaultsAPI {
+  list(): Promise<Vault[]>;
+  get(vaultId: string): Promise<VaultWithContents | null>;
+  getChunks(vaultId: string): Promise<VaultChunk[]>;
+  create(input: VaultCreate): Promise<Vault>;
+  rename(vaultId: string, name: string): Promise<boolean>;
+  delete(vaultId: string): Promise<boolean>;
+  reindex(vaultId: string): Promise<VaultReindexResult>;
+}
+interface MemoriesLinksAPI {
+  list(chatId: string): Promise<ChatLink[]>;
+  attach(input: ChatLinkAttach): Promise<ChatLink[]>;
+  remove(chatId: string, linkId: string): Promise<boolean>;
+  toggle(chatId: string, linkId: string, enabled: boolean): Promise<boolean>;
+}
+
+/** Memory Cortex + Long-Term Chat Memory. Requires the 'memories' permission. */
+interface MemoriesAPI {
+  cortex: MemoriesCortexAPI;
+  entities: MemoriesEntitiesAPI;
+  relations: MemoriesRelationsAPI;
+  consolidations: MemoriesConsolidationsAPI;
+  salience: MemoriesSalienceAPI;
+  vaults: MemoriesVaultsAPI;
+  links: MemoriesLinksAPI;
+  chatMemory: MemoriesChatMemoryAPI;
+  stats: MemoriesStatsAPI;
 }
 
 // ─── Council API (read-only, free tier) ──────────────────────────────────────
@@ -3374,6 +4352,14 @@ interface ScriptStorageAPI {
 interface LumiScriptAPI {
   chat: ChatAPI;
   llm: LLMAPI;
+  /** Read-only access to the user's LLM connection profiles (never includes API keys). */
+  connections: ConnectionsAPI;
+  /** Web search against the user's configured provider. Requires web_search permission. */
+  webSearch: WebSearchAPI;
+  /** Active-user context queries: session visibility + Lumiverse role. Free tier. */
+  users: UsersAPI;
+  /** Running Lumiverse backend + frontend versions. Free tier. */
+  version: VersionAPI;
   variables: VariablesAPI;
   json: JSONAPI;
   utils: UtilsAPI;
@@ -3387,6 +4373,8 @@ interface LumiScriptAPI {
   worldInfo: WorldInfoAPI;
   /** Databank (vectorised document collection) CRUD + per-document upload, fetch, and reprocess. Requires databanks permission. */
   databanks: DatabanksAPI;
+  /** Memory Cortex + Long-Term Chat Memory. Requires memories permission. */
+  memories: MemoriesAPI;
   /** Persona CRUD + active persona switching. Requires personas permission. */
   personas: PersonasAPI;
   /** Generation preset CRUD + nested prompt-block CRUD + host-derived category grouping. Requires presets permission. */

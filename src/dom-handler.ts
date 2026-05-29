@@ -128,17 +128,42 @@ type DOMMessage = Extract<BackendToFrontend,
   | { type: 'dom_cleanup_script' }
   | { type: 'dom_make_draggable' }
   | { type: 'dom_read_request' }
+  // v1.0.0-rc.9 — shared host components (api.ui.components.*). Handled here
+  // (rather than a sibling handler) because mounting needs `elementMap` + the
+  // `ctx` reference, both already local to this module.
+  | { type: 'comp_mount' }
+  | { type: 'comp_update' }
+  | { type: 'comp_destroy' }
+  | { type: 'comp_get_value' }
+  | { type: 'comp_invoke' }
 >;
 
 function isDOMMessage(msg: unknown): msg is DOMMessage {
   const t = (msg as { type?: string })?.type;
-  return typeof t === 'string' && t.startsWith('dom_');
+  return typeof t === 'string' && (t.startsWith('dom_') || t.startsWith('comp_'));
 }
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
 /** elementId → injected DOM Element */
 const elementMap = new Map<string, Element>();
+
+/**
+ * componentId → mounted host shared-component handle (v1.0.0-rc.9). The value
+ * is the `SpindleMountedComponent` returned by `ctx.components.mountX`. Typed
+ * minimally to the methods we drive over IPC (`update` always; `getValue` for
+ * interactive components added alongside the form components).
+ */
+interface MountedComp {
+  update(patch: Record<string, unknown>): void;
+  destroy(): void;
+  getValue?(): unknown;
+}
+const componentMountMap = new Map<string, MountedComp>();
+/** componentId → scriptId, so `dom_cleanup_script` can destroy a script's mounts. */
+const componentScripts = new Map<string, string>();
+/** componentId → bodyElementId (collapsibleSection only), so destroy/cleanup can unbind the body element. */
+const componentBodies = new Map<string, string>();
 
 // ─── External bindings (exposed for modal-handler) ───────────────────────────
 
@@ -1069,6 +1094,22 @@ export function installDOMHandler(
         for (const [key] of stableIndex) {
           if (key.startsWith(scriptId + ':')) stableIndex.delete(key);
         }
+
+        // Destroy any mounted shared-components owned by this script
+        // (their host DOM was just removed above; destroy() releases the
+        // React tree so it isn't orphaned).
+        for (const [cId, sid] of componentScripts) {
+          if (sid === scriptId) {
+            const handle = componentMountMap.get(cId);
+            if (handle) {
+              try { handle.destroy(); } catch { /* best-effort */ }
+              componentMountMap.delete(cId);
+            }
+            componentScripts.delete(cId);
+            const bodyId = componentBodies.get(cId);
+            if (bodyId) { unbindExternalElement(bodyId); componentBodies.delete(cId); }
+          }
+        }
         break;
       }
 
@@ -1149,6 +1190,109 @@ export function installDOMHandler(
           }
         }, true);
 
+        break;
+      }
+
+      // ── Shared host components (api.ui.components.*, v1.0.0-rc.9) ────────
+      case 'comp_mount': {
+        const { componentId, targetElementId, kind, props } = msg;
+        // Defensive against an older host that predates ctx.components.
+        if (!ctx.components) {
+          console.warn(`[LumiScript] comp_mount: this Lumiverse host does not expose ctx.components (kind=${kind})`);
+          break;
+        }
+        const target = elementMap.get(targetElementId) as HTMLElement | undefined;
+        if (!target) {
+          console.warn(`[LumiScript] comp_mount: target element "${targetElementId}" not found for component "${componentId}" (kind=${kind})`);
+          break;
+        }
+        // Boundary cast: the wire `props` is a plain Record; the host mount
+        // helpers accept their own typed option bags (which our public option
+        // types mirror) and validate at render time.
+        const comps = ctx.components as unknown as Record<
+          string,
+          (el: HTMLElement, opts: Record<string, unknown>) => MountedComp
+        >;
+        const mountFn = comps[`mount${kind.charAt(0).toUpperCase()}${kind.slice(1)}`];
+        if (typeof mountFn !== 'function') {
+          console.warn(`[LumiScript] comp_mount: unknown component kind "${kind}"`);
+          break;
+        }
+        // Wire each registered callback name into the mount props: invoking it
+        // sends a `component_callback` back, which the backend routes to the
+        // script's handler closure. Functions can't cross IPC, so the child
+        // sent only the names; the actual closures live child-side.
+        const wiredProps: Record<string, unknown> = { ...props };
+        for (const name of msg.callbackNames ?? []) {
+          wiredProps[name] = (value: unknown): void => {
+            sendToBackend({ type: 'component_callback', componentId, callbackName: name, value });
+          };
+        }
+        try {
+          const handle = mountFn(target, wiredProps);
+          componentMountMap.set(componentId, handle);
+          componentScripts.set(componentId, msg.scriptId);
+          // Body-slot binding (collapsibleSection): the host handle exposes a
+          // `.body` element the script owns. Bind it to the child-allocated
+          // bodyElementId so the script's body DOMHandle resolves through the
+          // normal DOM pipeline (mirror of how modal/drawer roots are bound).
+          const bodyEl = (handle as unknown as { body?: Element }).body;
+          if (msg.bodyElementId && bodyEl) {
+            bindExternalElement(msg.bodyElementId, bodyEl);
+            componentBodies.set(componentId, msg.bodyElementId);
+          }
+        } catch (err) {
+          console.warn(`[LumiScript] comp_mount: mount${kind} threw: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        break;
+      }
+
+      case 'comp_update': {
+        const { componentId, props } = msg;
+        const handle = componentMountMap.get(componentId);
+        if (handle) {
+          try { handle.update(props); }
+          catch (err) { console.warn(`[LumiScript] comp_update: ${err instanceof Error ? err.message : String(err)}`); }
+        }
+        break;
+      }
+
+      case 'comp_destroy': {
+        const { componentId } = msg;
+        const handle = componentMountMap.get(componentId);
+        if (handle) {
+          try { handle.destroy(); }
+          catch (err) { console.warn(`[LumiScript] comp_destroy: ${err instanceof Error ? err.message : String(err)}`); }
+          componentMountMap.delete(componentId);
+        }
+        componentScripts.delete(componentId);
+        const bodyId = componentBodies.get(componentId);
+        if (bodyId) { unbindExternalElement(bodyId); componentBodies.delete(componentId); }
+        break;
+      }
+
+      case 'comp_get_value': {
+        const { requestId, componentId, method } = msg;
+        const handle = componentMountMap.get(componentId) as (MountedComp & Record<string, unknown>) | undefined;
+        const fnName = method ?? 'getValue';
+        let value: unknown = undefined;
+        const fn = handle?.[fnName];
+        if (typeof fn === 'function') {
+          try { value = (fn as (...a: unknown[]) => unknown).call(handle); }
+          catch (err) { console.warn(`[LumiScript] comp_get_value (${fnName}): ${err instanceof Error ? err.message : String(err)}`); }
+        }
+        sendToBackend({ type: 'comp_value_result', requestId, value });
+        break;
+      }
+
+      case 'comp_invoke': {
+        const { componentId, method, args } = msg;
+        const handle = componentMountMap.get(componentId) as (MountedComp & Record<string, unknown>) | undefined;
+        const fn = handle?.[method];
+        if (typeof fn === 'function') {
+          try { (fn as (...a: unknown[]) => unknown).apply(handle, args ?? []); }
+          catch (err) { console.warn(`[LumiScript] comp_invoke (${method}): ${err instanceof Error ? err.message : String(err)}`); }
+        }
         break;
       }
     }

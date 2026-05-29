@@ -24,7 +24,7 @@
  * sanitised by construction.
  */
 
-import { memo, createContext, useContext, type ReactNode } from 'react';
+import { memo, createContext, useContext, useState, useRef, useEffect, type FC, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { PrismLight as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -34,7 +34,7 @@ import json from 'react-syntax-highlighter/dist/esm/languages/prism/json';
 import css from 'react-syntax-highlighter/dist/esm/languages/prism/css';
 import markup from 'react-syntax-highlighter/dist/esm/languages/prism/markup';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import { FilePlus } from 'lucide-react';
+import { FilePlus, ChevronDown, RefreshCw, Copy, Check } from 'lucide-react';
 
 // ─── Apply-to-script context ─────────────────────────────────────────────────
 //
@@ -49,9 +49,14 @@ import { FilePlus } from 'lucide-react';
 // that re-use MarkdownContent outside the assistant modal).
 
 export interface AssistantApplyContextValue {
-  /** Called when the user clicks the apply button on a code block. Receives
-   *  the raw code text + the fence-language tag (e.g. 'js', 'ts') if known. */
-  onApply: (code: string, languageHint: string | undefined) => void;
+  /** Called when the user picks an apply action on a code block. Receives the
+   *  raw code text, the fence-language tag (e.g. 'js', 'ts') if known, and an
+   *  optional `targetScriptId` — when set, update that existing script in place
+   *  instead of creating a new one. */
+  onApply: (code: string, languageHint: string | undefined, targetScriptId?: string) => void;
+  /** @-attached scripts offered as "Update «name»" targets in the apply menu.
+   *  Empty → the apply button stays a single "create new" action (no menu). */
+  attachedScripts: Array<{ id: string; name: string; type: string }>;
 }
 
 export const AssistantApplyContext = createContext<AssistantApplyContextValue | null>(null);
@@ -67,6 +72,76 @@ SyntaxHighlighter.registerLanguage('css', css);
 SyntaxHighlighter.registerLanguage('html', markup);
 SyntaxHighlighter.registerLanguage('xml', markup);
 
+// ─── Copy-to-clipboard affordance ────────────────────────────────────────────
+//
+// Reusable across the assistant: code blocks (below) and whole replies
+// (MessageBubble). Uses the async Clipboard API when available, with a legacy
+// execCommand fallback for webviews that gate `navigator.clipboard`.
+
+async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // fall through to the legacy path
+  }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-1000px';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Small copy button with transient "Copied" feedback. `withLabel` shows a
+ * "Copy"/"Copied" text label beside the icon (code blocks); without it the
+ * button is icon-only (e.g. the message-reply corner).
+ */
+export const CopyButton: FC<{
+  text: string;
+  className?: string;
+  withLabel?: boolean;
+  title?: string;
+}> = ({ text, className, withLabel, title }) => {
+  const [copied, setCopied] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
+
+  const onClick = async () => {
+    const ok = await copyText(text);
+    if (!ok) return;
+    setCopied(true);
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => setCopied(false), 1500);
+  };
+
+  const label = title ?? 'Copy';
+  return (
+    <button
+      type="button"
+      className={className}
+      onClick={onClick}
+      title={copied ? 'Copied' : label}
+      aria-label={copied ? 'Copied' : label}
+    >
+      {copied ? <Check size={11} /> : <Copy size={11} />}
+      {withLabel && <span>{copied ? 'Copied' : 'Copy'}</span>}
+    </button>
+  );
+};
+
 // ─── Code component ──────────────────────────────────────────────────────────
 
 interface CodeBlockProps {
@@ -78,48 +153,116 @@ interface CodeBlockProps {
 
 const CodeBlock = ({ className, children, ...rest }: CodeBlockProps) => {
   const match = /language-(\w+)/.exec(className ?? '');
-  const apply = useContext(AssistantApplyContext);
   if (match) {
-    const lang = match[1]!;
     const code = String(children ?? '').replace(/\n$/, '');
-    return (
-      // Wrapper sets `position: relative` so the apply button can sit
-      // absolutely in the top-right. The block's outer chrome (margin /
-      // background / border-radius) is supplied by .ls-asst-md-code-wrap
-      // in assistant.css so the absolutely-positioned button doesn't
-      // escape its rounded corner.
-      <div className="ls-asst-md-code-wrap">
-        <SyntaxHighlighter
-          language={lang}
-          style={oneDark}
-          PreTag="div"
-          customStyle={{
-            margin: 0,
-            padding: '10px 12px',
-            borderRadius: 6,
-            fontSize: '12px',
-            background: 'rgba(0, 0, 0, 0.42)',
-          }}
-          wrapLongLines
+    return <FencedCode code={code} lang={match[1]!} />;
+  }
+  return <code className="ls-asst-md-inline-code" {...rest}>{children}</code>;
+};
+
+/**
+ * A fenced code block with its apply affordance. Split out from CodeBlock so
+ * its hooks (menu open-state + click-away) don't run for every inline `<code>`
+ * in the assistant's prose — only for actual fenced blocks.
+ *
+ * When scripts are @-attached (`apply.attachedScripts`), the Apply button opens
+ * a menu offering "Create new script" plus "Update «name»" per attached script
+ * (apply-to-existing). With nothing attached it stays a single create button.
+ */
+const FencedCode = ({ code, lang }: { code: string; lang: string }) => {
+  const apply = useContext(AssistantApplyContext);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  // Close the apply menu on any click outside it.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [menuOpen]);
+
+  const targets = apply?.attachedScripts ?? [];
+
+  return (
+    // Wrapper sets `position: relative` so the apply control can sit absolutely
+    // in the top-right. The block's outer chrome (margin / background /
+    // border-radius) comes from .ls-asst-md-code-wrap in assistant.css.
+    <div className="ls-asst-md-code-wrap">
+      <SyntaxHighlighter
+        language={lang}
+        style={oneDark}
+        PreTag="div"
+        customStyle={{
+          margin: 0,
+          padding: '10px 12px',
+          borderRadius: 6,
+          fontSize: '12px',
+          background: 'rgba(0, 0, 0, 0.42)',
+        }}
+        wrapLongLines
+      >
+        {code}
+      </SyntaxHighlighter>
+      <div className="ls-asst-md-code-actions">
+        <CopyButton text={code} className="ls-asst-md-copy" withLabel title="Copy code" />
+        {apply && (targets.length === 0 ? (
+        <button
+          type="button"
+          className="ls-asst-md-apply"
+          onClick={() => apply.onApply(code, lang)}
+          title="Apply to script — create a new LumiScript from this code"
+          aria-label="Apply — create new script"
         >
-          {code}
-        </SyntaxHighlighter>
-        {apply && (
+          <FilePlus size={11} />
+          <span>Apply</span>
+        </button>
+      ) : (
+        <div className="ls-asst-md-apply-wrap" ref={wrapRef}>
           <button
             type="button"
             className="ls-asst-md-apply"
-            onClick={() => apply.onApply(code, lang)}
-            title="Apply to script — drop this code into a new LumiScript slot"
-            aria-label="Apply to script"
+            onClick={() => setMenuOpen((o) => !o)}
+            title="Apply this code…"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
           >
             <FilePlus size={11} />
             <span>Apply</span>
+            <ChevronDown size={10} />
           </button>
-        )}
+          {menuOpen && (
+            <div className="ls-asst-md-apply-menu" role="menu">
+              <button
+                type="button"
+                role="menuitem"
+                className="ls-asst-md-apply-item"
+                onClick={() => { setMenuOpen(false); apply.onApply(code, lang); }}
+              >
+                <FilePlus size={11} />
+                <span>Create new script</span>
+              </button>
+              {targets.map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  role="menuitem"
+                  className="ls-asst-md-apply-item"
+                  onClick={() => { setMenuOpen(false); apply.onApply(code, lang, t.id); }}
+                >
+                  <RefreshCw size={11} />
+                  <span>Update “{t.name}”</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
       </div>
-    );
-  }
-  return <code className="ls-asst-md-inline-code" {...rest}>{children}</code>;
+    </div>
+  );
 };
 
 // ─── Main component ──────────────────────────────────────────────────────────

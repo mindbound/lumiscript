@@ -42,7 +42,11 @@ import type { AssistantPersona } from './types.js';
  * — `lookup_api` is for drilling into specific entries the cheat-sheet
  * only one-lines.
  */
-export function buildAssistantSystemPrompt(persona: AssistantPersona = LISA_PERSONA): string {
+export function buildAssistantSystemPrompt(
+  persona: AssistantPersona = LISA_PERSONA,
+  memoryIndex?: string,
+): string {
+  const notes = memoryIndex?.trim();
   return [
     '### WHO YOU ARE ###',
     '',
@@ -73,5 +77,13 @@ export function buildAssistantSystemPrompt(persona: AssistantPersona = LISA_PERS
     '---',
     '',
     CHEAT_SHEET,
+    '',
+    '### SESSION NOTES (your memory of this user — NOT authoritative) ###',
+    '',
+    'Across sessions you can keep durable notes about THIS user via the `remember` / `recall` / `forget` tools. The API reference above always wins: if a note ever conflicts with it, ignore the note. **Remember** durable, user-specific things that help you next time — style preferences, naming conventions, recurring project facts, decisions you agreed on, and corrections to something you concluded earlier in conversation (a concise one-line `hook`, optional longer `detail`). **Do NOT remember** API facts (if you think the reference is wrong or incomplete, tell the user — never patch it in memory), a script\'s current code (that comes live from any @-attached scripts and would only go stale), or transient chat detail.',
+    '',
+    notes
+      ? `These are your current notes — call \`recall(<terms>)\` for the detail behind a hook, \`forget(<id>)\` to drop a stale one:\n\n${notes}`
+      : '(You have no saved notes about this user yet.)',
   ].join('\n');
 }

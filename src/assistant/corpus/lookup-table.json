@@ -328,12 +328,34 @@
       "const reply = await api.llm.generate([\n  { role: 'system', content: 'You are a helpful assistant.' },\n  { role: 'user',   content: 'Summarise this chat.' },\n], { connectionName: 'My GPT-4o' });"
     ],
     "see_also": [
+      "api.llm.generateStream",
       "api.llm.generateStructured",
       "api.llm.generateWithTools",
       "api.llm.dryRun",
       "LLMMessage",
-      "LLMOptions",
-      "Promise"
+      "LLMOptions"
+    ]
+  },
+  "api.llm.generateStream": {
+    "kind": "method",
+    "method": "api.llm.generateStream",
+    "namespace": "api.llm",
+    "signature": "generateStream(messages: LLMMessage[], options?: LLMOptions): AsyncGenerator<StreamChunk, void, void>",
+    "description": "Streaming variant of `generate`. Returns an async iterator yielding\n`StreamChunk` values: incremental `'token'` and `'reasoning'` chunks\nfollowed by exactly one terminal `'done'` chunk with the full aggregated\ncontent + `finish_reason` + optional `tool_calls` + optional `usage`.\n\nSame connection-resolution, provider/model-override, and `options.signal`\ncancellation semantics as `generate`.\n\nCancellation:\n - Breaking out of the `for await` loop calls `.return()` on the iterator,\n   which propagates to the upstream stream and tears down the HTTP request.\n - Passing an `AbortSignal` via `options.signal` cancels externally. After\n   abort, the iterator rejects on the next `.next()` with an `AbortError`.\n\nRequires generation permission.",
+    "permissions": [
+      "generation"
+    ],
+    "examples": [
+      "basic streaming consumer\nlet content = '';\nfor await (const chunk of api.llm.generateStream(messages)) {\n  if (chunk.type === 'token')     content += chunk.token;\n  else if (chunk.type === 'done') console.log('done:', chunk.finish_reason);\n}",
+      "partial-output-informed abort — stop early when banned content appears\nconst ctrl = new AbortController();\nfor await (const chunk of api.llm.generateStream(messages, { signal: ctrl.signal })) {\n  if (chunk.type === 'token' && chunk.token.toLowerCase().includes('banned-word')) {\n    ctrl.abort();\n    break;\n  }\n}"
+    ],
+    "see_also": [
+      "api.llm.generate",
+      "api.llm.generateStructured",
+      "api.llm.generateWithTools",
+      "api.llm.dryRun",
+      "LLMMessage",
+      "LLMOptions"
     ]
   },
   "api.llm.generateStructured": {
@@ -350,11 +372,11 @@
     ],
     "see_also": [
       "api.llm.generate",
+      "api.llm.generateStream",
       "api.llm.generateWithTools",
       "api.llm.dryRun",
       "LLMMessage",
-      "ZodLike",
-      "Record"
+      "ZodLike"
     ]
   },
   "api.llm.generateWithTools": {
@@ -369,11 +391,11 @@
     "examples": [],
     "see_also": [
       "api.llm.generate",
+      "api.llm.generateStream",
       "api.llm.generateStructured",
       "api.llm.dryRun",
       "LLMMessage",
-      "Array",
-      "Record"
+      "Array"
     ]
   },
   "api.llm.dryRun": {
@@ -388,11 +410,161 @@
     "examples": [],
     "see_also": [
       "api.llm.generate",
+      "api.llm.generateStream",
       "api.llm.generateStructured",
       "api.llm.generateWithTools",
       "DryRunOptions",
+      "Promise"
+    ]
+  },
+  "api.connections.list": {
+    "kind": "method",
+    "method": "api.connections.list",
+    "namespace": "api.connections",
+    "signature": "list(): Promise<Connection[]>",
+    "description": "List all of the user's connection profiles.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.connections.get",
+      "api.connections.getDefault",
+      "api.connections.findByName",
       "Promise",
-      "DryRunResult"
+      "Connection"
+    ]
+  },
+  "api.connections.get": {
+    "kind": "method",
+    "method": "api.connections.get",
+    "namespace": "api.connections",
+    "signature": "get(connectionId: string): Promise<Connection | null>",
+    "description": "Get a connection profile by ID, or null.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.connections.list",
+      "api.connections.getDefault",
+      "api.connections.findByName",
+      "Promise",
+      "Connection"
+    ]
+  },
+  "api.connections.getDefault": {
+    "kind": "method",
+    "method": "api.connections.getDefault",
+    "namespace": "api.connections",
+    "signature": "getDefault(): Promise<Connection | null>",
+    "description": "Get the user's default connection (is_default, or first available), or null.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.connections.list",
+      "api.connections.get",
+      "api.connections.findByName",
+      "Promise",
+      "Connection"
+    ]
+  },
+  "api.connections.findByName": {
+    "kind": "method",
+    "method": "api.connections.findByName",
+    "namespace": "api.connections",
+    "signature": "findByName(name: string): Promise<Connection | null>",
+    "description": "Find a connection by name (case-insensitive), or null.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.connections.list",
+      "api.connections.get",
+      "api.connections.getDefault",
+      "Promise",
+      "Connection"
+    ]
+  },
+  "api.webSearch.query": {
+    "kind": "method",
+    "method": "api.webSearch.query",
+    "namespace": "api.webSearch",
+    "signature": "query(options: WebSearchOptions): Promise<WebSearchResponse>",
+    "description": "Run a search. With scrape (default) you also get scraped documents + a prompt-ready context.",
+    "permissions": [
+      "web_search"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.webSearch.getSettings",
+      "WebSearchOptions",
+      "Promise",
+      "WebSearchResponse"
+    ]
+  },
+  "api.webSearch.getSettings": {
+    "kind": "method",
+    "method": "api.webSearch.getSettings",
+    "namespace": "api.webSearch",
+    "signature": "getSettings(): Promise<WebSearchSettings>",
+    "description": "Read the safe web-search config (never the API key).",
+    "permissions": [
+      "web_search"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.webSearch.query",
+      "Promise",
+      "WebSearchSettings"
+    ]
+  },
+  "api.users.isVisible": {
+    "kind": "method",
+    "method": "api.users.isVisible",
+    "namespace": "api.users",
+    "signature": "isVisible(): Promise<boolean>",
+    "description": "True if the active user has the app visible in at least one session.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.users.getRole",
+      "Promise"
+    ]
+  },
+  "api.users.getRole": {
+    "kind": "method",
+    "method": "api.users.getRole",
+    "namespace": "api.users",
+    "signature": "getRole(): Promise<UserRole>",
+    "description": "The active user's role: 'operator' | 'admin' | 'user'.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.users.isVisible",
+      "Promise",
+      "UserRole"
+    ]
+  },
+  "api.version.getBackend": {
+    "kind": "method",
+    "method": "api.version.getBackend",
+    "namespace": "api.version",
+    "signature": "getBackend(): Promise<string>",
+    "description": "The running backend server's semantic version (e.g. '1.2.0').",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.version.getFrontend",
+      "Promise"
+    ]
+  },
+  "api.version.getFrontend": {
+    "kind": "method",
+    "method": "api.version.getFrontend",
+    "namespace": "api.version",
+    "signature": "getFrontend(): Promise<string>",
+    "description": "The running frontend bundle's semantic version.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.version.getBackend",
+      "Promise"
     ]
   },
   "api.variables.local.get": {
@@ -1413,6 +1585,25 @@
       "FloatWidgetOptions"
     ]
   },
+  "api.ui.mountApp": {
+    "kind": "method",
+    "method": "api.ui.mountApp",
+    "namespace": "api.ui",
+    "signature": "mountApp(options?: MountAppOptions): MountedAppHandle",
+    "description": "Mount a route-persistent full-bleed document.body portal. Requires app_manipulation.",
+    "permissions": [
+      "app_manipulation"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.ui.toast",
+      "api.ui.prompt",
+      "api.ui.confirm",
+      "api.ui.showModal",
+      "api.ui.showAdvancedModal",
+      "MountAppOptions"
+    ]
+  },
   "api.ui.registerDrawerTab": {
     "kind": "method",
     "method": "api.ui.registerDrawerTab",
@@ -1487,6 +1678,261 @@
       "api.ui.showModal",
       "api.ui.showAdvancedModal",
       "Promise"
+    ]
+  },
+  "api.ui.getDrawerTabs": {
+    "kind": "method",
+    "method": "api.ui.getDrawerTabs",
+    "namespace": "api.ui",
+    "signature": "getDrawerTabs(): Promise<UIDrawerTab[]>",
+    "description": "List discoverable drawer tabs (built-in + extension-contributed) visible to the user.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.ui.toast",
+      "api.ui.prompt",
+      "api.ui.confirm",
+      "api.ui.showModal",
+      "api.ui.showAdvancedModal",
+      "Promise"
+    ]
+  },
+  "api.ui.getSettingsTabs": {
+    "kind": "method",
+    "method": "api.ui.getSettingsTabs",
+    "namespace": "api.ui",
+    "signature": "getSettingsTabs(): Promise<UISettingsTab[]>",
+    "description": "List discoverable settings tabs visible to the user (role-restricted tabs filtered out).",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.ui.toast",
+      "api.ui.prompt",
+      "api.ui.confirm",
+      "api.ui.showModal",
+      "api.ui.showAdvancedModal",
+      "Promise"
+    ]
+  },
+  "api.ui.openDrawerTab": {
+    "kind": "method",
+    "method": "api.ui.openDrawerTab",
+    "namespace": "api.ui",
+    "signature": "openDrawerTab(tabId: string): Promise<void>",
+    "description": "Open the drawer to a specific tab id (built-in or extension-contributed).",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.ui.toast",
+      "api.ui.prompt",
+      "api.ui.confirm",
+      "api.ui.showModal",
+      "api.ui.showAdvancedModal",
+      "Promise"
+    ]
+  },
+  "api.ui.closeDrawer": {
+    "kind": "method",
+    "method": "api.ui.closeDrawer",
+    "namespace": "api.ui",
+    "signature": "closeDrawer(): Promise<void>",
+    "description": "Close the drawer if it is currently open.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.ui.toast",
+      "api.ui.prompt",
+      "api.ui.confirm",
+      "api.ui.showModal",
+      "api.ui.showAdvancedModal",
+      "Promise"
+    ]
+  },
+  "api.ui.openSettings": {
+    "kind": "method",
+    "method": "api.ui.openSettings",
+    "namespace": "api.ui",
+    "signature": "openSettings(viewId?: string): Promise<void>",
+    "description": "Open the settings modal to a tab id (e.g. 'connections', 'display'); omit to land on 'display'.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.ui.toast",
+      "api.ui.prompt",
+      "api.ui.confirm",
+      "api.ui.showModal",
+      "api.ui.showAdvancedModal",
+      "Promise"
+    ]
+  },
+  "api.ui.closeSettings": {
+    "kind": "method",
+    "method": "api.ui.closeSettings",
+    "namespace": "api.ui",
+    "signature": "closeSettings(): Promise<void>",
+    "description": "Close the settings modal if it is currently open.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.ui.toast",
+      "api.ui.prompt",
+      "api.ui.confirm",
+      "api.ui.showModal",
+      "api.ui.showAdvancedModal",
+      "Promise"
+    ]
+  },
+  "api.ui.openCommandPalette": {
+    "kind": "method",
+    "method": "api.ui.openCommandPalette",
+    "namespace": "api.ui",
+    "signature": "openCommandPalette(): Promise<void>",
+    "description": "Open the command palette overlay.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.ui.toast",
+      "api.ui.prompt",
+      "api.ui.confirm",
+      "api.ui.showModal",
+      "api.ui.showAdvancedModal",
+      "Promise"
+    ]
+  },
+  "api.ui.closeCommandPalette": {
+    "kind": "method",
+    "method": "api.ui.closeCommandPalette",
+    "namespace": "api.ui",
+    "signature": "closeCommandPalette(): Promise<void>",
+    "description": "Close the command palette overlay if it is currently open.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.ui.toast",
+      "api.ui.prompt",
+      "api.ui.confirm",
+      "api.ui.showModal",
+      "api.ui.showAdvancedModal",
+      "Promise"
+    ]
+  },
+  "api.ui.pickFile": {
+    "kind": "method",
+    "method": "api.ui.pickFile",
+    "namespace": "api.ui",
+    "signature": "pickFile(options?: PickFileOptions): Promise<PickedFile[]>",
+    "description": "Open the browser's native file picker and return the selected file(s).\nFree tier (the native dialog is the user-action gate). Resolves [] if the\nuser cancels; rejects if a file exceeds maxSizeBytes. Feed bytes into\napi.images.upload / api.db / api.files, or decode text via TextDecoder.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.ui.toast",
+      "api.ui.prompt",
+      "api.ui.confirm",
+      "api.ui.showModal",
+      "api.ui.showAdvancedModal",
+      "PickFileOptions"
+    ]
+  },
+  "api.ui.events.getKeyboardState": {
+    "kind": "method",
+    "method": "api.ui.events.getKeyboardState",
+    "namespace": "api.ui.events",
+    "signature": "getKeyboardState(): Promise<UIKeyboardState>",
+    "description": "The current virtual-keyboard snapshot.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.ui.events.onKeyboardChange",
+      "api.ui.events.getDrawerState",
+      "api.ui.events.onDrawerChange",
+      "api.ui.events.getSettingsState",
+      "api.ui.events.onSettingsChange",
+      "Promise"
+    ]
+  },
+  "api.ui.events.onKeyboardChange": {
+    "kind": "method",
+    "method": "api.ui.events.onKeyboardChange",
+    "namespace": "api.ui.events",
+    "signature": "onKeyboardChange(handler: (state: UIKeyboardState) => void): () => void",
+    "description": "Subscribe to keyboard changes. Returns an unsubscribe fn.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.ui.events.getKeyboardState",
+      "api.ui.events.getDrawerState",
+      "api.ui.events.onDrawerChange",
+      "api.ui.events.getSettingsState",
+      "api.ui.events.onSettingsChange",
+      "UIKeyboardState"
+    ]
+  },
+  "api.ui.events.getDrawerState": {
+    "kind": "method",
+    "method": "api.ui.events.getDrawerState",
+    "namespace": "api.ui.events",
+    "signature": "getDrawerState(): Promise<UIDrawerState>",
+    "description": "The current side-drawer snapshot.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.ui.events.getKeyboardState",
+      "api.ui.events.onKeyboardChange",
+      "api.ui.events.onDrawerChange",
+      "api.ui.events.getSettingsState",
+      "api.ui.events.onSettingsChange",
+      "Promise"
+    ]
+  },
+  "api.ui.events.onDrawerChange": {
+    "kind": "method",
+    "method": "api.ui.events.onDrawerChange",
+    "namespace": "api.ui.events",
+    "signature": "onDrawerChange(handler: (state: UIDrawerState) => void): () => void",
+    "description": "Subscribe to drawer changes. Returns an unsubscribe fn.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.ui.events.getKeyboardState",
+      "api.ui.events.onKeyboardChange",
+      "api.ui.events.getDrawerState",
+      "api.ui.events.getSettingsState",
+      "api.ui.events.onSettingsChange",
+      "UIDrawerState"
+    ]
+  },
+  "api.ui.events.getSettingsState": {
+    "kind": "method",
+    "method": "api.ui.events.getSettingsState",
+    "namespace": "api.ui.events",
+    "signature": "getSettingsState(): Promise<UISettingsState>",
+    "description": "The current settings-modal snapshot.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.ui.events.getKeyboardState",
+      "api.ui.events.onKeyboardChange",
+      "api.ui.events.getDrawerState",
+      "api.ui.events.onDrawerChange",
+      "api.ui.events.onSettingsChange",
+      "Promise"
+    ]
+  },
+  "api.ui.events.onSettingsChange": {
+    "kind": "method",
+    "method": "api.ui.events.onSettingsChange",
+    "namespace": "api.ui.events",
+    "signature": "onSettingsChange(handler: (state: UISettingsState) => void): () => void",
+    "description": "Subscribe to settings changes. Returns an unsubscribe fn.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.ui.events.getKeyboardState",
+      "api.ui.events.onKeyboardChange",
+      "api.ui.events.getDrawerState",
+      "api.ui.events.onDrawerChange",
+      "api.ui.events.getSettingsState",
+      "UISettingsState"
     ]
   },
   "api.ui.dom.inject": {
@@ -1579,6 +2025,310 @@
       "api.ui.dom.injectAtMessage",
       "api.ui.dom.addStyle",
       "api.ui.dom.delegate"
+    ]
+  },
+  "api.ui.components.mountBadge": {
+    "kind": "method",
+    "method": "api.ui.components.mountBadge",
+    "namespace": "api.ui.components",
+    "signature": "mountBadge(target: DOMHandle, options?: SpindleBadgeOptions): MountedComponentHandle<SpindleBadgeOptions>",
+    "description": "Mount an inline status/label badge.",
+    "permissions": [
+      "app_manipulation"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.ui.components.mountSpinner",
+      "api.ui.components.mountSwitch",
+      "api.ui.components.mountTextInput",
+      "api.ui.components.mountTextArea",
+      "api.ui.components.mountNumericInput",
+      "DOMHandle"
+    ]
+  },
+  "api.ui.components.mountSpinner": {
+    "kind": "method",
+    "method": "api.ui.components.mountSpinner",
+    "namespace": "api.ui.components",
+    "signature": "mountSpinner(target: DOMHandle, options?: SpindleSpinnerOptions): MountedComponentHandle<SpindleSpinnerOptions>",
+    "description": "Mount a loading spinner.",
+    "permissions": [
+      "app_manipulation"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.ui.components.mountBadge",
+      "api.ui.components.mountSwitch",
+      "api.ui.components.mountTextInput",
+      "api.ui.components.mountTextArea",
+      "api.ui.components.mountNumericInput",
+      "DOMHandle"
+    ]
+  },
+  "api.ui.components.mountSwitch": {
+    "kind": "method",
+    "method": "api.ui.components.mountSwitch",
+    "namespace": "api.ui.components",
+    "signature": "mountSwitch(target: DOMHandle, options?: SpindleSwitchOptions): MountedValueComponentHandle<SpindleSwitchOptions, boolean>",
+    "description": "Mount a toggle switch. onChange fires with the new boolean; getValue() reads the current state.",
+    "permissions": [
+      "app_manipulation"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.ui.components.mountBadge",
+      "api.ui.components.mountSpinner",
+      "api.ui.components.mountTextInput",
+      "api.ui.components.mountTextArea",
+      "api.ui.components.mountNumericInput",
+      "DOMHandle"
+    ]
+  },
+  "api.ui.components.mountTextInput": {
+    "kind": "method",
+    "method": "api.ui.components.mountTextInput",
+    "namespace": "api.ui.components",
+    "signature": "mountTextInput(target: DOMHandle, options?: SpindleTextInputOptions): MountedValueComponentHandle<SpindleTextInputOptions, string>",
+    "description": "Mount a single-line text input. onChange fires with the current text; getValue() reads it.",
+    "permissions": [
+      "app_manipulation"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.ui.components.mountBadge",
+      "api.ui.components.mountSpinner",
+      "api.ui.components.mountSwitch",
+      "api.ui.components.mountTextArea",
+      "api.ui.components.mountNumericInput",
+      "DOMHandle"
+    ]
+  },
+  "api.ui.components.mountTextArea": {
+    "kind": "method",
+    "method": "api.ui.components.mountTextArea",
+    "namespace": "api.ui.components",
+    "signature": "mountTextArea(target: DOMHandle, options?: SpindleTextAreaOptions): MountedValueComponentHandle<SpindleTextAreaOptions, string>",
+    "description": "Mount a multi-line text editor. onChange fires with the current text; getValue() reads it.",
+    "permissions": [
+      "app_manipulation"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.ui.components.mountBadge",
+      "api.ui.components.mountSpinner",
+      "api.ui.components.mountSwitch",
+      "api.ui.components.mountTextInput",
+      "api.ui.components.mountNumericInput",
+      "DOMHandle"
+    ]
+  },
+  "api.ui.components.mountNumericInput": {
+    "kind": "method",
+    "method": "api.ui.components.mountNumericInput",
+    "namespace": "api.ui.components",
+    "signature": "mountNumericInput(target: DOMHandle, options?: SpindleNumericInputOptions): MountedValueComponentHandle<SpindleNumericInputOptions, number | null>",
+    "description": "Mount a validated number input. onChange/getValue() use number | null.",
+    "permissions": [
+      "app_manipulation"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.ui.components.mountBadge",
+      "api.ui.components.mountSpinner",
+      "api.ui.components.mountSwitch",
+      "api.ui.components.mountTextInput",
+      "api.ui.components.mountTextArea",
+      "DOMHandle"
+    ]
+  },
+  "api.ui.components.mountNumberStepper": {
+    "kind": "method",
+    "method": "api.ui.components.mountNumberStepper",
+    "namespace": "api.ui.components",
+    "signature": "mountNumberStepper(target: DOMHandle, options?: SpindleNumberStepperOptions): MountedValueComponentHandle<SpindleNumberStepperOptions, number | null>",
+    "description": "Mount a number input with +/- steppers. onChange/getValue() use number | null.",
+    "permissions": [
+      "app_manipulation"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.ui.components.mountBadge",
+      "api.ui.components.mountSpinner",
+      "api.ui.components.mountSwitch",
+      "api.ui.components.mountTextInput",
+      "api.ui.components.mountTextArea",
+      "DOMHandle"
+    ]
+  },
+  "api.ui.components.mountCheckbox": {
+    "kind": "method",
+    "method": "api.ui.components.mountCheckbox",
+    "namespace": "api.ui.components",
+    "signature": "mountCheckbox(target: DOMHandle, options?: SpindleCheckboxOptions): MountedValueComponentHandle<SpindleCheckboxOptions, boolean>",
+    "description": "Mount a checkbox. onChange fires with the new boolean; getValue() reads the checked state.",
+    "permissions": [
+      "app_manipulation"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.ui.components.mountBadge",
+      "api.ui.components.mountSpinner",
+      "api.ui.components.mountSwitch",
+      "api.ui.components.mountTextInput",
+      "api.ui.components.mountTextArea",
+      "DOMHandle"
+    ]
+  },
+  "api.ui.components.mountRangeSlider": {
+    "kind": "method",
+    "method": "api.ui.components.mountRangeSlider",
+    "namespace": "api.ui.components",
+    "signature": "mountRangeSlider(target: DOMHandle, options: SpindleRangeSliderOptions): MountedValueComponentHandle<SpindleRangeSliderOptions, number>",
+    "description": "Mount a range slider. options.min/options.max required; onCommit fires once per gesture; onDragValue fires live; getValue() reads the committed value.",
+    "permissions": [
+      "app_manipulation"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.ui.components.mountBadge",
+      "api.ui.components.mountSpinner",
+      "api.ui.components.mountSwitch",
+      "api.ui.components.mountTextInput",
+      "api.ui.components.mountTextArea",
+      "DOMHandle"
+    ]
+  },
+  "api.ui.components.mountSelect": {
+    "kind": "method",
+    "method": "api.ui.components.mountSelect",
+    "namespace": "api.ui.components",
+    "signature": "mountSelect(target: DOMHandle, options?: SpindleSelectOptions): MountedValueComponentHandle<SpindleSelectOptions, string>",
+    "description": "Mount a searchable single-select. onChange fires with the value; getValue() reads it.",
+    "permissions": [
+      "app_manipulation"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.ui.components.mountBadge",
+      "api.ui.components.mountSpinner",
+      "api.ui.components.mountSwitch",
+      "api.ui.components.mountTextInput",
+      "api.ui.components.mountTextArea",
+      "DOMHandle"
+    ]
+  },
+  "api.ui.components.mountMultiSelect": {
+    "kind": "method",
+    "method": "api.ui.components.mountMultiSelect",
+    "namespace": "api.ui.components",
+    "signature": "mountMultiSelect(target: DOMHandle, options?: SpindleMultiSelectOptions): MountedValueComponentHandle<SpindleMultiSelectOptions, string[]>",
+    "description": "Mount a searchable multi-select. onChange/getValue() use string[].",
+    "permissions": [
+      "app_manipulation"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.ui.components.mountBadge",
+      "api.ui.components.mountSpinner",
+      "api.ui.components.mountSwitch",
+      "api.ui.components.mountTextInput",
+      "api.ui.components.mountTextArea",
+      "DOMHandle"
+    ]
+  },
+  "api.ui.components.mountFolderDropdown": {
+    "kind": "method",
+    "method": "api.ui.components.mountFolderDropdown",
+    "namespace": "api.ui.components",
+    "signature": "mountFolderDropdown(target: DOMHandle, options?: SpindleFolderDropdownOptions): MountedValueComponentHandle<SpindleFolderDropdownOptions, string>",
+    "description": "Mount a folder picker with inline create-folder. onChange fires with the folder; getValue() reads it.",
+    "permissions": [
+      "app_manipulation"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.ui.components.mountBadge",
+      "api.ui.components.mountSpinner",
+      "api.ui.components.mountSwitch",
+      "api.ui.components.mountTextInput",
+      "api.ui.components.mountTextArea",
+      "DOMHandle"
+    ]
+  },
+  "api.ui.components.mountModelCombobox": {
+    "kind": "method",
+    "method": "api.ui.components.mountModelCombobox",
+    "namespace": "api.ui.components",
+    "signature": "mountModelCombobox(target: DOMHandle, options?: SpindleModelComboboxOptions): MountedValueComponentHandle<SpindleModelComboboxOptions, string>",
+    "description": "Mount the connection-aware model picker. onChange fires with the model id; getValue() reads it.",
+    "permissions": [
+      "app_manipulation"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.ui.components.mountBadge",
+      "api.ui.components.mountSpinner",
+      "api.ui.components.mountSwitch",
+      "api.ui.components.mountTextInput",
+      "api.ui.components.mountTextArea",
+      "DOMHandle"
+    ]
+  },
+  "api.ui.components.mountPagination": {
+    "kind": "method",
+    "method": "api.ui.components.mountPagination",
+    "namespace": "api.ui.components",
+    "signature": "mountPagination(target: DOMHandle, options: SpindlePaginationOptions): MountedComponentHandle<SpindlePaginationOptions>",
+    "description": "Mount page navigation (fully controlled; onPageChange required). No getValue().",
+    "permissions": [
+      "app_manipulation"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.ui.components.mountBadge",
+      "api.ui.components.mountSpinner",
+      "api.ui.components.mountSwitch",
+      "api.ui.components.mountTextInput",
+      "api.ui.components.mountTextArea",
+      "DOMHandle"
+    ]
+  },
+  "api.ui.components.mountCloseButton": {
+    "kind": "method",
+    "method": "api.ui.components.mountCloseButton",
+    "namespace": "api.ui.components",
+    "signature": "mountCloseButton(target: DOMHandle, options?: SpindleCloseButtonOptions): MountedComponentHandle<SpindleCloseButtonOptions>",
+    "description": "Mount a themed close (X) button. onClick fires on click. No getValue().",
+    "permissions": [
+      "app_manipulation"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.ui.components.mountBadge",
+      "api.ui.components.mountSpinner",
+      "api.ui.components.mountSwitch",
+      "api.ui.components.mountTextInput",
+      "api.ui.components.mountTextArea",
+      "DOMHandle"
+    ]
+  },
+  "api.ui.components.mountCollapsibleSection": {
+    "kind": "method",
+    "method": "api.ui.components.mountCollapsibleSection",
+    "namespace": "api.ui.components",
+    "signature": "mountCollapsibleSection(target: DOMHandle, options: SpindleCollapsibleSectionOptions): MountedCollapsibleSectionHandle",
+    "description": "Mount a collapsible section. Host owns the chrome; handle.body is a DOMHandle you fill. options.title required.",
+    "permissions": [
+      "app_manipulation"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.ui.components.mountBadge",
+      "api.ui.components.mountSpinner",
+      "api.ui.components.mountSwitch",
+      "api.ui.components.mountTextInput",
+      "api.ui.components.mountTextArea",
+      "DOMHandle"
     ]
   },
   "api.files.userRead": {
@@ -1841,7 +2591,7 @@
     "method": "api.files.tempWrite",
     "namespace": "api.files",
     "signature": "tempWrite(path: string, data: string, options?: TempWriteOptions): Promise<void>",
-    "description": "Write UTF-8 text. Options: { ttlMs } for expiry.",
+    "description": "Write UTF-8 text. Options: { ttlMs?, reservationId? } — ttlMs sets expiry; reservationId charges the write against a tempRequestBlock reservation.",
     "permissions": [],
     "examples": [],
     "see_also": [
@@ -1851,6 +2601,40 @@
       "api.files.userExists",
       "api.files.userList",
       "TempWriteOptions"
+    ]
+  },
+  "api.files.tempReadBinary": {
+    "kind": "method",
+    "method": "api.files.tempReadBinary",
+    "namespace": "api.files",
+    "signature": "tempReadBinary(path: string): Promise<Uint8Array>",
+    "description": "Read a file as raw bytes. Returns Promise<Uint8Array>. Pair with tempWriteBinary for caching images / PDFs / other binary blobs within quota.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.files.userRead",
+      "api.files.userWrite",
+      "api.files.userDelete",
+      "api.files.userExists",
+      "api.files.userList",
+      "Promise"
+    ]
+  },
+  "api.files.tempWriteBinary": {
+    "kind": "method",
+    "method": "api.files.tempWriteBinary",
+    "namespace": "api.files",
+    "signature": "tempWriteBinary(path: string, data: Uint8Array, options?: TempWriteOptions): Promise<void>",
+    "description": "Write raw bytes (Uint8Array). Options: { ttlMs?, reservationId? }, same as tempWrite. Bytes cross the IPC intact (no base64).",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.files.userRead",
+      "api.files.userWrite",
+      "api.files.userDelete",
+      "api.files.userExists",
+      "api.files.userList",
+      "Uint8Array"
     ]
   },
   "api.files.tempDelete": {
@@ -1910,6 +2694,57 @@
     "namespace": "api.files",
     "signature": "tempClearExpired(): Promise<number>",
     "description": "Remove all expired files. Returns count removed.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.files.userRead",
+      "api.files.userWrite",
+      "api.files.userDelete",
+      "api.files.userExists",
+      "api.files.userList",
+      "Promise"
+    ]
+  },
+  "api.files.tempGetPoolStatus": {
+    "kind": "method",
+    "method": "api.files.tempGetPoolStatus",
+    "namespace": "api.files",
+    "signature": "tempGetPoolStatus(): Promise<TempPoolStatus>",
+    "description": "Read the ephemeral-storage quota snapshot. Returns TempPoolStatus — global + this-extension max/used/reserved/available bytes plus fileCount / fileCountMax. Check available before a large write.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.files.userRead",
+      "api.files.userWrite",
+      "api.files.userDelete",
+      "api.files.userExists",
+      "api.files.userList",
+      "Promise"
+    ]
+  },
+  "api.files.tempRequestBlock": {
+    "kind": "method",
+    "method": "api.files.tempRequestBlock",
+    "namespace": "api.files",
+    "signature": "tempRequestBlock(sizeBytes: number, options?: TempRequestBlockOptions): Promise<TempReservation>",
+    "description": "Reserve sizeBytes of quota up front (so a large write can't fail partway). Options: { ttlMs?, reason? }. Returns TempReservation { reservationId, sizeBytes, expiresAt } — pass reservationId to tempWrite/tempWriteBinary options, or tempReleaseBlock to free it.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.files.userRead",
+      "api.files.userWrite",
+      "api.files.userDelete",
+      "api.files.userExists",
+      "api.files.userList",
+      "TempRequestBlockOptions"
+    ]
+  },
+  "api.files.tempReleaseBlock": {
+    "kind": "method",
+    "method": "api.files.tempReleaseBlock",
+    "namespace": "api.files",
+    "signature": "tempReleaseBlock(reservationId: string): Promise<void>",
+    "description": "Release a reservation from tempRequestBlock you did not use.",
     "permissions": [],
     "examples": [],
     "see_also": [
@@ -2663,6 +3498,710 @@
       "api.databanks.create",
       "api.databanks.update",
       "DatabankWaitUntilReadyOptions"
+    ]
+  },
+  "api.memories.cortex.getConfig": {
+    "kind": "method",
+    "method": "api.memories.cortex.getConfig",
+    "namespace": "api.memories.cortex",
+    "signature": "getConfig(): Promise<MemoryCortexConfig>",
+    "description": "Get the Memory Cortex configuration (MemoryCortexConfig — permissive; advanced/host-added fields pass through). Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.cortex.putConfig",
+      "api.memories.cortex.query",
+      "api.memories.cortex.queryLinked",
+      "api.memories.cortex.getCached",
+      "api.memories.cortex.getCachedLinked",
+      "Promise"
+    ]
+  },
+  "api.memories.cortex.putConfig": {
+    "kind": "method",
+    "method": "api.memories.cortex.putConfig",
+    "namespace": "api.memories.cortex",
+    "signature": "putConfig(patch: Partial<MemoryCortexConfig>): Promise<MemoryCortexConfig>",
+    "description": "Patch the Memory Cortex configuration (deep merge; unspecified fields untouched). Returns the updated config. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.cortex.getConfig",
+      "api.memories.cortex.query",
+      "api.memories.cortex.queryLinked",
+      "api.memories.cortex.getCached",
+      "api.memories.cortex.getCachedLinked",
+      "Partial"
+    ]
+  },
+  "api.memories.cortex.query": {
+    "kind": "method",
+    "method": "api.memories.cortex.query",
+    "namespace": "api.memories.cortex",
+    "signature": "query(query: CortexQuery): Promise<CortexResult>",
+    "description": "Fused-score retrieval (semantic + salience + recency + reinforcement + emotional + entity). query: CortexQuery { chatId (required), queryText (required), entityFilter?, timeRange?, emotionalContext?, generationType?, topK?, includeConsolidations?, includeRelationships?, excludeMessageIds? }. Returns CortexResult { memories, entityContext, activeRelationships, arcContext, stats }. Server-cached ~5 min per chat + query shape. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.cortex.getConfig",
+      "api.memories.cortex.putConfig",
+      "api.memories.cortex.queryLinked",
+      "api.memories.cortex.getCached",
+      "api.memories.cortex.getCachedLinked",
+      "CortexQuery"
+    ]
+  },
+  "api.memories.cortex.queryLinked": {
+    "kind": "method",
+    "method": "api.memories.cortex.queryLinked",
+    "namespace": "api.memories.cortex",
+    "signature": "queryLinked(chatId: string, options?: { queryText?: string }): Promise<LinkedCortexResult>",
+    "description": "Resolve every attached vault + interlink target in parallel. options: { queryText? } — pass queryText to rank by relevance. Returns LinkedCortexResult { vaults, interlinks }. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.cortex.getConfig",
+      "api.memories.cortex.putConfig",
+      "api.memories.cortex.query",
+      "api.memories.cortex.getCached",
+      "api.memories.cortex.getCachedLinked",
+      "Promise"
+    ]
+  },
+  "api.memories.cortex.getCached": {
+    "kind": "method",
+    "method": "api.memories.cortex.getCached",
+    "namespace": "api.memories.cortex",
+    "signature": "getCached(chatId: string): Promise<CortexResult | null>",
+    "description": "Read the warm cortex cache without re-running retrieval. Returns CortexResult or null (no/expired cache). Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.cortex.getConfig",
+      "api.memories.cortex.putConfig",
+      "api.memories.cortex.query",
+      "api.memories.cortex.queryLinked",
+      "api.memories.cortex.getCachedLinked",
+      "Promise"
+    ]
+  },
+  "api.memories.cortex.getCachedLinked": {
+    "kind": "method",
+    "method": "api.memories.cortex.getCachedLinked",
+    "namespace": "api.memories.cortex",
+    "signature": "getCachedLinked(chatId: string): Promise<LinkedCortexResult | null>",
+    "description": "Read the cached linked-cortex result. Returns LinkedCortexResult or null. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.cortex.getConfig",
+      "api.memories.cortex.putConfig",
+      "api.memories.cortex.query",
+      "api.memories.cortex.queryLinked",
+      "api.memories.cortex.getCached",
+      "Promise"
+    ]
+  },
+  "api.memories.cortex.invalidateCache": {
+    "kind": "method",
+    "method": "api.memories.cortex.invalidateCache",
+    "namespace": "api.memories.cortex",
+    "signature": "invalidateCache(chatId: string): Promise<void>",
+    "description": "Drop the warm cortex cache for a chat. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.cortex.getConfig",
+      "api.memories.cortex.putConfig",
+      "api.memories.cortex.query",
+      "api.memories.cortex.queryLinked",
+      "api.memories.cortex.getCached",
+      "Promise"
+    ]
+  },
+  "api.memories.cortex.invalidateLinkedCache": {
+    "kind": "method",
+    "method": "api.memories.cortex.invalidateLinkedCache",
+    "namespace": "api.memories.cortex",
+    "signature": "invalidateLinkedCache(chatId: string): Promise<void>",
+    "description": "Drop the warm linked-cortex cache for a chat. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.cortex.getConfig",
+      "api.memories.cortex.putConfig",
+      "api.memories.cortex.query",
+      "api.memories.cortex.queryLinked",
+      "api.memories.cortex.getCached",
+      "Promise"
+    ]
+  },
+  "api.memories.entities.list": {
+    "kind": "method",
+    "method": "api.memories.entities.list",
+    "namespace": "api.memories.entities",
+    "signature": "list(chatId: string, options?: { activeOnly?: boolean; limit?: number }): Promise<MemoryEntity[]>",
+    "description": "List entities for a chat. options: { activeOnly? (default true), limit? }. Ordered by salience. Returns MemoryEntity[]. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.entities.get",
+      "api.memories.entities.findByName",
+      "api.memories.entities.upsert",
+      "api.memories.entities.updateStatus",
+      "api.memories.entities.addFacts",
+      "Promise"
+    ]
+  },
+  "api.memories.entities.get": {
+    "kind": "method",
+    "method": "api.memories.entities.get",
+    "namespace": "api.memories.entities",
+    "signature": "get(entityId: string): Promise<MemoryEntity | null>",
+    "description": "Get an entity by id, or null if not found / not owned. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.entities.list",
+      "api.memories.entities.findByName",
+      "api.memories.entities.upsert",
+      "api.memories.entities.updateStatus",
+      "api.memories.entities.addFacts",
+      "Promise"
+    ]
+  },
+  "api.memories.entities.findByName": {
+    "kind": "method",
+    "method": "api.memories.entities.findByName",
+    "namespace": "api.memories.entities",
+    "signature": "findByName(chatId: string, name: string): Promise<MemoryEntity | null>",
+    "description": "Find an entity by canonical name OR known alias, or null. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.entities.list",
+      "api.memories.entities.get",
+      "api.memories.entities.upsert",
+      "api.memories.entities.updateStatus",
+      "api.memories.entities.addFacts",
+      "Promise"
+    ]
+  },
+  "api.memories.entities.upsert": {
+    "kind": "method",
+    "method": "api.memories.entities.upsert",
+    "namespace": "api.memories.entities",
+    "signature": "upsert(chatId: string, entity: MemoryEntityUpsert, options?: { chunkId?: string | null; createdAt?: number }): Promise<MemoryEntity>",
+    "description": "Smart-merge upsert against canonical name + aliases. entity: MemoryEntityUpsert { name, type (\"character\"|\"location\"|\"item\"|\"faction\"|\"concept\"|\"event\"), aliases?, confidence?, role?, provisional? }. options: { chunkId?, createdAt? } attribute the mention. Returns the merged MemoryEntity. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.entities.list",
+      "api.memories.entities.get",
+      "api.memories.entities.findByName",
+      "api.memories.entities.updateStatus",
+      "api.memories.entities.addFacts",
+      "MemoryEntityUpsert"
+    ]
+  },
+  "api.memories.entities.updateStatus": {
+    "kind": "method",
+    "method": "api.memories.entities.updateStatus",
+    "namespace": "api.memories.entities",
+    "signature": "updateStatus(entityId: string, patch: MemoryEntityStatusUpdate): Promise<MemoryEntity>",
+    "description": "Update status. patch: { status ('active'|'inactive'|'deceased'|'destroyed'|'unknown'), statusChangedAt? }. Returns MemoryEntity. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.entities.list",
+      "api.memories.entities.get",
+      "api.memories.entities.findByName",
+      "api.memories.entities.upsert",
+      "api.memories.entities.addFacts",
+      "MemoryEntityStatusUpdate"
+    ]
+  },
+  "api.memories.entities.addFacts": {
+    "kind": "method",
+    "method": "api.memories.entities.addFacts",
+    "namespace": "api.memories.entities",
+    "signature": "addFacts(entityId: string, facts: string[]): Promise<MemoryEntity>",
+    "description": "Append facts (string[]); deduplicated, keeps the most recent 20. Returns MemoryEntity. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.entities.list",
+      "api.memories.entities.get",
+      "api.memories.entities.findByName",
+      "api.memories.entities.upsert",
+      "api.memories.entities.updateStatus",
+      "Promise"
+    ]
+  },
+  "api.memories.entities.getFacts": {
+    "kind": "method",
+    "method": "api.memories.entities.getFacts",
+    "namespace": "api.memories.entities",
+    "signature": "getFacts(entityId: string): Promise<string[]>",
+    "description": "Read an entity's facts (string[]; tagged branch facts stripped). Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.entities.list",
+      "api.memories.entities.get",
+      "api.memories.entities.findByName",
+      "api.memories.entities.upsert",
+      "api.memories.entities.updateStatus",
+      "Promise"
+    ]
+  },
+  "api.memories.entities.updateEmotionalValence": {
+    "kind": "method",
+    "method": "api.memories.entities.updateEmotionalValence",
+    "namespace": "api.memories.entities",
+    "signature": "updateEmotionalValence(entityId: string, valence: Record<string, number>): Promise<MemoryEntity>",
+    "description": "Replace the running emotional-valence map (Record<string, number>, e.g. { betrayal: 0.6, grief: 0.4 }). Returns MemoryEntity. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.entities.list",
+      "api.memories.entities.get",
+      "api.memories.entities.findByName",
+      "api.memories.entities.upsert",
+      "api.memories.entities.updateStatus",
+      "Record"
+    ]
+  },
+  "api.memories.relations.list": {
+    "kind": "method",
+    "method": "api.memories.relations.list",
+    "namespace": "api.memories.relations",
+    "signature": "list(chatId: string): Promise<MemoryRelation[]>",
+    "description": "Active relation edges for a chat (excludes superseded / merged). Returns MemoryRelation[]. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.relations.listAll",
+      "api.memories.relations.forEntity",
+      "api.memories.relations.forEntities",
+      "api.memories.relations.upsert",
+      "Promise",
+      "MemoryRelation"
+    ]
+  },
+  "api.memories.relations.listAll": {
+    "kind": "method",
+    "method": "api.memories.relations.listAll",
+    "namespace": "api.memories.relations",
+    "signature": "listAll(chatId: string): Promise<MemoryRelation[]>",
+    "description": "Every relation edge including superseded / merged — for diagnostics. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.relations.list",
+      "api.memories.relations.forEntity",
+      "api.memories.relations.forEntities",
+      "api.memories.relations.upsert",
+      "Promise",
+      "MemoryRelation"
+    ]
+  },
+  "api.memories.relations.forEntity": {
+    "kind": "method",
+    "method": "api.memories.relations.forEntity",
+    "namespace": "api.memories.relations",
+    "signature": "forEntity(chatId: string, entityId: string): Promise<MemoryRelation[]>",
+    "description": "Active edges incident to one entity. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.relations.list",
+      "api.memories.relations.listAll",
+      "api.memories.relations.forEntities",
+      "api.memories.relations.upsert",
+      "Promise",
+      "MemoryRelation"
+    ]
+  },
+  "api.memories.relations.forEntities": {
+    "kind": "method",
+    "method": "api.memories.relations.forEntities",
+    "namespace": "api.memories.relations",
+    "signature": "forEntities(chatId: string, entityIds: string[], options?: { limit?: number }): Promise<MemoryRelation[]>",
+    "description": "Active edges across a set of entity ids. options: { limit? }. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.relations.list",
+      "api.memories.relations.listAll",
+      "api.memories.relations.forEntity",
+      "api.memories.relations.upsert",
+      "Promise",
+      "MemoryRelation"
+    ]
+  },
+  "api.memories.relations.upsert": {
+    "kind": "method",
+    "method": "api.memories.relations.upsert",
+    "namespace": "api.memories.relations",
+    "signature": "upsert(chatId: string, relation: MemoryRelationUpsert, options?: { chunkId?: string | null }): Promise<MemoryRelation | null>",
+    "description": "Upsert a relation by entity NAMES (not ids — the host resolves them). relation: MemoryRelationUpsert { source, target, type (RelationType), label, sentiment }. BOTH endpoints must already exist in the graph (call entities.upsert first) — returns the row or null if silently dropped. options: { chunkId? } attributes evidence. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.relations.list",
+      "api.memories.relations.listAll",
+      "api.memories.relations.forEntity",
+      "api.memories.relations.forEntities",
+      "MemoryRelationUpsert",
+      "Promise"
+    ]
+  },
+  "api.memories.consolidations.list": {
+    "kind": "method",
+    "method": "api.memories.consolidations.list",
+    "namespace": "api.memories.consolidations",
+    "signature": "list(chatId: string, options?: { tier?: number }): Promise<MemoryConsolidation[]>",
+    "description": "List narrative-arc consolidations (compressed summaries). options: { tier? } (1 = scene, 2 = chapter, …). Ordered most-recent first. Returns MemoryConsolidation[]. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.consolidations.latestArc",
+      "api.memories.consolidations.run",
+      "Promise",
+      "MemoryConsolidation"
+    ]
+  },
+  "api.memories.consolidations.latestArc": {
+    "kind": "method",
+    "method": "api.memories.consolidations.latestArc",
+    "namespace": "api.memories.consolidations",
+    "signature": "latestArc(chatId: string): Promise<MemoryConsolidation | null>",
+    "description": "The most recent arc across all tiers, or null. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.consolidations.list",
+      "api.memories.consolidations.run",
+      "Promise",
+      "MemoryConsolidation"
+    ]
+  },
+  "api.memories.consolidations.run": {
+    "kind": "method",
+    "method": "api.memories.consolidations.run",
+    "namespace": "api.memories.consolidations",
+    "signature": "run(chatId: string): Promise<void>",
+    "description": "Trigger a background EXTRACTIVE consolidation pass (heuristic only — no sidecar LLM). Fire-and-forget: returns immediately; new arcs surface via list() once the job completes. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.consolidations.list",
+      "api.memories.consolidations.latestArc",
+      "Promise"
+    ]
+  },
+  "api.memories.salience.list": {
+    "kind": "method",
+    "method": "api.memories.salience.list",
+    "namespace": "api.memories.salience",
+    "signature": "list(chatId: string, options?: { limit?: number; offset?: number }): Promise<MemorySalience[]>",
+    "description": "Per-chunk salience records, ordered by scoredAt desc. options: { limit? (max 500/page), offset? }. Returns MemorySalience[] { chunkId, score, scoreSource, emotionalTags, narrativeFlags, statusChanges, hasDialogue/Action/InternalThought, wordCount, scoredAt }. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "Promise",
+      "MemorySalience"
+    ]
+  },
+  "api.memories.vaults.list": {
+    "kind": "method",
+    "method": "api.memories.vaults.list",
+    "namespace": "api.memories.vaults",
+    "signature": "list(): Promise<Vault[]>",
+    "description": "All vaults owned by the active user (Vault[]). Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.vaults.get",
+      "api.memories.vaults.getChunks",
+      "api.memories.vaults.create",
+      "api.memories.vaults.rename",
+      "api.memories.vaults.delete",
+      "Promise"
+    ]
+  },
+  "api.memories.vaults.get": {
+    "kind": "method",
+    "method": "api.memories.vaults.get",
+    "namespace": "api.memories.vaults",
+    "signature": "get(vaultId: string): Promise<VaultWithContents | null>",
+    "description": "A vault with its entities + relations (VaultWithContents), or null if not found / not owned. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.vaults.list",
+      "api.memories.vaults.getChunks",
+      "api.memories.vaults.create",
+      "api.memories.vaults.rename",
+      "api.memories.vaults.delete",
+      "Promise"
+    ]
+  },
+  "api.memories.vaults.getChunks": {
+    "kind": "method",
+    "method": "api.memories.vaults.getChunks",
+    "namespace": "api.memories.vaults",
+    "signature": "getChunks(vaultId: string): Promise<VaultChunk[]>",
+    "description": "The chunk snapshot copied into the vault at creation (VaultChunk[]). Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.vaults.list",
+      "api.memories.vaults.get",
+      "api.memories.vaults.create",
+      "api.memories.vaults.rename",
+      "api.memories.vaults.delete",
+      "Promise"
+    ]
+  },
+  "api.memories.vaults.create": {
+    "kind": "method",
+    "method": "api.memories.vaults.create",
+    "namespace": "api.memories.vaults",
+    "signature": "create(input: VaultCreate): Promise<Vault>",
+    "description": "Snapshot a chat into a new vault. input: VaultCreate { chatId, name, description? }. Entities + relations copy synchronously; LanceDB chunks copy in the background (queryable structural-only until done). Returns Vault. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.vaults.list",
+      "api.memories.vaults.get",
+      "api.memories.vaults.getChunks",
+      "api.memories.vaults.rename",
+      "api.memories.vaults.delete",
+      "VaultCreate"
+    ]
+  },
+  "api.memories.vaults.rename": {
+    "kind": "method",
+    "method": "api.memories.vaults.rename",
+    "namespace": "api.memories.vaults",
+    "signature": "rename(vaultId: string, name: string): Promise<boolean>",
+    "description": "Rename a vault. Returns true if renamed. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.vaults.list",
+      "api.memories.vaults.get",
+      "api.memories.vaults.getChunks",
+      "api.memories.vaults.create",
+      "api.memories.vaults.delete",
+      "Promise"
+    ]
+  },
+  "api.memories.vaults.delete": {
+    "kind": "method",
+    "method": "api.memories.vaults.delete",
+    "namespace": "api.memories.vaults",
+    "signature": "delete(vaultId: string): Promise<boolean>",
+    "description": "Delete a vault + its chunks + attached links. Returns true if deleted. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.vaults.list",
+      "api.memories.vaults.get",
+      "api.memories.vaults.getChunks",
+      "api.memories.vaults.create",
+      "api.memories.vaults.rename",
+      "Promise"
+    ]
+  },
+  "api.memories.vaults.reindex": {
+    "kind": "method",
+    "method": "api.memories.vaults.reindex",
+    "namespace": "api.memories.vaults",
+    "signature": "reindex(vaultId: string): Promise<VaultReindexResult>",
+    "description": "Re-run the LanceDB chunk copy from the source chat (e.g. after an embedding-model swap). Returns VaultReindexResult { mode, chunkCount }. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.vaults.list",
+      "api.memories.vaults.get",
+      "api.memories.vaults.getChunks",
+      "api.memories.vaults.create",
+      "api.memories.vaults.rename",
+      "Promise"
+    ]
+  },
+  "api.memories.links.list": {
+    "kind": "method",
+    "method": "api.memories.links.list",
+    "namespace": "api.memories.links",
+    "signature": "list(chatId: string): Promise<ChatLink[]>",
+    "description": "All links attached to a chat — vault attaches + interlinks (ChatLink[]). Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.links.attach",
+      "api.memories.links.remove",
+      "api.memories.links.toggle",
+      "Promise",
+      "ChatLink"
+    ]
+  },
+  "api.memories.links.attach": {
+    "kind": "method",
+    "method": "api.memories.links.attach",
+    "namespace": "api.memories.links",
+    "signature": "attach(input: ChatLinkAttach): Promise<ChatLink[]>",
+    "description": "Attach a vault as read-only knowledge, or interlink two chats. input: ChatLinkAttach { chatId, linkType ('vault'|'interlink'), vaultId? (for vault), targetChatId? (for interlink), label?, bidirectional? (interlinks — also creates the reverse link) }. Returns the created ChatLink(s). Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.links.list",
+      "api.memories.links.remove",
+      "api.memories.links.toggle",
+      "ChatLinkAttach",
+      "Promise",
+      "ChatLink"
+    ]
+  },
+  "api.memories.links.remove": {
+    "kind": "method",
+    "method": "api.memories.links.remove",
+    "namespace": "api.memories.links",
+    "signature": "remove(chatId: string, linkId: string): Promise<boolean>",
+    "description": "Remove a link. Returns true if removed. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.links.list",
+      "api.memories.links.attach",
+      "api.memories.links.toggle",
+      "Promise"
+    ]
+  },
+  "api.memories.links.toggle": {
+    "kind": "method",
+    "method": "api.memories.links.toggle",
+    "namespace": "api.memories.links",
+    "signature": "toggle(chatId: string, linkId: string, enabled: boolean): Promise<boolean>",
+    "description": "Enable / disable a link without removing it. Returns true if toggled. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.links.list",
+      "api.memories.links.attach",
+      "api.memories.links.remove",
+      "Promise"
+    ]
+  },
+  "api.memories.chatMemory.listChunks": {
+    "kind": "method",
+    "method": "api.memories.chatMemory.listChunks",
+    "namespace": "api.memories.chatMemory",
+    "signature": "listChunks(chatId: string): Promise<ChatChunk[]>",
+    "description": "All vectorized chunks for a chat, oldest first (ChatChunk[]). The raw index behind the {{memories}} macro. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.chatMemory.get",
+      "api.memories.chatMemory.warm",
+      "api.memories.chatMemory.invalidate",
+      "Promise",
+      "ChatChunk"
+    ]
+  },
+  "api.memories.chatMemory.get": {
+    "kind": "method",
+    "method": "api.memories.chatMemory.get",
+    "namespace": "api.memories.chatMemory",
+    "signature": "get(chatId: string, options?: { topK?: number }): Promise<ChatMemoryResult>",
+    "description": "Top-K hybrid (vector + BM25) retrieval. options: { topK? }. Returns ChatMemoryResult { chunks, formatted, count, enabled, queryPreview, settingsSource, chunksAvailable, chunksPending } — same payload as the {{memories}} macro (equivalent to api.chats.getMemories but under the memories permission). Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.chatMemory.listChunks",
+      "api.memories.chatMemory.warm",
+      "api.memories.chatMemory.invalidate",
+      "Promise",
+      "ChatMemoryResult"
+    ]
+  },
+  "api.memories.chatMemory.warm": {
+    "kind": "method",
+    "method": "api.memories.chatMemory.warm",
+    "namespace": "api.memories.chatMemory",
+    "signature": "warm(chatId: string, options?: { force?: boolean }): Promise<ChatMemoryWarmupResult>",
+    "description": "Rebuild stale chunks + queue pending vectorizations. options: { force? }. Returns ChatMemoryWarmupResult { status, reason?, rebuilt?, vectorizationsQueued? }. No-op (status:'skipped') when chat vectorization is disabled. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.chatMemory.listChunks",
+      "api.memories.chatMemory.get",
+      "api.memories.chatMemory.invalidate",
+      "Promise",
+      "ChatMemoryWarmupResult"
+    ]
+  },
+  "api.memories.chatMemory.invalidate": {
+    "kind": "method",
+    "method": "api.memories.chatMemory.invalidate",
+    "namespace": "api.memories.chatMemory",
+    "signature": "invalidate(chatId: string): Promise<void>",
+    "description": "Drop the cached {{memories}} retrieval result for a chat. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.chatMemory.listChunks",
+      "api.memories.chatMemory.get",
+      "api.memories.chatMemory.warm",
+      "Promise"
+    ]
+  },
+  "api.memories.stats.usage": {
+    "kind": "method",
+    "method": "api.memories.stats.usage",
+    "namespace": "api.memories.stats",
+    "signature": "usage(chatId: string): Promise<CortexUsageStats>",
+    "description": "Entity / relation / consolidation / salience counts (CortexUsageStats; host gc fields pass through). Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.stats.ingestionStatus",
+      "api.memories.stats.ingestionTelemetry",
+      "Promise",
+      "CortexUsageStats"
+    ]
+  },
+  "api.memories.stats.ingestionStatus": {
+    "kind": "method",
+    "method": "api.memories.stats.ingestionStatus",
+    "namespace": "api.memories.stats",
+    "signature": "ingestionStatus(chatId: string): Promise<CortexIngestionStatus | null>",
+    "description": "Live ingestion phase + pending job count (CortexIngestionStatus), or null when the chat was never ingested. Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.stats.usage",
+      "api.memories.stats.ingestionTelemetry",
+      "Promise",
+      "CortexIngestionStatus"
+    ]
+  },
+  "api.memories.stats.ingestionTelemetry": {
+    "kind": "method",
+    "method": "api.memories.stats.ingestionTelemetry",
+    "namespace": "api.memories.stats",
+    "signature": "ingestionTelemetry(chatId: string): Promise<CortexIngestionTelemetry>",
+    "description": "Last sample + per-phase averages over recent ingestions (CortexIngestionTelemetry). Requires memories permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.memories.stats.usage",
+      "api.memories.stats.ingestionStatus",
+      "Promise",
+      "CortexIngestionTelemetry"
     ]
   },
   "api.personas.list": {
@@ -3419,7 +4958,7 @@
     "method": "api.theme.applyPalette",
     "namespace": "api.theme",
     "signature": "applyPalette(palette: ThemePaletteConfig | null): Promise<void>",
-    "description": "Apply a palette-driven theme. `palette.accent` is `{h, s, l}` and Lumiverse generates the full variable set coherently, preserving the user's glass/radius/font/UI-scale. Pass `null` to drop this script's palette contribution. Across LumiScript scripts: most-recent-script-wins. Requires app_manipulation permission.",
+    "description": "Apply a palette-driven theme. Pass `palette: ThemePaletteConfig` where `palette.accent` is `{h, s, l}` and Lumiverse generates the full variable set coherently, preserving the user's glass/radius/font/UI-scale. Pass `null` to drop this script's palette contribution. Across LumiScript scripts: most-recent-script-wins. Requires app_manipulation permission.",
     "permissions": [
       "app_manipulation"
     ],
@@ -6002,6 +7541,62 @@
       "api.ui.createFloatWidget"
     ]
   },
+  "MountAppOptions": {
+    "kind": "type",
+    "type": "MountAppOptions",
+    "note": "Options for api.ui.mountApp(). All optional.",
+    "fields": [
+      {
+        "field": "className?",
+        "type": "string",
+        "optional": true,
+        "desc": "CSS class applied to the mount container."
+      },
+      {
+        "field": "position?",
+        "type": "'start' | 'end' | 'app-overlay'",
+        "optional": true,
+        "desc": "Where the portal sits: before / after the main view, or covering it ('app-overlay'). Default host-defined."
+      }
+    ],
+    "usedBy": [
+      "api.ui.mountApp"
+    ]
+  },
+  "MountedAppHandle": {
+    "kind": "type",
+    "type": "MountedAppHandle",
+    "note": "Returned by api.ui.mountApp(). A route-persistent full-bleed document.body portal. Body DOM is script-owned via root (DOMHandle); the root element carries data-ls-script + data-ls-mount so api.ui.dom.addStyle() @scope rules match content inside.",
+    "fields": [
+      {
+        "field": "mountId",
+        "type": "string",
+        "optional": false,
+        "desc": "UUID identifying this mount. Available synchronously."
+      },
+      {
+        "field": "root",
+        "type": "DOMHandle",
+        "optional": false,
+        "desc": "DOMHandle bound to the mount's content container. Render + wire via api.ui.dom.*; calls are buffered until the frontend has created the mount."
+      },
+      {
+        "field": "setVisible(visible)",
+        "type": "(boolean) => void",
+        "optional": false,
+        "desc": "Show or hide the mount without destroying it."
+      },
+      {
+        "field": "destroy()",
+        "type": "() => void",
+        "optional": false,
+        "desc": "Remove the mount from the app shell. Idempotent — subsequent calls and method invocations are silent no-ops."
+      }
+    ],
+    "usedBy": [
+      "api.ui.mountApp"
+    ]
+  },
   "DrawerTabOptions": {
     "kind": "type",
     "type": "DrawerTabOptions",
@@ -6116,6 +7711,247 @@
     ],
     "usedBy": [
       "api.ui.registerDrawerTab"
+    ]
+  },
+  "UIDrawerTab": {
+    "kind": "type",
+    "type": "UIDrawerTab",
+    "note": "A drawer tab discoverable via api.ui.getDrawerTabs() — built-in or extension-contributed. The id is what you pass to api.ui.openDrawerTab().",
+    "fields": [
+      {
+        "field": "id",
+        "type": "string",
+        "optional": false,
+        "desc": "Stable tab id (→ openDrawerTab(id))."
+      },
+      {
+        "field": "shortName",
+        "type": "string",
+        "optional": false,
+        "desc": "Short label shown beneath the sidebar icon."
+      },
+      {
+        "field": "tabName",
+        "type": "string",
+        "optional": false,
+        "desc": "Full title shown in menus and the command palette."
+      },
+      {
+        "field": "tabDescription",
+        "type": "string",
+        "optional": false,
+        "desc": "One-line description shown in the command palette."
+      },
+      {
+        "field": "keywords",
+        "type": "string[]",
+        "optional": false,
+        "desc": "Keywords used for command-palette fuzzy search."
+      },
+      {
+        "field": "source",
+        "type": "'builtin' | 'extension'",
+        "optional": false,
+        "desc": "Whether the tab is built into Lumiverse or contributed by an extension."
+      },
+      {
+        "field": "extensionId?",
+        "type": "string",
+        "optional": true,
+        "desc": "For extension-contributed tabs, the owning extension's identifier."
+      }
+    ],
+    "usedBy": [
+      "api.ui.getDrawerTabs"
+    ]
+  },
+  "UISettingsTab": {
+    "kind": "type",
+    "type": "UISettingsTab",
+    "note": "A settings tab discoverable via api.ui.getSettingsTabs(). Role-restricted tabs are filtered out for users lacking the role. The id is what you pass to api.ui.openSettings().",
+    "fields": [
+      {
+        "field": "id",
+        "type": "string",
+        "optional": false,
+        "desc": "Stable tab id (→ openSettings(id))."
+      },
+      {
+        "field": "shortName",
+        "type": "string",
+        "optional": false,
+        "desc": "Short label shown in the settings sidebar."
+      },
+      {
+        "field": "tabName",
+        "type": "string",
+        "optional": false,
+        "desc": "Full title shown in the settings header / command palette."
+      },
+      {
+        "field": "tabDescription",
+        "type": "string",
+        "optional": false,
+        "desc": "One-line description shown in the command palette."
+      },
+      {
+        "field": "keywords",
+        "type": "string[]",
+        "optional": false,
+        "desc": "Keywords used for command-palette fuzzy search."
+      },
+      {
+        "field": "role?",
+        "type": "'admin' | 'owner'",
+        "optional": true,
+        "desc": "Set when the tab is only visible to certain roles."
+      }
+    ],
+    "usedBy": [
+      "api.ui.getSettingsTabs"
+    ]
+  },
+  "PickFileOptions": {
+    "kind": "type",
+    "type": "PickFileOptions",
+    "note": "Options for api.ui.pickFile().",
+    "fields": [
+      {
+        "field": "accept?",
+        "type": "string[]",
+        "optional": true,
+        "desc": "File-type filters — extensions and/or MIME types (e.g. ['.json', 'application/json'])."
+      },
+      {
+        "field": "multiple?",
+        "type": "boolean",
+        "optional": true,
+        "desc": "Allow selecting more than one file. Default: false."
+      },
+      {
+        "field": "maxSizeBytes?",
+        "type": "number",
+        "optional": true,
+        "desc": "Maximum size per file in bytes. pickFile() rejects if a selected file exceeds this."
+      }
+    ],
+    "usedBy": [
+      "api.ui.pickFile"
+    ]
+  },
+  "PickedFile": {
+    "kind": "type",
+    "type": "PickedFile",
+    "note": "A file returned by api.ui.pickFile(). bytes is the raw Uint8Array — decode text via new TextDecoder().decode(bytes), or pass to api.images.upload / api.files.",
+    "fields": [
+      {
+        "field": "name",
+        "type": "string",
+        "optional": false,
+        "desc": "Original file name."
+      },
+      {
+        "field": "mimeType",
+        "type": "string",
+        "optional": false,
+        "desc": "MIME type (falls back to 'application/octet-stream')."
+      },
+      {
+        "field": "sizeBytes",
+        "type": "number",
+        "optional": false,
+        "desc": "File size in bytes."
+      },
+      {
+        "field": "bytes",
+        "type": "Uint8Array",
+        "optional": false,
+        "desc": "Raw file contents."
+      }
+    ],
+    "usedBy": [
+      "api.ui.pickFile"
+    ]
+  },
+  "UIKeyboardState": {
+    "kind": "type",
+    "type": "UIKeyboardState",
+    "note": "Snapshot from api.ui.events.getKeyboardState() / onKeyboardChange().",
+    "fields": [
+      {
+        "field": "visible",
+        "type": "boolean",
+        "optional": false,
+        "desc": "True when the host believes a virtual keyboard is currently visible."
+      },
+      {
+        "field": "insetBottom",
+        "type": "number",
+        "optional": false,
+        "desc": "Safe bottom inset in CSS pixels that keeps content above the keyboard."
+      },
+      {
+        "field": "viewportWidth",
+        "type": "number",
+        "optional": false,
+        "desc": "Current visual viewport width in CSS pixels."
+      },
+      {
+        "field": "viewportHeight",
+        "type": "number",
+        "optional": false,
+        "desc": "Current visual viewport height in CSS pixels."
+      }
+    ],
+    "usedBy": [
+      "api.ui.events.getKeyboardState",
+      "api.ui.events.onKeyboardChange"
+    ]
+  },
+  "UIDrawerState": {
+    "kind": "type",
+    "type": "UIDrawerState",
+    "note": "Snapshot from api.ui.events.getDrawerState() / onDrawerChange().",
+    "fields": [
+      {
+        "field": "open",
+        "type": "boolean",
+        "optional": false,
+        "desc": "Whether the side drawer is currently open."
+      },
+      {
+        "field": "tabId",
+        "type": "string | null",
+        "optional": false,
+        "desc": "Active drawer tab id, or null."
+      }
+    ],
+    "usedBy": [
+      "api.ui.events.getDrawerState",
+      "api.ui.events.onDrawerChange"
+    ]
+  },
+  "UISettingsState": {
+    "kind": "type",
+    "type": "UISettingsState",
+    "note": "Snapshot from api.ui.events.getSettingsState() / onSettingsChange().",
+    "fields": [
+      {
+        "field": "open",
+        "type": "boolean",
+        "optional": false,
+        "desc": "Whether the settings modal is currently open."
+      },
+      {
+        "field": "view",
+        "type": "string",
+        "optional": false,
+        "desc": "Active settings view identifier."
+      }
+    ],
+    "usedBy": [
+      "api.ui.events.getSettingsState",
+      "api.ui.events.onSettingsChange"
     ]
   },
   "DOMInjectOptions": {
@@ -6280,7 +8116,941 @@
     ],
     "usedBy": [
       "api.ui.dom.inject",
-      "api.ui.dom.injectAtMessage"
+      "api.ui.dom.injectAtMessage",
+      "api.ui.components.mountBadge",
+      "api.ui.components.mountSpinner",
+      "api.ui.components.mountSwitch",
+      "api.ui.components.mountTextInput",
+      "api.ui.components.mountTextArea",
+      "api.ui.components.mountNumericInput"
+    ]
+  },
+  "MountedComponentHandle": {
+    "kind": "type",
+    "type": "MountedComponentHandle",
+    "note": "Returned synchronously by api.ui.components.mountBadge / mountSpinner (display-only components). Methods are fire-and-forget.",
+    "fields": [
+      {
+        "field": "id",
+        "type": "string",
+        "optional": false,
+        "desc": "Unique component ID (host-assigned)."
+      },
+      {
+        "field": "update(patch)",
+        "type": "void",
+        "optional": false,
+        "desc": "Merge a partial of the original mount options into the live component. Pass only the fields to change. Fire-and-forget (no round-trip)."
+      },
+      {
+        "field": "destroy()",
+        "type": "void",
+        "optional": false,
+        "desc": "Unmount the component and release host resources. The container element you mounted into is left in place. Idempotent."
+      }
+    ],
+    "usedBy": [
+      "api.ui.components.mountBadge",
+      "api.ui.components.mountSpinner",
+      "api.ui.components.mountPagination",
+      "api.ui.components.mountCloseButton"
+    ]
+  },
+  "MountedValueComponentHandle": {
+    "kind": "type",
+    "type": "MountedValueComponentHandle",
+    "note": "Generic `MountedValueComponentHandle<TOptions, TValue>`. Returned by interactive mounts (api.ui.components.mountSwitch → boolean, mountTextInput → string). Extends MountedComponentHandle with an async getValue().",
+    "fields": [
+      {
+        "field": "id",
+        "type": "string",
+        "optional": false,
+        "desc": "Unique component ID."
+      },
+      {
+        "field": "update(patch)",
+        "type": "void",
+        "optional": false,
+        "desc": "Merge a partial of the mount options into the live component. Fire-and-forget."
+      },
+      {
+        "field": "destroy()",
+        "type": "void",
+        "optional": false,
+        "desc": "Unmount + release. Also drops the component's registered callbacks. Idempotent."
+      },
+      {
+        "field": "getValue()",
+        "type": "Promise<TValue>",
+        "optional": false,
+        "desc": "Read the component's current value. ASYNC here (a frontend round-trip across the worker boundary), unlike the host's synchronous getValue(). Same reason DOMHandle.read() is async. Auto-controlled state lives host-side — you don't need to mirror it."
+      }
+    ],
+    "usedBy": [
+      "api.ui.components.mountSwitch",
+      "api.ui.components.mountTextInput",
+      "api.ui.components.mountTextArea",
+      "api.ui.components.mountNumericInput",
+      "api.ui.components.mountNumberStepper",
+      "api.ui.components.mountCheckbox",
+      "api.ui.components.mountRangeSlider",
+      "api.ui.components.mountSelect"
+    ]
+  },
+  "SpindleBadgeOptions": {
+    "kind": "type",
+    "type": "SpindleBadgeOptions",
+    "note": "Options for api.ui.components.mountBadge().",
+    "fields": [
+      {
+        "field": "text?",
+        "type": "string",
+        "optional": true,
+        "desc": "Badge text. Default \"\"."
+      },
+      {
+        "field": "color?",
+        "type": "'neutral' | 'primary' | 'success' | 'warning' | 'danger' | 'info'",
+        "optional": true,
+        "desc": "Accent color. Default 'neutral'."
+      },
+      {
+        "field": "size?",
+        "type": "'sm' | 'md' | 'pill'",
+        "optional": true,
+        "desc": "Visual size. Default 'md'."
+      }
+    ],
+    "usedBy": [
+      "api.ui.components.mountBadge"
+    ]
+  },
+  "SpindleSpinnerOptions": {
+    "kind": "type",
+    "type": "SpindleSpinnerOptions",
+    "note": "Options for api.ui.components.mountSpinner().",
+    "fields": [
+      {
+        "field": "size?",
+        "type": "number",
+        "optional": true,
+        "desc": "Diameter in CSS pixels. Default 16."
+      },
+      {
+        "field": "fast?",
+        "type": "boolean",
+        "optional": true,
+        "desc": "Use the faster rotation variant. Default false."
+      }
+    ],
+    "usedBy": [
+      "api.ui.components.mountSpinner"
+    ]
+  },
+  "SpindleSwitchOptions": {
+    "kind": "type",
+    "type": "SpindleSwitchOptions",
+    "note": "Options for api.ui.components.mountSwitch(). onChange fires into your script on every toggle.",
+    "fields": [
+      {
+        "field": "checked?",
+        "type": "boolean",
+        "optional": true,
+        "desc": "Initial state. Default false."
+      },
+      {
+        "field": "onChange?",
+        "type": "(checked: boolean) => void",
+        "optional": true,
+        "desc": "Fired on every toggle with the new state. Can be async; the host keeps the per-fire run alive across awaits."
+      },
+      {
+        "field": "size?",
+        "type": "'sm' | 'md'",
+        "optional": true,
+        "desc": "Visual size. Default 'md'."
+      },
+      {
+        "field": "disabled?",
+        "type": "boolean",
+        "optional": true,
+        "desc": "Disable user interaction. Default false."
+      },
+      {
+        "field": "ariaLabel?",
+        "type": "string",
+        "optional": true,
+        "desc": "Accessible label."
+      }
+    ],
+    "usedBy": [
+      "api.ui.components.mountSwitch"
+    ]
+  },
+  "SpindleTextInputOptions": {
+    "kind": "type",
+    "type": "SpindleTextInputOptions",
+    "note": "Options for api.ui.components.mountTextInput(). onChange fires on every user change.",
+    "fields": [
+      {
+        "field": "value?",
+        "type": "string",
+        "optional": true,
+        "desc": "Initial value. Default \"\"."
+      },
+      {
+        "field": "onChange?",
+        "type": "(value: string) => void",
+        "optional": true,
+        "desc": "Fired on every user change with the full current text. Can be async."
+      },
+      {
+        "field": "placeholder?",
+        "type": "string",
+        "optional": true,
+        "desc": "Placeholder text."
+      },
+      {
+        "field": "autoFocus?",
+        "type": "boolean",
+        "optional": true,
+        "desc": "Focus on mount. Default false."
+      },
+      {
+        "field": "disabled?",
+        "type": "boolean",
+        "optional": true,
+        "desc": "Disable user interaction. Default false."
+      },
+      {
+        "field": "className?",
+        "type": "string",
+        "optional": true,
+        "desc": "Additional CSS class on the wrapper."
+      },
+      {
+        "field": "ariaLabel?",
+        "type": "string",
+        "optional": true,
+        "desc": "Accessible label."
+      }
+    ],
+    "usedBy": [
+      "api.ui.components.mountTextInput"
+    ]
+  },
+  "SpindleTextAreaOptions": {
+    "kind": "type",
+    "type": "SpindleTextAreaOptions",
+    "note": "Options for api.ui.components.mountTextArea(). Like SpindleTextInputOptions plus rows.",
+    "fields": [
+      {
+        "field": "value?",
+        "type": "string",
+        "optional": true,
+        "desc": "Initial value. Default \"\"."
+      },
+      {
+        "field": "onChange?",
+        "type": "(value: string) => void",
+        "optional": true,
+        "desc": "Fired on every user change. Can be async."
+      },
+      {
+        "field": "placeholder?",
+        "type": "string",
+        "optional": true,
+        "desc": "Placeholder text."
+      },
+      {
+        "field": "rows?",
+        "type": "number",
+        "optional": true,
+        "desc": "Visible rows. Default 4."
+      },
+      {
+        "field": "disabled?",
+        "type": "boolean",
+        "optional": true,
+        "desc": "Disable user interaction. Default false."
+      },
+      {
+        "field": "className?",
+        "type": "string",
+        "optional": true,
+        "desc": "Additional CSS class."
+      },
+      {
+        "field": "ariaLabel?",
+        "type": "string",
+        "optional": true,
+        "desc": "Accessible label."
+      }
+    ],
+    "usedBy": [
+      "api.ui.components.mountTextArea"
+    ]
+  },
+  "SpindleNumericInputOptions": {
+    "kind": "type",
+    "type": "SpindleNumericInputOptions",
+    "note": "Options for api.ui.components.mountNumericInput(). Value is number | null (null = empty when allowEmpty).",
+    "fields": [
+      {
+        "field": "value?",
+        "type": "number | null",
+        "optional": true,
+        "desc": "Initial value. null = empty. Default null."
+      },
+      {
+        "field": "onChange?",
+        "type": "(value: number | null) => void",
+        "optional": true,
+        "desc": "Fired on every user change."
+      },
+      {
+        "field": "allowEmpty?",
+        "type": "boolean",
+        "optional": true,
+        "desc": "Allow null (empty) as a valid value. Default false."
+      },
+      {
+        "field": "integer?",
+        "type": "boolean",
+        "optional": true,
+        "desc": "Restrict to integers. Default false."
+      },
+      {
+        "field": "min?",
+        "type": "number",
+        "optional": true,
+        "desc": "Lower bound."
+      },
+      {
+        "field": "max?",
+        "type": "number",
+        "optional": true,
+        "desc": "Upper bound."
+      },
+      {
+        "field": "step?",
+        "type": "number",
+        "optional": true,
+        "desc": "Native step size."
+      },
+      {
+        "field": "placeholder?",
+        "type": "string",
+        "optional": true,
+        "desc": "Placeholder text."
+      },
+      {
+        "field": "disabled?",
+        "type": "boolean",
+        "optional": true,
+        "desc": "Disable user interaction. Default false."
+      }
+    ],
+    "usedBy": [
+      "api.ui.components.mountNumericInput"
+    ]
+  },
+  "SpindleNumberStepperOptions": {
+    "kind": "type",
+    "type": "SpindleNumberStepperOptions",
+    "note": "Options for api.ui.components.mountNumberStepper(). Like SpindleNumericInputOptions minus integer; step defaults to 1.",
+    "fields": [
+      {
+        "field": "value?",
+        "type": "number | null",
+        "optional": true,
+        "desc": "Initial value. null = empty. Default null."
+      },
+      {
+        "field": "onChange?",
+        "type": "(value: number | null) => void",
+        "optional": true,
+        "desc": "Fired on every user change."
+      },
+      {
+        "field": "allowEmpty?",
+        "type": "boolean",
+        "optional": true,
+        "desc": "Allow null (empty). Default false."
+      },
+      {
+        "field": "min?",
+        "type": "number",
+        "optional": true,
+        "desc": "Lower bound."
+      },
+      {
+        "field": "max?",
+        "type": "number",
+        "optional": true,
+        "desc": "Upper bound."
+      },
+      {
+        "field": "step?",
+        "type": "number",
+        "optional": true,
+        "desc": "Step size. Default 1."
+      },
+      {
+        "field": "placeholder?",
+        "type": "string",
+        "optional": true,
+        "desc": "Placeholder text."
+      },
+      {
+        "field": "disabled?",
+        "type": "boolean",
+        "optional": true,
+        "desc": "Disable user interaction. Default false."
+      }
+    ],
+    "usedBy": [
+      "api.ui.components.mountNumberStepper"
+    ]
+  },
+  "SpindleCheckboxOptions": {
+    "kind": "type",
+    "type": "SpindleCheckboxOptions",
+    "note": "Options for api.ui.components.mountCheckbox().",
+    "fields": [
+      {
+        "field": "checked?",
+        "type": "boolean",
+        "optional": true,
+        "desc": "Initial state. Default false."
+      },
+      {
+        "field": "onChange?",
+        "type": "(checked: boolean) => void",
+        "optional": true,
+        "desc": "Fired on every toggle."
+      },
+      {
+        "field": "label?",
+        "type": "string",
+        "optional": true,
+        "desc": "Label rendered next to the checkbox."
+      },
+      {
+        "field": "hint?",
+        "type": "string",
+        "optional": true,
+        "desc": "Helper text under the label."
+      },
+      {
+        "field": "disabled?",
+        "type": "boolean",
+        "optional": true,
+        "desc": "Disable user interaction. Default false."
+      }
+    ],
+    "usedBy": [
+      "api.ui.components.mountCheckbox"
+    ]
+  },
+  "SpindleRangeSliderOptions": {
+    "kind": "type",
+    "type": "SpindleRangeSliderOptions",
+    "note": "Options for api.ui.components.mountRangeSlider(). onCommit fires once when a drag/tap ends; onDragValue fires live during a drag.",
+    "fields": [
+      {
+        "field": "min",
+        "type": "number",
+        "optional": false,
+        "desc": "REQUIRED. Inclusive lower bound."
+      },
+      {
+        "field": "max",
+        "type": "number",
+        "optional": false,
+        "desc": "REQUIRED. Inclusive upper bound."
+      },
+      {
+        "field": "value?",
+        "type": "number",
+        "optional": true,
+        "desc": "Initial committed value. Default min."
+      },
+      {
+        "field": "step?",
+        "type": "number",
+        "optional": true,
+        "desc": "Snap increment. Default 1."
+      },
+      {
+        "field": "integer?",
+        "type": "boolean",
+        "optional": true,
+        "desc": "Round to integers. Default false."
+      },
+      {
+        "field": "onCommit?",
+        "type": "(value: number) => void",
+        "optional": true,
+        "desc": "Fired once when the gesture ends (NOT during drag)."
+      },
+      {
+        "field": "onDragValue?",
+        "type": "(value: number | null) => void",
+        "optional": true,
+        "desc": "Fired with the live value during a drag; null if the gesture ends without committing."
+      },
+      {
+        "field": "label?",
+        "type": "string",
+        "optional": true,
+        "desc": "Renders a header with label + live value."
+      },
+      {
+        "field": "hint?",
+        "type": "string",
+        "optional": true,
+        "desc": "Helper text under the header. Ignored without label."
+      },
+      {
+        "field": "format?",
+        "type": "SpindleRangeSliderFormat",
+        "optional": true,
+        "desc": "{ decimals?, prefix?, suffix? } for the header value. Ignored without label."
+      },
+      {
+        "field": "disabled?",
+        "type": "boolean",
+        "optional": true,
+        "desc": "Dim the track and ignore input. Default false."
+      },
+      {
+        "field": "className?",
+        "type": "string",
+        "optional": true,
+        "desc": "Additional CSS class on the track area."
+      }
+    ],
+    "usedBy": [
+      "api.ui.components.mountRangeSlider"
+    ]
+  },
+  "SpindleSelectOption": {
+    "kind": "type",
+    "type": "SpindleSelectOption",
+    "note": "A single option in api.ui.components.mountSelect() / mountMultiSelect().",
+    "fields": [
+      {
+        "field": "value",
+        "type": "string",
+        "optional": false,
+        "desc": "Stable value emitted to onChange."
+      },
+      {
+        "field": "label",
+        "type": "string",
+        "optional": false,
+        "desc": "Display label."
+      },
+      {
+        "field": "sublabel?",
+        "type": "string",
+        "optional": true,
+        "desc": "Secondary text beneath the label."
+      },
+      {
+        "field": "group?",
+        "type": "string",
+        "optional": true,
+        "desc": "Group key — shared-group options cluster under a header."
+      },
+      {
+        "field": "leading?",
+        "type": "SpindleSelectOptionLeading",
+        "optional": true,
+        "desc": "Leading cell: { type: \"image\"|\"icon-svg\"|\"icon-url\"|\"swatch\"|\"initial\", ... }."
+      },
+      {
+        "field": "disabled?",
+        "type": "boolean",
+        "optional": true,
+        "desc": "Render as disabled."
+      }
+    ],
+    "usedBy": []
+  },
+  "SpindleSelectOptions": {
+    "kind": "type",
+    "type": "SpindleSelectOptions",
+    "note": "Options for api.ui.components.mountSelect() (single-select). Extends SpindleSelectOptionsBase (options, placeholder, searchPlaceholder, searchThreshold, emptyMessage, noResultsMessage, triggerLabel, triggerIcon, portal, align, maxHeight, minWidth, disabled, className).",
+    "fields": [
+      {
+        "field": "value?",
+        "type": "string",
+        "optional": true,
+        "desc": "Currently selected value."
+      },
+      {
+        "field": "onChange?",
+        "type": "(value: string) => void",
+        "optional": true,
+        "desc": "Fired when the user picks an option."
+      },
+      {
+        "field": "options?",
+        "type": "SpindleSelectOption[]",
+        "optional": true,
+        "desc": "Available choices."
+      },
+      {
+        "field": "clearable?",
+        "type": "boolean",
+        "optional": true,
+        "desc": "Show a pinned \"None\" option that emits onChange(\"\")."
+      },
+      {
+        "field": "clearLabel?",
+        "type": "string",
+        "optional": true,
+        "desc": "Label for the clear option. Default \"None\"."
+      }
+    ],
+    "usedBy": [
+      "api.ui.components.mountSelect"
+    ]
+  },
+  "SpindleMultiSelectOptions": {
+    "kind": "type",
+    "type": "SpindleMultiSelectOptions",
+    "note": "Options for api.ui.components.mountMultiSelect(). Same base as SpindleSelectOptions but value/onChange use string[].",
+    "fields": [
+      {
+        "field": "value?",
+        "type": "string[]",
+        "optional": true,
+        "desc": "Currently selected values."
+      },
+      {
+        "field": "onChange?",
+        "type": "(value: string[]) => void",
+        "optional": true,
+        "desc": "Fired when the selection changes."
+      },
+      {
+        "field": "options?",
+        "type": "SpindleSelectOption[]",
+        "optional": true,
+        "desc": "Available choices."
+      }
+    ],
+    "usedBy": [
+      "api.ui.components.mountMultiSelect"
+    ]
+  },
+  "SpindleFolderDropdownOptions": {
+    "kind": "type",
+    "type": "SpindleFolderDropdownOptions",
+    "note": "Options for api.ui.components.mountFolderDropdown().",
+    "fields": [
+      {
+        "field": "folders?",
+        "type": "string[]",
+        "optional": true,
+        "desc": "Available folder names."
+      },
+      {
+        "field": "value?",
+        "type": "string",
+        "optional": true,
+        "desc": "Currently selected folder."
+      },
+      {
+        "field": "onChange?",
+        "type": "(folder: string) => void",
+        "optional": true,
+        "desc": "Fired when the user picks a folder."
+      },
+      {
+        "field": "onCreateFolder?",
+        "type": "(name: string) => void",
+        "optional": true,
+        "desc": "Fired when the user creates a folder inline."
+      },
+      {
+        "field": "placeholder?",
+        "type": "string",
+        "optional": true,
+        "desc": "Placeholder when no folder is selected."
+      },
+      {
+        "field": "disabled?",
+        "type": "boolean",
+        "optional": true,
+        "desc": "Disable interaction."
+      }
+    ],
+    "usedBy": [
+      "api.ui.components.mountFolderDropdown"
+    ]
+  },
+  "SpindleModelComboboxOptions": {
+    "kind": "type",
+    "type": "SpindleModelComboboxOptions",
+    "note": "Options for api.ui.components.mountModelCombobox(). Connection-bound mode (connection) is recommended; manual mode uses models + onRefresh.",
+    "fields": [
+      {
+        "field": "value?",
+        "type": "string",
+        "optional": true,
+        "desc": "Currently entered model ID."
+      },
+      {
+        "field": "onChange?",
+        "type": "(value: string) => void",
+        "optional": true,
+        "desc": "Fired on every change."
+      },
+      {
+        "field": "connection?",
+        "type": "{ kind: \"llm\"|\"image\"|\"tts\"|\"embedding\"; id? }",
+        "optional": true,
+        "desc": "Bind to a host-managed connection; host fetches + updates the model list. embedding is manual-mode-only."
+      },
+      {
+        "field": "models?",
+        "type": "string[]",
+        "optional": true,
+        "desc": "Manual mode: explicit model list."
+      },
+      {
+        "field": "modelLabels?",
+        "type": "Record<string, string>",
+        "optional": true,
+        "desc": "Manual mode: id → human label."
+      },
+      {
+        "field": "loading?",
+        "type": "boolean",
+        "optional": true,
+        "desc": "Manual mode: show the refresh spinner."
+      },
+      {
+        "field": "onRefresh?",
+        "type": "() => void",
+        "optional": true,
+        "desc": "Manual mode: invoked on refresh click."
+      },
+      {
+        "field": "appearance?",
+        "type": "'compact' | 'standard' | 'editor'",
+        "optional": true,
+        "desc": "Visual density. Default 'compact'."
+      },
+      {
+        "field": "placeholder?",
+        "type": "string",
+        "optional": true,
+        "desc": "Placeholder text."
+      }
+    ],
+    "usedBy": [
+      "api.ui.components.mountModelCombobox"
+    ]
+  },
+  "SpindlePaginationOptions": {
+    "kind": "type",
+    "type": "SpindlePaginationOptions",
+    "note": "Options for api.ui.components.mountPagination(). Fully controlled — currentPage/totalPages/onPageChange are REQUIRED; call handle.update({currentPage}) after navigating.",
+    "fields": [
+      {
+        "field": "currentPage",
+        "type": "number",
+        "optional": false,
+        "desc": "REQUIRED. Current page index (1-based)."
+      },
+      {
+        "field": "totalPages",
+        "type": "number",
+        "optional": false,
+        "desc": "REQUIRED. Total page count."
+      },
+      {
+        "field": "onPageChange",
+        "type": "(page: number) => void",
+        "optional": false,
+        "desc": "REQUIRED. Fired when the user clicks a page."
+      },
+      {
+        "field": "perPage?",
+        "type": "number",
+        "optional": true,
+        "desc": "Current per-page selection (omit to hide the selector)."
+      },
+      {
+        "field": "perPageOptions?",
+        "type": "number[]",
+        "optional": true,
+        "desc": "Page-size choices."
+      },
+      {
+        "field": "onPerPageChange?",
+        "type": "(n: number) => void",
+        "optional": true,
+        "desc": "Fired when the user changes per-page."
+      },
+      {
+        "field": "totalItems?",
+        "type": "number",
+        "optional": true,
+        "desc": "Total item count for the \"Showing X–Y of N\" summary."
+      }
+    ],
+    "usedBy": [
+      "api.ui.components.mountPagination"
+    ]
+  },
+  "SpindleCloseButtonOptions": {
+    "kind": "type",
+    "type": "SpindleCloseButtonOptions",
+    "note": "Options for api.ui.components.mountCloseButton().",
+    "fields": [
+      {
+        "field": "onClick?",
+        "type": "() => void",
+        "optional": true,
+        "desc": "Click handler."
+      },
+      {
+        "field": "size?",
+        "type": "'sm' | 'md'",
+        "optional": true,
+        "desc": "Visual size. Default 'md'."
+      },
+      {
+        "field": "variant?",
+        "type": "'subtle' | 'solid'",
+        "optional": true,
+        "desc": "Visual variant. Default 'subtle'."
+      },
+      {
+        "field": "position?",
+        "type": "'static' | 'absolute'",
+        "optional": true,
+        "desc": "Positioning behavior. Default 'static'."
+      },
+      {
+        "field": "iconSize?",
+        "type": "number",
+        "optional": true,
+        "desc": "Icon size override in CSS pixels."
+      }
+    ],
+    "usedBy": [
+      "api.ui.components.mountCloseButton"
+    ]
+  },
+  "SpindleCollapsibleSectionOptions": {
+    "kind": "type",
+    "type": "SpindleCollapsibleSectionOptions",
+    "note": "Options for api.ui.components.mountCollapsibleSection(). title is REQUIRED.",
+    "fields": [
+      {
+        "field": "title",
+        "type": "string",
+        "optional": false,
+        "desc": "REQUIRED. Header text."
+      },
+      {
+        "field": "iconSvg?",
+        "type": "string",
+        "optional": true,
+        "desc": "Inline SVG icon next to the title."
+      },
+      {
+        "field": "iconUrl?",
+        "type": "string",
+        "optional": true,
+        "desc": "Icon image URL. Mutually exclusive with iconSvg."
+      },
+      {
+        "field": "badge?",
+        "type": "string | number",
+        "optional": true,
+        "desc": "Optional badge text next to the title."
+      },
+      {
+        "field": "defaultExpanded?",
+        "type": "boolean",
+        "optional": true,
+        "desc": "Initial expanded state. Default true."
+      },
+      {
+        "field": "onToggle?",
+        "type": "(expanded: boolean) => void",
+        "optional": true,
+        "desc": "Fired whenever the user toggles the section."
+      }
+    ],
+    "usedBy": [
+      "api.ui.components.mountCollapsibleSection"
+    ]
+  },
+  "MountedCollapsibleSectionHandle": {
+    "kind": "type",
+    "type": "MountedCollapsibleSectionHandle",
+    "note": "Returned by api.ui.components.mountCollapsibleSection(). The host owns the header chrome; your script owns the body.",
+    "fields": [
+      {
+        "field": "id",
+        "type": "string",
+        "optional": false,
+        "desc": "Unique component ID."
+      },
+      {
+        "field": "body",
+        "type": "DOMHandle",
+        "optional": false,
+        "desc": "The section body — a DOMHandle your script owns. Use body.inject(...)/update(...)/on(...) to fill + wire it, exactly like any injected element."
+      },
+      {
+        "field": "update(patch)",
+        "type": "void",
+        "optional": false,
+        "desc": "Merge a partial of the mount options (title/badge/etc.) into the live section. Fire-and-forget."
+      },
+      {
+        "field": "destroy()",
+        "type": "void",
+        "optional": false,
+        "desc": "Unmount the section + release. Idempotent."
+      },
+      {
+        "field": "isExpanded()",
+        "type": "Promise<boolean>",
+        "optional": false,
+        "desc": "Read the current expanded state. ASYNC (a frontend round-trip), like getValue()."
+      },
+      {
+        "field": "expand()",
+        "type": "void",
+        "optional": false,
+        "desc": "Open the section. Fire-and-forget."
+      },
+      {
+        "field": "collapse()",
+        "type": "void",
+        "optional": false,
+        "desc": "Close the section. Fire-and-forget."
+      },
+      {
+        "field": "toggle()",
+        "type": "void",
+        "optional": false,
+        "desc": "Flip the section. Fire-and-forget."
+      }
+    ],
+    "usedBy": [
+      "api.ui.components.mountCollapsibleSection"
     ]
   },
   "DOMEventData": {
@@ -6475,6 +9245,7 @@
     ],
     "usedBy": [
       "api.llm.generate",
+      "api.llm.generateStream",
       "api.llm.generateStructured",
       "api.llm.generateWithTools",
       "api.tokens.countMessages"
@@ -6580,8 +9351,238 @@
     ],
     "usedBy": [
       "api.llm.generate",
+      "api.llm.generateStream",
       "api.llm.generateStructured",
       "api.llm.generateWithTools"
+    ]
+  },
+  "Connection": {
+    "kind": "type",
+    "type": "Connection",
+    "note": "Read-only view of an LLM connection profile (api.connections.*). snake_case, mirrors the host ConnectionProfileDTO. NEVER contains the API key — only has_api_key. id/name map to LLMOptions.connectionId/connectionName.",
+    "fields": [
+      {
+        "field": "id",
+        "type": "string",
+        "optional": false,
+        "desc": "Stable connection ID (→ LLMOptions.connectionId)."
+      },
+      {
+        "field": "name",
+        "type": "string",
+        "optional": false,
+        "desc": "Human-readable name (→ LLMOptions.connectionName)."
+      },
+      {
+        "field": "provider",
+        "type": "string",
+        "optional": false,
+        "desc": "Provider identifier (e.g. \"anthropic\", \"openai\")."
+      },
+      {
+        "field": "api_url",
+        "type": "string",
+        "optional": false,
+        "desc": "Provider API base URL."
+      },
+      {
+        "field": "model",
+        "type": "string",
+        "optional": false,
+        "desc": "Model identifier."
+      },
+      {
+        "field": "preset_id",
+        "type": "string | null",
+        "optional": false,
+        "desc": "Bound generation preset ID, or null."
+      },
+      {
+        "field": "is_default",
+        "type": "boolean",
+        "optional": false,
+        "desc": "Whether this is the user's default connection."
+      },
+      {
+        "field": "has_api_key",
+        "type": "boolean",
+        "optional": false,
+        "desc": "Whether a key is stored. NEVER the key itself."
+      },
+      {
+        "field": "metadata",
+        "type": "Record<string, unknown>",
+        "optional": false,
+        "desc": "Raw provider-specific metadata bag (provider-quirk flags, etc.)."
+      },
+      {
+        "field": "reasoning_bindings",
+        "type": "Record<string, unknown> | null",
+        "optional": false,
+        "desc": "Parsed reasoning bindings, or null when the connection has none."
+      },
+      {
+        "field": "created_at",
+        "type": "number",
+        "optional": false,
+        "desc": "Unix-ms creation timestamp."
+      },
+      {
+        "field": "updated_at",
+        "type": "number",
+        "optional": false,
+        "desc": "Unix-ms last-update timestamp."
+      }
+    ],
+    "usedBy": [
+      "api.connections.list",
+      "api.connections.get",
+      "api.connections.getDefault",
+      "api.connections.findByName"
+    ]
+  },
+  "WebSearchOptions": {
+    "kind": "type",
+    "type": "WebSearchOptions",
+    "note": "Passed to api.webSearch.query().",
+    "fields": [
+      {
+        "field": "query",
+        "type": "string",
+        "optional": false,
+        "desc": "Free-text query (required). Trimmed by the host; empty is rejected."
+      },
+      {
+        "field": "count?",
+        "type": "number",
+        "optional": true,
+        "desc": "Desired result count. Clamped to maxResultCount; omit for defaultResultCount."
+      },
+      {
+        "field": "scrape?",
+        "type": "boolean",
+        "optional": true,
+        "desc": "Default true → scrape top results + assemble context. false → only results (no documents/context)."
+      }
+    ],
+    "usedBy": [
+      "api.webSearch.query"
+    ]
+  },
+  "WebSearchResponse": {
+    "kind": "type",
+    "type": "WebSearchResponse",
+    "note": "Returned by api.webSearch.query(). documents/context are omitted when scrape:false.",
+    "fields": [
+      {
+        "field": "query",
+        "type": "string",
+        "optional": false,
+        "desc": "The (trimmed) query that ran."
+      },
+      {
+        "field": "results",
+        "type": "WebSearchResult[]",
+        "optional": false,
+        "desc": "Normalized results { title, url, snippet, engine?, score? }."
+      },
+      {
+        "field": "documents?",
+        "type": "WebSearchDocument[]",
+        "optional": true,
+        "desc": "Per-result scraped content { ..., content?, contentLength?, sourceType?, error? }. Absent when scrape:false."
+      },
+      {
+        "field": "context?",
+        "type": "string",
+        "optional": true,
+        "desc": "Pre-assembled prompt-ready context (query + scraped docs). Absent when scrape:false."
+      }
+    ],
+    "usedBy": [
+      "api.webSearch.query"
+    ]
+  },
+  "WebSearchSettings": {
+    "kind": "type",
+    "type": "WebSearchSettings",
+    "note": "Returned by api.webSearch.getSettings(). Safe view — NEVER the API key (only hasApiKey).",
+    "fields": [
+      {
+        "field": "enabled",
+        "type": "boolean",
+        "optional": false,
+        "desc": "Whether web search is configured + enabled. Check before query()."
+      },
+      {
+        "field": "provider",
+        "type": "string",
+        "optional": false,
+        "desc": "Provider identifier (currently 'searxng')."
+      },
+      {
+        "field": "apiUrl",
+        "type": "string",
+        "optional": false,
+        "desc": "Provider API base URL."
+      },
+      {
+        "field": "hasApiKey",
+        "type": "boolean",
+        "optional": false,
+        "desc": "Whether a key is stored. NEVER the key itself."
+      },
+      {
+        "field": "defaultResultCount",
+        "type": "number",
+        "optional": false,
+        "desc": "Result count when query.count is omitted."
+      },
+      {
+        "field": "maxResultCount",
+        "type": "number",
+        "optional": false,
+        "desc": "Upper bound (count is clamped to this)."
+      },
+      {
+        "field": "maxPagesToScrape",
+        "type": "number",
+        "optional": false,
+        "desc": "How many top results get scraped when scrape:true."
+      },
+      {
+        "field": "maxCharsPerPage",
+        "type": "number",
+        "optional": false,
+        "desc": "Per-page scraped-text character cap."
+      },
+      {
+        "field": "language",
+        "type": "string",
+        "optional": false,
+        "desc": "Search language code."
+      },
+      {
+        "field": "safeSearch",
+        "type": "0 | 1 | 2",
+        "optional": false,
+        "desc": "SafeSearch: 0 off, 1 moderate, 2 strict."
+      },
+      {
+        "field": "engines",
+        "type": "string[]",
+        "optional": false,
+        "desc": "Provider engines to query."
+      },
+      {
+        "field": "requestTimeoutMs",
+        "type": "number",
+        "optional": false,
+        "desc": "Per-request timeout in ms."
+      }
+    ],
+    "usedBy": [
+      "api.webSearch.getSettings"
     ]
   },
   "DryRunOptions": {
@@ -6682,6 +9683,34 @@
     ],
     "usedBy": [
       "api.llm.generateWithTools"
+    ]
+  },
+  "StreamChunk": {
+    "kind": "type",
+    "type": "StreamChunk",
+    "note": "One chunk yielded by api.llm.generateStream. Discriminated union — switch on the `type` field. snake_case throughout, mirroring LLMRawResult and the upstream StreamChunkDTO.",
+    "fields": [
+      {
+        "field": "{ type: 'token', token }",
+        "type": "",
+        "optional": false,
+        "desc": "Incremental visible content chunk. Concatenate token across all token chunks to assemble the streamed text."
+      },
+      {
+        "field": "{ type: 'reasoning', token }",
+        "type": "",
+        "optional": false,
+        "desc": "Incremental chain-of-thought chunk. Thinking-mode models only (DeepSeek-thinking, Anthropic extended-thinking, …). Other providers skip these."
+      },
+      {
+        "field": "{ type: 'done', content, reasoning?, finish_reason, tool_calls?, usage? }",
+        "type": "",
+        "optional": false,
+        "desc": "Terminal chunk emitted exactly once on successful completion. content is the full aggregated text; reasoning the full aggregated reasoning (when present); finish_reason is 'stop' | 'length' | 'tool_calls' | 'content_filter' | provider-specific; tool_calls is set when finish_reason === 'tool_calls'; usage is { prompt_tokens, completion_tokens, total_tokens } when the provider reports it. Breaking out of the for await loop before this arrives means you won't see it."
+      }
+    ],
+    "usedBy": [
+      "api.llm.generateStream"
     ]
   },
   "ToolCall": {
@@ -6936,6 +9965,12 @@
         "desc": "How memories are injected into the prompt."
       },
       {
+        "field": "retrievalMode?",
+        "type": "'vector' | 'recency' | 'empty' | 'disabled'",
+        "optional": true,
+        "desc": "How chunks were retrieved (real vector search vs recency fallback). Absent until the chat-memory cache is populated."
+      },
+      {
         "field": "queryPreview",
         "type": "string",
         "optional": false,
@@ -7035,17 +10070,24 @@
   "TempWriteOptions": {
     "kind": "type",
     "type": "TempWriteOptions",
-    "note": "Passed to api.files.tempWrite(path, data, options?).",
+    "note": "Passed to api.files.tempWrite / tempWriteBinary (path, data, options?).",
     "fields": [
       {
         "field": "ttlMs?",
         "type": "number",
         "optional": true,
         "desc": "Time-to-live in milliseconds. If omitted the file persists until deleted or restart."
+      },
+      {
+        "field": "reservationId?",
+        "type": "string",
+        "optional": true,
+        "desc": "Charge this write against a tempRequestBlock reservation, so a large write can't fail partway through on a full pool."
       }
     ],
     "usedBy": [
-      "api.files.tempWrite"
+      "api.files.tempWrite",
+      "api.files.tempWriteBinary"
     ]
   },
   "FileStatResult": {
@@ -7114,6 +10156,126 @@
     ],
     "usedBy": [
       "api.files.tempStat"
+    ]
+  },
+  "TempRequestBlockOptions": {
+    "kind": "type",
+    "type": "TempRequestBlockOptions",
+    "note": "Passed to api.files.tempRequestBlock(sizeBytes, options?).",
+    "fields": [
+      {
+        "field": "ttlMs?",
+        "type": "number",
+        "optional": true,
+        "desc": "Time-to-live for the reservation in milliseconds."
+      },
+      {
+        "field": "reason?",
+        "type": "string",
+        "optional": true,
+        "desc": "Free-text reason recorded with the reservation (diagnostics only)."
+      }
+    ],
+    "usedBy": [
+      "api.files.tempRequestBlock"
+    ]
+  },
+  "TempReservation": {
+    "kind": "type",
+    "type": "TempReservation",
+    "note": "Returned by api.files.tempRequestBlock(). Pass reservationId to tempWrite/tempWriteBinary options, or to tempReleaseBlock.",
+    "fields": [
+      {
+        "field": "reservationId",
+        "type": "string",
+        "optional": false,
+        "desc": "The reservation handle."
+      },
+      {
+        "field": "sizeBytes",
+        "type": "number",
+        "optional": false,
+        "desc": "The reserved size in bytes."
+      },
+      {
+        "field": "expiresAt",
+        "type": "string",
+        "optional": false,
+        "desc": "ISO 8601 timestamp when the reservation expires if unused."
+      }
+    ],
+    "usedBy": [
+      "api.files.tempRequestBlock"
+    ]
+  },
+  "TempPoolStatus": {
+    "kind": "type",
+    "type": "TempPoolStatus",
+    "note": "Returned by api.files.tempGetPoolStatus(). Global = across all extensions; extension* = this extension only.",
+    "fields": [
+      {
+        "field": "globalMaxBytes",
+        "type": "number",
+        "optional": false,
+        "desc": "Total ephemeral pool size across all extensions."
+      },
+      {
+        "field": "globalUsedBytes",
+        "type": "number",
+        "optional": false,
+        "desc": "Bytes currently stored across all extensions."
+      },
+      {
+        "field": "globalReservedBytes",
+        "type": "number",
+        "optional": false,
+        "desc": "Bytes currently reserved (not yet written) across all extensions."
+      },
+      {
+        "field": "globalAvailableBytes",
+        "type": "number",
+        "optional": false,
+        "desc": "Bytes still available globally (max − used − reserved)."
+      },
+      {
+        "field": "extensionMaxBytes",
+        "type": "number",
+        "optional": false,
+        "desc": "This extension's ephemeral quota."
+      },
+      {
+        "field": "extensionUsedBytes",
+        "type": "number",
+        "optional": false,
+        "desc": "Bytes this extension is currently storing."
+      },
+      {
+        "field": "extensionReservedBytes",
+        "type": "number",
+        "optional": false,
+        "desc": "Bytes this extension currently has reserved."
+      },
+      {
+        "field": "extensionAvailableBytes",
+        "type": "number",
+        "optional": false,
+        "desc": "Bytes this extension still has available."
+      },
+      {
+        "field": "fileCount",
+        "type": "number",
+        "optional": false,
+        "desc": "Number of ephemeral files this extension currently holds."
+      },
+      {
+        "field": "fileCountMax",
+        "type": "number",
+        "optional": false,
+        "desc": "Maximum file count allowed for this extension."
+      }
+    ],
+    "usedBy": [
+      "api.files.tempGetPoolStatus"
     ]
   },
   "Character": {
@@ -7511,9 +10673,9 @@
       },
       {
         "field": "score",
-        "type": "number",
+        "type": "number | null",
         "optional": false,
-        "desc": "Cosine similarity score (lower = more similar to the query)."
+        "desc": "Vector distance (lower = more similar). null for keyword-only / recency-fallback hits — do not treat a missing score as a zero-distance match."
       },
       {
         "field": "metadata",
@@ -7576,10 +10738,17 @@
         "type": "'global' | 'per_chat'",
         "optional": false,
         "desc": "Whether memory settings come from global or per-chat config."
+      },
+      {
+        "field": "retrievalMode?",
+        "type": "'vector' | 'recency' | 'empty' | 'disabled'",
+        "optional": true,
+        "desc": "How chunks were retrieved (vector search vs recency fallback). Absent until the chat-memory cache is populated."
       }
     ],
     "usedBy": [
-      "api.chats.getMemories"
+      "api.chats.getMemories",
+      "api.memories.chatMemory.get"
     ]
   },
   "WorldInfo": {
@@ -10039,6 +13208,920 @@
     ],
     "usedBy": [
       "api.databanks.documents.waitUntilReady"
+    ]
+  },
+  "CortexQuery": {
+    "kind": "type",
+    "type": "CortexQuery",
+    "note": "Input to api.memories.cortex.query(). chatId + queryText are required; the active userId is folded in by LumiScript.",
+    "fields": [
+      {
+        "field": "chatId",
+        "type": "string",
+        "optional": false,
+        "desc": "The chat to retrieve from."
+      },
+      {
+        "field": "queryText",
+        "type": "string",
+        "optional": false,
+        "desc": "Free-text retrieval query."
+      },
+      {
+        "field": "entityFilter?",
+        "type": "string[]",
+        "optional": true,
+        "desc": "Restrict to memories mentioning these entity names."
+      },
+      {
+        "field": "timeRange?",
+        "type": "{ start?: number; end?: number }",
+        "optional": true,
+        "desc": "Restrict to a time window (Unix ms)."
+      },
+      {
+        "field": "emotionalContext?",
+        "type": "EmotionalTag[]",
+        "optional": true,
+        "desc": "Bias scoring toward emotional tags (e.g. 'betrayal', 'fury', 'grief')."
+      },
+      {
+        "field": "generationType?",
+        "type": "string",
+        "optional": true,
+        "desc": "Host hint for retrieval tuning."
+      },
+      {
+        "field": "topK?",
+        "type": "number",
+        "optional": true,
+        "desc": "Number of memories to return."
+      },
+      {
+        "field": "includeConsolidations?",
+        "type": "boolean",
+        "optional": true,
+        "desc": "Include narrative-arc consolidations in the candidate pool."
+      },
+      {
+        "field": "includeRelationships?",
+        "type": "boolean",
+        "optional": true,
+        "desc": "Include the active relationship edges in the result."
+      },
+      {
+        "field": "excludeMessageIds?",
+        "type": "string[]",
+        "optional": true,
+        "desc": "Exclude chunks tied to these message ids."
+      }
+    ],
+    "usedBy": [
+      "api.memories.cortex.query"
+    ]
+  },
+  "CortexResult": {
+    "kind": "type",
+    "type": "CortexResult",
+    "note": "Returned by api.memories.cortex.query() / getCached(). The same shape the host uses internally during prompt assembly.",
+    "fields": [
+      {
+        "field": "memories",
+        "type": "CortexMemory[]",
+        "optional": false,
+        "desc": "Ranked memories: { source (\"chunk\"|\"consolidation\"), sourceId, content, finalScore, components, emotionalTags, entityNames, messageRange, timeRange }."
+      },
+      {
+        "field": "entityContext",
+        "type": "EntitySnapshot[]",
+        "optional": false,
+        "desc": "Entities in context: { id, name, type, status, description, lastSeenAt, mentionCount, topFacts, emotionalProfile, relationships }."
+      },
+      {
+        "field": "activeRelationships",
+        "type": "RelationEdge[]",
+        "optional": false,
+        "desc": "Active edges: { sourceName, targetName, type, label, strength, sentiment }."
+      },
+      {
+        "field": "arcContext",
+        "type": "string | null",
+        "optional": false,
+        "desc": "The current narrative arc summary, or null."
+      },
+      {
+        "field": "stats",
+        "type": "CortexStats",
+        "optional": false,
+        "desc": "Retrieval diagnostics: { candidatePoolSize, vectorSearchResults, entitiesMatched, scoreFusionApplied, topScore, retrievalTimeMs, timedOut?, aborted? }."
+      }
+    ],
+    "usedBy": [
+      "api.memories.cortex.query",
+      "api.memories.cortex.getCached"
+    ]
+  },
+  "LinkedCortexResult": {
+    "kind": "type",
+    "type": "LinkedCortexResult",
+    "note": "Returned by api.memories.cortex.queryLinked() / getCachedLinked(). Attached vaults + interlink targets.",
+    "fields": [
+      {
+        "field": "vaults",
+        "type": "VaultCortexData[]",
+        "optional": false,
+        "desc": "Per attached vault: { vaultId, vaultName, sourceChatId?, entities, relations, memories?, arcContext? }."
+      },
+      {
+        "field": "interlinks",
+        "type": "InterlinkCortexData[]",
+        "optional": false,
+        "desc": "Per interlinked chat: { targetChatId, targetChatName, result: CortexResult }."
+      }
+    ],
+    "usedBy": [
+      "api.memories.cortex.queryLinked",
+      "api.memories.cortex.getCachedLinked"
+    ]
+  },
+  "MemoryCortexConfig": {
+    "kind": "type",
+    "type": "MemoryCortexConfig",
+    "note": "Returned by api.memories.cortex.getConfig(); patch with putConfig(). Permissive — only top-level toggles are typed; advanced + host-added fields pass through the index signature.",
+    "fields": [
+      {
+        "field": "enabled",
+        "type": "boolean",
+        "optional": false,
+        "desc": "Master Memory Cortex toggle."
+      },
+      {
+        "field": "entityTracking",
+        "type": "boolean",
+        "optional": false,
+        "desc": "Whether entity extraction runs."
+      },
+      {
+        "field": "entityExtractionMode",
+        "type": "string",
+        "optional": false,
+        "desc": "e.g. 'heuristic' / 'sidecar'."
+      },
+      {
+        "field": "salienceScoring",
+        "type": "boolean",
+        "optional": false,
+        "desc": "Whether per-chunk salience scoring runs."
+      },
+      {
+        "field": "[advanced]",
+        "type": "unknown",
+        "optional": true,
+        "desc": "retrieval / decay / consolidation / entityPruning / sidecar tuning + any host-added fields pass through unchanged."
+      }
+    ],
+    "usedBy": [
+      "api.memories.cortex.getConfig",
+      "api.memories.cortex.putConfig"
+    ]
+  },
+  "ChatChunk": {
+    "kind": "type",
+    "type": "ChatChunk",
+    "note": "Returned by api.memories.chatMemory.listChunks(). A vectorized chat chunk — the {{memories}} retrieval unit.",
+    "fields": [
+      {
+        "field": "id",
+        "type": "string",
+        "optional": false,
+        "desc": "Chunk id."
+      },
+      {
+        "field": "chatId",
+        "type": "string",
+        "optional": false,
+        "desc": "Owning chat."
+      },
+      {
+        "field": "content",
+        "type": "string",
+        "optional": false,
+        "desc": "Chunk text."
+      },
+      {
+        "field": "messageIds",
+        "type": "string[]",
+        "optional": false,
+        "desc": "Source message ids (startMessageId..endMessageId)."
+      },
+      {
+        "field": "tokenCount",
+        "type": "number",
+        "optional": false,
+        "desc": "Approx token count."
+      },
+      {
+        "field": "vectorizedAt",
+        "type": "number | null",
+        "optional": false,
+        "desc": "When embedded (Unix ms), or null if pending."
+      },
+      {
+        "field": "retrievalCount",
+        "type": "number",
+        "optional": false,
+        "desc": "How many times retrieved."
+      }
+    ],
+    "usedBy": [
+      "api.memories.chatMemory.listChunks"
+    ]
+  },
+  "ChatMemoryWarmupResult": {
+    "kind": "type",
+    "type": "ChatMemoryWarmupResult",
+    "note": "Returned by api.memories.chatMemory.warm().",
+    "fields": [
+      {
+        "field": "status",
+        "type": "'skipped' | 'complete' | 'rebuilding' | 'queued' | 'error'",
+        "optional": false,
+        "desc": "'skipped' (e.g. vectorization disabled), etc."
+      },
+      {
+        "field": "reason?",
+        "type": "string",
+        "optional": true,
+        "desc": "Human-readable detail (e.g. 'chat_vectorization_disabled')."
+      },
+      {
+        "field": "rebuilt?",
+        "type": "boolean",
+        "optional": true,
+        "desc": "Whether chunks were rebuilt."
+      },
+      {
+        "field": "vectorizationsQueued?",
+        "type": "number",
+        "optional": true,
+        "desc": "How many vectorizations were queued."
+      }
+    ],
+    "usedBy": [
+      "api.memories.chatMemory.warm"
+    ]
+  },
+  "CortexUsageStats": {
+    "kind": "type",
+    "type": "CortexUsageStats",
+    "note": "Returned by api.memories.stats.usage(). Host gc fields (mention counts, last GC, etc.) pass through.",
+    "fields": [
+      {
+        "field": "entityCount",
+        "type": "number",
+        "optional": false,
+        "desc": "Tracked entities."
+      },
+      {
+        "field": "relationCount",
+        "type": "number",
+        "optional": false,
+        "desc": "Relation edges."
+      },
+      {
+        "field": "salienceRecordCount",
+        "type": "number",
+        "optional": false,
+        "desc": "Per-chunk salience records."
+      },
+      {
+        "field": "consolidationCount",
+        "type": "number",
+        "optional": false,
+        "desc": "Narrative-arc consolidations."
+      }
+    ],
+    "usedBy": [
+      "api.memories.stats.usage"
+    ]
+  },
+  "CortexIngestionStatus": {
+    "kind": "type",
+    "type": "CortexIngestionStatus",
+    "note": "Returned by api.memories.stats.ingestionStatus(), or null when never ingested.",
+    "fields": [
+      {
+        "field": "chatId",
+        "type": "string",
+        "optional": false,
+        "desc": "The chat."
+      },
+      {
+        "field": "status",
+        "type": "'idle' | 'processing' | 'complete' | 'error'",
+        "optional": false,
+        "desc": "Overall ingestion status."
+      },
+      {
+        "field": "phase",
+        "type": "'queued'|'font'|'heuristics'|'sidecar'|'persisting'|'complete'|'error'",
+        "optional": false,
+        "desc": "Current pipeline phase."
+      },
+      {
+        "field": "pendingJobs",
+        "type": "number",
+        "optional": false,
+        "desc": "Queued ingestion jobs."
+      },
+      {
+        "field": "timings?",
+        "type": "CortexIngestionTimings | null",
+        "optional": true,
+        "desc": "Last per-phase timings."
+      }
+    ],
+    "usedBy": [
+      "api.memories.stats.ingestionStatus"
+    ]
+  },
+  "CortexIngestionTelemetry": {
+    "kind": "type",
+    "type": "CortexIngestionTelemetry",
+    "note": "Returned by api.memories.stats.ingestionTelemetry().",
+    "fields": [
+      {
+        "field": "samples",
+        "type": "number",
+        "optional": false,
+        "desc": "Number of ingestion samples averaged."
+      },
+      {
+        "field": "last",
+        "type": "CortexIngestionTimings | null",
+        "optional": false,
+        "desc": "The most recent ingestion timing sample."
+      },
+      {
+        "field": "averages",
+        "type": "{ fontMs, heuristicMs, sidecarMs, graphMs, dbMs, totalMs }",
+        "optional": false,
+        "desc": "Per-phase average ms over recent ingestions."
+      }
+    ],
+    "usedBy": [
+      "api.memories.stats.ingestionTelemetry"
+    ]
+  },
+  "MemoryEntity": {
+    "kind": "type",
+    "type": "MemoryEntity",
+    "note": "A tracked entity in the cortex graph. Returned by api.memories.entities.* and inside CortexResult.entityContext (as the lighter EntitySnapshot).",
+    "fields": [
+      {
+        "field": "id",
+        "type": "string",
+        "optional": false,
+        "desc": "Entity id."
+      },
+      {
+        "field": "chatId",
+        "type": "string",
+        "optional": false,
+        "desc": "Owning chat."
+      },
+      {
+        "field": "name",
+        "type": "string",
+        "optional": false,
+        "desc": "Canonical name."
+      },
+      {
+        "field": "entityType",
+        "type": "EntityType",
+        "optional": false,
+        "desc": "'character' | 'location' | 'item' | 'faction' | 'concept' | 'event'."
+      },
+      {
+        "field": "aliases",
+        "type": "string[]",
+        "optional": false,
+        "desc": "Known aliases (matched by findByName / upsert)."
+      },
+      {
+        "field": "description",
+        "type": "string",
+        "optional": false,
+        "desc": "Entity description."
+      },
+      {
+        "field": "status",
+        "type": "EntityStatus",
+        "optional": false,
+        "desc": "'active' | 'inactive' | 'deceased' | 'destroyed' | 'unknown'."
+      },
+      {
+        "field": "facts",
+        "type": "string[]",
+        "optional": false,
+        "desc": "Up to 20 most-recent facts."
+      },
+      {
+        "field": "emotionalValence",
+        "type": "Record<string, number>",
+        "optional": false,
+        "desc": "Running emotional-valence map."
+      },
+      {
+        "field": "mentionCount",
+        "type": "number",
+        "optional": false,
+        "desc": "Total mentions."
+      },
+      {
+        "field": "salienceAvg",
+        "type": "number",
+        "optional": false,
+        "desc": "Average salience (orders list())."
+      },
+      {
+        "field": "confidence",
+        "type": "'confirmed' | 'provisional'",
+        "optional": false,
+        "desc": "Promotion confidence."
+      },
+      {
+        "field": "…",
+        "type": "more",
+        "optional": true,
+        "desc": "Plus firstSeen*/lastSeen*, statusChangedAt, factExtraction*, salienceBreakdown, recentMentionCount, metadata, createdAt, updatedAt, userEditedAt — see the host DTO."
+      }
+    ],
+    "usedBy": [
+      "api.memories.entities.list",
+      "api.memories.entities.get",
+      "api.memories.entities.findByName",
+      "api.memories.entities.upsert",
+      "api.memories.entities.updateStatus",
+      "api.memories.entities.addFacts",
+      "api.memories.entities.updateEmotionalValence"
+    ]
+  },
+  "MemoryEntityUpsert": {
+    "kind": "type",
+    "type": "MemoryEntityUpsert",
+    "note": "Input to api.memories.entities.upsert(). Matches the extractor shape so a script can replay its own NER results.",
+    "fields": [
+      {
+        "field": "name",
+        "type": "string",
+        "optional": false,
+        "desc": "Canonical name (matched against existing names + aliases)."
+      },
+      {
+        "field": "type",
+        "type": "EntityType",
+        "optional": false,
+        "desc": "'character' | 'location' | 'item' | 'faction' | 'concept' | 'event'."
+      },
+      {
+        "field": "aliases?",
+        "type": "string[]",
+        "optional": true,
+        "desc": "Alternate names."
+      },
+      {
+        "field": "confidence?",
+        "type": "number",
+        "optional": true,
+        "desc": "Raw [0,1] extractor confidence; below the configured threshold the host drops it."
+      },
+      {
+        "field": "role?",
+        "type": "MentionRole",
+        "optional": true,
+        "desc": "'subject' | 'object' | 'present' | 'referenced' | 'absent'."
+      },
+      {
+        "field": "provisional?",
+        "type": "boolean",
+        "optional": true,
+        "desc": "Mark as needing corroboration before promotion."
+      }
+    ],
+    "usedBy": [
+      "api.memories.entities.upsert"
+    ]
+  },
+  "MemoryRelation": {
+    "kind": "type",
+    "type": "MemoryRelation",
+    "note": "A typed relation edge. Returned by api.memories.relations.*.",
+    "fields": [
+      {
+        "field": "id",
+        "type": "string",
+        "optional": false,
+        "desc": "Edge id."
+      },
+      {
+        "field": "sourceEntityId",
+        "type": "string",
+        "optional": false,
+        "desc": "Source entity id."
+      },
+      {
+        "field": "targetEntityId",
+        "type": "string",
+        "optional": false,
+        "desc": "Target entity id."
+      },
+      {
+        "field": "relationType",
+        "type": "RelationType",
+        "optional": false,
+        "desc": "'ally' | 'enemy' | 'lover' | 'rival' | 'owns' | 'member_of' | 'located_in' | … | 'custom'."
+      },
+      {
+        "field": "relationLabel",
+        "type": "string | null",
+        "optional": false,
+        "desc": "Free-text label (e.g. \"duel pending\")."
+      },
+      {
+        "field": "strength",
+        "type": "number",
+        "optional": false,
+        "desc": "Edge strength."
+      },
+      {
+        "field": "sentiment",
+        "type": "number",
+        "optional": false,
+        "desc": "Edge sentiment [-1, 1]."
+      },
+      {
+        "field": "status",
+        "type": "RelationStatus",
+        "optional": false,
+        "desc": "'active' | 'broken' | 'dormant' | 'former'."
+      },
+      {
+        "field": "…",
+        "type": "more",
+        "optional": true,
+        "desc": "Plus evidenceChunkIds, edgeSalience, decayRate, contradictionFlag, supersededBy, arcIds, timestamps — see the host DTO."
+      }
+    ],
+    "usedBy": [
+      "api.memories.relations.list",
+      "api.memories.relations.listAll",
+      "api.memories.relations.forEntity",
+      "api.memories.relations.forEntities",
+      "api.memories.relations.upsert"
+    ]
+  },
+  "MemoryRelationUpsert": {
+    "kind": "type",
+    "type": "MemoryRelationUpsert",
+    "note": "Input to api.memories.relations.upsert(). Uses entity NAMES — both endpoints must already exist in the graph or the edge is silently dropped.",
+    "fields": [
+      {
+        "field": "source",
+        "type": "string",
+        "optional": false,
+        "desc": "Source entity name (resolved to id server-side)."
+      },
+      {
+        "field": "target",
+        "type": "string",
+        "optional": false,
+        "desc": "Target entity name."
+      },
+      {
+        "field": "type",
+        "type": "RelationType",
+        "optional": false,
+        "desc": "Relation type (e.g. 'rival', 'ally', 'custom')."
+      },
+      {
+        "field": "label",
+        "type": "string",
+        "optional": false,
+        "desc": "Free-text label."
+      },
+      {
+        "field": "sentiment",
+        "type": "number",
+        "optional": false,
+        "desc": "Sentiment [-1, 1]."
+      }
+    ],
+    "usedBy": [
+      "api.memories.relations.upsert"
+    ]
+  },
+  "MemoryConsolidation": {
+    "kind": "type",
+    "type": "MemoryConsolidation",
+    "note": "A narrative-arc consolidation. Returned by api.memories.consolidations.list / latestArc.",
+    "fields": [
+      {
+        "field": "id",
+        "type": "string",
+        "optional": false,
+        "desc": "Consolidation id."
+      },
+      {
+        "field": "tier",
+        "type": "number",
+        "optional": false,
+        "desc": "Arc tier (1 = scene, 2 = chapter, …)."
+      },
+      {
+        "field": "title",
+        "type": "string | null",
+        "optional": false,
+        "desc": "Arc title, or null."
+      },
+      {
+        "field": "summary",
+        "type": "string",
+        "optional": false,
+        "desc": "Compressed summary text."
+      },
+      {
+        "field": "entityIds",
+        "type": "string[]",
+        "optional": false,
+        "desc": "Entities featured in the arc."
+      },
+      {
+        "field": "emotionalTags",
+        "type": "EmotionalTag[]",
+        "optional": false,
+        "desc": "Dominant emotional tags."
+      },
+      {
+        "field": "…",
+        "type": "more",
+        "optional": true,
+        "desc": "Plus sourceChunkIds, messageRange*, timeRange*, salienceAvg, tokenCount, vectorizedAt, timestamps."
+      }
+    ],
+    "usedBy": [
+      "api.memories.consolidations.list",
+      "api.memories.consolidations.latestArc"
+    ]
+  },
+  "MemorySalience": {
+    "kind": "type",
+    "type": "MemorySalience",
+    "note": "A per-chunk salience record. Returned by api.memories.salience.list.",
+    "fields": [
+      {
+        "field": "chunkId",
+        "type": "string",
+        "optional": false,
+        "desc": "The scored chunk."
+      },
+      {
+        "field": "score",
+        "type": "number",
+        "optional": false,
+        "desc": "Salience score."
+      },
+      {
+        "field": "scoreSource",
+        "type": "'heuristic' | 'sidecar'",
+        "optional": false,
+        "desc": "How it was scored."
+      },
+      {
+        "field": "emotionalTags",
+        "type": "EmotionalTag[]",
+        "optional": false,
+        "desc": "Emotional tags detected."
+      },
+      {
+        "field": "narrativeFlags",
+        "type": "NarrativeFlag[]",
+        "optional": false,
+        "desc": "e.g. 'first_meeting', 'death', 'confession'."
+      },
+      {
+        "field": "statusChanges",
+        "type": "{ entity, change, detail }[]",
+        "optional": false,
+        "desc": "Detected entity status changes."
+      },
+      {
+        "field": "scoredAt",
+        "type": "number",
+        "optional": false,
+        "desc": "When scored (Unix ms). Orders list()."
+      }
+    ],
+    "usedBy": [
+      "api.memories.salience.list"
+    ]
+  },
+  "Vault": {
+    "kind": "type",
+    "type": "Vault",
+    "note": "A frozen cortex snapshot. Returned by api.memories.vaults.list / create; inside VaultWithContents.vault.",
+    "fields": [
+      {
+        "field": "id",
+        "type": "string",
+        "optional": false,
+        "desc": "Vault id."
+      },
+      {
+        "field": "name",
+        "type": "string",
+        "optional": false,
+        "desc": "Vault name."
+      },
+      {
+        "field": "description",
+        "type": "string",
+        "optional": false,
+        "desc": "Vault description."
+      },
+      {
+        "field": "sourceChatId",
+        "type": "string | null",
+        "optional": false,
+        "desc": "The chat snapshotted, or null."
+      },
+      {
+        "field": "sourceChatName",
+        "type": "string | null",
+        "optional": false,
+        "desc": "Source chat name."
+      },
+      {
+        "field": "entityCount",
+        "type": "number",
+        "optional": false,
+        "desc": "Entities in the snapshot."
+      },
+      {
+        "field": "relationCount",
+        "type": "number",
+        "optional": false,
+        "desc": "Relations in the snapshot."
+      },
+      {
+        "field": "chunkCount",
+        "type": "number",
+        "optional": false,
+        "desc": "Chunks copied."
+      },
+      {
+        "field": "createdAt",
+        "type": "number",
+        "optional": false,
+        "desc": "Unix-ms creation timestamp."
+      }
+    ],
+    "usedBy": [
+      "api.memories.vaults.list",
+      "api.memories.vaults.create"
+    ]
+  },
+  "VaultCreate": {
+    "kind": "type",
+    "type": "VaultCreate",
+    "note": "Input to api.memories.vaults.create().",
+    "fields": [
+      {
+        "field": "chatId",
+        "type": "string",
+        "optional": false,
+        "desc": "The chat to snapshot."
+      },
+      {
+        "field": "name",
+        "type": "string",
+        "optional": false,
+        "desc": "Vault name."
+      },
+      {
+        "field": "description?",
+        "type": "string",
+        "optional": true,
+        "desc": "Optional description."
+      }
+    ],
+    "usedBy": [
+      "api.memories.vaults.create"
+    ]
+  },
+  "ChatLink": {
+    "kind": "type",
+    "type": "ChatLink",
+    "note": "A vault attach or chat interlink. Returned by api.memories.links.list / attach.",
+    "fields": [
+      {
+        "field": "id",
+        "type": "string",
+        "optional": false,
+        "desc": "Link id."
+      },
+      {
+        "field": "chatId",
+        "type": "string",
+        "optional": false,
+        "desc": "The chat the link is attached to."
+      },
+      {
+        "field": "linkType",
+        "type": "'vault' | 'interlink'",
+        "optional": false,
+        "desc": "Link kind."
+      },
+      {
+        "field": "vaultId",
+        "type": "string | null",
+        "optional": false,
+        "desc": "Attached vault id (vault links)."
+      },
+      {
+        "field": "targetChatId",
+        "type": "string | null",
+        "optional": false,
+        "desc": "Interlinked chat id (interlinks)."
+      },
+      {
+        "field": "label",
+        "type": "string",
+        "optional": false,
+        "desc": "Link label."
+      },
+      {
+        "field": "enabled",
+        "type": "boolean",
+        "optional": false,
+        "desc": "Whether the link is active."
+      },
+      {
+        "field": "…",
+        "type": "more",
+        "optional": true,
+        "desc": "Plus vaultName, vaultEntityCount/RelationCount, targetChatName, targetChatExists, priority, createdAt."
+      }
+    ],
+    "usedBy": [
+      "api.memories.links.list",
+      "api.memories.links.attach"
+    ]
+  },
+  "ChatLinkAttach": {
+    "kind": "type",
+    "type": "ChatLinkAttach",
+    "note": "Input to api.memories.links.attach(). Provide vaultId for a vault attach, or targetChatId for an interlink.",
+    "fields": [
+      {
+        "field": "chatId",
+        "type": "string",
+        "optional": false,
+        "desc": "The chat to attach to."
+      },
+      {
+        "field": "linkType",
+        "type": "'vault' | 'interlink'",
+        "optional": false,
+        "desc": "Link kind."
+      },
+      {
+        "field": "vaultId?",
+        "type": "string",
+        "optional": true,
+        "desc": "Vault to attach (linkType: vault)."
+      },
+      {
+        "field": "targetChatId?",
+        "type": "string",
+        "optional": true,
+        "desc": "Chat to interlink (linkType: interlink)."
+      },
+      {
+        "field": "label?",
+        "type": "string",
+        "optional": true,
+        "desc": "Optional label."
+      },
+      {
+        "field": "bidirectional?",
+        "type": "boolean",
+        "optional": true,
+        "desc": "Interlinks only — also create the reverse link on the target chat."
+      }
+    ],
+    "usedBy": [
+      "api.memories.links.attach"
     ]
   },
   "ImageInfo": {

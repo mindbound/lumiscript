@@ -57,7 +57,7 @@ For state that needs to survive across fires, pick one of:
 
 - **`globalThis.<key>`** — process-scoped, persists for the lifetime of the script-runner subprocess (i.e. until the extension reloads). Cheapest option; ideal for in-memory caches. Example: `globalThis.lsScoringBankId ??= await ensureBank();`. (Note: globalThis values survive *editor saves* too — see the saved memory note about globalThis-cache-invalidation traps if you cache anything keyed on script identity.)
 - **`api.variables.{local,global,character,chat}`** — durable JSON-serialised stores with explicit scope semantics. Survives extension reloads.
-- **Registered handlers** (`api.broadcast.on(event, handler)`, `api.macros.register(...)`, `api.tools.register(...)`, `api.chat.registerContentProcessor(...)`, etc.) — these capture closures over the proxy and *do* survive across fires until the script is disabled or deleted. Useful for "subscriber-only" patterns where a script registers a handler in one fire and that handler fires later from a different source.
+- **Registered handlers** (`api.macros.register(...)`, `api.tools.register(...)`, `api.chat.registerContentProcessor(...)`, etc.) — these capture closures over the proxy and *do* survive across fires until the script is disabled or deleted. Useful for "subscriber-only" patterns where a script registers a handler in one fire and it fires later from a different source. **`api.broadcast.on(...)` is the one exception**: its subscriptions also persist between fires, but the owning script's next run clears them at its START and the body re-registers — so a re-firing script never stacks duplicate listeners, and a fire-once script (e.g. wired to `ls:startup`) keeps them until disabled or deleted.
 
 **Common misconception**: "the local variable persists until the extension reloads." It does NOT. Each fire is its own scope. The boundary is per-fire, not per-extension-load.
 
@@ -87,7 +87,7 @@ For state that needs to survive across fires, pick one of:
 
 ## Permission model
 
-**DO NOT WRITE `// @permissions` OR `// @permission` IN YOUR SCRIPT.** Neither is a LumiScript directive. **LumiScript does not parse ANY script-header directives currently** — including `// @triggers`, which despite the name is purely a documentary comment with no runtime effect (event wiring happens in the editor UI; see the **Trigger model** section). Writing `@permissions` or `@permission` in a script header is a **no-op** — it looks like it grants permissions but actually does nothing; your script will then fail at runtime when it calls a gated method. This is the single most common script-permission-bug we see; if you find yourself reaching for an `@permission` directive, stop and re-read this section.
+**DO NOT WRITE `// @permissions` OR `// @permission` IN YOUR SCRIPT.** Neither is a LumiScript directive. **LumiScript does not parse `@permissions`, `@permission`, or `@triggers` directives** — `// @triggers`, despite the name, is purely a documentary comment with no runtime effect (event wiring happens in the editor UI; see the **Trigger model** section). (The one script-header directive LumiScript *does* read is the unrelated `// @ls:reload-on-edit` hot-reload opt-in — nothing to do with permissions or wiring.) Writing `@permissions` or `@permission` in a script header is a **no-op** — it looks like it grants permissions but actually does nothing; your script will then fail at runtime when it calls a gated method. This is the single most common script-permission-bug we see; if you find yourself reaching for an `@permission` directive, stop and re-read this section.
 
 How permissions actually work: LumiScript permissions are declared **at the extension level** in `spindle.json` and granted once by the user when the extension is enabled. **There are no per-script permission declarations** — every script inside the LumiScript extension shares the same grant set. The user (not the script author) controls what's granted. (Earlier mental models à la SillyTavern, where each script declares its own perms, do NOT apply here.)
 
@@ -111,6 +111,7 @@ How permissions actually work: LumiScript permissions are declared **at the exte
 | `images` | Persist + retrieve images in Lumiverse's image store via `api.images.*`. Returns `ImageInfo` whose `id` can be passed to `api.theme.extractColors`, stored on a character avatar, or attached to a databank document. |
 | `interceptor` | Register prompt injections (`api.chat.inject`) and content processors (`api.chat.registerContentProcessor`) — anything that mutates host data mid-flight. **Note**: world-info interceptors (`api.worldInfo.registerInterceptor`) are gated by `generation` instead, since they run at prompt-assembly time. |
 | `macro_interceptor` | Register macro-resolution interceptors (`api.macros.registerInterceptor`). Performance-sensitive; gated separately from `interceptor`. |
+| `memories` | Full access to Lumiverse's hybrid memory architecture via `api.memories.*` — the Memory Cortex (entity/relation graph, narrative-arc consolidations, salience, vault snapshots, chat interlinks, fused retrieval) and Long-Term Chat Memory (the vectorized chunk store behind the `{{memories}}` macro). Read + write; every chat-scoped call is ownership-checked against the active user. |
 | `oauth` | OAuth callback handling via `api.oauth.*` — the only inbound-HTTP hook Spindle exposes to extensions. Wrapper is intentionally thin: it covers the callback registration, CSRF state nonce, and the callback URL path. Constructing the authorize URL, exchanging the code for a token, and persisting + refreshing tokens are the script's responsibility (pair with `api.utils.http` + `api.enclave`). |
 | `personas` | CRUD on personas via `api.personas.*`. |
 | `presets` | CRUD on generation presets + their prompt blocks via `api.presets.*` (parameters, ordered prompt blocks with roles/positions/depth, behavior settings, metadata, plus host-derived category groupings). |
@@ -118,6 +119,7 @@ How permissions actually work: LumiScript permissions are declared **at the exte
 | `regex_scripts` | CRUD on regex find/replace scripts via `api.regexScripts.*`. |
 | `tools` | Register Council-eligible LLM tools via `api.tools.*`. |
 | `ui_panels` | Float widgets / dock panels — surfaces that hold their own persistent UI region in the app shell. |
+| `web_search` | Run web searches via `api.webSearch.*` against the user's configured search provider (e.g. SearXNG). `query` returns ranked results plus optional scraped page content + an assembled context string; `getSettings` exposes the safe provider config (never the API key — only `hasApiKey`). |
 | `world_books` | CRUD on world books and entries via `api.worldInfo.*`. |
 
 ## api.chat
@@ -147,9 +149,48 @@ How permissions actually work: LumiScript permissions are declared **at the exte
 | Method | Args | Description |
 |---|---|---|
 | async `generate` | messages, options? | Generate a text response from the LLM. [generation] |
+| `generateStream` | messages, options? | Streaming variant of generate. Async iterator of StreamChunk values (token / reasoning / done). Break out of for await or pass options.signal to cancel. [generation] |
 | async `generateStructured` | messages, schema, options? | Generate and parse a structured JSON response against a Zod or JSON Schema. [generation] |
 | async `generateWithTools` | messages, tools, options?, schema? | Generate with tool schemas. Returns text or function calls for an agentic loop. [generation] |
 | async `dryRun` | options? | Assemble the full prompt without calling the LLM. Returns messages, token counts, WI stats. [generation] |
+
+## api.connections
+
+> **Concepts:** Read-only view of the user's LLM connection profiles — the same profiles `api.llm` resolves against. `list()` / `get(id)` / `getDefault()` (the `is_default` profile, else the first available) / `findByName(name)` (case-insensitive). Each `Connection` is snake_case (mirrors the host DTO: `id`, `name`, `provider`, `api_url`, `model`, `preset_id`, `is_default`, `has_api_key`, `metadata`, `reasoning_bindings`) and is a SAFE view — it carries `has_api_key: boolean`, NEVER the key. `id` / `name` map straight to `api.llm` options `connectionId` / `connectionName`, so you can let the user pick a connection (pair with `api.ui.components.mountSelect` / `mountModelCombobox`) and route a generation to it. **Intentionally read-only** — connections hold provider credentials and are managed by the user in Lumiverse settings, never by scripts (no create / update / delete). Free tier. The active userId is folded in implicitly.
+
+| Method | Args | Description |
+|---|---|---|
+| async `list` | — | List the user's LLM connection profiles (read-only; never includes API keys — only has_api_key). Returns Connection[]. Free tier. Pair with api.ui.components.mountSelect/mountModelCombobox for pickers. |
+| async `get` | connectionId | Get a connection profile by ID, or null if not found/accessible. Returns Connection \| null. |
+| async `getDefault` | — | Get the user's default connection (is_default, or the first available), or null. |
+| async `findByName` | name | Find a connection by name (case-insensitive), or null. The id/name map to api.llm options.connectionId/connectionName. |
+
+## api.webSearch
+
+> **Concepts:** Native web search against the user's configured provider (SearXNG today). `query({ query, count?, scrape? })` returns ranked `results` (title / url / snippet); with `scrape` (default **true**) it ALSO scrapes the top pages into `documents` (full text) and assembles a prompt-ready `context` string — drop `context` straight into an LLM prompt for grounding / RAG. `scrape: false` is the fast path: titles / URLs / snippets only, no page fetches. `query` REJECTS with "Web search is disabled" when the user has no provider configured — branch on `getSettings().enabled` first. `getSettings()` returns the SAFE config (provider, limits, language, safeSearch, engines, `hasApiKey`) — NEVER the API key itself. The active userId is folded in implicitly. Use cases: Council "look it up" tools, grounding a reply in current info, RAG over fresh results. Requires `web_search` permission.
+
+| Method | Args | Description |
+|---|---|---|
+| async `query` | options | Search the user's configured provider (SearXNG). options: { query (required), count?, scrape? (default true) }. Returns WebSearchResponse { query, results: WebSearchResult[], documents?, context? }. With scrape (default) you also get scraped documents + a prompt-ready context block; scrape:false returns only results (titles/URLs/snippets). Rejects "Web search is disabled" if no provider configured. Requires web_search. [web_search] |
+| async `getSettings` | — | Read the safe web-search config (NEVER the API key — only hasApiKey). Returns WebSearchSettings { enabled, provider, apiUrl, defaultResultCount, maxResultCount, maxPagesToScrape, maxCharsPerPage, language, safeSearch, engines, hasApiKey, requestTimeoutMs }. Branch on enabled before query(). Requires web_search. [web_search] |
+
+## api.users
+
+> **Concepts:** Active-user context probes. `isVisible()` — true if the user has the app visible in at least one session, false if every session is hidden / backgrounded (or there is no open session); use it to choose a push notification (when the user is away) vs. an in-app toast / UI update (when present), or to defer background work. `getRole()` — the user's Lumiverse role: `'operator' | 'admin' | 'user'` (internal owners report as `operator`); gate operator-only diagnostics or admin-only actions on it. Free tier; the active userId is folded in implicitly.
+
+| Method | Args | Description |
+|---|---|---|
+| async `isVisible` | — | True if the active user has the app visible in at least one session; false if every session is hidden/backgrounded or there is no open session. Returns Promise<boolean>. Free tier. Use to gate push notifications (when hidden) vs. in-app UI (when visible). |
+| async `getRole` | — | The active user's Lumiverse role: 'operator' \| 'admin' \| 'user' (internal owners report as operator). Returns Promise<UserRole>. Free tier. |
+
+## api.version
+
+> **Concepts:** The running Lumiverse versions: `getBackend()` and `getFrontend()` each return a semver string. Use for feature-gating — branch a script on whether the host is new enough for a given event or API. Compare numerically (split on `.`, strip any `-rc` / `+build` suffix) rather than string `===`; LumiScript's own `host-version.ts` `compareVersions` helper is the reference implementation. Free tier. (This is the script-facing view of the same version probe LumiScript uses internally for its `minimum_lumiverse_version` check.)
+
+| Method | Args | Description |
+|---|---|---|
+| async `getBackend` | — | The running Lumiverse backend server's semantic version string (e.g. '1.2.0'). Returns Promise<string>. Free tier. Pair with feature gating / compatibility checks. |
+| async `getFrontend` | — | The running Lumiverse frontend bundle's semantic version string. Returns Promise<string>. Free tier. |
 
 ## api.variables.local / api.variables.global / api.variables.character / api.variables.chat
 
@@ -210,6 +251,8 @@ _The same method set applies to each of the 4 namespaces above._
 
 ## api.ui
 
+> **Concepts:** User-facing UI surface — notifications (`toast`, `pushNotification`), dialogs (`prompt`, `confirm`, `editText`, `showModal`, `showContextMenu`), script-owned regions (`showAdvancedModal`, `createFloatWidget`, `registerDrawerTab`), the native file picker (`pickFile`), and **navigation**. The sub-namespaces `api.ui.dom.*` (DOM injection), `api.ui.components.*` (host components), and `api.ui.events.*` (reactive keyboard / drawer / settings state) have their own concept entries. `pickFile(options?)` opens the browser's native file picker and resolves with the selected `PickedFile[]` (bytes as `Uint8Array`) — free tier (the native dialog is the user-action gate); rejects if a file exceeds `maxSizeBytes`, resolves `[]` on cancel. **Script-owned UI regions** form a ladder of increasing scope: `showAdvancedModal` (a modal), `createFloatWidget` (a draggable overlay, `ui_panels`), `registerDrawerTab` (a sidebar tab), and `mountApp(options?)` — a route-persistent, full-bleed `document.body` portal (`position: 'start' | 'end' | 'app-overlay'`) for full-screen overlays / persistent chrome beyond the others. All hand back a `.root` DOMHandle you fill via `api.ui.dom.*`; `mountApp` / `showAdvancedModal` / DOM / components require `app_manipulation`. **Navigate vs. contribute** is the key distinction for the navigation methods: `registerDrawerTab` *contributes* a new tab your script owns, whereas `openDrawerTab(id)` / `openSettings(viewId?)` / `openCommandPalette()` *navigate* the user to surfaces that already exist (built-in OR contributed by any extension). Enumerate targets with `getDrawerTabs()` / `getSettingsTabs()` (each returns id + names + keywords + source) and deep-link by id — you can jump into another extension's tab if you know its id. Navigation calls resolve once the host dispatches the event (the frontend applies it asynchronously); `closeDrawer` / `closeSettings` / `closeCommandPalette` reverse them. Use for onboarding nudges ("open the Connections drawer"), agent-driven walkthroughs, and "fix it" deep links. The navigation methods are free tier — other `api.ui.*` methods carry their own permissions (see the per-method rows).
+
 | Method | Args | Description |
 |---|---|---|
 | `toast` | message, type?, options? | Show a native Lumiverse toast notification. Fire-and-forget. Rate-limited 5/10s. Options: title, duration. |
@@ -220,16 +263,41 @@ _The same method set applies to each of the 4 namespaces above._
 | async `showContextMenu` | options | Show a themed context menu at a screen position and await the user's selection. Resolves with the chosen item's key, or null if dismissed. Options: { position: { x, y }, items: [{ key, label, type?, disabled?, danger?, active? }] }. Pair with a contextmenu event listener using { preventDefault: true } to suppress the native browser menu. Free-tier. |
 | `registerInputBarAction` | options | Register an action inside the chat input-bar Extras popover. Extension actions are visually grouped under a teal-badged extension header. Optional subtitle adds a second line under the label (status text, shortcut, etc.) — settable via setSubtitle for live updates. Limits: 4 per script (pre-checked backend-side), 12 global. Returns InputBarActionHandle { actionId, setLabel, setSubtitle, setEnabled, onClick, destroy }. Free-tier. |
 | `createFloatWidget` | options | Create a small draggable widget overlaying the app. Body DOM is fully script-owned via handle.root (DOMHandle). Supports snap-to-edge, chromeless mode, drag-end callbacks for position persistence. Limits: 2 widgets per script (pre-checked backend-side), 8 global. Returns FloatWidgetHandle { widgetId, root, moveTo, getPosition, setVisible, isVisible, onDragEnd, destroy }. Requires ui_panels. [ui_panels] |
+| `mountApp` | options? | Mount a route-persistent, full-bleed document.body portal — full-screen overlays or persistent chrome beyond dock / drawer / float. options: { className?, position? ('start'\|'end'\|'app-overlay') }. Body DOM is fully script-owned via handle.root (DOMHandle); render + wire it via api.ui.dom.*. Returns MountedAppHandle { mountId, root, setVisible, destroy }. Requires app_manipulation. [app_manipulation] |
 | `registerDrawerTab` | options | Register a tab in the ViewportDrawer sidebar. Body DOM is script-owned via handle.root (DOMHandle). Tabs auto-appear in the command palette (Ctrl+K) searchable by title, shortName, description terms, keywords, and the extension name. Limits: 1 tab per script (LumiScript-enforced), 4 total across all LumiScript scripts (Spindle host cap), 8 global. Returns DrawerTabHandle { tabId, root, setTitle, setShortName, setBadge, activate, onActivate, destroy }. Free-tier. |
 | async `editText` | title?, value?, options? | Open the native Lumiverse expanded text editor with macro syntax highlighting. Blocks until close. Returns edited text or null if cancelled. Options: placeholder. |
 | async `pushNotification` | title, body, options? | Send an OS push notification. Only delivered when app is unfocused. Returns { sent }. Options: tag (dedup), url, icon, rawTitle, image. Requires push_notification. [push_notification] |
 | async `getPushStatus` | — | Check if push notifications are available. Returns { available, subscriptionCount }. Requires push_notification. [push_notification] |
+| async `getDrawerTabs` | — | List discoverable drawer tabs (built-in + extension-contributed) visible to the user. Returns UIDrawerTab[] { id, shortName, tabName, tabDescription, keywords, source ("builtin"\|"extension"), extensionId? }. Pair with openDrawerTab(id) to build a custom jump-to picker. Free-tier. |
+| async `getSettingsTabs` | — | List discoverable settings tabs visible to the user (role-restricted tabs are filtered out). Returns UISettingsTab[] { id, shortName, tabName, tabDescription, keywords, role? }. Free-tier. |
+| async `openDrawerTab` | tabId | Open the drawer to a specific tab id (built-in or extension-contributed — ids from getDrawerTabs). Resolves once the host dispatches the navigation; the frontend applies it asynchronously. Free-tier. |
+| async `closeDrawer` | — | Close the drawer if it is currently open. Free-tier. |
+| async `openSettings` | viewId? | Open the settings modal to a tab id (e.g. 'connections', 'display' — ids from getSettingsTabs). Omit viewId to land on 'display'. Free-tier. |
+| async `closeSettings` | — | Close the settings modal if it is currently open. Free-tier. |
+| async `openCommandPalette` | — | Open the command palette overlay (the Ctrl+K surface). Free-tier. |
+| async `closeCommandPalette` | — | Close the command palette overlay if it is currently open. Free-tier. |
+| async `pickFile` | options? | Open the browser's native file picker and return the selected file(s). options: { accept? (string[] of extensions/MIME types), multiple? (default false), maxSizeBytes? }. Returns Promise<PickedFile[]> where PickedFile is { name, mimeType, sizeBytes, bytes: Uint8Array }. Resolves [] if the user cancels; REJECTS if a file exceeds maxSizeBytes (mirrors the host throw). The native dialog is the user-action gate, so free-tier. Feed bytes into api.images.upload / api.db / api.files; decode text via new TextDecoder().decode(file.bytes). |
+
+## api.ui.events
+
+> **Concepts:** Reactive Lumiverse UI state — virtual keyboard, side drawer, settings modal. Each surface has BOTH a snapshot getter and a change subscription. **Snapshots** (`getKeyboardState` / `getDrawerState` / `getSettingsState`) resolve with the latest known state (keyboard `{ visible, insetBottom, viewportWidth, viewportHeight }`, drawer `{ open, tabId }`, settings `{ open, view }`) — async because they cross the worker boundary, but served from a cache the frontend keeps fresh (no per-call round-trip). **Subscriptions** (`onKeyboardChange` / `onDrawerChange` / `onSettingsChange`) fire on every change with the new state and return an unsubscribe fn. **Primary use case: mobile-safe positioning** — reposition float widgets / injected DOM when the on-screen keyboard opens (`insetBottom`) or the visual viewport changes. Free tier. Lifecycle: a live subscription keeps the script pinned (it won't be evicted while a handler is registered) and is torn down automatically on script disable — call the returned unsub when you're done to release the pin sooner. Keyboard events are most relevant on mobile / PWA; on desktop the drawer + settings channels are the active ones.
+
+| Method | Args | Description |
+|---|---|---|
+| async `getKeyboardState` | — | The current virtual-keyboard snapshot. Returns Promise<UIKeyboardState> { visible, insetBottom, viewportWidth, viewportHeight }. Free-tier. Resolves from a backend cache the frontend keeps fresh. |
+| `onKeyboardChange` | handler | Subscribe to keyboard visibility / safe-area changes. handler receives UIKeyboardState. Returns an unsubscribe fn. Free-tier. The subscription keeps the script alive while registered and is torn down on disable. Primary use: mobile-safe widget positioning (reposition on insetBottom). |
+| async `getDrawerState` | — | The current side-drawer snapshot. Returns Promise<UIDrawerState> { open, tabId }. Free-tier. |
+| `onDrawerChange` | handler | Subscribe to drawer open/close + tab changes. handler receives UIDrawerState. Returns an unsubscribe fn. Free-tier. |
+| async `getSettingsState` | — | The current settings-modal snapshot. Returns Promise<UISettingsState> { open, view }. Free-tier. |
+| `onSettingsChange` | handler | Subscribe to settings open/close + active-view changes. handler receives UISettingsState. Returns an unsubscribe fn. Free-tier. |
 
 ## api.ui.dom
 
 > **Concepts:** DOM injection surface. `inject(target, html, position?)` returns a `DOMHandle`; subsequent calls go through the handle (`update`, `remove`, `on`, `injectChild`, `read`, `makeDraggable`). `addStyle(css)` adds a scoped stylesheet (wrapped in `@scope ([data-ls-script="<id>"])` — only matches script-injected DOM, doesn't cascade into the host app shell). `injectAtMessage(messageId, html, options?)` attaches DOM to a specific chat message (header, before, after, footer positions). `delegate(selector, event, handler, options?)` installs a capture-phase event-delegated listener at a known root — use to react to events on host DOM you didn't inject (e.g. LLM-emitted interactive elements inside `.mes_text` content). `cleanup()` removes ALL of this script's DOM in one call. Requires `app_manipulation` permission.
 
 **Styling host UI requires inline `<style>` injection, NOT `addStyle`.** Because `addStyle` wraps its CSS in `@scope ([data-ls-script="<id>"])`, every rule only matches descendants of script-injected DOM — host elements (chat input bar, message bubbles, toolbar buttons, the body itself) are unreachable. To style host DOM (`button[aria-label="..."]`, `[class*="hostClass"]`, `body:has(.my-toggle:checked) ...` selectors, etc.), include a `<style>` block in your `inject()` HTML. CSS rules inside a `<style>` element are document-global regardless of where the tag sits in the DOM, so they reach host elements. The wrapper (`data-ls-script="<id>"`) still carries cleanup attribution — script disable removes the wrapper, the `<style>` goes with it, host UI returns to baseline. Same lifecycle as `addStyle`; different reach.
+
+**Top-level at-rules don't survive `addStyle`.** `addStyle` wraps the whole stylesheet in its `@scope` block, and at-rules CSS only permits at the top level — `@font-face`, `@keyframes`, and similar — are invalid nested inside `@scope`, so the browser silently drops them (the surrounding scoped style rules still apply, which makes the failure easy to miss: a custom `@font-face` never registers and the text falls back to a default face, with no error and no console entry). Put any such at-rule in an inline `<style>` block inside an `inject()` HTML payload instead — that `<style>` is document-global (NOT `@scope`-wrapped), so the `@font-face` / `@keyframes` registers normally. Same split as host-UI styling above: descendant-scoped rules go through `addStyle`; anything that must live at stylesheet top level goes in an inline `<style>`.
 
 **Inline `<style>` blocks and `opts.id`-dedup DON'T MIX.** Re-firing `inject(target, html, { id })` with an `id` that already exists triggers the `dom_update` IPC path on the frontend, which replaces the wrapper's `innerHTML` in place. Browsers don't reliably reactivate `<style>` elements added via `innerHTML` — the tag is in the DOM but its rules don't register into the active stylesheet list. Net effect: first fire works, second fire silently loses every CSS rule from the inline `<style>` (host elements re-appear; the script's own UI loses its styling too). For scripts that combine inline `<style>` blocks with re-firing triggers (`ls:startup` + `CHAT_SWITCHED` + manual Run-button), DROP the `id` and call `api.ui.dom.cleanup()` at the top of the body instead. `cleanup()` removes only THIS script's DOM + styles, leaves other scripts untouched, and forces every fire to take the fresh-inject path which parses `<style>` correctly.
 
@@ -259,9 +327,30 @@ The delegation reads `event.target.dataset.action` (not a `closest()` walk), so 
 |---|---|---|
 | `inject` | target, html, options? | Inject sanitized HTML at a CSS selector. Returns DOMHandle { id, update, remove, on }. Options object (single arg — NOT `inject(target, html, position, options)`): `position` (default "beforeend"), `id` (stable ID for idempotent injection — re-firing with the same id triggers in-place innerHTML update via dom_update IPC instead of a fresh insert). **Note**: when the injected HTML contains an inline `<style>` block (the host-CSS-targeting pattern — see api.ui.dom NAMESPACE_CONCEPTS), do NOT use `id`-dedup. The dom_update path replaces wrapper innerHTML, and browsers don't reliably reactivate `<style>` blocks added that way — second fire silently loses every CSS rule. Pattern for inline-style scripts that re-fire: drop `id`, call `api.ui.dom.cleanup()` at body start instead. Requires app_manipulation. [app_manipulation] |
 | `injectAtMessage` | messageId, html, options? | Inject sanitized HTML into a message bubble. Waits up to 5 s for the element if not yet rendered. Options: position ("footer" default / "header"), id (stable ID). Returns DOMHandle. Requires app_manipulation. [app_manipulation] |
-| `addStyle` | css, opts? | Add a `<style>` element scoped to this script via `@scope ([data-ls-script="<id>"])`. Returns `{ remove() }`. Use `--lumiverse-*` CSS variables for theming. Pass `{ id: 'foo' }` for idempotent re-injection — calling `addStyle` again with the same id removes the prior stylesheet first (useful for dev-iteration where the CSS source changes between fires). Without an id, every call adds a fresh stylesheet. **Scope limitation**: rules ONLY match descendants of script-injected DOM. Cannot reach host elements (chat input bar, message bubbles, toolbar buttons, the body, etc.) because `@scope` excludes everything outside the script's wrappers. To style host UI, include an inline `<style>` block inside an `inject()` HTML payload instead — CSS rules in a `<style>` element are document-global regardless of where the tag sits. See api.ui.dom NAMESPACE_CONCEPTS for the full pattern. Requires app_manipulation permission. [app_manipulation] |
+| `addStyle` | css, opts? | Add a `<style>` element scoped to this script via `@scope ([data-ls-script="<id>"])`. Returns `{ remove() }`. Use `--lumiverse-*` CSS variables for theming. Pass `{ id: 'foo' }` for idempotent re-injection — calling `addStyle` again with the same id removes the prior stylesheet first (useful for dev-iteration where the CSS source changes between fires). Without an id, every call adds a fresh stylesheet. **Scope limitation**: rules ONLY match descendants of script-injected DOM. Cannot reach host elements (chat input bar, message bubbles, toolbar buttons, the body, etc.) because `@scope` excludes everything outside the script's wrappers. To style host UI, include an inline `<style>` block inside an `inject()` HTML payload instead — CSS rules in a `<style>` element are document-global regardless of where the tag sits. **Top-level at-rules** (`@font-face`, `@keyframes`) are likewise dropped here — they're invalid nested inside `@scope`, so the browser silently discards them; deliver those via an inline `<style>` block too, never `addStyle`. See api.ui.dom NAMESPACE_CONCEPTS for the full pattern. Requires app_manipulation permission. [app_manipulation] |
 | `delegate` | selector, event, handler, options? | Attach an event-delegated listener at a known root, matching descendants by CSS selector. Lets scripts react to clicks/changes on DOM the script didn't inject — e.g. interactive elements emitted by the LLM in chat-message content. Single host-side capture listener per (root, event) tuple regardless of how many scripts subscribe; selector matching happens frontend-side via event.target.closest(). Default scope (options.root: "chat") restricts matching to chat content; "document" matches anywhere on the page. Returns an unsubscribe function. Requires app_manipulation. [app_manipulation] |
 | `cleanup` | — | Remove all DOM injections, styles, and delegations created by THIS script (other scripts' DOM is untouched). Auto-fired on script disable / delete — manual call is for re-fire scenarios where you want to wipe and rebuild from scratch. **Canonical use**: at the top of a script body that combines re-firing triggers (`ls:startup` + `CHAT_SWITCHED` + manual Run) with inline `<style>` blocks in injected HTML. Calling `cleanup()` then `inject(...)` guarantees a fresh-inject path on every fire — which parses `<style>` correctly — instead of dom_update-via-id-dedup which doesn't reactivate inline styles. Requires app_manipulation. [app_manipulation] |
+
+## api.ui.components
+
+| Method | Args | Description |
+|---|---|---|
+| `mountBadge` | target, options? | Mount a themed host badge into a script-owned slot. `target` is a DOMHandle (inject an empty container via api.ui.dom.inject first). Options: text, color ("neutral"\|"primary"\|"success"\|"warning"\|"danger"\|"info"), size ("sm"\|"md"\|"pill"). Returns MountedComponentHandle { id, update(patch), destroy() } synchronously. update/destroy are fire-and-forget. Requires app_manipulation. [app_manipulation] |
+| `mountSpinner` | target, options? | Mount a themed loading spinner into a script-owned slot (DOMHandle target). Options: size (px, default 16), fast (boolean). Returns MountedComponentHandle. Requires app_manipulation. [app_manipulation] |
+| `mountSwitch` | target, options? | Mount a themed toggle switch into a script-owned slot (DOMHandle target). Options: checked, onChange(checked:boolean), size ("sm"\|"md"), disabled, ariaLabel. Returns MountedValueComponentHandle { id, update, destroy, getValue(): Promise<boolean> } — getValue() is ASYNC (a frontend round-trip), unlike the host's sync getValue. onChange fires into your script on every toggle. Requires app_manipulation. [app_manipulation] |
+| `mountTextInput` | target, options? | Mount a themed single-line text input into a script-owned slot (DOMHandle target). Options: value, onChange(value:string), placeholder, autoFocus, disabled, className, ariaLabel. Returns MountedValueComponentHandle { ..., getValue(): Promise<string> } (async getValue). onChange fires on every user change. Requires app_manipulation. [app_manipulation] |
+| `mountTextArea` | target, options? | Mount a themed multi-line text editor (DOMHandle target). Options: value, onChange(value:string), placeholder, rows (default 4), disabled, className, ariaLabel. Returns MountedValueComponentHandle (getValue(): Promise<string>). Requires app_manipulation. [app_manipulation] |
+| `mountNumericInput` | target, options? | Mount a themed validated number input (DOMHandle target). Options: value (number\|null), onChange(value:number\|null), allowEmpty, integer, min, max, step, placeholder, disabled. Returns MountedValueComponentHandle (getValue(): Promise<number\|null>). Requires app_manipulation. [app_manipulation] |
+| `mountNumberStepper` | target, options? | Mount a themed number input with +/- buttons (DOMHandle target). Like mountNumericInput minus integer; step defaults to 1. Returns MountedValueComponentHandle (getValue(): Promise<number\|null>). Requires app_manipulation. [app_manipulation] |
+| `mountCheckbox` | target, options? | Mount a themed checkbox (DOMHandle target). Options: checked, onChange(checked:boolean), label, hint, disabled. Returns MountedValueComponentHandle (getValue(): Promise<boolean>). Requires app_manipulation. [app_manipulation] |
+| `mountRangeSlider` | target, options | Mount a themed touch-friendly range slider (DOMHandle target). options is REQUIRED (min + max are mandatory). Options: min (required), max (required), value, step, integer, onCommit(v:number) [once per gesture], onDragValue(v:number\|null) [live], label, hint, format ({decimals,prefix,suffix}), disabled, className. Returns MountedValueComponentHandle (getValue(): Promise<number>). Requires app_manipulation. [app_manipulation] |
+| `mountSelect` | target, options? | Mount a themed searchable single-select dropdown (DOMHandle target). Options: options (SpindleSelectOption[]), value, onChange(value:string), placeholder, searchPlaceholder, clearable, clearLabel, leading cells, grouping, portal/align/maxHeight/minWidth, disabled, etc. Returns MountedValueComponentHandle (getValue(): Promise<string>). Requires app_manipulation. [app_manipulation] |
+| `mountMultiSelect` | target, options? | Mount a themed searchable multi-select (DOMHandle target). Like mountSelect but value/onChange use string[]. Returns MountedValueComponentHandle (getValue(): Promise<string[]>). Requires app_manipulation. [app_manipulation] |
+| `mountFolderDropdown` | target, options? | Mount a themed folder picker with inline create-folder (DOMHandle target). Options: folders (string[]), value, onChange(folder:string), onCreateFolder(name:string), placeholder, disabled. Returns MountedValueComponentHandle (getValue(): Promise<string>). Requires app_manipulation. [app_manipulation] |
+| `mountModelCombobox` | target, options? | Mount the themed connection-aware model picker (DOMHandle target). Connection-bound mode: pass connection {kind:"llm"\|"image"\|"tts"\|"embedding", id?} and the host manages the model list. Manual mode: pass models[] + onRefresh. Other options: value, onChange(model:string), appearance, placeholder, etc. Returns MountedValueComponentHandle (getValue(): Promise<string>). NOTE: the handle's refresh() method is a deferred follow-up; connection-bound mode auto-manages the list without it. Requires app_manipulation. [app_manipulation] |
+| `mountPagination` | target, options | Mount themed page navigation (DOMHandle target). options is REQUIRED (currentPage, totalPages, onPageChange(page:number) are mandatory). Optional: perPage, perPageOptions, onPerPageChange(n:number), totalItems. Fully controlled — call handle.update({currentPage}) after navigation. Returns MountedComponentHandle (no getValue). Requires app_manipulation. [app_manipulation] |
+| `mountCloseButton` | target, options? | Mount a themed close (X) button (DOMHandle target). Options: onClick(), size ("sm"\|"md"), variant ("subtle"\|"solid"), position ("static"\|"absolute"), iconSize. Returns MountedComponentHandle (no getValue). Requires app_manipulation. [app_manipulation] |
+| `mountCollapsibleSection` | target, options | Mount a collapsible section (DOMHandle target). options is REQUIRED (title is mandatory). Options: title (required), iconSvg, iconUrl, badge, defaultExpanded (default true), onToggle(expanded:boolean). The host owns the header chrome; the returned MountedCollapsibleSectionHandle adds: body (a DOMHandle you inject/update content into), isExpanded(): Promise<boolean>, expand(), collapse(), toggle(). Requires app_manipulation. [app_manipulation] |
 
 ## api.files
 
@@ -291,14 +380,21 @@ The delegation reads `event.target.dataset.action` (not a `closest()` walk), so 
 
 ## api.files
 
+> **Concepts:** TTL-bound ephemeral storage (`spindle.ephemeral`), gated by `allowDangerous` + `ephemeral_storage`. Text I/O (`tempRead` / `tempWrite`) AND **binary I/O** (`tempReadBinary` → `Uint8Array`, `tempWriteBinary(path, Uint8Array, options?)`) — use the binary pair for images / PDFs / any non-text blob; bytes cross the IPC intact (no base64 hop). `tempWrite` / `tempWriteBinary` options are `{ ttlMs?, reservationId? }`. Files auto-expire after `ttlMs`; `tempClearExpired()` sweeps expired entries early. **Quota subsystem**: the ephemeral pool is bounded per-extension AND globally. `tempGetPoolStatus()` returns the snapshot (`TempPoolStatus` — global + this-extension max/used/reserved/available bytes + fileCount / fileCountMax). For a large write, **reserve up front** with `tempRequestBlock(sizeBytes, { ttlMs?, reason? })` → `TempReservation { reservationId, sizeBytes, expiresAt }`, pass that `reservationId` to the write options so it can't fail partway through on a full pool, and `tempReleaseBlock(reservationId)` if you end up not using it. **Use cases**: cache a downloaded asset across two fires, buffer intermediate state during a long job — anything large + transient where you don't want to spend durable storage. For persistent bytes use `api.files.user*` / `shared*`; for images Lumiverse should own use `api.images.*`.
+
 | Method | Args | Description |
 |---|---|---|
 | async `tempRead` | path | Read a file as UTF-8 text. |
-| async `tempWrite` | path, data, options? | Write UTF-8 text. Options: { ttlMs } for expiry. |
+| async `tempWrite` | path, data, options? | Write UTF-8 text. Options: { ttlMs?, reservationId? } — ttlMs sets expiry; reservationId charges the write against a tempRequestBlock reservation. |
+| async `tempReadBinary` | path | Read a file as raw bytes. Returns Promise<Uint8Array>. Pair with tempWriteBinary for caching images / PDFs / other binary blobs within quota. |
+| async `tempWriteBinary` | path, data, options? | Write raw bytes (Uint8Array). Options: { ttlMs?, reservationId? }, same as tempWrite. Bytes cross the IPC intact (no base64). |
 | async `tempDelete` | path | Delete a file. |
 | async `tempList` | prefix? | List files under a prefix. |
 | async `tempStat` | path | Get file metadata (sizeBytes, createdAt, expiresAt?). |
 | async `tempClearExpired` | — | Remove all expired files. Returns count removed. |
+| async `tempGetPoolStatus` | — | Read the ephemeral-storage quota snapshot. Returns TempPoolStatus — global + this-extension max/used/reserved/available bytes plus fileCount / fileCountMax. Check available before a large write. |
+| async `tempRequestBlock` | sizeBytes, options? | Reserve sizeBytes of quota up front (so a large write can't fail partway). Options: { ttlMs?, reason? }. Returns TempReservation { reservationId, sizeBytes, expiresAt } — pass reservationId to tempWrite/tempWriteBinary options, or tempReleaseBlock to free it. |
+| async `tempReleaseBlock` | reservationId | Release a reservation from tempRequestBlock you did not use. |
 
 ## api.characters
 
@@ -366,6 +462,108 @@ The delegation reads `event.target.dataset.action` (not a `closest()` walk), so 
 | async `documents.reprocess` | documentId | Reset a document to `status: 'pending'`, drop its vectors, and re-queue for full reingestion. Useful after upstream content changes or when ingestion errored. Requires databanks permission. |
 | async `documents.waitUntilReady` | documentId, options? | Poll until the document reaches `status: 'ready'`. Throws on error/timeout/deletion. Default 60s timeout, 500ms poll interval — override via DatabankWaitUntilReadyOptions. Use after `create()` or `reprocess()` to await ingestion. Requires databanks permission. |
 
+## api.memories.cortex
+
+> **Concepts:** `api.memories.*` bridges Lumiverse's **hybrid memory architecture**, under one `memories` permission. Two halves: the **Memory Cortex** (entity/relation graph + narrative-arc consolidations + salience + vaults + chat interlinks + fused retrieval) and **Long-Term Chat Memory** (the vectorized chunk store behind the `{{memories}}` macro — see `api.memories.chatMemory`). **Distinct from `api.databanks`** — databanks are explicitly-uploaded reference documents; the cortex is what Lumiverse automatically *remembers* about a chat. The active userId is folded in implicitly, and **every chat-scoped call is ownership-checked** host-side (other users' chats return `null` on reads / throw on writes). `cortex.query(CortexQueryDTO)` is the headline call: it fuses semantic search + salience + recency + reinforcement + emotional + entity components into a ranked `CortexResult` (the same shape the host uses during prompt assembly) — use it for grounding/RAG over what the chat remembers. Results are server-cached ~5 min per chat+query shape; `getCached` / `getCachedLinked` read that warm cache without re-querying (return `null` when empty/expired); `invalidateCache` drops it. `queryLinked` resolves every attached vault + interlink target in parallel. `getConfig` / `putConfig` read + patch the (permissive, host-owned) cortex configuration.
+
+| Method | Args | Description |
+|---|---|---|
+| async `getConfig` | — | Get the Memory Cortex configuration (MemoryCortexConfig — permissive; advanced/host-added fields pass through). Requires memories permission. |
+| async `putConfig` | patch | Patch the Memory Cortex configuration (deep merge; unspecified fields untouched). Returns the updated config. Requires memories permission. |
+| async `query` | query | Fused-score retrieval (semantic + salience + recency + reinforcement + emotional + entity). query: CortexQuery { chatId (required), queryText (required), entityFilter?, timeRange?, emotionalContext?, generationType?, topK?, includeConsolidations?, includeRelationships?, excludeMessageIds? }. Returns CortexResult { memories, entityContext, activeRelationships, arcContext, stats }. Server-cached ~5 min per chat + query shape. Requires memories permission. |
+| async `queryLinked` | chatId, options? | Resolve every attached vault + interlink target in parallel. options: { queryText? } — pass queryText to rank by relevance. Returns LinkedCortexResult { vaults, interlinks }. Requires memories permission. |
+| async `getCached` | chatId | Read the warm cortex cache without re-running retrieval. Returns CortexResult or null (no/expired cache). Requires memories permission. |
+| async `getCachedLinked` | chatId | Read the cached linked-cortex result. Returns LinkedCortexResult or null. Requires memories permission. |
+| async `invalidateCache` | chatId | Drop the warm cortex cache for a chat. Requires memories permission. |
+| async `invalidateLinkedCache` | chatId | Drop the warm linked-cortex cache for a chat. Requires memories permission. |
+
+## api.memories.entities
+
+> **Concepts:** The cortex **entity graph** — characters, locations, items, factions, concepts, events. `list` defaults to active-only, ordered by salience; `findByName` matches canonical name OR known aliases. `upsert` is a **smart merge** against the canonical name + aliases (not a blind insert) — pass `MemoryEntityUpsert { name, type, aliases?, confidence?, role?, provisional? }`; entities below the configured confidence threshold are dropped host-side. Mutators: `updateStatus` (active / inactive / deceased / destroyed / unknown), `addFacts` (deduplicated, keeps the most recent 20), `updateEmotionalValence` (replaces the running valence map). Use to build entity dashboards, replay your own NER into the graph, or correct what Lumiverse extracted.
+
+| Method | Args | Description |
+|---|---|---|
+| async `list` | chatId, options? | List entities for a chat. options: { activeOnly? (default true), limit? }. Ordered by salience. Returns MemoryEntity[]. Requires memories permission. |
+| async `get` | entityId | Get an entity by id, or null if not found / not owned. Requires memories permission. |
+| async `findByName` | chatId, name | Find an entity by canonical name OR known alias, or null. Requires memories permission. |
+| async `upsert` | chatId, entity, options? | Smart-merge upsert against canonical name + aliases. entity: MemoryEntityUpsert { name, type ("character"\|"location"\|"item"\|"faction"\|"concept"\|"event"), aliases?, confidence?, role?, provisional? }. options: { chunkId?, createdAt? } attribute the mention. Returns the merged MemoryEntity. Requires memories permission. |
+| async `updateStatus` | entityId, patch | Update status. patch: { status ('active'\|'inactive'\|'deceased'\|'destroyed'\|'unknown'), statusChangedAt? }. Returns MemoryEntity. Requires memories permission. |
+| async `addFacts` | entityId, facts | Append facts (string[]); deduplicated, keeps the most recent 20. Returns MemoryEntity. Requires memories permission. |
+| async `getFacts` | entityId | Read an entity's facts (string[]; tagged branch facts stripped). Requires memories permission. |
+| async `updateEmotionalValence` | entityId, valence | Replace the running emotional-valence map (Record<string, number>, e.g. { betrayal: 0.6, grief: 0.4 }). Returns MemoryEntity. Requires memories permission. |
+
+## api.memories.relations
+
+> **Concepts:** The typed **relation graph** between entities. `list` is active edges only; `listAll` includes superseded/merged (diagnostics); `forEntity` / `forEntities` filter by incident entity. **`upsert` uses entity NAMES, not ids** (`MemoryRelationUpsert { source, target, type, label, sentiment }`) — the host resolves canonical ids server-side. **Gotcha: both endpoints must already exist in the entity graph** — call `entities.upsert` for source + target first, or the relation is silently dropped and `upsert` returns `null` (not the row). Always null-check the return.
+
+| Method | Args | Description |
+|---|---|---|
+| async `list` | chatId | Active relation edges for a chat (excludes superseded / merged). Returns MemoryRelation[]. Requires memories permission. |
+| async `listAll` | chatId | Every relation edge including superseded / merged — for diagnostics. Requires memories permission. |
+| async `forEntity` | chatId, entityId | Active edges incident to one entity. Requires memories permission. |
+| async `forEntities` | chatId, entityIds, options? | Active edges across a set of entity ids. options: { limit? }. Requires memories permission. |
+| async `upsert` | chatId, relation, options? | Upsert a relation by entity NAMES (not ids — the host resolves them). relation: MemoryRelationUpsert { source, target, type (RelationType), label, sentiment }. BOTH endpoints must already exist in the graph (call entities.upsert first) — returns the row or null if silently dropped. options: { chunkId? } attributes evidence. Requires memories permission. |
+
+## api.memories.consolidations
+
+> **Concepts:** Narrative-arc **consolidations** — compressed summaries across a tier of chunks (tier 1 = scene, 2 = chapter, …). `list` (optionally tier-filtered, most-recent-first) and `latestArc` read them; `run` triggers a background pass. **`run` is extractive / heuristic only — it does NOT call a sidecar LLM** (sidecar-driven consolidation is host-owned and runs automatically during ingestion). `run` is fire-and-forget: it returns immediately and new arcs surface via `list()` once the background job finishes.
+
+| Method | Args | Description |
+|---|---|---|
+| async `list` | chatId, options? | List narrative-arc consolidations (compressed summaries). options: { tier? } (1 = scene, 2 = chapter, …). Ordered most-recent first. Returns MemoryConsolidation[]. Requires memories permission. |
+| async `latestArc` | chatId | The most recent arc across all tiers, or null. Requires memories permission. |
+| async `run` | chatId | Trigger a background EXTRACTIVE consolidation pass (heuristic only — no sidecar LLM). Fire-and-forget: returns immediately; new arcs surface via list() once the job completes. Requires memories permission. |
+
+## api.memories.salience
+
+| Method | Args | Description |
+|---|---|---|
+| async `list` | chatId, options? | Per-chunk salience records, ordered by scoredAt desc. options: { limit? (max 500/page), offset? }. Returns MemorySalience[] { chunkId, score, scoreSource, emotionalTags, narrativeFlags, statusChanges, hasDialogue/Action/InternalThought, wordCount, scoredAt }. Requires memories permission. |
+
+## api.memories.vaults
+
+> **Concepts:** **Vaults** are frozen cortex snapshots — capture a chat's entities + relations + chunk content for reuse. `create({ chatId, name, description? })` copies entities + relations **synchronously** but copies the LanceDB chunks **in the background** (the vault is queryable in structural-only mode until that finishes); `reindex` re-runs the chunk copy (e.g. after an embedding-model swap). `get` returns the vault + entities + relations; `getChunks` the chunk snapshot. Attach a vault to other chats as read-only knowledge via `api.memories.links`.
+
+| Method | Args | Description |
+|---|---|---|
+| async `list` | — | All vaults owned by the active user (Vault[]). Requires memories permission. |
+| async `get` | vaultId | A vault with its entities + relations (VaultWithContents), or null if not found / not owned. Requires memories permission. |
+| async `getChunks` | vaultId | The chunk snapshot copied into the vault at creation (VaultChunk[]). Requires memories permission. |
+| async `create` | input | Snapshot a chat into a new vault. input: VaultCreate { chatId, name, description? }. Entities + relations copy synchronously; LanceDB chunks copy in the background (queryable structural-only until done). Returns Vault. Requires memories permission. |
+| async `rename` | vaultId, name | Rename a vault. Returns true if renamed. Requires memories permission. |
+| async `delete` | vaultId | Delete a vault + its chunks + attached links. Returns true if deleted. Requires memories permission. |
+| async `reindex` | vaultId | Re-run the LanceDB chunk copy from the source chat (e.g. after an embedding-model swap). Returns VaultReindexResult { mode, chunkCount }. Requires memories permission. |
+
+## api.memories.links
+
+> **Concepts:** Chat **links** — two kinds via `attach(ChatLinkAttach)`: a **vault attach** (`linkType: 'vault'`, `vaultId`) gives a chat read-only access to a frozen snapshot, and an **interlink** (`linkType: 'interlink'`, `targetChatId`) makes two chats see each other's live entities/relations (pass `bidirectional: true` to also create the reverse edge on the target). `list` enumerates a chat's links; `toggle` enables/disables without removing; `remove` deletes. Linked data surfaces through `cortex.queryLinked`.
+
+| Method | Args | Description |
+|---|---|---|
+| async `list` | chatId | All links attached to a chat — vault attaches + interlinks (ChatLink[]). Requires memories permission. |
+| async `attach` | input | Attach a vault as read-only knowledge, or interlink two chats. input: ChatLinkAttach { chatId, linkType ('vault'\|'interlink'), vaultId? (for vault), targetChatId? (for interlink), label?, bidirectional? (interlinks — also creates the reverse link) }. Returns the created ChatLink(s). Requires memories permission. |
+| async `remove` | chatId, linkId | Remove a link. Returns true if removed. Requires memories permission. |
+| async `toggle` | chatId, linkId, enabled | Enable / disable a link without removing it. Returns true if toggled. Requires memories permission. |
+
+## api.memories.chatMemory
+
+> **Concepts:** Long-Term Chat Memory — the vectorized **chunk store behind the `{{memories}}` macro**. `get(chatId, { topK })` runs the same top-K hybrid (vector + BM25) retrieval the macro uses and returns `ChatMemoryResult { chunks, formatted, count, … }` — **equivalent to `api.chats.getMemories()`** but under the `memories` permission (use that lighter alias if `memories` is overkill). `listChunks` inspects the raw index; `warm` rebuilds stale chunks + queues pending vectorizations (no-op `status: 'skipped'` when chat vectorization is disabled — check the user's embedding config first); `invalidate` drops the cached retrieval. **Distinct from `cortex`** — chatMemory is flat semantic chunk retrieval; cortex is the structured graph + fused scoring.
+
+| Method | Args | Description |
+|---|---|---|
+| async `listChunks` | chatId | All vectorized chunks for a chat, oldest first (ChatChunk[]). The raw index behind the {{memories}} macro. Requires memories permission. |
+| async `get` | chatId, options? | Top-K hybrid (vector + BM25) retrieval. options: { topK? }. Returns ChatMemoryResult { chunks, formatted, count, enabled, queryPreview, settingsSource, chunksAvailable, chunksPending } — same payload as the {{memories}} macro (equivalent to api.chats.getMemories but under the memories permission). Requires memories permission. |
+| async `warm` | chatId, options? | Rebuild stale chunks + queue pending vectorizations. options: { force? }. Returns ChatMemoryWarmupResult { status, reason?, rebuilt?, vectorizationsQueued? }. No-op (status:'skipped') when chat vectorization is disabled. Requires memories permission. |
+| async `invalidate` | chatId | Drop the cached {{memories}} retrieval result for a chat. Requires memories permission. |
+
+## api.memories.stats
+
+| Method | Args | Description |
+|---|---|---|
+| async `usage` | chatId | Entity / relation / consolidation / salience counts (CortexUsageStats; host gc fields pass through). Requires memories permission. |
+| async `ingestionStatus` | chatId | Live ingestion phase + pending job count (CortexIngestionStatus), or null when the chat was never ingested. Requires memories permission. |
+| async `ingestionTelemetry` | chatId | Last sample + per-phase averages over recent ingestions (CortexIngestionTelemetry). Requires memories permission. |
+
 ## api.personas
 
 | Method | Args | Description |
@@ -377,7 +575,7 @@ The delegation reads `event.target.dataset.action` (not a `closest()` walk), so 
 | async `create` | input | Create a persona. [personas] |
 | async `update` | personaId, input | Update a persona. [personas] |
 | async `delete` | personaId | Delete a persona. [personas] |
-| async `switchActive` | personaId \| null | Switch the active persona. Pass null to deactivate. [personas] |
+| async `switchActive` | personaId | Switch the active persona. Pass `personaId: string` to activate a persona, or `null` to deactivate. [personas] |
 | async `getWorldBook` | personaId | Get the world book attached to a persona. [personas] |
 
 ## api.presets
@@ -454,7 +652,7 @@ The delegation reads `event.target.dataset.action` (not a `closest()` walk), so 
 | Method | Args | Description |
 |---|---|---|
 | async `apply` | overrides | Apply CSS variable overrides on top of the user's current theme. `overrides.variables` is a flat map applied regardless of mode; `overrides.variablesByMode.{dark,light}` is mode-selected at apply time by the host. LumiScript maintains per-script attribution — multiple scripts' apply calls merge with per-key last-applied-wins semantics. Requires app_manipulation permission. [app_manipulation] |
-| async `applyPalette` | palette \| null | Apply a palette-driven theme. `palette.accent` is `{h, s, l}` and Lumiverse generates the full variable set coherently, preserving the user's glass/radius/font/UI-scale. Pass `null` to drop this script's palette contribution. Across LumiScript scripts: most-recent-script-wins. Requires app_manipulation permission. [app_manipulation] |
+| async `applyPalette` | palette | Apply a palette-driven theme. Pass `palette: ThemePaletteConfig` where `palette.accent` is `{h, s, l}` and Lumiverse generates the full variable set coherently, preserving the user's glass/radius/font/UI-scale. Pass `null` to drop this script's palette contribution. Across LumiScript scripts: most-recent-script-wins. Requires app_manipulation permission. [app_manipulation] |
 | async `clear` | — | Drop this script's contributions from the per-script override registry, re-merge, push the post-clear result to spindle.theme.{apply,applyPalette}. Auto-called on script disable / delete. Requires app_manipulation permission. [app_manipulation] |
 | async `getCurrent` | — | Get a read-only snapshot of the user's current theme configuration (NOT including any extension overrides). Returns ThemeInfo with id, name, mode ('light' \| 'dark'), accent (HSL), enableGlass, radiusScale, fontScale, uiScale, characterAware. Requires app_manipulation permission. [app_manipulation] |
 | async `extractColors` | imageId | Extract a color palette from an image stored in Lumiverse's image system. `imageId` is a host-side UUID (sources: `character.imageId`, `api.images.upload(...).id`). Returns ColorExtractionInfo with dominant + per-region RGB + flatness scores + isLight + dominantHsl (ready to pass to applyPalette). Throws if the id is unknown. Requires app_manipulation permission. [app_manipulation] |
@@ -494,7 +692,7 @@ The delegation reads `event.target.dataset.action` (not a `closest()` walk), so 
 
 ## api.broadcast
 
-> **Concepts:** In-memory real-time pub/sub between scripts. Events are NOT persisted — handlers fire synchronously when an event is emitted, and there's no replay across script reloads. Subscriptions persist between trigger runs (host wipes them at the START of each new run, not the end), so a "subscriber-only" script can watch events from a script it isn't co-triggered with. The `ls:*` prefix is reserved for system events; scripts should namespace their own events with a project-specific prefix. **Distinct from `api.events`** — that one is for persistent event tracking; this one is for real-time messaging.
+> **Concepts:** In-memory real-time pub/sub between scripts. Events are NOT persisted — handlers fire synchronously when an event is emitted, and there's no replay across script reloads. Subscriptions persist between trigger runs, so a "subscriber-only" script can watch events from a script it isn't co-triggered with. The owning script's next run clears its subscriptions at the START (then the body re-registers them) — so a re-firing script never stacks duplicate listeners, while a script that fires once (e.g. on `ls:startup`) keeps its subscriptions until it's disabled or deleted. The `ls:*` prefix is reserved for system events; scripts should namespace their own events with a project-specific prefix. **Distinct from `api.events`** — that one is for persistent event tracking; this one is for real-time messaging.
 
 **Payload size cap + emit rate limit.** `api.broadcast.emit(event, payload)` synchronously throws if the JSON-serialised payload exceeds **1 MB** (matches the `api.scriptStorage` per-value ceiling), OR if the calling script has emitted more than **100 events/sec sustained** (token bucket with **1000-emit burst capacity**). Errors carry clear migration hints. The caps apply at the `api.broadcast.emit` proxy entry (NOT at the underlying bus, so internal `ls:*` events the engine emits are unaffected). For high-frequency data flow, push the data to `api.db.*` or `api.scriptStorage` and emit a small "data updated" notification on the bus instead.
 
@@ -627,7 +825,7 @@ Lumiverse + LumiScript lifecycle events. Scripts react to these by being **wired
 | `GENERATION_STARTED` | { generationId, chatId, model } | At the start of a new generation, **before prompt assembly + interceptor invocation** in the same generation pipeline. `api.chat.inject(...)` calls from this handler ARE picked up by this generation. Symmetric pre-assembly hook to `MESSAGE_SENT` — use whichever fits the script flow. |
 | `GENERATION_ENDED` | { generationId, chatId, messageId, content } | Assistant-side message arrival (the counterpart to `MESSAGE_SENT` for user messages). Fires **after** the generation completes — `api.chat.inject(...)` calls from this handler are too late for the just-finished generation but WILL be picked up by the next one. Payload has no `swipeId` — look it up via `api.chat.getMessages` if needed. |
 | `GENERATION_STOPPED` | { generationId, chatId, content } |  |
-| `STREAM_TOKEN_RECEIVED` | { generationId, chatId, token } |  |
+| `STREAM_TOKEN_RECEIVED` | { generationId, chatId, token } | Once per streamed token — **high-frequency**. Deliberately NOT offered in the editor event picker (wiring a whole script body per token is rarely intended); advanced use only. |
 | `CHAT_CHANGED` | { chatId } | Chat **metadata** mutations only (rename, etc.). Does NOT fire on chat open/switch — use `CHAT_SWITCHED` for that. |
 | `CHAT_SWITCHED` | { chatId: string \| null }  // null on return-to-home — NO characterId on the payload | Active chat opens, switches, or closes (chatId becomes null on return-to-home). **Important — Phase-1/Phase-2 character resolution**: triggers fire during Phase 1 (chatId set sync); characterId is resolved Phase-2 ~10–15 ms later via async lookup. So `data.characterId` does NOT exist on the payload, and reading the active-context characterId at trigger-fire time can see null/stale. **Pattern**: call `api.chats.getActive()` and read `chat.characterId` — that hits the host's live state which has it populated regardless of Phase-2 status. |
 | `CHARACTER_EDITED` | { id, character: Character } |  |
@@ -644,7 +842,7 @@ Lumiverse + LumiScript lifecycle events. Scripts react to these by being **wired
 | `CONNECTION_PROFILE_LOADED` | { connectionId } |  |
 | `REGEX_SCRIPT_CHANGED` | { id, script: RegexScriptInfo }  // create / update / duplicate / reorder / enable / disable. Requires regex_scripts permission. |  |
 | `REGEX_SCRIPT_DELETED` | { id }  // Requires regex_scripts permission. |  |
-| `TOOL_INVOCATION` | { toolName, requestId, args } |  |
+| `TOOL_INVOCATION` | { toolName, requestId, args } | Internal routing for `api.tools.register` handlers — NOT a user-wireable trigger (not in the editor picker). Register a tool and the host dispatches Council/LLM invocations to your handler; you do not subscribe to this event directly. |
 
 ## Broadcast events (script-to-script pub/sub)
 
@@ -726,13 +924,42 @@ Public types referenced by `api.*` method signatures. **Each type is in the look
 - `InputBarActionHandle` — Returned by api.ui.registerInputBarAction(). Actions appear in the chat input-bar Extras popover under a teal-badged extension header. Limits: 4 per script, 12 global.
 - `FloatWidgetOptions` — Options for api.ui.createFloatWidget(). Widget is a small draggable overlay with script-owned body DOM.
 - `FloatWidgetHandle` — Returned by api.ui.createFloatWidget(). Body DOM is script-owned via root (DOMHandle). The root element carries data-ls-script and data-ls-widget attributes, so api.ui.dom.addStyle() @scope rules match content inside the widget. getPosition() / isVisible() return backend-cached state — see docs for caching semantics around moveTo and drag-end echoes.
+- `MountAppOptions` — Options for api.ui.mountApp(). All optional.
+- `MountedAppHandle` — Returned by api.ui.mountApp(). A route-persistent full-bleed document.body portal. Body DOM is script-owned via root (DOMHandle); the root element carries data-ls-script + data-ls-mount so api.ui.dom.addStyle() @scope rules match content inside.
 - `DrawerTabOptions` — Options for api.ui.registerDrawerTab(). Tab appears in the ViewportDrawer sidebar and is automatically searchable in the command palette.
 - `DrawerTabHandle` — Returned by api.ui.registerDrawerTab(). Body DOM is script-owned via root (DOMHandle). The root element carries data-ls-script and data-ls-tab attributes, so api.ui.dom.addStyle() @scope rules match content inside the tab. LumiScript enforces 1 drawer tab per script; if all 4 of LumiScript's host-quota tabs are in use by other scripts, registration throws with a distinct 'quota exhausted' message.
+- `UIDrawerTab` — A drawer tab discoverable via api.ui.getDrawerTabs() — built-in or extension-contributed. The id is what you pass to api.ui.openDrawerTab().
+- `UISettingsTab` — A settings tab discoverable via api.ui.getSettingsTabs(). Role-restricted tabs are filtered out for users lacking the role. The id is what you pass to api.ui.openSettings().
+- `PickFileOptions` — Options for api.ui.pickFile().
+- `PickedFile` — A file returned by api.ui.pickFile(). bytes is the raw Uint8Array — decode text via new TextDecoder().decode(bytes), or pass to api.images.upload / api.files.
+- `UIKeyboardState` — Snapshot from api.ui.events.getKeyboardState() / onKeyboardChange().
+- `UIDrawerState` — Snapshot from api.ui.events.getDrawerState() / onDrawerChange().
+- `UISettingsState` — Snapshot from api.ui.events.getSettingsState() / onSettingsChange().
 - `DOMInjectOptions` — Options for api.ui.dom.inject(target, html, options?).
 - `DOMMessageInjectOptions` — Options for api.ui.dom.injectAtMessage(messageId, html, options?).
 - `DOMDelegateOptions` — Options for api.ui.dom.delegate(selector, event, handler, options?).
 - `DOMDelegatedEventData` — Event data delivered to handlers registered via api.ui.dom.delegate(). Extends DOMEventData with a serialized snapshot of the matched element + modifier-key state + optional message context.
 - `DOMHandle` — Returned by api.ui.dom.inject() and api.ui.dom.injectAtMessage(). Most methods are fire-and-forget; the exception is `read(options?)` which is async (it awaits a frontend roundtrip).
+- `MountedComponentHandle` — Returned synchronously by api.ui.components.mountBadge / mountSpinner (display-only components). Methods are fire-and-forget.
+- `MountedValueComponentHandle` — Generic `MountedValueComponentHandle<TOptions, TValue>`. Returned by interactive mounts (api.ui.components.mountSwitch → boolean, mountTextInput → string). Extends MountedComponentHandle with an async getValue().
+- `SpindleBadgeOptions` — Options for api.ui.components.mountBadge().
+- `SpindleSpinnerOptions` — Options for api.ui.components.mountSpinner().
+- `SpindleSwitchOptions` — Options for api.ui.components.mountSwitch(). onChange fires into your script on every toggle.
+- `SpindleTextInputOptions` — Options for api.ui.components.mountTextInput(). onChange fires on every user change.
+- `SpindleTextAreaOptions` — Options for api.ui.components.mountTextArea(). Like SpindleTextInputOptions plus rows.
+- `SpindleNumericInputOptions` — Options for api.ui.components.mountNumericInput(). Value is number | null (null = empty when allowEmpty).
+- `SpindleNumberStepperOptions` — Options for api.ui.components.mountNumberStepper(). Like SpindleNumericInputOptions minus integer; step defaults to 1.
+- `SpindleCheckboxOptions` — Options for api.ui.components.mountCheckbox().
+- `SpindleRangeSliderOptions` — Options for api.ui.components.mountRangeSlider(). onCommit fires once when a drag/tap ends; onDragValue fires live during a drag.
+- `SpindleSelectOption` — A single option in api.ui.components.mountSelect() / mountMultiSelect().
+- `SpindleSelectOptions` — Options for api.ui.components.mountSelect() (single-select). Extends SpindleSelectOptionsBase (options, placeholder, searchPlaceholder, searchThreshold, emptyMessage, noResultsMessage, triggerLabel, triggerIcon, portal, align, maxHeight, minWidth, disabled, className).
+- `SpindleMultiSelectOptions` — Options for api.ui.components.mountMultiSelect(). Same base as SpindleSelectOptions but value/onChange use string[].
+- `SpindleFolderDropdownOptions` — Options for api.ui.components.mountFolderDropdown().
+- `SpindleModelComboboxOptions` — Options for api.ui.components.mountModelCombobox(). Connection-bound mode (connection) is recommended; manual mode uses models + onRefresh.
+- `SpindlePaginationOptions` — Options for api.ui.components.mountPagination(). Fully controlled — currentPage/totalPages/onPageChange are REQUIRED; call handle.update({currentPage}) after navigating.
+- `SpindleCloseButtonOptions` — Options for api.ui.components.mountCloseButton().
+- `SpindleCollapsibleSectionOptions` — Options for api.ui.components.mountCollapsibleSection(). title is REQUIRED.
+- `MountedCollapsibleSectionHandle` — Returned by api.ui.components.mountCollapsibleSection(). The host owns the header chrome; your script owns the body.
 - `DOMEventData` — Serialized event data passed to DOM event handlers. A safe subset of the browser Event object.
 - `DOMListenOptions` — Options bag for DOMHandle.on(event, handler, options?).
 - `DOMReadOptions` — Options bag for DOMHandle.read(options?). All fields optional — `read()` with no argument returns a baseline snapshot.
@@ -745,9 +972,14 @@ Deliberate omissions: computed styles, bounding rect, recursive child snapshots,
 - `LLMMessage` — A single message in the messages array passed to api.llm.generate / generateStructured / generateWithTools.
 - `LlmMessagePart` — A single content part inside an LLMMessage. Discriminated union — switch on the `type` field. Mirrors the host's LlmMessagePartDTO.
 - `LLMOptions` — Resolution order: connectionId → connectionName → provider + model → active user connection.
+- `Connection` — Read-only view of an LLM connection profile (api.connections.*). snake_case, mirrors the host ConnectionProfileDTO. NEVER contains the API key — only has_api_key. id/name map to LLMOptions.connectionId/connectionName.
+- `WebSearchOptions` — Passed to api.webSearch.query().
+- `WebSearchResponse` — Returned by api.webSearch.query(). documents/context are omitted when scrape:false.
+- `WebSearchSettings` — Returned by api.webSearch.getSettings(). Safe view — NEVER the API key (only hasApiKey).
 - `DryRunOptions` — Passed to api.llm.dryRun(options?). All fields are optional; defaults use the active context.
 - `LLMRawResult` — Return type of api.llm.generateWithTools() without a schema. On intermediate steps tool_calls is set; on the final step content holds the text response.
 - `LLMRawResultStructured` — Generic type `LLMRawResultStructured<T>`. Return type of `api.llm.generateWithTools(messages, tools, opts, schema)` — the structured-output overload. On intermediate steps only `tool_calls` is set. On the final step only `content` is set, typed as `T` (the schema-parsed result).
+- `StreamChunk` — One chunk yielded by api.llm.generateStream. Discriminated union — switch on the `type` field. snake_case throughout, mirroring LLMRawResult and the upstream StreamChunkDTO.
 - `ToolCall` — A single function call inside LLMRawResult.tool_calls or LLMRawResultStructured.tool_calls.
 - `DryRunResult` — Return type of api.llm.dryRun(). Contains everything that would be sent to the LLM plus diagnostic data.
 - `DryRunBlock` — A single prompt composition block inside DryRunResult.breakdown.
@@ -756,9 +988,12 @@ Deliberate omissions: computed styles, bounding rect, recursive child snapshots,
 - `DryRunMemoryStats` — Long-term memory retrieval statistics inside DryRunResult.memoryStats.
 - `HttpRequestOptions` — Passed to api.utils.http.get / post / put / delete / request. Requires allowDangerous + cors_proxy permission. Responses are capped at 25 MB by the Lumiverse cors_proxy; larger bodies are rejected upstream.
 - `HttpResponse` — Returned by api.utils.http.* methods. Response body is capped at 25 MB by the Lumiverse cors_proxy — requests for larger payloads reject with an upstream error.
-- `TempWriteOptions` — Passed to api.files.tempWrite(path, data, options?).
+- `TempWriteOptions` — Passed to api.files.tempWrite / tempWriteBinary (path, data, options?).
 - `FileStatResult` — Returned by api.files.sharedStat(path).
 - `TempStatResult` — Returned by api.files.tempStat(path).
+- `TempRequestBlockOptions` — Passed to api.files.tempRequestBlock(sizeBytes, options?).
+- `TempReservation` — Returned by api.files.tempRequestBlock(). Pass reservationId to tempWrite/tempWriteBinary options, or to tempReleaseBlock.
+- `TempPoolStatus` — Returned by api.files.tempGetPoolStatus(). Global = across all extensions; extension* = this extension only.
 - `Character` — Returned by api.characters.get / create / update.
 - `CharacterCreateInput` — Passed to api.characters.create(input). Only name is required.
 - `CharacterUpdateInput` — Passed to api.characters.update(id, input). Same fields as CharacterCreateInput, all optional.
@@ -819,6 +1054,25 @@ Deliberate omissions: computed styles, bounding rect, recursive child snapshots,
 - `DatabankDocumentCreateInput` — Passed to api.databanks.documents.create(databankId, input). Upload returns immediately with status='pending' — use waitUntilReady() to await ingestion. Max size 10 MB.
 - `DatabankDocumentUpdateInput` — Passed to api.databanks.documents.update(documentId, input). The URL-safe slug regenerates automatically from the new name.
 - `DatabankWaitUntilReadyOptions` — Optional polling parameters for api.databanks.documents.waitUntilReady(documentId, options?). Throws on timeout, error status, or document deletion.
+- `CortexQuery` — Input to api.memories.cortex.query(). chatId + queryText are required; the active userId is folded in by LumiScript.
+- `CortexResult` — Returned by api.memories.cortex.query() / getCached(). The same shape the host uses internally during prompt assembly.
+- `LinkedCortexResult` — Returned by api.memories.cortex.queryLinked() / getCachedLinked(). Attached vaults + interlink targets.
+- `MemoryCortexConfig` — Returned by api.memories.cortex.getConfig(); patch with putConfig(). Permissive — only top-level toggles are typed; advanced + host-added fields pass through the index signature.
+- `ChatChunk` — Returned by api.memories.chatMemory.listChunks(). A vectorized chat chunk — the {{memories}} retrieval unit.
+- `ChatMemoryWarmupResult` — Returned by api.memories.chatMemory.warm().
+- `CortexUsageStats` — Returned by api.memories.stats.usage(). Host gc fields (mention counts, last GC, etc.) pass through.
+- `CortexIngestionStatus` — Returned by api.memories.stats.ingestionStatus(), or null when never ingested.
+- `CortexIngestionTelemetry` — Returned by api.memories.stats.ingestionTelemetry().
+- `MemoryEntity` — A tracked entity in the cortex graph. Returned by api.memories.entities.* and inside CortexResult.entityContext (as the lighter EntitySnapshot).
+- `MemoryEntityUpsert` — Input to api.memories.entities.upsert(). Matches the extractor shape so a script can replay its own NER results.
+- `MemoryRelation` — A typed relation edge. Returned by api.memories.relations.*.
+- `MemoryRelationUpsert` — Input to api.memories.relations.upsert(). Uses entity NAMES — both endpoints must already exist in the graph or the edge is silently dropped.
+- `MemoryConsolidation` — A narrative-arc consolidation. Returned by api.memories.consolidations.list / latestArc.
+- `MemorySalience` — A per-chunk salience record. Returned by api.memories.salience.list.
+- `Vault` — A frozen cortex snapshot. Returned by api.memories.vaults.list / create; inside VaultWithContents.vault.
+- `VaultCreate` — Input to api.memories.vaults.create().
+- `ChatLink` — A vault attach or chat interlink. Returned by api.memories.links.list / attach.
+- `ChatLinkAttach` — Input to api.memories.links.attach(). Provide vaultId for a vault attach, or targetChatId for an interlink.
 - `ImageInfo` — Returned by api.images.upload / uploadFromDataUrl / get. Camel-case mirror of ImageDTO from Spindle.
 - `ImageUploadInput` — Passed to api.images.upload(input).
 - `ImageUploadFromDataUrlOptions` — Passed to api.images.uploadFromDataUrl(dataUrl, options?). The data URL itself carries the bytes + MIME; these options only set ownership / display metadata.

@@ -49,7 +49,7 @@ Most non-trivial scripts use two or three of these together. A typical pattern: 
 
 - `api.files.userRead` / `userWrite` / `userDelete` / `userExists` / `userList` / `userMkdir` — per-user, per-extension. Persistent. (No `userStat`.)
 - `api.files.sharedRead` / `sharedWrite` / `sharedDelete` / `sharedExists` / `sharedStat` / `sharedList` / `sharedMkdir` — shared across all users of the extension. Persistent.
-- `api.files.tempRead` / `tempWrite` / `tempDelete` / `tempStat` / `tempList` — TTL-bound. The host auto-expires entries; use for large transient data (downloaded asset that's about to be processed, intermediate state during a long-running job).
+- `api.files.tempRead` / `tempWrite` / `tempReadBinary` / `tempWriteBinary` / `tempDelete` / `tempStat` / `tempList` / `tempClearExpired` — TTL-bound. Text **and** binary I/O — use the `*Binary` pair (`tempReadBinary` → `Uint8Array`, `tempWriteBinary(path, bytes, opts)`) for images / PDFs / any non-text blob. The host auto-expires entries; use for large transient data (downloaded asset that's about to be processed, intermediate state during a long-running job). The ephemeral pool is **quota-bounded** (per-extension and global): `tempGetPoolStatus()` reads the usage snapshot, and for a large write you can reserve space up front — `tempRequestBlock(sizeBytes, { ttlMs?, reason? })` returns a `{ reservationId, … }` you pass to the write's `options.reservationId` so it can't fail partway through on a full pool (`tempReleaseBlock(reservationId)` frees an unused reservation).
 
 All three need `allowDangerous`; the temp tier additionally needs the `ephemeral_storage` permission.
 
@@ -104,13 +104,13 @@ const stored = await api.enclave.get('spotify:refresh_token');
 **Downloaded binary processed across two fires** — write to temp, read from temp, let the host auto-expire it:
 
 ```js
-// Fire 1: fetch and stash.
+// Fire 1: fetch and stash. resp.body is a Uint8Array → use the binary tier.
 const resp = await api.utils.http.get(url, { responseType: 'arraybuffer' });
-await api.files.tempWrite('pending-upload.png', resp.body, { ttlMs: 10 * 60_000 });
+await api.files.tempWriteBinary('pending-upload.png', resp.body, { ttlMs: 10 * 60_000 });
 
 // Fire 2: process from temp.
-const bytes = await api.files.tempRead('pending-upload.png');
-await api.images.upload(bytes, { mimeType: 'image/png' });
+const bytes = await api.files.tempReadBinary('pending-upload.png');
+await api.images.upload({ data: bytes, mimeType: 'image/png' });
 ```
 
 ## What NOT to use each tier for

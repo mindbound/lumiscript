@@ -115,6 +115,12 @@ export const HANDLE_KIND_LIFECYCLE: Readonly<Record<HandleKind, 'transient' | 'p
   ContentProcessorHandle:     'persistent',
   StyleHandle:                'persistent',
   EnclaveHandle:              'persistent',
+  // v1.0.0-rc.9 — mounted host shared-component handle (api.ui.components.*).
+  // Persistent for the same reasons as DOMHandle: it outlives the run that
+  // mounted it and its methods (update/destroy/getValue) can be invoked from
+  // long-lived handler contexts (e.g. an onChange firing after the mounting
+  // run ended), which need the handler-fire ALS fallback in resolveActiveRun.
+  MountedComponent:           'persistent',
 };
 
 /**

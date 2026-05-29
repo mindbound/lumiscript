@@ -20,6 +20,7 @@ import type {
   LLMMessage,
   ZodLike,
   DryRunOptions,
+  StreamChunk,
 } from '../../types/script.js';
 import { messageContentToString } from '../../types/script.js';
 import { type APIBuildDeps, assertPerm, shielded } from './shared.js';
@@ -237,6 +238,65 @@ export function buildLLMAPI(deps: APIBuildDeps): LumiScriptAPI['llm'] {
           }).then(result => (result as { content: string }).content);
         }),
       );
+    },
+
+    /**
+     * Streaming variant of `generate`. Returns an async generator yielding
+     * `StreamChunk` values (`'token'` / `'reasoning'` / terminal `'done'`).
+     *
+     * Permission check + provider validation run synchronously at call time
+     * so failures surface before the caller starts iterating (matching
+     * `generate`'s fail-fast semantics). The async-generator body resolves
+     * the connection on first `.next()` invocation.
+     *
+     * Cancellation cascade:
+     *   - Consumer `break` → runtime calls `.return()` on our generator →
+     *     `for await` inside calls `.return()` on the upstream stream →
+     *     upstream tears down the HTTP request.
+     *   - `opts.signal` → forwarded to the underlying request DTO; abort
+     *     tears down the upstream HTTP and the generator rejects.
+     *
+     * No `shielded()` wrapper — that helper exists to suppress unhandled-
+     * rejection noise from chained `.then()` patterns. Streams surface
+     * rejections through the `for await` loop itself, which the consumer
+     * is expected to handle via try/catch.
+     *
+     * Field naming: passes `StreamChunkDTO` through as-is. The DTO and our
+     * `StreamChunk` type are structurally identical (snake_case throughout,
+     * matching `LLMRawResult` / `ToolCall` convention). One `as` cast at
+     * the boundary documents the nominal-type boundary.
+     */
+    generateStream: function (messages: LLMMessage[], opts?: LLMOptions): AsyncGenerator<StreamChunk, void, void> {
+      assertPerm('generation', hasPerm, script.name);
+      if (opts?.provider) assertProvider(opts.provider);
+      return (async function*(): AsyncGenerator<StreamChunk, void, void> {
+        const conn = await resolveConnection(opts, userId);
+        const effectiveProvider = opts?.provider ?? conn?.provider;
+        const effectiveModel    = opts?.model    ?? conn?.model;
+        const providerFields = {
+          ...(effectiveProvider ? { provider: effectiveProvider } as Record<string, string> : {}),
+          ...(effectiveModel    ? { model:    effectiveModel    } as Record<string, string> : {}),
+        };
+        const request = {
+          type: 'raw',
+          messages,
+          ...providerFields,
+          ...(conn?.id ? { connection_id: conn.id } : {}),
+          parameters: buildLLMParams(opts),
+          userId: userId ?? undefined,
+          ...(opts?.signal ? { signal: opts.signal } : {}),
+        };
+        // `spindle.generate.rawStream` is typed as yielding `StreamChunkDTO` on
+        // current spindle-types, but the type itself isn't directly importable
+        // through our type-only import chain — cast at the yield boundary.
+        // Same pattern as `src/assistant/agent.ts:234`.
+        const stream = spindle.generate.rawStream(
+          request as unknown as Parameters<typeof spindle.generate.rawStream>[0],
+        ) as AsyncIterable<unknown>;
+        for await (const dto of stream) {
+          yield dto as StreamChunk;
+        }
+      })();
     },
 
     generateStructured: <T>(

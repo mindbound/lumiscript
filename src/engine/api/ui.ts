@@ -37,11 +37,18 @@ import type {
   InputBarActionHandle,
   FloatWidgetOptions,
   FloatWidgetHandle,
+  MountAppOptions,
+  MountedAppHandle,
   DrawerTabOptions,
   DrawerTabHandle,
+  UIDrawerTab,
+  UISettingsTab,
+  PickFileOptions,
+  PickedFile,
 } from '../../types/script.js';
 import type { APIBuildDeps } from './shared.js';
 import { shielded, assertPerm } from './shared.js';
+import { base64ToBytes } from '../image-format.js';
 import { createDOMHandle, nextDOMId } from './dom.js';
 import { registerElement } from '../dom-registry.js';
 import {
@@ -71,6 +78,11 @@ import {
   addDragEndHandler,
   destroyWidget,
 } from '../float-widget-registry.js';
+import {
+  registerAppMount,
+  getAppMount,
+  destroyAppMount,
+} from '../app-mount-registry.js';
 import {
   registerTab,
   hasTab,
@@ -125,9 +137,50 @@ export function resolveContextMenu(requestId: string, selectedKey: string | null
   resolve(selectedKey);
 }
 
+// ─── File picker — request-response bridge ──────────────────────────────────
+
+/**
+ * In-flight `api.ui.pickFile` calls keyed by requestId. Unlike the context
+ * menu (which only ever resolves), pickFile can also REJECT — the host throws
+ * when a selected file exceeds `maxSizeBytes` — so we hold both callbacks.
+ */
+const pendingPickFiles = new Map<
+  string,
+  { resolve: (files: PickedFile[]) => void; reject: (err: Error) => void }
+>();
+
+/**
+ * Settle a pending `pickFile` call from the frontend's `ls_pick_file_result`.
+ * On `error`, reject (mirrors the host throw). Otherwise decode each wire file's
+ * base64 payload back to a `Uint8Array` and resolve (an empty array = the user
+ * cancelled). No-op on unknown requestId (stale result after script teardown).
+ */
+export function resolvePickFile(
+  requestId: string,
+  result: {
+    files?: Array<{ name: string; mimeType: string; sizeBytes: number; dataBase64: string }>;
+    error?: string;
+  },
+): void {
+  const pending = pendingPickFiles.get(requestId);
+  if (!pending) return;
+  pendingPickFiles.delete(requestId);
+  if (result.error !== undefined) {
+    pending.reject(new Error(result.error));
+    return;
+  }
+  const files: PickedFile[] = (result.files ?? []).map((f) => ({
+    name:      f.name,
+    mimeType:  f.mimeType,
+    sizeBytes: f.sizeBytes,
+    bytes:     base64ToBytes(f.dataBase64),
+  }));
+  pending.resolve(files);
+}
+
 // ─── API builder ──────────────────────────────────────────────────────────────
 
-export function buildUIAPI(deps: APIBuildDeps): Omit<LumiScriptAPI['ui'], 'dom'> {
+export function buildUIAPI(deps: APIBuildDeps): Omit<LumiScriptAPI['ui'], 'dom' | 'components' | 'events'> {
   return {
     toast(
       message: string,
@@ -574,6 +627,58 @@ export function buildUIAPI(deps: APIBuildDeps): Omit<LumiScriptAPI['ui'], 'dom'>
       return handle;
     },
 
+    mountApp(options: MountAppOptions = {}): MountedAppHandle {
+      assertPerm('app_manipulation', deps.hasPerm, deps.script.name);
+
+      const scriptId = deps.script.id;
+
+      // ── Allocate IDs ───────────────────────────────────────────────────
+      // `options._mountId` / `options._rootElementId` are @internal opt-ins
+      // for the script-runner child runtime (mirrors createFloatWidget): the
+      // child supplies them so the proxy-side sync handle carries ids matching
+      // parent-side state for later setVisible / destroy / DOMHandle root
+      // dispatch lookups. Generated here on the (rare) in-process path.
+      const mountId       = options._mountId       ?? crypto.randomUUID();
+      const rootElementId = options._rootElementId ?? nextDOMId('am');
+
+      // Register BEFORE sending the create message so any synchronous follow-up
+      // DOM op on `.root` resolves the elementId.
+      registerElement(rootElementId, scriptId);
+      registerAppMount(mountId, rootElementId, scriptId, {
+        className: options.className,
+        position:  options.position,
+      });
+
+      const root = createDOMHandle(rootElementId, deps);
+
+      const handle: MountedAppHandle = {
+        mountId,
+        root,
+        setVisible(visible: boolean): void {
+          const entry = getAppMount(mountId);
+          if (!entry || entry.destroyed) return;
+          spindle.sendToFrontend({ type: 'ls_app_mount_set_visible', mountId, visible });
+        },
+        destroy(): void {
+          if (!destroyAppMount(mountId)) return;
+          spindle.sendToFrontend({ type: 'ls_app_mount_destroy', mountId });
+        },
+      };
+
+      spindle.sendToFrontend({
+        type: 'ls_app_mount_create',
+        scriptId,
+        mountId,
+        rootElementId,
+        options: {
+          className: options.className,
+          position:  options.position,
+        },
+      });
+
+      return handle;
+    },
+
     registerDrawerTab(options: DrawerTabOptions): DrawerTabHandle {
       const scriptId = deps.script.id;
 
@@ -735,6 +840,70 @@ export function buildUIAPI(deps: APIBuildDeps): Omit<LumiScriptAPI['ui'], 'dom'>
     getPushStatus(): Promise<{ available: boolean; subscriptionCount: number }> {
       assertPerm('push_notification', deps.hasPerm, deps.script.name);
       return shielded(spindle.push.getStatus(deps.userId ?? undefined));
+    },
+
+    // ── Navigation (free tier) ──────────────────────────────────────────────
+    // Backend passthroughs over spindle.ui.* — the same primitives the built-in
+    // Command Palette uses. The active userId is folded in implicitly. The
+    // listing DTOs are already safe + structurally identical to ours.
+
+    getDrawerTabs(): Promise<UIDrawerTab[]> {
+      return shielded(
+        spindle.ui.getDrawerTabs({ userId: deps.userId ?? undefined })
+          .then((dtos) => dtos as unknown as UIDrawerTab[]),
+      );
+    },
+
+    getSettingsTabs(): Promise<UISettingsTab[]> {
+      return shielded(
+        spindle.ui.getSettingsTabs({ userId: deps.userId ?? undefined })
+          .then((dtos) => dtos as unknown as UISettingsTab[]),
+      );
+    },
+
+    openDrawerTab(tabId: string): Promise<void> {
+      return shielded(spindle.ui.openDrawerTab(tabId, { userId: deps.userId ?? undefined }));
+    },
+
+    closeDrawer(): Promise<void> {
+      return shielded(spindle.ui.closeDrawer({ userId: deps.userId ?? undefined }));
+    },
+
+    openSettings(viewId?: string): Promise<void> {
+      return shielded(spindle.ui.openSettings(viewId, { userId: deps.userId ?? undefined }));
+    },
+
+    closeSettings(): Promise<void> {
+      return shielded(spindle.ui.closeSettings({ userId: deps.userId ?? undefined }));
+    },
+
+    openCommandPalette(): Promise<void> {
+      return shielded(spindle.ui.openCommandPalette({ userId: deps.userId ?? undefined }));
+    },
+
+    closeCommandPalette(): Promise<void> {
+      return shielded(spindle.ui.closeCommandPalette({ userId: deps.userId ?? undefined }));
+    },
+
+    // ── File picker (free tier) ─────────────────────────────────────────────
+    // Frontend round-trip: ask the frontend to open ctx.uploads.pickFile, get
+    // the selected file(s) back (bytes base64-encoded over the JSON bus). The
+    // native picker is the user-action gate, so no permission. Bytes decode to
+    // Uint8Array in resolvePickFile before the promise settles.
+    pickFile(options?: PickFileOptions): Promise<PickedFile[]> {
+      const requestId = crypto.randomUUID();
+      return shielded(new Promise<PickedFile[]>((resolve, reject) => {
+        pendingPickFiles.set(requestId, { resolve, reject });
+        spindle.sendToFrontend({
+          type: 'ls_pick_file_request',
+          requestId,
+          options: {
+            accept:       options?.accept,
+            multiple:     options?.multiple,
+            maxSizeBytes: options?.maxSizeBytes,
+          },
+        });
+      }));
     },
   };
 }

@@ -72,6 +72,10 @@ import { buildUtilsAPI      } from './api/utils.js';
 import { buildJSONAPI       } from './api/json.js';
 import { buildChatAPI       } from './api/chat.js';
 import { buildLLMAPI        } from './api/llm.js';
+import { buildConnectionsAPI } from './api/connections.js';
+import { buildWebSearchAPI } from './api/web-search.js';
+import { buildUsersAPI } from './api/users.js';
+import { buildVersionAPI } from './api/version.js';
 import { buildVariablesAPI  } from './api/variables.js';
 import { buildFilesAPI      } from './api/files.js';
 import { buildUIAPI         } from './api/ui.js';
@@ -79,6 +83,7 @@ import { buildCharactersAPI } from './api/characters.js';
 import { buildChatsAPI      } from './api/chats-session.js';
 import { buildWorldInfoAPI  } from './api/world-info.js';
 import { buildDatabanksAPI } from './api/databanks.js';
+import { buildMemoriesAPI } from './api/memories.js';
 import { buildRpcAPI       } from './api/rpc.js';
 import { buildPersonasAPI  } from './api/personas.js';
 import { buildPresetsAPI   } from './api/presets.js';
@@ -94,6 +99,8 @@ import { buildEnclaveAPI   } from './api/enclave.js';
 import { buildCommandsAPI  } from './api/commands.js';
 import { buildEventsAPI   } from './api/events.js';
 import { buildDOMAPI      } from './api/dom.js';
+import { buildComponentsAPI } from './api/components.js';
+import { buildUIEventsAPI    } from './api/ui-events.js';
 import { buildMacrosAPI   } from './api/macros.js';
 import { buildTokensAPI   } from './api/tokens.js';
 import { buildDbAPI       } from './api/db.js';
@@ -405,13 +412,18 @@ export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiSc
     variables:  buildVariablesAPI(deps),
     chat:       buildChatAPI(deps),
     llm:        buildLLMAPI(deps),
+    connections: buildConnectionsAPI(deps),
+    webSearch:  buildWebSearchAPI(deps),
+    users:      buildUsersAPI(deps),
+    version:    buildVersionAPI(),
     files:      buildFilesAPI(deps),
     enclave:    buildEnclaveAPI(deps),
-    ui:         { ...buildUIAPI(deps), dom: buildDOMAPI(deps) },
+    ui:         { ...buildUIAPI(deps), dom: buildDOMAPI(deps), components: buildComponentsAPI(deps), events: buildUIEventsAPI(deps) },
     characters: buildCharactersAPI(deps),
     chats:      buildChatsAPI(deps),
     worldInfo:  buildWorldInfoAPI(deps),
     databanks:  buildDatabanksAPI(deps),
+    memories:   buildMemoriesAPI(deps),
     personas:   buildPersonasAPI(deps),
     presets:    buildPresetsAPI(deps),
     regexScripts: buildRegexScriptsAPI(deps),

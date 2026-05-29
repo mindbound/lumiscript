@@ -1,6 +1,6 @@
 # Calling the LLM
 
-`api.llm.*` gives a script four ways to interact with the LLM connection the user has configured: plain text generation, validated structured JSON, tool-using generation, and a dry-run that assembles the prompt without calling the model. All four require the `generation` permission (see [`concepts/permissions.md`](../concepts/permissions.md) for the broader gate).
+`api.llm.*` gives a script four ways to interact with the LLM connection the user has configured: plain text generation, validated structured JSON, tool-using generation, and a dry-run that assembles the prompt without calling the model — plus a streaming variant of the plain-text path. All five surfaces require the `generation` permission (see [`concepts/permissions.md`](../concepts/permissions.md) for the broader gate).
 
 The host wraps `spindle.generate.raw()`, so everything flows through the user's selected connection profile — your script doesn't see provider API keys, doesn't pick endpoints, and doesn't know whether the user is using OpenAI / Anthropic / a local model. It just sends messages and gets responses.
 
@@ -85,6 +85,107 @@ const text = await api.llm.generate([
     { type: 'image', data: base64bytes, mime_type: 'image/png' },
   ]},
 ]);
+```
+
+## `generateStream(messages, options?)` — streaming text
+
+```ts
+generateStream(messages: LLMMessage[], options?: LLMOptions): AsyncGenerator<StreamChunk, void, void>
+```
+
+Streaming variant of `generate`. Returns an async iterator that yields token-level chunks as they arrive from the provider, followed by exactly one terminal `'done'` chunk that carries the full aggregated text, the finish reason, and (when the provider reports them) `usage` token counts.
+
+```js
+let buffer = '';
+for await (const chunk of api.llm.generateStream(messages)) {
+  if (chunk.type === 'token')     buffer += chunk.token;
+  else if (chunk.type === 'done') console.log('finished:', chunk.finish_reason);
+}
+```
+
+### Chunk shape
+
+```ts
+type StreamChunk =
+  | { type: 'token';     token: string }
+  | { type: 'reasoning'; token: string }
+  | {
+      type:          'done';
+      content:       string;       // full aggregated text
+      reasoning?:    string;       // full aggregated chain-of-thought (when present)
+      finish_reason: string;       // 'stop' | 'length' | 'tool_calls' | 'content_filter' | provider-specific
+      tool_calls?:   ToolCall[];   // set when finish_reason === 'tool_calls'
+      usage?:        { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+    };
+```
+
+Three variants, switch on `type`. `'token'` chunks are incremental visible-content deltas — concatenate them to get the streamed text. `'reasoning'` chunks are incremental chain-of-thought deltas from thinking-mode models (DeepSeek-thinking, Anthropic extended-thinking, …); providers without thinking mode skip these entirely. The terminal `'done'` chunk is emitted exactly once on successful completion.
+
+Field naming is snake_case throughout, matching `LLMRawResult` and the upstream DTO. The `usage` field is **stream-only** — the non-stream `generate` / `generateStructured` / `generateWithTools` methods don't currently surface it.
+
+### When to stream
+
+Stream when:
+
+- **Latency-to-first-token matters.** Showing partial output as it arrives feels far snappier than a 5-second wait for a complete response. Chat-style UIs, narrator boxes, anything user-visible benefits.
+- **You want early-stop on partial output.** Inspecting `'token'` chunks as they arrive lets you abort the generation when the model produces something unwanted, instead of paying the full token cost.
+- **You need `usage` counts.** Currently only `generateStream` surfaces token usage; non-stream calls don't.
+
+Don't stream when:
+
+- You're producing structured JSON. Use `generateStructured` — the engine validates against your schema and a partial JSON object isn't useful anyway.
+- You need tool-calling. Use `generateWithTools` — `generateStream` doesn't currently support the tool-loop pattern.
+- You don't surface output to the user incrementally. The extra plumbing (buffer, for-await, break-handling) earns nothing if you're going to await the whole result anyway. Use `generate`.
+
+### Cancellation — two paths
+
+Streams support two cancellation paths and they compose:
+
+**Consumer break** — Breaking out of the `for await` loop calls `.return()` on the iterator, which propagates upstream and tears down the in-flight HTTP request. Useful for partial-output-informed abort:
+
+```js
+let buffer = '';
+for await (const chunk of api.llm.generateStream(messages)) {
+  if (chunk.type !== 'token') continue;
+  buffer += chunk.token;
+
+  // Bail as soon as the model produces something we won't ship
+  if (/\b(banned-pattern|other-veto)\b/i.test(buffer)) break;
+}
+```
+
+**External `AbortSignal`** — Pass `options.signal` to cancel from outside the loop. The next iterator pull rejects with an `AbortError`. Compose with `AbortSignal.timeout()` / `AbortSignal.any([...])` like the non-streaming methods:
+
+```js
+const ctrl = new AbortController();
+setTimeout(() => ctrl.abort(), 5000);  // 5-second wall-clock cap
+
+try {
+  for await (const chunk of api.llm.generateStream(messages, { signal: ctrl.signal })) {
+    if (chunk.type === 'token') process.stdout.write(chunk.token);
+  }
+} catch (err) {
+  if (err.name === 'AbortError') console.log('cancelled');
+  else throw err;
+}
+```
+
+Either path correctly tears down the upstream connection — you won't keep paying tokens after the consumer stops listening. The worker host also auto-aborts in-flight streams on extension teardown, same as the non-streaming methods.
+
+### Errors surface on first iteration
+
+Permission denied, unknown provider, connection-not-found, and other validation failures don't throw at the call site — they surface on the first `await` against the iterator (typically the first iteration of `for await`). The async generator returned by `generateStream` is a thin handle; the underlying validation + connection-resolution + HTTP request all happen as the consumer starts pulling chunks. Wrap your loop in `try / catch` if you want to handle validation errors distinctly from in-stream errors.
+
+```js
+try {
+  for await (const chunk of api.llm.generateStream(messages)) {
+    /* … */
+  }
+} catch (err) {
+  console.error('stream failed:', err.message);
+  // PERMISSION_DENIED, unknown provider, connection not found,
+  // upstream HTTP failure, AbortError — all land here.
+}
 ```
 
 ## `generateStructured(messages, schema, options?)` — validated JSON

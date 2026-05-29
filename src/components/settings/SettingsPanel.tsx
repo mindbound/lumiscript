@@ -1,4 +1,4 @@
-import { FC, useState, useEffect } from 'react';
+import { FC, useState, useEffect, useMemo } from 'react';
 import { Code2, BookMarked, Terminal, Timer, Type, FileCode2, Activity, MessageCircle, Trash2, RotateCcw, Cpu, Shuffle } from 'lucide-react';
 import type { Script, LumiScriptSettings } from '../../types/script.js';
 import type { BackendToFrontend, FrontendToBackend } from '../../types/messages.js';
@@ -6,6 +6,11 @@ import { DEFAULT_SETTINGS } from '../../types/script.js';
 import { DiagnosticsModal } from '../diagnostics/DiagnosticsModal.js';
 import { AssistantModal } from '../assistant/AssistantModal.js';
 import { LS_OPEN_ASSISTANT_EVENT, dispatchOpenAssistant } from '../assistant/openAssistant.js';
+import { HostSelect } from '../common/HostSelect.js';
+
+// Connection rows as pushed by the backend's `assistant_connections` reply —
+// derived from the message contract so the shape can't drift.
+type AssistantConnRow = Extract<BackendToFrontend, { type: 'assistant_connections' }>['connections'][number];
 
 interface SettingsPanelProps {
   onBackendMessage: (handler: (msg: unknown) => void) => () => void;
@@ -25,16 +30,21 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
   // v0.30.x — assistant modal visibility. Opens the in-app code assistant
   // (persona: Lisa). Portal-mounted same way as Diagnostics.
   const [assistantOpen, setAssistantOpen] = useState(false);
+  // v1.0.0-rc.9 — LLM connections for the "Default connection" picker below.
+  // null = not yet loaded (picker disabled); [] = loaded, none configured.
+  const [assistantConnections, setAssistantConnections] = useState<AssistantConnRow[] | null>(null);
 
   useEffect(() => {
     const unsub = onBackendMessage((raw) => {
       const msg = raw as BackendToFrontend;
       if (msg.type === 'scripts_updated') setScripts(msg.scripts);
       if (msg.type === 'settings_updated') setSettings(msg.settings);
+      if (msg.type === 'assistant_connections') setAssistantConnections(msg.connections);
     });
 
     sendToBackend({ type: 'get_settings' });
     sendToBackend({ type: 'get_scripts' });
+    sendToBackend({ type: 'request_assistant_connections' });
 
     return unsub;
   }, [onBackendMessage, sendToBackend]);
@@ -53,6 +63,21 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
 
   const triggerCount = scripts.filter(s => s.type === 'trigger').length;
   const libraryCount = scripts.filter(s => s.type === 'library').length;
+
+  // Options for the default-connection picker: a "Lumiverse default" sentinel
+  // (value '') ahead of every configured connection. Memoized for a stable
+  // array identity into HostSelect.
+  const assistantConnectionOptions = useMemo(
+    () => [
+      { value: '', label: 'Lumiverse default', sublabel: 'Follow the app’s own default connection' },
+      ...(assistantConnections ?? []).map((c) => ({
+        value: c.id,
+        label: c.name,
+        sublabel: `${c.provider} · ${c.model}${c.isDefault ? ' · app default' : ''}`,
+      })),
+    ],
+    [assistantConnections],
+  );
 
   const handleToggleEnabled = (enabled: boolean) => {
     sendToBackend({ type: 'update_settings', patch: { enabled } });
@@ -335,6 +360,21 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
         </div>
 
         <div className="ls-settings-field">
+          <label className="ls-settings-field-label" title="The LLM connection Lisa's chat starts on. Leave as “Lumiverse default” to follow the app's own default connection, or point Lisa at a model that's a stronger coding brain than your main-chat pick (e.g. GLM-5.1). You can still switch connections per-session inside the chat — this only sets the starting point.">
+            Connection
+          </label>
+          <HostSelect
+            options={assistantConnectionOptions}
+            value={settings.assistantConnectionId ?? ''}
+            onChange={(v) => sendToBackend({ type: 'update_settings', patch: { assistantConnectionId: v } })}
+            placeholder={assistantConnections === null ? 'Loading…' : 'Lumiverse default'}
+            disabled={assistantConnections === null}
+            ariaLabel="Default Lisa connection"
+            searchThreshold={8}
+          />
+        </div>
+
+        <div className="ls-settings-field">
           <label className="ls-settings-field-label" title="Maximum tool-call iterations Lisa is allowed per turn. Each lookup_api call counts as one. Lower this if your model thrashes on hard questions; raise it if Lisa hits the ceiling on genuinely complex Q&A.">
             Tool iterations
           </label>
@@ -475,6 +515,8 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
       )}
       {assistantOpen && (
         <AssistantModal
+          scripts={scripts}
+          defaultConnectionId={settings.assistantConnectionId ?? ''}
           onClose={() => setAssistantOpen(false)}
           onBackendMessage={onBackendMessage}
           sendToBackend={sendToBackend}

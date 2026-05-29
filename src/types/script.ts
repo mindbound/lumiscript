@@ -175,6 +175,16 @@ export interface LumiScriptSettings {
   defaultLibraryTemplate: string;
   // ─── Assistant (Lisa) ────────────────────────────────────────────────────────
   /**
+   * Connection (LLM profile) the assistant's connection picker defaults to,
+   * keyed by connection id. Empty string / undefined = "follow Lumiverse's own
+   * default connection" (the original behaviour). Lets you point Lisa at a
+   * model that shines as a coding brain even if it isn't your main-chat pick
+   * (e.g. GLM-5.1). Per-session choice is unaffected — the in-modal picker
+   * still switches freely; this only seeds its initial value. A stored id that
+   * no longer exists silently falls back to the Lumiverse default at pick time.
+   */
+  assistantConnectionId?: string;
+  /**
    * Maximum tool-call iterations the in-app assistant's agentic loop is
    * allowed before failing with a "did not converge" error. Each
    * `lookup_api` call counts as one iteration. Lower values fail fast for
@@ -276,6 +286,14 @@ export interface ScriptExecutionResult {
 export interface LumiScriptAPI {
   chat: ChatAPI;
   llm: LLMAPI;
+  /** Read-only access to the user's LLM connection profiles (never includes API keys). Free tier. */
+  connections: ConnectionsAPI;
+  /** Web search against the user's configured provider. Requires web_search permission. */
+  webSearch: WebSearchAPI;
+  /** Active-user context queries: session visibility + Lumiverse role. Free tier. */
+  users: UsersAPI;
+  /** Running Lumiverse backend + frontend versions. Free tier. */
+  version: VersionAPI;
   variables: VariablesAPI;
   json: JSONAPI;
   utils: UtilsAPI;
@@ -289,6 +307,8 @@ export interface LumiScriptAPI {
   worldInfo: WorldInfoAPI;
   /** Databank (vectorised document collection) CRUD + per-document upload, fetch, and reprocess. Requires databanks permission. */
   databanks: DatabanksAPI;
+  /** Memory Cortex + Long-Term Chat Memory — entity/relation graph, arcs, vaults, links, retrieval, and the {{memories}} chunk store. Requires memories permission. */
+  memories: MemoriesAPI;
   /** Persona (identity profile) CRUD + active persona switching. Requires personas permission. */
   personas: PersonasAPI;
   /** Generation preset CRUD + nested prompt-block CRUD + host-derived category grouping. Mirrors Spindle's `spindle.presets.*` surface. Requires presets permission. */
@@ -1048,8 +1068,13 @@ export interface DryRunMemoryStats {
   chunksAvailable: number;
   chunksPending: number;
   injectionMethod: 'macro' | 'fallback' | 'disabled';
+  /** How the chunks were retrieved (real vector search vs recency fallback).
+   *  Absent until the chat-memory cache has been populated. */
+  retrievalMode?: 'vector' | 'recency' | 'empty' | 'disabled';
   retrievedChunks: Array<{
-    score: number;
+    /** Vector distance (lower = more similar); `null` for keyword-only or
+     *  recency-fallback hits. */
+    score: number | null;
     tokenEstimate: number;
     messageRange: [number, number];
     preview: string;
@@ -1126,9 +1151,91 @@ export interface LLMRawResult {
   reasoning_content?: string;
 }
 
+/**
+ * One chunk yielded by `api.llm.generateStream`. Three variants:
+ *  - `'token'`     — incremental visible content chunk
+ *  - `'reasoning'` — incremental chain-of-thought chunk (thinking-mode models only)
+ *  - `'done'`      — terminal chunk emitted exactly once on successful completion
+ *
+ * The `'done'` chunk carries the full aggregated content, `finish_reason`,
+ * optional `tool_calls`, and optional `usage` token counts. Stream-only
+ * surface — non-streaming methods don't currently expose `usage`.
+ *
+ * Cancellation: breaking out of the consumer's `for await` loop calls
+ * `.return()` on the iterator, which propagates to the upstream stream and
+ * tears down the HTTP request. You can also pass an `AbortSignal` via
+ * `options.signal` for external cancellation.
+ *
+ * Field-naming: snake_case throughout, mirroring `LLMRawResult` and the
+ * upstream `StreamChunkDTO`. No DTO translation at the boundary.
+ */
+export type StreamChunk =
+  | { type: 'token';     token: string }
+  | { type: 'reasoning'; token: string }
+  | {
+      type:           'done';
+      /** Full aggregated content (concatenation of all `token` chunks). */
+      content:        string;
+      /** Aggregated reasoning content (concatenation of all `reasoning` chunks). Absent when the model didn't produce reasoning. */
+      reasoning?:     string;
+      /** Why the generation stopped: `'stop'`, `'length'`, `'tool_calls'`, `'content_filter'`, provider-specific. */
+      finish_reason:  string;
+      /** Function calls requested by the LLM. Present when `finish_reason === 'tool_calls'` (or provider-equivalent). */
+      tool_calls?:    ToolCall[];
+      /**
+       * Token-count statistics. Present when the provider reports them
+       * (most do; some self-hosted providers don't, and some report all
+       * zeros which is functionally equivalent to "didn't report").
+       *
+       * Stream-only — the non-stream `generate` / `generateStructured` /
+       * `generateWithTools` methods don't currently surface `usage`.
+       * Breaking out of the stream before the `'done'` chunk arrives
+       * means you won't see usage at all.
+       */
+      usage?: {
+        prompt_tokens:     number;
+        completion_tokens: number;
+        total_tokens:      number;
+      };
+    };
+
 export interface LLMAPI {
   /** Generate using the user's active connection and preset. Requires generation permission. */
   generate(messages: LLMMessage[], options?: LLMOptions): Promise<string>;
+  /**
+   * Streaming variant of `generate`. Returns an async iterator yielding
+   * `StreamChunk` values: incremental `'token'` and `'reasoning'` chunks
+   * followed by exactly one terminal `'done'` chunk with the full aggregated
+   * content + `finish_reason` + optional `tool_calls` + optional `usage`.
+   *
+   * Same connection-resolution, provider/model-override, and `options.signal`
+   * cancellation semantics as `generate`.
+   *
+   * Cancellation:
+   *  - Breaking out of the `for await` loop calls `.return()` on the iterator,
+   *    which propagates to the upstream stream and tears down the HTTP request.
+   *  - Passing an `AbortSignal` via `options.signal` cancels externally. After
+   *    abort, the iterator rejects on the next `.next()` with an `AbortError`.
+   *
+   * Requires `generation` permission.
+   *
+   * @example basic streaming consumer
+   * let content = '';
+   * for await (const chunk of api.llm.generateStream(messages)) {
+   *   if (chunk.type === 'token')     content += chunk.token;
+   *   else if (chunk.type === 'done') console.log('done:', chunk.finish_reason);
+   * }
+   *
+   * @example partial-output-informed abort — stop early when banned content appears
+   * const ctrl = new AbortController();
+   * for await (const chunk of api.llm.generateStream(messages, { signal: ctrl.signal })) {
+   *   if (chunk.type === 'token' && chunk.token.toLowerCase().includes('banned-word')) {
+   *     ctrl.abort();
+   *     break;
+   *   }
+   * }
+   */
+  generateStream(messages: LLMMessage[], options?: LLMOptions): AsyncGenerator<StreamChunk, void, void>;
   /**
    * Generate and parse a structured JSON response. Requires generation permission.
    *
@@ -1227,6 +1334,186 @@ export interface LLMAPI {
    * Requires generation permission.
    */
   dryRun(options?: DryRunOptions): Promise<DryRunResult>;
+}
+
+// ─── Connections API ──────────────────────────────────────────────────────────
+
+/**
+ * Safe, read-only view of one of the user's LLM connection profiles. **Never
+ * contains the API key** — only the `has_api_key` boolean. Mirrors the host's
+ * `ConnectionProfileDTO` field-for-field (snake_case, like `LLMRawResult`).
+ *
+ * The `id` is what you pass to {@link LLMOptions.connectionId}; `name` to
+ * {@link LLMOptions.connectionName}. Pair `list()` with
+ * `api.ui.components.mountSelect` / `mountModelCombobox` to build connection /
+ * model pickers.
+ */
+export interface Connection {
+  /** Stable connection ID. Pass to `api.llm.*` via `options.connectionId`. */
+  id: string;
+  /** Human-readable name. Pass to `api.llm.*` via `options.connectionName`. */
+  name: string;
+  /** Provider identifier (e.g. `'anthropic'`, `'openai'`). */
+  provider: string;
+  /** Provider API base URL. */
+  api_url: string;
+  /** Model identifier. */
+  model: string;
+  /** Bound generation preset ID, or `null`. */
+  preset_id: string | null;
+  /** Whether this is the user's default connection. */
+  is_default: boolean;
+  /** Whether an API key is stored. NEVER the key itself. */
+  has_api_key: boolean;
+  /** Raw provider-specific metadata bag (provider-quirk flags, etc.). */
+  metadata: Record<string, unknown>;
+  /** Parsed reasoning bindings, or `null` when the connection has none. */
+  reasoning_bindings: Record<string, unknown> | null;
+  /** Unix-ms creation timestamp. */
+  created_at: number;
+  /** Unix-ms last-update timestamp. */
+  updated_at: number;
+}
+
+/**
+ * Read-only access to the user's LLM connection profiles. Free tier (no
+ * permission) — the surface exposes no secrets (`has_api_key` is a boolean).
+ * There is intentionally no create/update/delete: connections hold provider
+ * credentials and are managed by the user in Lumiverse settings.
+ */
+export interface ConnectionsAPI {
+  /** List all of the user's connection profiles. */
+  list(): Promise<Connection[]>;
+  /** Get a connection profile by ID, or `null` if it doesn't exist / isn't accessible. */
+  get(connectionId: string): Promise<Connection | null>;
+  /** Get the user's default connection (the `is_default` one, or the first available), or `null`. */
+  getDefault(): Promise<Connection | null>;
+  /** Find a connection by name (case-insensitive), or `null` if unmatched. */
+  findByName(name: string): Promise<Connection | null>;
+}
+
+// ─── Web Search API ───────────────────────────────────────────────────────────
+
+/** Safe view of the user's web-search configuration. NEVER contains the API key — only `hasApiKey`. Mirrors the host `WebSearchSettingsDTO`. */
+export interface WebSearchSettings {
+  /** Whether web search is configured + enabled. Check before calling `query`. */
+  enabled: boolean;
+  /** Search provider identifier (currently `'searxng'`). */
+  provider: string;
+  /** Provider API base URL. */
+  apiUrl: string;
+  /** Per-request timeout in ms. */
+  requestTimeoutMs: number;
+  /** Default result count when `query`'s `count` is omitted. */
+  defaultResultCount: number;
+  /** Maximum result count (`count` is clamped to this). */
+  maxResultCount: number;
+  /** How many top results get scraped when `scrape` is true. */
+  maxPagesToScrape: number;
+  /** Per-page scraped-text character cap. */
+  maxCharsPerPage: number;
+  /** Search language code. */
+  language: string;
+  /** SafeSearch level: 0 = off, 1 = moderate, 2 = strict. */
+  safeSearch: 0 | 1 | 2;
+  /** Provider engines to query. */
+  engines: string[];
+  /** Whether an API key is stored. NEVER the key itself. */
+  hasApiKey: boolean;
+}
+
+/** A single normalized search result. */
+export interface WebSearchResult {
+  title: string;
+  url: string;
+  snippet: string;
+  /** Provider-reported engine (e.g. `'google'`, `'bing'`), when available. */
+  engine?: string;
+  /** Provider-reported relevance score, when available. */
+  score?: number;
+}
+
+/** A search result enriched with scraped page content. Only present when `query` ran with `scrape: true` (the default). */
+export interface WebSearchDocument {
+  title: string;
+  url: string;
+  snippet: string;
+  /** How the page content was extracted (e.g. `'html'`, `'pdf'`). */
+  sourceType?: string;
+  /** Extracted page text, clipped to `maxCharsPerPage`. Absent when scraping failed (see `error`). */
+  content?: string;
+  /** Source page content length before clipping. */
+  contentLength?: number;
+  /** Populated when scraping this result failed; `content` is then absent. */
+  error?: string;
+}
+
+/** Options for `api.webSearch.query()`. */
+export interface WebSearchOptions {
+  /** Free-text query. Trimmed by the host; empty values are rejected. */
+  query: string;
+  /** Desired result count. Clamped to `maxResultCount`; omit for `defaultResultCount`. */
+  count?: number;
+  /**
+   * When `true` (default), the host scrapes the top results, fills
+   * `documents[].content`, and assembles a prompt-ready `context` block. Set
+   * `false` to skip scraping — only `results` are returned (no `documents` /
+   * `context`). Use `false` when you only need titles / URLs / snippets.
+   */
+  scrape?: boolean;
+}
+
+/** Result of `api.webSearch.query()`. `documents` / `context` are omitted when `scrape: false`. */
+export interface WebSearchResponse {
+  /** The (trimmed) query that was executed. */
+  query: string;
+  /** Normalized results from the provider. */
+  results: WebSearchResult[];
+  /** Per-result scraped page content. Absent when `scrape: false`. */
+  documents?: WebSearchDocument[];
+  /** Pre-assembled, prompt-ready context block (query + scraped docs). Absent when `scrape: false`. */
+  context?: string;
+}
+
+/**
+ * Web search against the user's configured provider (SearXNG today). Requires
+ * the `web_search` permission. `query` rejects with `"Web search is disabled"`
+ * when the user hasn't configured a provider — branch on
+ * `getSettings().enabled` first if that's a possibility.
+ */
+export interface WebSearchAPI {
+  /** Run a search. With `scrape` (default) you also get scraped `documents` + a prompt-ready `context`. */
+  query(options: WebSearchOptions): Promise<WebSearchResponse>;
+  /** Read the safe web-search config (never the API key). Useful for branching on `enabled` / `provider`. */
+  getSettings(): Promise<WebSearchSettings>;
+}
+
+// ─── Users API ──────────────────────────────────────────────────────────────
+
+/**
+ * The active user's Lumiverse role as exposed to extensions. Internal owners
+ * are reported as `operator`; admins as `admin`; everyone else as `user`.
+ */
+export type UserRole = 'operator' | 'admin' | 'user';
+
+export interface UsersAPI {
+  /**
+   * True if the active user has the app visible in at least one session.
+   * False if every session is hidden/backgrounded, or the user has no open
+   * session. Useful for gating notifications vs. in-app UI.
+   */
+  isVisible(): Promise<boolean>;
+  /** The active user's role: `'operator' | 'admin' | 'user'`. */
+  getRole(): Promise<UserRole>;
+}
+
+// ─── Version API ──────────────────────────────────────────────────────────────
+
+export interface VersionAPI {
+  /** The running backend server's semantic version (e.g. `"1.2.0"`). */
+  getBackend(): Promise<string>;
+  /** The running frontend bundle's semantic version. */
+  getFrontend(): Promise<string>;
 }
 
 // ─── Variables API ────────────────────────────────────────────────────────────
@@ -1526,10 +1813,58 @@ export interface TempStatResult {
   expiresAt?: string;
 }
 
-/** Options for `api.files.tempWrite`. */
+/** Options for `api.files.tempWrite` / `tempWriteBinary`. */
 export interface TempWriteOptions {
   /** Time-to-live in milliseconds. If omitted the file persists until manually deleted or restart. */
   ttlMs?: number;
+  /**
+   * Charge this write against a reservation from `tempRequestBlock`. Lets you
+   * pre-reserve quota before producing the bytes, so a large write can't fail
+   * partway through on a full pool.
+   */
+  reservationId?: string;
+}
+
+/** Options for `api.files.tempRequestBlock`. */
+export interface TempRequestBlockOptions {
+  /** Time-to-live for the reservation in milliseconds. */
+  ttlMs?: number;
+  /** Free-text reason recorded with the reservation (diagnostics only). */
+  reason?: string;
+}
+
+/** A quota reservation returned by `api.files.tempRequestBlock`. */
+export interface TempReservation {
+  /** Pass to `tempWrite` / `tempWriteBinary` `options.reservationId`, or to `tempReleaseBlock`. */
+  reservationId: string;
+  /** The reserved size in bytes. */
+  sizeBytes: number;
+  /** ISO 8601 timestamp when the reservation expires if unused. */
+  expiresAt: string;
+}
+
+/** Ephemeral-storage quota snapshot returned by `api.files.tempGetPoolStatus`. */
+export interface TempPoolStatus {
+  /** Total ephemeral pool size across all extensions, in bytes. */
+  globalMaxBytes: number;
+  /** Bytes currently stored across all extensions. */
+  globalUsedBytes: number;
+  /** Bytes currently reserved (not yet written) across all extensions. */
+  globalReservedBytes: number;
+  /** Bytes still available globally (max − used − reserved). */
+  globalAvailableBytes: number;
+  /** This extension's ephemeral quota, in bytes. */
+  extensionMaxBytes: number;
+  /** Bytes this extension is currently storing. */
+  extensionUsedBytes: number;
+  /** Bytes this extension currently has reserved. */
+  extensionReservedBytes: number;
+  /** Bytes this extension still has available. */
+  extensionAvailableBytes: number;
+  /** Number of ephemeral files this extension currently holds. */
+  fileCount: number;
+  /** Maximum file count allowed for this extension. */
+  fileCountMax: number;
 }
 
 /**
@@ -1579,6 +1914,10 @@ export interface FilesAPI {
   tempRead(path: string): Promise<string>;
   /** Write UTF-8 text to ephemeral storage. Requires ephemeral_storage permission. */
   tempWrite(path: string, data: string, options?: TempWriteOptions): Promise<void>;
+  /** Read a file from ephemeral storage as raw bytes. Requires ephemeral_storage permission. */
+  tempReadBinary(path: string): Promise<Uint8Array>;
+  /** Write raw bytes to ephemeral storage. Requires ephemeral_storage permission. */
+  tempWriteBinary(path: string, data: Uint8Array, options?: TempWriteOptions): Promise<void>;
   /** Delete a file from ephemeral storage. Requires ephemeral_storage permission. */
   tempDelete(path: string): Promise<void>;
   /** List files in ephemeral storage, optionally under a prefix. Requires ephemeral_storage permission. */
@@ -1587,6 +1926,215 @@ export interface FilesAPI {
   tempStat(path: string): Promise<TempStatResult>;
   /** Remove all expired ephemeral files. Returns count of files removed. Requires ephemeral_storage permission. */
   tempClearExpired(): Promise<number>;
+
+  // ── Temp storage quota subsystem ──────────────────────────────────────────
+  /** Read the ephemeral-storage quota snapshot (global + this-extension usage/reservations + file counts). Requires ephemeral_storage permission. */
+  tempGetPoolStatus(): Promise<TempPoolStatus>;
+  /**
+   * Reserve `sizeBytes` of ephemeral quota up front. Returns a reservation whose
+   * `reservationId` you pass to `tempWrite` / `tempWriteBinary` options, so a
+   * large write can't fail partway through on a full pool. Release with
+   * `tempReleaseBlock` if you don't use it. Requires ephemeral_storage permission.
+   */
+  tempRequestBlock(sizeBytes: number, options?: TempRequestBlockOptions): Promise<TempReservation>;
+  /** Release a previously requested reservation. Requires ephemeral_storage permission. */
+  tempReleaseBlock(reservationId: string): Promise<void>;
+}
+
+// ─── Memories API (Memory Cortex + Long-Term Chat Memory) ───────────────────
+//
+// Bridges `spindle.memories.*`. The host owns the schema and the DTOs are
+// camelCase + already-safe, so the script-facing types are direct aliases of
+// the host DTOs (no per-field translation — and host field additions are
+// visible immediately). The active userId is folded in implicitly. Requires the
+// `memories` permission. (Phase 1 surface: cortex + chatMemory + stats.)
+
+/** Memory Cortex retrieval input. `userId` is folded in by LumiScript. */
+export type CortexQuery = Omit<import('lumiverse-spindle-types').CortexQueryDTO, 'userId'>;
+/** Fused-score cortex retrieval result (memories + entity/relation context + arc + stats). */
+export type CortexResult = import('lumiverse-spindle-types').CortexResultDTO;
+/** Linked-cortex result — attached vaults + interlink targets. */
+export type LinkedCortexResult = import('lumiverse-spindle-types').LinkedCortexResultDTO;
+/** Memory Cortex configuration (permissive — advanced/host-added fields pass through). */
+export type MemoryCortexConfig = import('lumiverse-spindle-types').MemoryCortexConfigDTO;
+/** A vectorized chat chunk — the {{memories}} retrieval unit. */
+export type ChatChunk = import('lumiverse-spindle-types').ChatChunkDTO;
+// `ChatMemoryResult` is already defined above (shared with api.chats.getMemories) —
+// it's structurally identical to the host ChatMemoryResultDTO, so chatMemory.get reuses it.
+/** Result of a long-term chat-memory warmup. */
+export type ChatMemoryWarmupResult = import('lumiverse-spindle-types').ChatMemoryWarmupResultDTO;
+/** Entity / relation / consolidation / salience counts for a chat. */
+export type CortexUsageStats = import('lumiverse-spindle-types').CortexUsageStatsDTO;
+/** Live ingestion phase + pending job count. */
+export type CortexIngestionStatus = import('lumiverse-spindle-types').CortexIngestionStatusDTO;
+/** Per-phase ingestion timing averages over recent ingestions. */
+export type CortexIngestionTelemetry = import('lumiverse-spindle-types').CortexIngestionTelemetryDTO;
+/** A tracked entity in the cortex graph (character / location / item / faction / concept / event). */
+export type MemoryEntity = import('lumiverse-spindle-types').MemoryEntityDTO;
+/** Input for upserting an entity (smart-merge against canonical name + aliases). */
+export type MemoryEntityUpsert = import('lumiverse-spindle-types').MemoryEntityUpsertDTO;
+/** Status patch for an entity. */
+export type MemoryEntityStatusUpdate = import('lumiverse-spindle-types').MemoryEntityStatusUpdateDTO;
+/** A typed relation edge between two entities. */
+export type MemoryRelation = import('lumiverse-spindle-types').MemoryRelationDTO;
+/** Input for upserting a relation (uses entity *names*; both endpoints must already exist). */
+export type MemoryRelationUpsert = import('lumiverse-spindle-types').MemoryRelationUpsertDTO;
+/** A narrative-arc consolidation (compressed summary across a tier of chunks). */
+export type MemoryConsolidation = import('lumiverse-spindle-types').MemoryConsolidationDTO;
+/** A per-chunk salience record (importance score + tags). */
+export type MemorySalience = import('lumiverse-spindle-types').MemorySalienceDTO;
+/** A frozen cortex snapshot (entities + relations + chunk copy). */
+export type Vault = import('lumiverse-spindle-types').VaultDTO;
+/** A vault plus its snapshotted entities + relations. */
+export type VaultWithContents = import('lumiverse-spindle-types').VaultWithContentsDTO;
+/** A chunk copied into a vault snapshot. */
+export type VaultChunk = import('lumiverse-spindle-types').VaultChunkDTO;
+/** Input for creating a vault from a chat. */
+export type VaultCreate = import('lumiverse-spindle-types').VaultCreateDTO;
+/** Result of a vault LanceDB re-index. */
+export type VaultReindexResult = import('lumiverse-spindle-types').VaultReindexResultDTO;
+/** A link attaching a vault to a chat, or interlinking two chats. */
+export type ChatLink = import('lumiverse-spindle-types').ChatLinkDTO;
+/** Input for attaching a vault or setting up a chat interlink. */
+export type ChatLinkAttach = import('lumiverse-spindle-types').ChatLinkAttachDTO;
+
+export interface MemoriesCortexAPI {
+  /** Get the user's Memory Cortex configuration. */
+  getConfig(): Promise<MemoryCortexConfig>;
+  /** Patch the Memory Cortex configuration (deep merge; unspecified fields left untouched). */
+  putConfig(patch: Partial<MemoryCortexConfig>): Promise<MemoryCortexConfig>;
+  /** Fused-score retrieval (semantic + salience + recency + reinforcement + emotional + entity). Server-cached ~5 min per chat + query shape. */
+  query(query: CortexQuery): Promise<CortexResult>;
+  /** Resolve every attached vault + interlink target in parallel. Pass `queryText` to rank by relevance to the current conversation. */
+  queryLinked(chatId: string, options?: { queryText?: string }): Promise<LinkedCortexResult>;
+  /** Read the warm cache without re-running retrieval. `null` if none / expired. */
+  getCached(chatId: string): Promise<CortexResult | null>;
+  /** Read the cached linked-cortex result. `null` if none / expired. */
+  getCachedLinked(chatId: string): Promise<LinkedCortexResult | null>;
+  /** Drop the warm cortex cache for a chat. */
+  invalidateCache(chatId: string): Promise<void>;
+  /** Drop the warm linked-cortex cache for a chat. */
+  invalidateLinkedCache(chatId: string): Promise<void>;
+}
+
+export interface MemoriesChatMemoryAPI {
+  /** All vectorized chunks for a chat, oldest first. */
+  listChunks(chatId: string): Promise<ChatChunk[]>;
+  /** Top-K hybrid (vector + BM25) retrieval — the same payload the {{memories}} macro uses. */
+  get(chatId: string, options?: { topK?: number }): Promise<ChatMemoryResult>;
+  /** Rebuild stale chunks + queue pending vectorizations. `force: true` rebuilds even when fresh. No-op when chat vectorization is disabled. */
+  warm(chatId: string, options?: { force?: boolean }): Promise<ChatMemoryWarmupResult>;
+  /** Drop the cached {{memories}} retrieval result for a chat. */
+  invalidate(chatId: string): Promise<void>;
+}
+
+export interface MemoriesStatsAPI {
+  /** Entity / relation / consolidation / salience counts for a chat. */
+  usage(chatId: string): Promise<CortexUsageStats>;
+  /** Live ingestion phase + pending job count; `null` when the chat was never ingested. */
+  ingestionStatus(chatId: string): Promise<CortexIngestionStatus | null>;
+  /** Last sample + per-phase averages over recent ingestions. */
+  ingestionTelemetry(chatId: string): Promise<CortexIngestionTelemetry>;
+}
+
+export interface MemoriesEntitiesAPI {
+  /** List entities for a chat. Defaults to active-only, ordered by salience. */
+  list(chatId: string, options?: { activeOnly?: boolean; limit?: number }): Promise<MemoryEntity[]>;
+  /** Get an entity by id, or `null` if not found / not owned. */
+  get(entityId: string): Promise<MemoryEntity | null>;
+  /** Find an entity by canonical name or known alias, or `null`. */
+  findByName(chatId: string, name: string): Promise<MemoryEntity | null>;
+  /** Smart-merge upsert against canonical name + aliases. `chunkId`/`createdAt` attribute the mention. */
+  upsert(chatId: string, entity: MemoryEntityUpsert, options?: { chunkId?: string | null; createdAt?: number }): Promise<MemoryEntity>;
+  /** Update an entity's status (active / inactive / deceased / destroyed / unknown). */
+  updateStatus(entityId: string, patch: MemoryEntityStatusUpdate): Promise<MemoryEntity>;
+  /** Append facts (deduplicated; keeps the most recent 20). */
+  addFacts(entityId: string, facts: string[]): Promise<MemoryEntity>;
+  /** Read an entity's facts (tagged branch facts stripped). */
+  getFacts(entityId: string): Promise<string[]>;
+  /** Replace the running emotional-valence map. */
+  updateEmotionalValence(entityId: string, valence: Record<string, number>): Promise<MemoryEntity>;
+}
+
+export interface MemoriesRelationsAPI {
+  /** Active edges only (excludes superseded / merged). */
+  list(chatId: string): Promise<MemoryRelation[]>;
+  /** Every edge including superseded / merged — for diagnostics. */
+  listAll(chatId: string): Promise<MemoryRelation[]>;
+  /** Active edges incident to one entity. */
+  forEntity(chatId: string, entityId: string): Promise<MemoryRelation[]>;
+  /** Active edges across a set of entities. */
+  forEntities(chatId: string, entityIds: string[], options?: { limit?: number }): Promise<MemoryRelation[]>;
+  /** Upsert a relation by entity *names*. Both endpoints must already exist (use entities.upsert first) — returns `null` if dropped. */
+  upsert(chatId: string, relation: MemoryRelationUpsert, options?: { chunkId?: string | null }): Promise<MemoryRelation | null>;
+}
+
+export interface MemoriesConsolidationsAPI {
+  /** List narrative-arc consolidations. Pass `tier` to filter (1 = scene, 2 = chapter, …); ordered most-recent first. */
+  list(chatId: string, options?: { tier?: number }): Promise<MemoryConsolidation[]>;
+  /** The most recent arc across all tiers, or `null`. */
+  latestArc(chatId: string): Promise<MemoryConsolidation | null>;
+  /** Trigger a background extractive consolidation pass (no sidecar LLM). Returns immediately; new arcs appear via `list()` once it completes. */
+  run(chatId: string): Promise<void>;
+}
+
+export interface MemoriesSalienceAPI {
+  /** Per-chunk salience records, ordered by `scoredAt` desc. Max 500 per page. */
+  list(chatId: string, options?: { limit?: number; offset?: number }): Promise<MemorySalience[]>;
+}
+
+export interface MemoriesVaultsAPI {
+  /** All vaults owned by the active user. */
+  list(): Promise<Vault[]>;
+  /** A vault with its entities + relations, or `null` if not found / not owned. */
+  get(vaultId: string): Promise<VaultWithContents | null>;
+  /** The chunk snapshot copied into a vault at creation time. */
+  getChunks(vaultId: string): Promise<VaultChunk[]>;
+  /** Snapshot a chat's cortex state into a new vault. Entities + relations copy synchronously; LanceDB chunks copy in the background. */
+  create(input: VaultCreate): Promise<Vault>;
+  /** Rename a vault. Returns whether it was renamed. */
+  rename(vaultId: string, name: string): Promise<boolean>;
+  /** Delete a vault + its chunks + attached links. Returns whether it was deleted. */
+  delete(vaultId: string): Promise<boolean>;
+  /** Re-run the LanceDB chunk copy (e.g. after an embedding-model swap). */
+  reindex(vaultId: string): Promise<VaultReindexResult>;
+}
+
+export interface MemoriesLinksAPI {
+  /** All links attached to a chat (vault attaches + interlinks). */
+  list(chatId: string): Promise<ChatLink[]>;
+  /** Attach a vault as read-only knowledge, or interlink two chats (pass `bidirectional: true` for the reverse edge). Returns the created link(s). */
+  attach(input: ChatLinkAttach): Promise<ChatLink[]>;
+  /** Remove a link. Returns whether it was removed. */
+  remove(chatId: string, linkId: string): Promise<boolean>;
+  /** Enable / disable a link without removing it. Returns whether it was toggled. */
+  toggle(chatId: string, linkId: string, enabled: boolean): Promise<boolean>;
+}
+
+/**
+ * Memory Cortex + Long-Term Chat Memory. Requires the `memories` permission;
+ * the active userId is folded in implicitly. Every chat-scoped call is
+ * ownership-checked against the active user host-side.
+ */
+export interface MemoriesAPI {
+  /** Cortex config, fused retrieval, linked cortex, and the warm cache. */
+  cortex: MemoriesCortexAPI;
+  /** The entity graph — characters / locations / items / factions / concepts / events. */
+  entities: MemoriesEntitiesAPI;
+  /** The typed relation graph between entities. */
+  relations: MemoriesRelationsAPI;
+  /** Narrative-arc consolidations (compressed summaries). */
+  consolidations: MemoriesConsolidationsAPI;
+  /** Per-chunk salience records. */
+  salience: MemoriesSalienceAPI;
+  /** Frozen cortex snapshots (vaults). */
+  vaults: MemoriesVaultsAPI;
+  /** Vault attaches + chat-to-chat interlinks. */
+  links: MemoriesLinksAPI;
+  /** Long-term chat memory — the {{memories}} chunk store. */
+  chatMemory: MemoriesChatMemoryAPI;
+  /** Cortex usage counts + ingestion telemetry. */
+  stats: MemoriesStatsAPI;
 }
 
 // ─── Enclave API ──────────────────────────────────────────────────────────────
@@ -1779,8 +2327,10 @@ export interface ChatSessionUpdateInput {
 export interface ChatMemoryChunk {
   /** The chunk text (concatenated messages from a conversation segment). */
   content: string;
-  /** Cosine similarity score (lower = more similar). */
-  score: number;
+  /** Vector distance (lower = more similar). `null` for keyword-only or
+   *  recency-fallback hits, which have no vector distance — do not treat a
+   *  missing score as a perfect (zero-distance) match. */
+  score: number | null;
   /** Chunk metadata (may include startIndex, endIndex, etc.). */
   metadata: Record<string, unknown>;
 }
@@ -1798,6 +2348,9 @@ export interface ChatMemoryResult {
   chunksAvailable: number;
   /** Chunks awaiting vectorization. If > 0, results may be incomplete. */
   chunksPending: number;
+  /** How the chunks were retrieved (real vector search vs recency fallback).
+   *  Absent until the chat-memory cache has been populated. */
+  retrievalMode?: 'vector' | 'recency' | 'empty' | 'disabled';
 }
 
 export interface ChatsAPI {
@@ -3758,6 +4311,52 @@ export interface FloatWidgetHandle {
   destroy(): void;
 }
 
+// ─── App mount (route-persistent full-bleed portal, DOM-owned) ───────────────
+
+/** Options for `api.ui.mountApp()`. */
+export interface MountAppOptions {
+  /** Optional CSS class applied to the mount container. */
+  className?: string;
+  /**
+   * Where the full-bleed portal sits relative to the app shell:
+   * `'start'` / `'end'` (before / after the main view) or `'app-overlay'`
+   * (covering it). Default is host-defined.
+   */
+  position?: 'start' | 'end' | 'app-overlay';
+  /**
+   * @internal — used by the script-runner child runtime to thread child-
+   * generated ids through the canonical impl so the sync-shaped
+   * `MountedAppHandle` returned to user code carries stable ids that match
+   * parent-side state. Don't set from user code.
+   */
+  _mountId?: string;
+  /** @internal — see `_mountId`. */
+  _rootElementId?: string;
+}
+
+/**
+ * Handle for a mounted app — a route-persistent, full-bleed `document.body`
+ * portal your script fully owns. Use for full-screen overlays or persistent
+ * chrome beyond what dock panels / drawers / float widgets provide.
+ */
+export interface MountedAppHandle {
+  /** UUID identifying this mount instance. Available synchronously. */
+  readonly mountId: string;
+  /**
+   * `DOMHandle` bound to the mount's content container. Render + wire it via
+   * the existing `api.ui.dom.*` pipeline; calls are buffered and applied once
+   * the frontend has created the mount.
+   */
+  readonly root: DOMHandle;
+  /** Show or hide the mount without destroying it. */
+  setVisible(visible: boolean): void;
+  /**
+   * Remove the mount from the app shell. Idempotent — subsequent calls and
+   * method invocations on this handle are silent no-ops.
+   */
+  destroy(): void;
+}
+
 // ─── Drawer tabs (lifecycle, DOM-owned) ──────────────────────────────────────
 
 /** Options for `api.ui.registerDrawerTab()`. */
@@ -3855,6 +4454,120 @@ export interface DrawerTabHandle {
   destroy(): void;
 }
 
+// ─── UI navigation DTOs ─────────────────────────────────────────────────────
+
+/** A drawer tab discoverable via api.ui.getDrawerTabs() — built-in or extension-contributed. */
+export interface UIDrawerTab {
+  /** Stable id to pass to api.ui.openDrawerTab(). */
+  id: string;
+  /** Short label shown beneath the sidebar icon. */
+  shortName: string;
+  /** Full title shown in menus and the command palette. */
+  tabName: string;
+  /** One-line description shown in the command palette. */
+  tabDescription: string;
+  /** Keywords used for command-palette fuzzy search. */
+  keywords: string[];
+  /** Whether the tab is built into Lumiverse or contributed by an extension. */
+  source: 'builtin' | 'extension';
+  /** For extension-contributed tabs, the owning extension's identifier. */
+  extensionId?: string;
+}
+
+/** A settings tab discoverable via api.ui.getSettingsTabs(). Role-restricted tabs are filtered out for users lacking the role. */
+export interface UISettingsTab {
+  /** Stable id to pass to api.ui.openSettings(). */
+  id: string;
+  /** Short label shown in the settings sidebar. */
+  shortName: string;
+  /** Full title shown in the settings header / command palette. */
+  tabName: string;
+  /** One-line description shown in the command palette. */
+  tabDescription: string;
+  /** Keywords used for command-palette fuzzy search. */
+  keywords: string[];
+  /** Set when the tab is only visible to certain roles. */
+  role?: 'admin' | 'owner';
+}
+
+/** Options for api.ui.pickFile(). */
+export interface PickFileOptions {
+  /** File-type filters — extensions and/or MIME types (e.g. ['.json', 'application/json']). */
+  accept?: string[];
+  /** Allow selecting more than one file. Default: false. */
+  multiple?: boolean;
+  /** Maximum size per file in bytes. pickFile() rejects if a selected file exceeds this. */
+  maxSizeBytes?: number;
+}
+
+/** A file returned by api.ui.pickFile(). */
+export interface PickedFile {
+  /** Original file name. */
+  name: string;
+  /** MIME type (falls back to 'application/octet-stream'). */
+  mimeType: string;
+  /** File size in bytes. */
+  sizeBytes: number;
+  /** Raw file contents. */
+  bytes: Uint8Array;
+}
+
+// ─── UI events (reactive UI state) ──────────────────────────────────────────
+
+/** Virtual-keyboard snapshot from api.ui.events.getKeyboardState() / onKeyboardChange(). */
+export interface UIKeyboardState {
+  /** True when the host believes a virtual keyboard is currently visible. */
+  visible: boolean;
+  /** Safe bottom inset in CSS pixels that keeps content above the keyboard. */
+  insetBottom: number;
+  /** Current visual viewport width in CSS pixels. */
+  viewportWidth: number;
+  /** Current visual viewport height in CSS pixels. */
+  viewportHeight: number;
+}
+
+/** Side-drawer snapshot from api.ui.events.getDrawerState() / onDrawerChange(). */
+export interface UIDrawerState {
+  /** Whether the side drawer is currently open. */
+  open: boolean;
+  /** Active drawer tab id, or null. */
+  tabId: string | null;
+}
+
+/** Settings-modal snapshot from api.ui.events.getSettingsState() / onSettingsChange(). */
+export interface UISettingsState {
+  /** Whether the settings modal is currently open. */
+  open: boolean;
+  /** Active settings view identifier. */
+  view: string;
+}
+
+/**
+ * Reactive Lumiverse UI state — virtual keyboard, side drawer, settings modal.
+ * Each surface has a snapshot getter (resolves with the latest known state) and
+ * a change subscription (fires on every change, returns an unsubscribe fn).
+ * Free tier. Subscriptions keep the script alive while registered and are torn
+ * down automatically when the script is disabled.
+ *
+ * Primary use case: mobile-safe widget positioning — reposition float widgets /
+ * injected DOM when the on-screen keyboard opens (`insetBottom`) or the visual
+ * viewport changes.
+ */
+export interface UIEventsAPI {
+  /** The current virtual-keyboard snapshot. */
+  getKeyboardState(): Promise<UIKeyboardState>;
+  /** Subscribe to keyboard visibility / safe-area changes. Returns an unsubscribe fn. */
+  onKeyboardChange(handler: (state: UIKeyboardState) => void): () => void;
+  /** The current side-drawer snapshot. */
+  getDrawerState(): Promise<UIDrawerState>;
+  /** Subscribe to drawer open/close + tab changes. Returns an unsubscribe fn. */
+  onDrawerChange(handler: (state: UIDrawerState) => void): () => void;
+  /** The current settings-modal snapshot. */
+  getSettingsState(): Promise<UISettingsState>;
+  /** Subscribe to settings open/close + active-view changes. Returns an unsubscribe fn. */
+  onSettingsChange(handler: (state: UISettingsState) => void): () => void;
+}
+
 // ─── UI API ───────────────────────────────────────────────────────────────────
 
 export interface UIAPI {
@@ -3950,7 +4663,7 @@ export interface UIAPI {
    * modal.root.on('click', (e) => {
    *   if (e.targetId === 'save') modal.dismiss();
    * });
-   * modal.onDismiss((reason) => api.chat.console(`modal closed: ${reason}`));
+   * modal.onDismiss((reason) => console.log(`modal closed: ${reason}`));
    */
   showAdvancedModal(options: AdvancedModalOptions): AdvancedModalHandle;
 
@@ -4028,6 +4741,13 @@ export interface UIAPI {
    * widget.onDragEnd((pos) => api.variables.local.set('widget-pos', pos));
    */
   createFloatWidget(options: FloatWidgetOptions): FloatWidgetHandle;
+  /**
+   * Mount a route-persistent, full-bleed portal into the app shell — a
+   * full-screen overlay or persistent chrome beyond dock / drawer / float.
+   * Returns a `MountedAppHandle` whose `.root` you fill via `api.ui.dom.*`.
+   * Requires the `app_manipulation` permission.
+   */
+  mountApp(options?: MountAppOptions): MountedAppHandle;
 
   /**
    * Register a tab in the ViewportDrawer sidebar. The tab's body DOM is
@@ -4056,7 +4776,7 @@ export interface UIAPI {
    *   iconSvg: '<svg>...</svg>',
    * });
    * tab.root.update('<div>...</div>');
-   * tab.onActivate(() => api.chat.console('user opened stats tab'));
+   * tab.onActivate(() => console.log('user opened stats tab'));
    */
   registerDrawerTab(options: DrawerTabOptions): DrawerTabHandle;
 
@@ -4103,12 +4823,537 @@ export interface UIAPI {
     subscriptionCount: number;
   }>;
 
+  // ── Navigation (free tier) ─────────────────────────────────────────────
+  // UI automation: enumerate + drive the same drawer / settings / command-
+  // palette surfaces the built-in Command Palette uses. Free tier. Useful for
+  // onboarding flows ("open the Connections drawer"), "fix it" deep links, or
+  // building a custom command-palette-style picker over getDrawerTabs().
+
+  /** List the discoverable drawer tabs (built-in + extension-contributed) visible to the user. */
+  getDrawerTabs(): Promise<UIDrawerTab[]>;
+  /** List the discoverable settings tabs visible to the user (role-restricted tabs are filtered out). */
+  getSettingsTabs(): Promise<UISettingsTab[]>;
+  /** Open the drawer to a specific tab id (built-in or extension-contributed). Resolves once the host dispatches the navigation. */
+  openDrawerTab(tabId: string): Promise<void>;
+  /** Close the drawer if it is currently open. */
+  closeDrawer(): Promise<void>;
+  /** Open the settings modal to a tab id (e.g. 'connections', 'display'); omit to land on 'display'. */
+  openSettings(viewId?: string): Promise<void>;
+  /** Close the settings modal if it is currently open. */
+  closeSettings(): Promise<void>;
+  /** Open the command palette overlay. */
+  openCommandPalette(): Promise<void>;
+  /** Close the command palette overlay if it is currently open. */
+  closeCommandPalette(): Promise<void>;
+
+  // ── File picker (free tier) ────────────────────────────────────────────
+  /**
+   * Open the browser's native file picker and return the selected file(s).
+   * The native dialog is the user-action gate, so this is free tier — but it
+   * only resolves when the user actually picks (or cancels). Use it to import
+   * JSON configs, character cards, images, etc. and feed the bytes into
+   * `api.images.upload`, `api.db`, `api.files`, etc.
+   *
+   * Resolves with `[]` if the user cancels. **Rejects** if a selected file
+   * exceeds `maxSizeBytes` (mirrors the host's throw).
+   *
+   * @example
+   * const [file] = await api.ui.pickFile({ accept: ['.json'], maxSizeBytes: 1_000_000 });
+   * if (file) {
+   *   const config = JSON.parse(new TextDecoder().decode(file.bytes));
+   * }
+   */
+  pickFile(options?: PickFileOptions): Promise<PickedFile[]>;
+
+  /**
+   * Reactive UI state sub-API: virtual keyboard, side drawer, settings modal —
+   * snapshot getters + change subscriptions. Free tier. Useful for mobile-safe
+   * widget positioning (reposition on keyboard open via `insetBottom`).
+   */
+  events: UIEventsAPI;
+
   /**
    * DOM injection sub-API. Allows scripts to inject HTML and CSS into the
    * Lumiverse frontend and receive DOM events back.
    * Requires the `app_manipulation` permission.
    */
   dom: DOMAPI;
+
+  /**
+   * Shared host-component sub-API. Mounts Lumiverse's first-party, themed
+   * React components (switches, selects, sliders, model pickers, …) into a
+   * script-owned container element. The mounted components automatically
+   * inherit the active Lumiverse theme — no CSS to ship.
+   *
+   * Mount into a container you injected via {@link DOMAPI.inject}:
+   * @example
+   * const slot = api.ui.dom.inject('body', '<div></div>');
+   * const toggle = api.ui.components.mountSwitch(slot, {
+   *   checked: true,
+   *   onChange: (on) => console.log('toggled', on),
+   * });
+   *
+   * Requires the `app_manipulation` permission.
+   */
+  components: ComponentsAPI;
+}
+
+// ─── Shared Components API (api.ui.components.*, v1.0.0-rc.9) ──────────────────
+
+/**
+ * Handle to a mounted host shared-component. Returned synchronously by every
+ * `api.ui.components.mount*` call (the underlying mount is dispatched
+ * fire-and-forget, like {@link DOMAPI.inject}).
+ *
+ * @typeParam TOptions - the component's options type; `update()` accepts a
+ *   partial of it.
+ */
+export interface MountedComponentHandle<TOptions = Record<string, unknown>> {
+  /** Unique component ID (host-assigned, stable for this handle's lifetime). */
+  readonly id: string;
+  /**
+   * Merge a partial of the original mount options into the live component.
+   * Pass only the fields you want to change. Fire-and-forget (no round-trip).
+   */
+  update(patch: Partial<TOptions>): void;
+  /**
+   * Unmount the component and release host resources. The target container
+   * element you mounted into is left in place. Idempotent.
+   */
+  destroy(): void;
+}
+
+/** Options for `api.ui.components.mountBadge()`. Mirrors the host `SpindleBadgeOptions`. */
+export interface SpindleBadgeOptions {
+  /** Badge text. Default: `""`. */
+  text?: string;
+  /** Accent color. Default: `'neutral'`. */
+  color?: 'neutral' | 'primary' | 'success' | 'warning' | 'danger' | 'info';
+  /** Visual size. Default: `'md'`. */
+  size?: 'sm' | 'md' | 'pill';
+}
+
+/** Options for `api.ui.components.mountSpinner()`. Mirrors the host `SpindleSpinnerOptions`. */
+export interface SpindleSpinnerOptions {
+  /** Diameter in CSS pixels. Default: `16`. */
+  size?: number;
+  /** Use the faster rotation variant. Default: `false`. */
+  fast?: boolean;
+}
+
+/**
+ * Handle to a mounted interactive (value-bearing) component. Adds an async
+ * `getValue()` to the base handle.
+ *
+ * @typeParam TOptions - the component's options type
+ * @typeParam TValue   - the component's value type (e.g. `boolean`, `string`)
+ */
+export interface MountedValueComponentHandle<TOptions = Record<string, unknown>, TValue = unknown>
+  extends MountedComponentHandle<TOptions> {
+  /**
+   * Read the component's current value.
+   *
+   * **Async here**, unlike the host's synchronous `getValue()` — reading the
+   * live value is a round-trip to the frontend across the worker boundary
+   * (same reason {@link DOMHandle.read} is async). Auto-controlled state still
+   * lives host-side; you don't need to mirror it.
+   */
+  getValue(): Promise<TValue>;
+}
+
+/**
+ * Handle to a mounted collapsible section. Unlike other components, the host
+ * owns the header chrome (title / chevron / badge) and hands back a `body`
+ * element your script fully owns — append/inject your own content into it
+ * exactly as you would a drawer-tab root.
+ */
+export interface MountedCollapsibleSectionHandle
+  extends MountedComponentHandle<SpindleCollapsibleSectionOptions> {
+  /** The section body — a {@link DOMHandle} your script owns. Inject/update content into it. */
+  readonly body: DOMHandle;
+  /** Read the current expanded state. Async (a frontend round-trip), like {@link MountedValueComponentHandle.getValue}. */
+  isExpanded(): Promise<boolean>;
+  /** Open the section. Fire-and-forget. */
+  expand(): void;
+  /** Close the section. Fire-and-forget. */
+  collapse(): void;
+  /** Flip the section's expanded state. Fire-and-forget. */
+  toggle(): void;
+}
+
+/** Options for `api.ui.components.mountSwitch()`. Mirrors the host `SpindleSwitchOptions`. */
+export interface SpindleSwitchOptions {
+  /** Initial state. Default: `false`. */
+  checked?: boolean;
+  /** Fired on every toggle, with the new checked state. */
+  onChange?: (checked: boolean) => void;
+  /** Visual size. Default: `'md'`. */
+  size?: 'sm' | 'md';
+  /** Disable user interaction. Default: `false`. */
+  disabled?: boolean;
+  /** Accessible label. */
+  ariaLabel?: string;
+}
+
+/** Options for `api.ui.components.mountTextInput()`. Mirrors the host `SpindleTextInputOptions`. */
+export interface SpindleTextInputOptions {
+  /** Initial value. Default: `""`. */
+  value?: string;
+  /** Fired on every user change, with the full current text. */
+  onChange?: (value: string) => void;
+  /** Placeholder text. */
+  placeholder?: string;
+  /** Focus on mount. Default: `false`. */
+  autoFocus?: boolean;
+  /** Disable user interaction. Default: `false`. */
+  disabled?: boolean;
+  /** Additional CSS class on the wrapper. */
+  className?: string;
+  /** Accessible label. */
+  ariaLabel?: string;
+}
+
+/** Options for `api.ui.components.mountTextArea()`. Mirrors the host `SpindleTextAreaOptions`. */
+export interface SpindleTextAreaOptions {
+  /** Initial value. Default: `""`. */
+  value?: string;
+  /** Fired on every user change, with the full current text. */
+  onChange?: (value: string) => void;
+  /** Placeholder text. */
+  placeholder?: string;
+  /** Visible rows. Default: `4`. */
+  rows?: number;
+  /** Disable user interaction. Default: `false`. */
+  disabled?: boolean;
+  /** Additional CSS class on the wrapper. */
+  className?: string;
+  /** Accessible label. */
+  ariaLabel?: string;
+}
+
+/** Options for `api.ui.components.mountNumericInput()`. Mirrors the host `SpindleNumericInputOptions`. */
+export interface SpindleNumericInputOptions {
+  /** Initial value. `null` means empty. Default: `null`. */
+  value?: number | null;
+  /** Fired on every user change. */
+  onChange?: (value: number | null) => void;
+  /** Allow `null` (empty) as a valid value. Default: `false`. */
+  allowEmpty?: boolean;
+  /** Restrict to integers. Default: `false`. */
+  integer?: boolean;
+  /** Lower bound. */
+  min?: number;
+  /** Upper bound. */
+  max?: number;
+  /** Native step size. */
+  step?: number;
+  /** Placeholder text. */
+  placeholder?: string;
+  /** Disable user interaction. Default: `false`. */
+  disabled?: boolean;
+}
+
+/** Options for `api.ui.components.mountNumberStepper()`. Like `SpindleNumericInputOptions` minus `integer`; `step` defaults to `1`. */
+export interface SpindleNumberStepperOptions {
+  /** Initial value. `null` means empty. Default: `null`. */
+  value?: number | null;
+  /** Fired on every user change. */
+  onChange?: (value: number | null) => void;
+  /** Allow `null` (empty) as a valid value. Default: `false`. */
+  allowEmpty?: boolean;
+  /** Lower bound. */
+  min?: number;
+  /** Upper bound. */
+  max?: number;
+  /** Step size. Default: `1`. */
+  step?: number;
+  /** Placeholder text. */
+  placeholder?: string;
+  /** Disable user interaction. Default: `false`. */
+  disabled?: boolean;
+}
+
+/** Options for `api.ui.components.mountCheckbox()`. Mirrors the host `SpindleCheckboxOptions`. */
+export interface SpindleCheckboxOptions {
+  /** Initial state. Default: `false`. */
+  checked?: boolean;
+  /** Fired on every toggle. */
+  onChange?: (checked: boolean) => void;
+  /** Label rendered next to the checkbox. */
+  label?: string;
+  /** Helper text rendered under the label. */
+  hint?: string;
+  /** Disable user interaction. Default: `false`. */
+  disabled?: boolean;
+}
+
+/** Declarative value formatting for the range slider's header. */
+export interface SpindleRangeSliderFormat {
+  /** Decimal places to show. Defaults to whatever `step` implies (0 for integer sliders). */
+  decimals?: number;
+  /** Prepended before the value, e.g. `"$"`. */
+  prefix?: string;
+  /** Appended after the value, e.g. `"%"` or `"ms"`. */
+  suffix?: string;
+}
+
+/** Options for `api.ui.components.mountRangeSlider()`. Mirrors the host `SpindleRangeSliderOptions`. */
+export interface SpindleRangeSliderOptions {
+  /** **Required.** Inclusive lower bound. */
+  min: number;
+  /** **Required.** Inclusive upper bound. */
+  max: number;
+  /** Initial committed value. Default: `min`. */
+  value?: number;
+  /** Snap increment. Default: `1`. */
+  step?: number;
+  /** Round to integers regardless of `step`. Default: `false`. */
+  integer?: boolean;
+  /** Fired once when a drag ends or the user taps the track (NOT during the drag). */
+  onCommit?: (value: number) => void;
+  /** Fired with the live value during a drag, and with `null` if the gesture ends without committing. */
+  onDragValue?: (value: number | null) => void;
+  /** If set, renders a header above the track with the label and live value. */
+  label?: string;
+  /** Helper text under the header. Ignored if `label` is omitted. */
+  hint?: string;
+  /** Declarative value formatting for the header. Ignored if `label` is omitted. */
+  format?: SpindleRangeSliderFormat;
+  /** Dim the track and ignore input. Default: `false`. */
+  disabled?: boolean;
+  /** Additional CSS class merged onto the track area. */
+  className?: string;
+}
+
+/** Leading-cell content for a select option (avatar / icon / swatch / initial). Mirrors the host `SpindleSelectOptionLeading`. */
+export type SpindleSelectOptionLeading =
+  | { type: 'image';    src: string; rounded?: boolean; fallback?: { text?: string; background?: string } }
+  | { type: 'icon-svg'; svg: string; color?: string }
+  | { type: 'icon-url'; url: string }
+  | { type: 'swatch';   color: string }
+  | { type: 'initial';  text: string; background?: string; color?: string };
+
+/** A single option in a select / multi-select. Mirrors the host `SpindleSelectOption`. */
+export interface SpindleSelectOption {
+  /** Stable value emitted to `onChange`. */
+  value: string;
+  /** Display label. */
+  label: string;
+  /** Secondary text rendered beneath the label. */
+  sublabel?: string;
+  /** Group key — options sharing a group cluster under a shared header. */
+  group?: string;
+  /** Leading-cell content (avatar / icon / swatch / initial). */
+  leading?: SpindleSelectOptionLeading;
+  /** Render as disabled. */
+  disabled?: boolean;
+}
+
+/** Shared option fields for single- and multi-select. Mirrors `SpindleSelectOptionsBase`. */
+export interface SpindleSelectOptionsBase {
+  /** Available choices. */
+  options?: SpindleSelectOption[];
+  /** Placeholder shown when no value is selected. */
+  placeholder?: string;
+  /** Placeholder for the search input. */
+  searchPlaceholder?: string;
+  /** Minimum option count before the search input is shown. Default: `8`. */
+  searchThreshold?: number;
+  /** Message when no options were supplied. */
+  emptyMessage?: string;
+  /** Message when the search query has no matches. */
+  noResultsMessage?: string;
+  /** Force a trigger label (e.g. `"+ Add"`), ignoring current selection. */
+  triggerLabel?: string;
+  /** Custom icon shown on the trigger. */
+  triggerIcon?: SpindleSelectOptionLeading;
+  /** Additional CSS class on the trigger button. */
+  triggerClassName?: string;
+  /** Accessible label for the trigger. */
+  ariaLabel?: string;
+  /** Render the dropdown into `document.body` so it escapes `overflow:hidden` ancestors. Default: `true`. */
+  portal?: boolean;
+  /** Dropdown horizontal alignment relative to the trigger. Default: `'left'`. */
+  align?: 'left' | 'right';
+  /** Maximum dropdown height in CSS pixels. */
+  maxHeight?: number;
+  /** Minimum dropdown width in CSS pixels. */
+  minWidth?: number;
+  /** Disable interaction. */
+  disabled?: boolean;
+  /** Additional CSS class on the wrapper. */
+  className?: string;
+}
+
+/** Options for `api.ui.components.mountSelect()` (searchable single-select). */
+export interface SpindleSelectOptions extends SpindleSelectOptionsBase {
+  /** Currently selected value. */
+  value?: string;
+  /** Fired when the user picks an option. */
+  onChange?: (value: string) => void;
+  /** Show a pinned "None" option that emits `onChange("")`. */
+  clearable?: boolean;
+  /** Label for the clear option. Default: `"None"`. */
+  clearLabel?: string;
+}
+
+/** Options for `api.ui.components.mountMultiSelect()` (searchable multi-select). */
+export interface SpindleMultiSelectOptions extends SpindleSelectOptionsBase {
+  /** Currently selected values. */
+  value?: string[];
+  /** Fired when the selection changes. */
+  onChange?: (value: string[]) => void;
+}
+
+/** Options for `api.ui.components.mountFolderDropdown()`. */
+export interface SpindleFolderDropdownOptions {
+  /** Available folder names. */
+  folders?: string[];
+  /** Currently selected folder. */
+  value?: string;
+  /** Fired when the user picks a folder. */
+  onChange?: (folder: string) => void;
+  /** Fired when the user creates a new folder inline. */
+  onCreateFolder?: (name: string) => void;
+  /** Placeholder shown when no folder is selected. */
+  placeholder?: string;
+  /** Disable interaction. */
+  disabled?: boolean;
+}
+
+/** A host connection reference for the model combobox's connection-bound mode. */
+export interface SpindleModelComboboxConnection {
+  /** Connection kind. `'embedding'` is not yet supported in connection-bound mode — use manual mode. */
+  kind: 'llm' | 'image' | 'tts' | 'embedding';
+  /** Pin to a specific connection profile id instead of the active one. */
+  id?: string;
+}
+
+/** Options for `api.ui.components.mountModelCombobox()`. Connection-bound mode (supply `connection`) is recommended; manual mode (supply `models` + `onRefresh`) is for custom catalogs. */
+export interface SpindleModelComboboxOptions {
+  /** Currently entered model ID. */
+  value?: string;
+  /** Fired on every change. */
+  onChange?: (value: string) => void;
+  /** Bind to a host-managed connection (recommended). When set, `models`/`loading`/`onRefresh` are ignored. */
+  connection?: SpindleModelComboboxConnection;
+  /** Manual mode: explicit model list. */
+  models?: string[];
+  /** Manual mode: model id → human label. */
+  modelLabels?: Record<string, string>;
+  /** Manual mode: show the spinner in the refresh affordance. */
+  loading?: boolean;
+  /** Manual mode: invoked when the user clicks refresh. */
+  onRefresh?: () => void;
+  /** Auto-refresh once the first time the input gains focus. */
+  autoRefreshOnFocus?: boolean;
+  /** Opaque key — when it changes, re-arms `autoRefreshOnFocus`. */
+  refreshKey?: string;
+  /** Visual density. Default: `'compact'`. */
+  appearance?: 'compact' | 'standard' | 'editor';
+  /** Placeholder text. Default: `"gpt-4o"`. */
+  placeholder?: string;
+  /** Message when the list is empty. */
+  emptyMessage?: string;
+  /** Message shown while loading. */
+  loadingMessage?: string;
+  /** Optional hint shown beneath the input. */
+  browseHint?: string;
+  /** Disable interaction. */
+  disabled?: boolean;
+}
+
+/** Options for `api.ui.components.mountPagination()`. Fully controlled — call `update({ currentPage })` after navigating. */
+export interface SpindlePaginationOptions {
+  /** **Required.** Current page index (1-based). */
+  currentPage: number;
+  /** **Required.** Total page count. */
+  totalPages: number;
+  /** **Required.** Fired when the user clicks a page. */
+  onPageChange: (page: number) => void;
+  /** Current per-page selection (omit to hide the selector). */
+  perPage?: number;
+  /** Page-size choices. */
+  perPageOptions?: number[];
+  /** Fired when the user changes per-page. */
+  onPerPageChange?: (n: number) => void;
+  /** Total item count for the "Showing X–Y of N" summary. */
+  totalItems?: number;
+}
+
+/** Options for `api.ui.components.mountCloseButton()`. */
+export interface SpindleCloseButtonOptions {
+  /** Click handler. */
+  onClick?: () => void;
+  /** Visual size. Default: `'md'`. */
+  size?: 'sm' | 'md';
+  /** Visual variant. Default: `'subtle'`. */
+  variant?: 'subtle' | 'solid';
+  /** Positioning behavior. Default: `'static'`. */
+  position?: 'static' | 'absolute';
+  /** Icon size override in CSS pixels. */
+  iconSize?: number;
+}
+
+/** Options for `api.ui.components.mountCollapsibleSection()`. Mirrors the host `SpindleCollapsibleSectionOptions`. */
+export interface SpindleCollapsibleSectionOptions {
+  /** **Required.** Header text. */
+  title: string;
+  /** Inline SVG icon shown next to the title. */
+  iconSvg?: string;
+  /** Icon image URL. Mutually exclusive with `iconSvg`. */
+  iconUrl?: string;
+  /** Optional badge text rendered next to the title. */
+  badge?: string | number;
+  /** Initial expanded state. Default: `true`. */
+  defaultExpanded?: boolean;
+  /** Fired whenever the user toggles the section. */
+  onToggle?: (expanded: boolean) => void;
+}
+
+/**
+ * Mounts Lumiverse's first-party shared UI components into script-owned
+ * container elements. Every `mount*` takes a {@link DOMHandle} (the slot you
+ * injected) as its target and returns a {@link MountedComponentHandle}
+ * synchronously. Requires the `app_manipulation` permission.
+ *
+ * The component catalog is being brought over from the host incrementally;
+ * display-only badge/spinner landed first (v1.0.0-rc.9), with interactive
+ * form components following.
+ */
+export interface ComponentsAPI {
+  /** Mount an inline status/label badge. */
+  mountBadge(target: DOMHandle, options?: SpindleBadgeOptions): MountedComponentHandle<SpindleBadgeOptions>;
+  /** Mount a loading spinner. */
+  mountSpinner(target: DOMHandle, options?: SpindleSpinnerOptions): MountedComponentHandle<SpindleSpinnerOptions>;
+  /** Mount a toggle switch. `onChange` fires with the new boolean; `getValue()` reads the current state. */
+  mountSwitch(target: DOMHandle, options?: SpindleSwitchOptions): MountedValueComponentHandle<SpindleSwitchOptions, boolean>;
+  /** Mount a single-line text input. `onChange` fires with the current text; `getValue()` reads it. */
+  mountTextInput(target: DOMHandle, options?: SpindleTextInputOptions): MountedValueComponentHandle<SpindleTextInputOptions, string>;
+  /** Mount a multi-line text editor. `onChange` fires with the current text; `getValue()` reads it. */
+  mountTextArea(target: DOMHandle, options?: SpindleTextAreaOptions): MountedValueComponentHandle<SpindleTextAreaOptions, string>;
+  /** Mount a validated number input. `onChange`/`getValue()` use `number | null` (`null` = empty when `allowEmpty`). */
+  mountNumericInput(target: DOMHandle, options?: SpindleNumericInputOptions): MountedValueComponentHandle<SpindleNumericInputOptions, number | null>;
+  /** Mount a number input with +/- steppers. `onChange`/`getValue()` use `number | null`. */
+  mountNumberStepper(target: DOMHandle, options?: SpindleNumberStepperOptions): MountedValueComponentHandle<SpindleNumberStepperOptions, number | null>;
+  /** Mount a checkbox. `onChange` fires with the new boolean; `getValue()` reads the checked state. */
+  mountCheckbox(target: DOMHandle, options?: SpindleCheckboxOptions): MountedValueComponentHandle<SpindleCheckboxOptions, boolean>;
+  /** Mount a touch-friendly range slider. `options.min`/`options.max` are required; `onCommit` fires once per gesture; `onDragValue` fires live; `getValue()` reads the committed value. */
+  mountRangeSlider(target: DOMHandle, options: SpindleRangeSliderOptions): MountedValueComponentHandle<SpindleRangeSliderOptions, number>;
+  /** Mount a searchable single-select dropdown. `onChange` fires with the value; `getValue()` reads it. */
+  mountSelect(target: DOMHandle, options?: SpindleSelectOptions): MountedValueComponentHandle<SpindleSelectOptions, string>;
+  /** Mount a searchable multi-select dropdown. `onChange`/`getValue()` use `string[]`. */
+  mountMultiSelect(target: DOMHandle, options?: SpindleMultiSelectOptions): MountedValueComponentHandle<SpindleMultiSelectOptions, string[]>;
+  /** Mount a folder picker with inline "create folder". `onChange` fires with the folder; `getValue()` reads it. */
+  mountFolderDropdown(target: DOMHandle, options?: SpindleFolderDropdownOptions): MountedValueComponentHandle<SpindleFolderDropdownOptions, string>;
+  /** Mount the connection-aware model picker. `onChange` fires with the model id; `getValue()` reads it. (Manual-mode `refresh()` is a deferred follow-up.) */
+  mountModelCombobox(target: DOMHandle, options?: SpindleModelComboboxOptions): MountedValueComponentHandle<SpindleModelComboboxOptions, string>;
+  /** Mount page navigation. Fully controlled — `onPageChange` is required; call `update({ currentPage })` after navigating. No `getValue()`. */
+  mountPagination(target: DOMHandle, options: SpindlePaginationOptions): MountedComponentHandle<SpindlePaginationOptions>;
+  /** Mount a themed close (X) button. `onClick` fires on click. No `getValue()`. */
+  mountCloseButton(target: DOMHandle, options?: SpindleCloseButtonOptions): MountedComponentHandle<SpindleCloseButtonOptions>;
+  /** Mount a collapsible section. The host owns the header chrome; `handle.body` is a `DOMHandle` your script fills. `options.title` is required. */
+  mountCollapsibleSection(target: DOMHandle, options: SpindleCollapsibleSectionOptions): MountedCollapsibleSectionHandle;
 }
 
 // ─── DOM Injection API ───────────────────────────────────────────────────────

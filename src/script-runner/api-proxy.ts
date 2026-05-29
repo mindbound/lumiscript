@@ -48,6 +48,26 @@ import type {
   UIAPI,
   DOMAPI,
   DOMHandle,
+  ComponentsAPI,
+  MountedComponentHandle,
+  MountedValueComponentHandle,
+  MountedCollapsibleSectionHandle,
+  SpindleCollapsibleSectionOptions,
+  SpindleBadgeOptions,
+  SpindleSpinnerOptions,
+  SpindleSwitchOptions,
+  SpindleTextInputOptions,
+  SpindleTextAreaOptions,
+  SpindleNumericInputOptions,
+  SpindleNumberStepperOptions,
+  SpindleCheckboxOptions,
+  SpindleRangeSliderOptions,
+  SpindleSelectOptions,
+  SpindleMultiSelectOptions,
+  SpindleFolderDropdownOptions,
+  SpindleModelComboboxOptions,
+  SpindlePaginationOptions,
+  SpindleCloseButtonOptions,
   DOMInjectOptions,
   DOMMessageInjectOptions,
   DOMDelegateOptions,
@@ -57,11 +77,17 @@ import type {
   ScriptNamespace,
   ScriptType,
   LLMAPI,
+  StreamChunk,
+  ConnectionsAPI,
+  WebSearchAPI,
+  UsersAPI,
+  VersionAPI,
   ChatAPI,
   ChatsAPI,
   CharactersAPI,
   WorldInfoAPI,
   DatabanksAPI,
+  MemoriesAPI,
   PersonasAPI,
   PresetsAPI,
   ImagesAPI,
@@ -93,6 +119,10 @@ import type {
   WorldInfoInterceptorHandler,
   WorldInfoInterceptorOptions,
   WorldInfoInterceptorHandle,
+  UIEventsAPI,
+  UIKeyboardState,
+  UIDrawerState,
+  UISettingsState,
 } from '../types/script.js';
 // Phase 9d.2 — sync local utilities bundled into the child:
 //   - Handlebars: per-script-isolated template environment for utils.template.*
@@ -130,6 +160,10 @@ import type {
   RegisterHandler,
   UnregisterHandler,
   ScriptStateSnapshot,
+  StreamRequest,
+  StreamCancelRequest,
+  StreamChunkMessage,
+  StreamEndMessage,
 } from '../types/script-runner-ipc.js';
 import { isHandleRef } from '../types/script-runner-ipc.js';
 import { AsyncLocalStorage } from 'async_hooks';
@@ -647,12 +681,17 @@ export interface ProxyHandle {
     | 'db'
     | 'ui'
     | 'llm'
+    | 'connections'
+    | 'webSearch'
+    | 'users'
+    | 'version'
     // ── Phase 9d.1 additions ───────────────────────────────────────────────
     | 'chat'
     | 'chats'
     | 'characters'
     | 'worldInfo'
     | 'databanks'
+    | 'memories'
     | 'personas'
     | 'presets'
     | 'images'
@@ -682,6 +721,10 @@ export interface ProxyHandle {
   script: ScriptNamespace;
   /** Forward an `ApiProxyResponse` IPC to the proxy's pending-request map. */
   handleResponse(msg: ApiProxyResponse): void;
+  /** Forward a `StreamChunkMessage` IPC to the proxy's streaming consumer for that requestId. */
+  handleStreamChunk(msg: StreamChunkMessage): void;
+  /** Forward a `StreamEndMessage` IPC to the proxy's streaming consumer for that requestId. */
+  handleStreamEnd(msg: StreamEndMessage): void;
   /** Reject any in-flight requests (called on script-run completion). */
   cleanup(reason?: string): void;
   /**
@@ -708,6 +751,19 @@ export interface ProxyHandle {
 export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
   type Pending = { resolve: (v: unknown) => void; reject: (err: Error) => void };
   const pending = new Map<string, Pending>();
+
+  // v1.0.0-rc.9 — Streaming-IPC routing table. Parallel to `pending` but for
+  // `StreamRequest`-shaped IPC where the parent sends zero-or-more
+  // `StreamChunkMessage`s followed by one terminal `StreamEndMessage`.
+  // `onChunk` is invoked per incoming chunk; `onEnd` exactly once. The
+  // generator returned by `llm.generateStream` owns the entry and removes
+  // it from this map in its `finally` block (consumer break / loop exit
+  // / error path all run finally — see ES2018 async-iterator semantics).
+  type PendingStream = {
+    onChunk: (chunk: unknown) => void;
+    onEnd:   (ok: boolean, error: ApiProxyResponse['error']) => void;
+  };
+  const pendingStreams = new Map<string, PendingStream>();
 
   // Phase 9d.4.x cross-run handle fix — refresh the script's latest
   // runId. Cross-run handle method invocations (e.g. a DOMHandle stored
@@ -1924,8 +1980,242 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
   // meaningful sense — and even there, the canonical impl sends frontend
   // messages directly; we just need to proxy the DOMHandle's methods
   // back through `api-request`. The proxy stays thin throughout.
+  // ─── components — v1.0.0-rc.9 mounted host shared-component proxy ──────────
+  //
+  // Mirrors `buildDOMHandleProxy`: handle methods dispatch through
+  // `dispatchOnHandle` with `targetHandle.kind === 'MountedComponent'` so the
+  // parent routes them to the stored canonical handle. The persistent-kind
+  // hint lets `resolveActiveRun` fall back to the script's current run when a
+  // method is called from inside a handler-fire ALS context (e.g. `update()`
+  // from a component's own `onChange`). `update`/`destroy` are sync-void
+  // fire-and-forget, like the DOMHandle equivalents.
+  function buildMountedComponentProxy<TOptions>(
+    componentId: string,
+    handlerIds: string[],
+  ): MountedComponentHandle<TOptions> {
+    const targetHandle: HandleRef = { __handleRef: true, id: componentId, kind: 'MountedComponent' };
+    return {
+      get id(): string { return componentId; },
+      update: (patch: Partial<TOptions>): void => {
+        trackChain(dispatchOnHandle(targetHandle, 'ui._components.update', [componentId, patch ?? {}])
+          .catch(() => { /* canonical: sync void — drop errors */ }));
+      },
+      destroy: (): void => {
+        trackChain(dispatchOnHandle(targetHandle, 'ui._components.destroy', [componentId])
+          .catch(() => { /* canonical: sync void */ }));
+        // Drop the callback closures we registered for this component so they
+        // don't pin the script past the component's lifecycle.
+        for (const hid of handlerIds) ctx.unregisterHandlerClosure(hid);
+      },
+    };
+  }
+
+  // Value-bearing variant — adds the async `getValue()` round-trip (mirrors
+  // `DOMHandle.read`). Not wrapped in trackChain: the caller awaits it, so
+  // their await keeps the run alive (same as `read`).
+  function buildMountedValueComponentProxy<TOptions, TValue>(
+    componentId: string,
+    handlerIds: string[],
+  ): MountedValueComponentHandle<TOptions, TValue> {
+    const targetHandle: HandleRef = { __handleRef: true, id: componentId, kind: 'MountedComponent' };
+    return {
+      ...buildMountedComponentProxy<TOptions>(componentId, handlerIds),
+      getValue: (): Promise<TValue> =>
+        dispatchOnHandle(targetHandle, 'ui._components.getValue', [componentId]) as Promise<TValue>,
+    };
+  }
+
+  // Collapsible-section variant — base + a `body` DOMHandle (bound FE-side to
+  // the host section body) + expand/collapse/toggle (void) + isExpanded
+  // (value round-trip). `body` is a normal DOMHandle proxy over the
+  // child-allocated bodyElementId, so `handle.body.inject(...)` etc. flow
+  // through the existing DOM pipeline.
+  function buildMountedCollapsibleProxy(
+    componentId: string,
+    bodyElementId: string,
+    handlerIds: string[],
+  ): MountedCollapsibleSectionHandle {
+    const targetHandle: HandleRef = { __handleRef: true, id: componentId, kind: 'MountedComponent' };
+    const voidMethod = (method: string) => (): void => {
+      trackChain(dispatchOnHandle(targetHandle, `ui._components.${method}`, [componentId])
+        .catch(() => { /* canonical: sync void */ }));
+    };
+    return {
+      ...buildMountedComponentProxy<SpindleCollapsibleSectionOptions>(componentId, handlerIds),
+      body:       buildDOMHandleProxy(bodyElementId),
+      isExpanded: (): Promise<boolean> =>
+        dispatchOnHandle(targetHandle, 'ui._components.isExpanded', [componentId]) as Promise<boolean>,
+      expand:     voidMethod('expand'),
+      collapse:   voidMethod('collapse'),
+      toggle:     voidMethod('toggle'),
+    };
+  }
+
+  // Allocate a componentId child-side and fire the mount dispatch
+  // fire-and-forget (same optimistic sync-return shape as `dom.inject`). The
+  // child-allocated id is threaded via `_componentId`. Any function-valued
+  // option is treated as a callback: registered as a handler closure, replaced
+  // in `_callbacks` by its handler-id (functions can't cross IPC), and stripped
+  // from the serialised props. Generic over option keys so it covers onChange /
+  // onCommit / onToggle / etc. across every component without per-kind lists.
+  // `target.id` is the DOMHandle slot the component mounts into.
+  function dispatchComponentMount(
+    method: string,
+    target: DOMHandle,
+    options: object | undefined,
+  ): { componentId: string; handlerIds: string[] } {
+    const componentId = crypto.randomUUID();
+    const props:      Record<string, unknown> = {};
+    const callbacks:  Record<string, string>  = {};
+    const handlerIds: string[]                = [];
+    for (const [key, val] of Object.entries(options ?? {})) {
+      if (typeof val === 'function') {
+        const handlerId = generateHandlerId('componentCallback');
+        const fn = val as (...a: unknown[]) => unknown;
+        // `await` keeps the handler-IPC's activeRun alive across the user
+        // callback's async work (the rc.8 fire-and-forget-drop fix).
+        ctx.registerHandlerClosure(handlerId, async (...a: unknown[]) => { await fn(a[0]); });
+        callbacks[key] = handlerId;
+        handlerIds.push(handlerId);
+      } else {
+        props[key] = val;
+      }
+    }
+    trackChain(
+      dispatch(method, [target.id, { ...props, _componentId: componentId, _callbacks: callbacks }]).catch((err) => {
+        try {
+          console.warn(
+            `${method}: dispatch failed (${err instanceof Error ? err.message : String(err)}); ` +
+            `subsequent handle method calls will no-op via parent-side lookup miss`,
+          );
+        } catch { /* ignore */ }
+      }),
+    );
+    return { componentId, handlerIds };
+  }
+
+  const components: ComponentsAPI = {
+    mountBadge: (target, options?): MountedComponentHandle<SpindleBadgeOptions> => {
+      const { componentId, handlerIds } = dispatchComponentMount('ui.components.mountBadge', target, options);
+      return buildMountedComponentProxy<SpindleBadgeOptions>(componentId, handlerIds);
+    },
+    mountSpinner: (target, options?): MountedComponentHandle<SpindleSpinnerOptions> => {
+      const { componentId, handlerIds } = dispatchComponentMount('ui.components.mountSpinner', target, options);
+      return buildMountedComponentProxy<SpindleSpinnerOptions>(componentId, handlerIds);
+    },
+    mountSwitch: (target, options?): MountedValueComponentHandle<SpindleSwitchOptions, boolean> => {
+      const { componentId, handlerIds } = dispatchComponentMount('ui.components.mountSwitch', target, options);
+      return buildMountedValueComponentProxy<SpindleSwitchOptions, boolean>(componentId, handlerIds);
+    },
+    mountTextInput: (target, options?): MountedValueComponentHandle<SpindleTextInputOptions, string> => {
+      const { componentId, handlerIds } = dispatchComponentMount('ui.components.mountTextInput', target, options);
+      return buildMountedValueComponentProxy<SpindleTextInputOptions, string>(componentId, handlerIds);
+    },
+    mountTextArea: (target, options?): MountedValueComponentHandle<SpindleTextAreaOptions, string> => {
+      const { componentId, handlerIds } = dispatchComponentMount('ui.components.mountTextArea', target, options);
+      return buildMountedValueComponentProxy<SpindleTextAreaOptions, string>(componentId, handlerIds);
+    },
+    mountNumericInput: (target, options?): MountedValueComponentHandle<SpindleNumericInputOptions, number | null> => {
+      const { componentId, handlerIds } = dispatchComponentMount('ui.components.mountNumericInput', target, options);
+      return buildMountedValueComponentProxy<SpindleNumericInputOptions, number | null>(componentId, handlerIds);
+    },
+    mountNumberStepper: (target, options?): MountedValueComponentHandle<SpindleNumberStepperOptions, number | null> => {
+      const { componentId, handlerIds } = dispatchComponentMount('ui.components.mountNumberStepper', target, options);
+      return buildMountedValueComponentProxy<SpindleNumberStepperOptions, number | null>(componentId, handlerIds);
+    },
+    mountCheckbox: (target, options?): MountedValueComponentHandle<SpindleCheckboxOptions, boolean> => {
+      const { componentId, handlerIds } = dispatchComponentMount('ui.components.mountCheckbox', target, options);
+      return buildMountedValueComponentProxy<SpindleCheckboxOptions, boolean>(componentId, handlerIds);
+    },
+    mountRangeSlider: (target, options): MountedValueComponentHandle<SpindleRangeSliderOptions, number> => {
+      const { componentId, handlerIds } = dispatchComponentMount('ui.components.mountRangeSlider', target, options);
+      return buildMountedValueComponentProxy<SpindleRangeSliderOptions, number>(componentId, handlerIds);
+    },
+    mountSelect: (target, options?): MountedValueComponentHandle<SpindleSelectOptions, string> => {
+      const { componentId, handlerIds } = dispatchComponentMount('ui.components.mountSelect', target, options);
+      return buildMountedValueComponentProxy<SpindleSelectOptions, string>(componentId, handlerIds);
+    },
+    mountMultiSelect: (target, options?): MountedValueComponentHandle<SpindleMultiSelectOptions, string[]> => {
+      const { componentId, handlerIds } = dispatchComponentMount('ui.components.mountMultiSelect', target, options);
+      return buildMountedValueComponentProxy<SpindleMultiSelectOptions, string[]>(componentId, handlerIds);
+    },
+    mountFolderDropdown: (target, options?): MountedValueComponentHandle<SpindleFolderDropdownOptions, string> => {
+      const { componentId, handlerIds } = dispatchComponentMount('ui.components.mountFolderDropdown', target, options);
+      return buildMountedValueComponentProxy<SpindleFolderDropdownOptions, string>(componentId, handlerIds);
+    },
+    mountModelCombobox: (target, options?): MountedValueComponentHandle<SpindleModelComboboxOptions, string> => {
+      const { componentId, handlerIds } = dispatchComponentMount('ui.components.mountModelCombobox', target, options);
+      return buildMountedValueComponentProxy<SpindleModelComboboxOptions, string>(componentId, handlerIds);
+    },
+    mountPagination: (target, options): MountedComponentHandle<SpindlePaginationOptions> => {
+      const { componentId, handlerIds } = dispatchComponentMount('ui.components.mountPagination', target, options);
+      return buildMountedComponentProxy<SpindlePaginationOptions>(componentId, handlerIds);
+    },
+    mountCloseButton: (target, options?): MountedComponentHandle<SpindleCloseButtonOptions> => {
+      const { componentId, handlerIds } = dispatchComponentMount('ui.components.mountCloseButton', target, options);
+      return buildMountedComponentProxy<SpindleCloseButtonOptions>(componentId, handlerIds);
+    },
+    mountCollapsibleSection: (target, options): MountedCollapsibleSectionHandle => {
+      // Allocate the body elementId child-side and thread it via `_bodyElementId`
+      // so the canonical body DOMHandle + the FE binding all share the id.
+      const bodyElementId = crypto.randomUUID();
+      const { componentId, handlerIds } = dispatchComponentMount(
+        'ui.components.mountCollapsibleSection',
+        target,
+        { ...options, _bodyElementId: bodyElementId },
+      );
+      return buildMountedCollapsibleProxy(componentId, bodyElementId, handlerIds);
+    },
+  };
+
+  // api.ui.events.on*Change — subscription factory. Same un-gated register-
+  // handler shape as `commands.onInvoked`, parameterised over the channel kind.
+  // The fired handler receives the changed UI state as its single arg (mirrors
+  // the floatWidget.onDragEnd `await fn(a[0])` wrapper — keeps the per-fire run
+  // alive across the user handler's async body).
+  const makeUiEventSub = <S>(
+    kind: 'uiKeyboardChange' | 'uiDrawerChange' | 'uiSettingsChange',
+  ) => (handler: (state: S) => void): (() => void) => {
+    const handlerId = generateHandlerId(kind);
+    ctx.registerHandlerClosure(handlerId, async (...a: unknown[]) => { await handler(a[0] as S); });
+    const msg: RegisterHandler = {
+      type:       'register-handler',
+      kind,
+      runId:      runIdContext.getStore() ?? ctx.runId,
+      scriptId:   ctx.scriptId,
+      handlerId,
+      hasHandler: true,
+    };
+    try {
+      ctx.send(msg);
+    } catch (err) {
+      ctx.unregisterHandlerClosure(handlerId);
+      throw err instanceof Error ? err : new Error(String(err));
+    }
+    return () => {
+      ctx.unregisterHandlerClosure(handlerId);
+      const unsubMsg: UnregisterHandler = {
+        type:      'unregister-handler',
+        kind,
+        scriptId:  ctx.scriptId,
+        handlerId,
+      };
+      try { ctx.send(unsubMsg); } catch { /* sync void: no throw */ }
+    };
+  };
+
+  const uiEvents: UIEventsAPI = {
+    getKeyboardState: mkAsync<UIEventsAPI['getKeyboardState']>(dispatch, 'ui.events.getKeyboardState'),
+    onKeyboardChange: makeUiEventSub<UIKeyboardState>('uiKeyboardChange'),
+    getDrawerState:   mkAsync<UIEventsAPI['getDrawerState']>(dispatch,   'ui.events.getDrawerState'),
+    onDrawerChange:   makeUiEventSub<UIDrawerState>('uiDrawerChange'),
+    getSettingsState: mkAsync<UIEventsAPI['getSettingsState']>(dispatch, 'ui.events.getSettingsState'),
+    onSettingsChange: makeUiEventSub<UISettingsState>('uiSettingsChange'),
+  };
+
   const ui: UIAPI = {
     dom,
+    components,
 
     // ── Phase 9d.4.a — simple passthroughs ─────────────────────────────────
     toast:            mkSyncVoidFireForget<UIAPI['toast']>(dispatch, 'ui.toast', trackChain),
@@ -1935,6 +2225,26 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
     showContextMenu:  mkAsync<UIAPI['showContextMenu']>(dispatch,  'ui.showContextMenu'),
     pushNotification: mkAsync<UIAPI['pushNotification']>(dispatch, 'ui.pushNotification'),
     getPushStatus:    mkAsync<UIAPI['getPushStatus']>(dispatch,    'ui.getPushStatus'),
+
+    // ── Navigation (free tier) — v1.0.0-rc.9. Plain async passthroughs; the
+    // parent's generic dispatchApiCall path-walk resolves api.ui.* directly.
+    getDrawerTabs:      mkAsync<UIAPI['getDrawerTabs']>(dispatch,      'ui.getDrawerTabs'),
+    getSettingsTabs:    mkAsync<UIAPI['getSettingsTabs']>(dispatch,    'ui.getSettingsTabs'),
+    openDrawerTab:      mkAsync<UIAPI['openDrawerTab']>(dispatch,      'ui.openDrawerTab'),
+    closeDrawer:        mkAsync<UIAPI['closeDrawer']>(dispatch,        'ui.closeDrawer'),
+    openSettings:       mkAsync<UIAPI['openSettings']>(dispatch,       'ui.openSettings'),
+    closeSettings:      mkAsync<UIAPI['closeSettings']>(dispatch,      'ui.closeSettings'),
+    openCommandPalette: mkAsync<UIAPI['openCommandPalette']>(dispatch, 'ui.openCommandPalette'),
+    closeCommandPalette: mkAsync<UIAPI['closeCommandPalette']>(dispatch, 'ui.closeCommandPalette'),
+
+    // File picker — async passthrough; canonical owns the frontend round-trip
+    // and returns PickedFile[] (bytes as Uint8Array, like the http arraybuffer
+    // path — the parent→child api-response preserves Uint8Array).
+    pickFile: mkAsync<UIAPI['pickFile']>(dispatch, 'ui.pickFile'),
+
+    // Reactive UI state — snapshot getters (round-trip to the cache) +
+    // on*Change subscriptions (register-handler IPC). See `makeUiEventSub`.
+    events: uiEvents,
 
     // ── Phase 9d.4.b: ModalHandle ──────────────────────────────────────────
     //
@@ -2489,6 +2799,52 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
     },
 
     /**
+     * v1.0.0-rc.9 — sync-shaped MountedAppHandle proxy. Same Option-B shape
+     * as createFloatWidget but trimmed: no position / move / drag / getters.
+     * `.root` is a DOMHandle gated on openAck (parent stores it in
+     * pendingDomHandles inside handleMountAppRequest); setVisible / destroy
+     * dispatch via `ui._appMount.*` after openAck resolves.
+     */
+    mountApp: (options: import('../types/script.js').MountAppOptions = {}) => {
+      const mountId       = crypto.randomUUID();
+      const rootElementId = crypto.randomUUID();
+      const destroyedRef = { current: false };
+
+      const openAck = dispatch('ui.mountApp', [
+        { ...options, _mountId: mountId, _rootElementId: rootElementId },
+      ]).catch((err) => {
+        destroyedRef.current = true;
+        try {
+          console.warn(
+            `api.ui.mountApp: create dispatch failed (${err instanceof Error ? err.message : String(err)}); ` +
+            `handle methods will no-op`,
+          );
+        } catch { /* ignore */ }
+        throw err;
+      });
+
+      const root = buildDOMHandleProxy(rootElementId, openAck);
+
+      return {
+        mountId,
+        root,
+        setVisible: (visible: boolean): void => {
+          if (destroyedRef.current) return;
+          trackChain(openAck
+            .then(() => dispatch('ui._appMount.setVisible', [mountId, visible]))
+            .catch(() => { /* canonical: sync void */ }));
+        },
+        destroy: (): void => {
+          if (destroyedRef.current) return;
+          destroyedRef.current = true;
+          trackChain(openAck
+            .then(() => dispatch('ui._appMount.destroy', [mountId]))
+            .catch(() => { /* canonical: sync void */ }));
+        },
+      };
+    },
+
+    /**
      * Phase 9d.4.e-3-a — sync-shaped DrawerTabHandle proxy.
      *
      * Same Option-B shape as createFloatWidget: child-generates
@@ -2703,6 +3059,128 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
         stripped !== undefined ? [messages, stripped] : [messages],
         signal,
       ) as Promise<string>;
+    },
+
+    /**
+     * v1.0.0-rc.9 — Streaming variant. Returns an async generator that
+     * yields `StreamChunk` values as they arrive over IPC.
+     *
+     * Wire shape:
+     *  - On first `.next()`, sends `StreamRequest` to the parent and
+     *    registers a `pendingStreams` entry. Stream-request is lazy (not
+     *    sent at call time) so an unconsumed generator never leaks an
+     *    IPC stream on the host.
+     *  - Parent sends 0..N `StreamChunkMessage`s + one `StreamEndMessage`.
+     *    `handleStreamChunk` / `handleStreamEnd` push events onto the
+     *    generator's queue; awaited waiters resolve.
+     *  - On normal completion (`'end'` event): generator returns cleanly.
+     *  - On consumer break / throw: generator's `finally` runs, removes
+     *    the pendingStreams entry, and sends `StreamCancelRequest` so
+     *    the host tears down the upstream HTTP request.
+     *  - `signal` integration reuses the same `AbortRequest` plumbing as
+     *    `dispatchWithSignal`: parent has a real AbortController under
+     *    the requestId; child emits `AbortRequest` when the user signal
+     *    fires.
+     */
+    generateStream: (messages, options) => {
+      const { stripped, signal } = stripSignalFromOpts(options);
+
+      // Same three-tier runId resolution as `dispatchWithSignal` — see
+      // that function's docs for the rationale. Captured synchronously
+      // so the requestId is stable across the generator's lifetime.
+      const ctxRunId   = runIdContext.getStore();
+      const latestRunId = latestRunIdByScript.get(ctx.scriptId);
+      const runIdSource: 'context' | 'latest' | 'ctx' =
+        ctxRunId !== undefined ? 'context'
+        : latestRunId !== undefined ? 'latest'
+        : 'ctx';
+      const runId     = ctxRunId ?? latestRunId ?? ctx.runId;
+      const requestId = generateRequestId(runId);
+
+      const wireArgs = stripped !== undefined ? [messages, stripped] : [messages];
+
+      return (async function*(): AsyncGenerator<StreamChunk, void, void> {
+        type ChunkEvent =
+          | { kind: 'chunk'; chunk: unknown }
+          | { kind: 'end';   error?: Error };
+        const queue:    ChunkEvent[]         = [];
+        const waiters:  Array<() => void>    = [];
+        let normalEnd = false;
+
+        function pushEvent(ev: ChunkEvent): void {
+          queue.push(ev);
+          const w = waiters.shift();
+          if (w) w();
+        }
+
+        pendingStreams.set(requestId, {
+          onChunk: (chunk) => pushEvent({ kind: 'chunk', chunk }),
+          onEnd:   (ok, err) => pushEvent({
+            kind:  'end',
+            error: ok ? undefined : reconstructError(err),
+          }),
+        });
+
+        const req: StreamRequest = {
+          type:         'stream-request',
+          requestId,
+          runId,
+          scriptId:     ctx.scriptId,
+          method:       'llm.generateStream',
+          args:         wireArgs,
+          hasSignal:    signal !== undefined,
+          _runIdSource: runIdSource,
+        };
+        try {
+          ctx.send(req);
+        } catch (sendErr) {
+          pendingStreams.delete(requestId);
+          throw sendErr instanceof Error ? sendErr : new Error(String(sendErr));
+        }
+
+        // Abort wiring — mirrors `dispatchWithSignal`. Pre-aborted signal
+        // fires synchronously (per WHATWG spec) so the parent receives
+        // stream-request + abort-request in FIFO order.
+        let abortListenerCleanup: (() => void) | undefined;
+        if (signal !== undefined) {
+          const sendAbort = (): void => {
+            const abortMsg: AbortRequest = { type: 'abort-request', requestId };
+            try { ctx.send(abortMsg); } catch { /* channel down — abort is moot */ }
+          };
+          if (signal.aborted) {
+            sendAbort();
+          } else {
+            signal.addEventListener('abort', sendAbort, { once: true });
+            abortListenerCleanup = (): void => signal.removeEventListener('abort', sendAbort);
+          }
+        }
+
+        try {
+          while (true) {
+            if (queue.length === 0) {
+              await new Promise<void>((resolve) => waiters.push(resolve));
+            }
+            const ev = queue.shift()!;
+            if (ev.kind === 'end') {
+              normalEnd = true;
+              if (ev.error) throw ev.error;
+              return;
+            }
+            yield ev.chunk as StreamChunk;
+          }
+        } finally {
+          pendingStreams.delete(requestId);
+          abortListenerCleanup?.();
+          // Consumer break / throw before stream ended naturally:
+          // tell the host to teardown its upstream pump. Idempotent on
+          // the parent side, so racing with a near-simultaneous
+          // stream-end is safe.
+          if (!normalEnd) {
+            const cancelMsg: StreamCancelRequest = { type: 'stream-cancel', requestId };
+            try { ctx.send(cancelMsg); } catch { /* channel down */ }
+          }
+        }
+      })();
     },
 
     /**
@@ -3140,6 +3618,73 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
     },
   };
 
+  // ── memories (Memory Cortex + LTCM) — v1.0.0-rc.9. Nested mkAsync passthroughs;
+  // the parent's generic dispatchApiCall path-walk resolves memories.<sub>.<m>.
+  // Phase 1: cortex + chatMemory + stats.
+  const memories: MemoriesAPI = {
+    cortex: {
+      getConfig:            mkAsync<MemoriesAPI['cortex']['getConfig']>(dispatch,            'memories.cortex.getConfig'),
+      putConfig:            mkAsync<MemoriesAPI['cortex']['putConfig']>(dispatch,            'memories.cortex.putConfig'),
+      query:                mkAsync<MemoriesAPI['cortex']['query']>(dispatch,                'memories.cortex.query'),
+      queryLinked:          mkAsync<MemoriesAPI['cortex']['queryLinked']>(dispatch,          'memories.cortex.queryLinked'),
+      getCached:            mkAsync<MemoriesAPI['cortex']['getCached']>(dispatch,            'memories.cortex.getCached'),
+      getCachedLinked:      mkAsync<MemoriesAPI['cortex']['getCachedLinked']>(dispatch,      'memories.cortex.getCachedLinked'),
+      invalidateCache:      mkAsync<MemoriesAPI['cortex']['invalidateCache']>(dispatch,      'memories.cortex.invalidateCache'),
+      invalidateLinkedCache: mkAsync<MemoriesAPI['cortex']['invalidateLinkedCache']>(dispatch, 'memories.cortex.invalidateLinkedCache'),
+    },
+    entities: {
+      list:                   mkAsync<MemoriesAPI['entities']['list']>(dispatch,                   'memories.entities.list'),
+      get:                    mkAsync<MemoriesAPI['entities']['get']>(dispatch,                    'memories.entities.get'),
+      findByName:             mkAsync<MemoriesAPI['entities']['findByName']>(dispatch,             'memories.entities.findByName'),
+      upsert:                 mkAsync<MemoriesAPI['entities']['upsert']>(dispatch,                 'memories.entities.upsert'),
+      updateStatus:           mkAsync<MemoriesAPI['entities']['updateStatus']>(dispatch,           'memories.entities.updateStatus'),
+      addFacts:               mkAsync<MemoriesAPI['entities']['addFacts']>(dispatch,               'memories.entities.addFacts'),
+      getFacts:               mkAsync<MemoriesAPI['entities']['getFacts']>(dispatch,               'memories.entities.getFacts'),
+      updateEmotionalValence: mkAsync<MemoriesAPI['entities']['updateEmotionalValence']>(dispatch, 'memories.entities.updateEmotionalValence'),
+    },
+    relations: {
+      list:        mkAsync<MemoriesAPI['relations']['list']>(dispatch,        'memories.relations.list'),
+      listAll:     mkAsync<MemoriesAPI['relations']['listAll']>(dispatch,     'memories.relations.listAll'),
+      forEntity:   mkAsync<MemoriesAPI['relations']['forEntity']>(dispatch,   'memories.relations.forEntity'),
+      forEntities: mkAsync<MemoriesAPI['relations']['forEntities']>(dispatch, 'memories.relations.forEntities'),
+      upsert:      mkAsync<MemoriesAPI['relations']['upsert']>(dispatch,      'memories.relations.upsert'),
+    },
+    consolidations: {
+      list:      mkAsync<MemoriesAPI['consolidations']['list']>(dispatch,      'memories.consolidations.list'),
+      latestArc: mkAsync<MemoriesAPI['consolidations']['latestArc']>(dispatch, 'memories.consolidations.latestArc'),
+      run:       mkAsync<MemoriesAPI['consolidations']['run']>(dispatch,       'memories.consolidations.run'),
+    },
+    salience: {
+      list: mkAsync<MemoriesAPI['salience']['list']>(dispatch, 'memories.salience.list'),
+    },
+    vaults: {
+      list:      mkAsync<MemoriesAPI['vaults']['list']>(dispatch,      'memories.vaults.list'),
+      get:       mkAsync<MemoriesAPI['vaults']['get']>(dispatch,       'memories.vaults.get'),
+      getChunks: mkAsync<MemoriesAPI['vaults']['getChunks']>(dispatch, 'memories.vaults.getChunks'),
+      create:    mkAsync<MemoriesAPI['vaults']['create']>(dispatch,    'memories.vaults.create'),
+      rename:    mkAsync<MemoriesAPI['vaults']['rename']>(dispatch,    'memories.vaults.rename'),
+      delete:    mkAsync<MemoriesAPI['vaults']['delete']>(dispatch,    'memories.vaults.delete'),
+      reindex:   mkAsync<MemoriesAPI['vaults']['reindex']>(dispatch,   'memories.vaults.reindex'),
+    },
+    links: {
+      list:   mkAsync<MemoriesAPI['links']['list']>(dispatch,   'memories.links.list'),
+      attach: mkAsync<MemoriesAPI['links']['attach']>(dispatch, 'memories.links.attach'),
+      remove: mkAsync<MemoriesAPI['links']['remove']>(dispatch, 'memories.links.remove'),
+      toggle: mkAsync<MemoriesAPI['links']['toggle']>(dispatch, 'memories.links.toggle'),
+    },
+    chatMemory: {
+      listChunks: mkAsync<MemoriesAPI['chatMemory']['listChunks']>(dispatch, 'memories.chatMemory.listChunks'),
+      get:        mkAsync<MemoriesAPI['chatMemory']['get']>(dispatch,        'memories.chatMemory.get'),
+      warm:       mkAsync<MemoriesAPI['chatMemory']['warm']>(dispatch,       'memories.chatMemory.warm'),
+      invalidate: mkAsync<MemoriesAPI['chatMemory']['invalidate']>(dispatch, 'memories.chatMemory.invalidate'),
+    },
+    stats: {
+      usage:               mkAsync<MemoriesAPI['stats']['usage']>(dispatch,               'memories.stats.usage'),
+      ingestionStatus:     mkAsync<MemoriesAPI['stats']['ingestionStatus']>(dispatch,     'memories.stats.ingestionStatus'),
+      ingestionTelemetry:  mkAsync<MemoriesAPI['stats']['ingestionTelemetry']>(dispatch,  'memories.stats.ingestionTelemetry'),
+    },
+  };
+
   // ── personas ──────────────────────────────────────────────────────────────
   const personas: PersonasAPI = {
     list:           mkAsync<PersonasAPI['list']>(dispatch,           'personas.list'),
@@ -3299,10 +3844,15 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
 
     tempRead:          mkAsync<FilesAPI['tempRead']>(dispatch,          'files.tempRead'),
     tempWrite:         mkAsync<FilesAPI['tempWrite']>(dispatch,         'files.tempWrite'),
+    tempReadBinary:    mkAsync<FilesAPI['tempReadBinary']>(dispatch,    'files.tempReadBinary'),
+    tempWriteBinary:   mkAsync<FilesAPI['tempWriteBinary']>(dispatch,   'files.tempWriteBinary'),
     tempDelete:        mkAsync<FilesAPI['tempDelete']>(dispatch,        'files.tempDelete'),
     tempList:          mkAsync<FilesAPI['tempList']>(dispatch,          'files.tempList'),
     tempStat:          mkAsync<FilesAPI['tempStat']>(dispatch,          'files.tempStat'),
     tempClearExpired:  mkAsync<FilesAPI['tempClearExpired']>(dispatch,  'files.tempClearExpired'),
+    tempGetPoolStatus: mkAsync<FilesAPI['tempGetPoolStatus']>(dispatch, 'files.tempGetPoolStatus'),
+    tempRequestBlock:  mkAsync<FilesAPI['tempRequestBlock']>(dispatch,  'files.tempRequestBlock'),
+    tempReleaseBlock:  mkAsync<FilesAPI['tempReleaseBlock']>(dispatch,  'files.tempReleaseBlock'),
   };
 
   // ── enclave (encrypted secrets) ───────────────────────────────────────────
@@ -3335,6 +3885,36 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
     countText:     mkAsync<TokensAPI['countText']>(dispatch,     'tokens.countText'),
     countMessages: mkAsync<TokensAPI['countMessages']>(dispatch, 'tokens.countMessages'),
     countChat:     mkAsync<TokensAPI['countChat']>(dispatch,     'tokens.countChat'),
+  };
+
+  // connections — v1.0.0-rc.9. Read-only; all value-returning → plain mkAsync
+  // passthroughs (the canonical does the spindle.connections.* work parent-side).
+  const connections: ConnectionsAPI = {
+    list:       mkAsync<ConnectionsAPI['list']>(dispatch,       'connections.list'),
+    get:        mkAsync<ConnectionsAPI['get']>(dispatch,        'connections.get'),
+    getDefault: mkAsync<ConnectionsAPI['getDefault']>(dispatch, 'connections.getDefault'),
+    findByName: mkAsync<ConnectionsAPI['findByName']>(dispatch, 'connections.findByName'),
+  };
+
+  // webSearch — v1.0.0-rc.9. Async value-returning → plain mkAsync passthroughs
+  // (canonical gates on `web_search` + does the spindle.webSearch.* work).
+  const webSearch: WebSearchAPI = {
+    query:       mkAsync<WebSearchAPI['query']>(dispatch,       'webSearch.query'),
+    getSettings: mkAsync<WebSearchAPI['getSettings']>(dispatch, 'webSearch.getSettings'),
+  };
+
+  // users — v1.0.0-rc.9. Free-tier active-user probes; async value-returning →
+  // plain mkAsync passthroughs (canonical does the spindle.users.* work).
+  const users: UsersAPI = {
+    isVisible: mkAsync<UsersAPI['isVisible']>(dispatch, 'users.isVisible'),
+    getRole:   mkAsync<UsersAPI['getRole']>(dispatch,   'users.getRole'),
+  };
+
+  // version — v1.0.0-rc.9. Free-tier host-version probes; async value-returning
+  // → plain mkAsync passthroughs (canonical does the spindle.version.* work).
+  const version: VersionAPI = {
+    getBackend:  mkAsync<VersionAPI['getBackend']>(dispatch,  'version.getBackend'),
+    getFrontend: mkAsync<VersionAPI['getFrontend']>(dispatch, 'version.getFrontend'),
   };
 
   // ── json (Phase 9d.2 — pure-local; jsonquery bundled into the child) ──────
@@ -3844,8 +4424,8 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
   // LumiScriptAPI even though we currently only implement a subset —
   // libraries that touch unimplemented namespaces will throw clearly.
   const apiForLibraries = {
-    utils, broadcast, variables, db, scriptStorage, ui, llm,
-    chat, chats, characters, worldInfo, databanks, personas, presets, images, imageGen, oauth, theme, council,
+    utils, broadcast, variables, db, scriptStorage, ui, llm, connections, webSearch, users, version,
+    chat, chats, characters, worldInfo, databanks, memories, personas, presets, images, imageGen, oauth, theme, council,
     files, enclave, tokens, events, commands, tools, macros,
     json,
   } as unknown as LumiScriptAPI;
@@ -3980,23 +4560,59 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
     }
   }
 
+  /**
+   * Forward an incoming `StreamChunkMessage` to the registered streaming
+   * consumer. Same silent-drop policy as `handleResponse` — unknown
+   * requestIds are no-ops (late arrival after consumer break, etc.).
+   */
+  function handleStreamChunk(msg: StreamChunkMessage): void {
+    const s = pendingStreams.get(msg.requestId);
+    if (!s) return;
+    s.onChunk(msg.chunk);
+  }
+
+  /**
+   * Forward an incoming `StreamEndMessage` to the registered streaming
+   * consumer. After this call, the generator's `finally` block removes
+   * the pendingStreams entry — but we don't delete here; the consumer-
+   * side normal-end branch is what tears down (and may want to do so
+   * after a final-chunk yield).
+   */
+  function handleStreamEnd(msg: StreamEndMessage): void {
+    const s = pendingStreams.get(msg.requestId);
+    if (!s) return;
+    s.onEnd(msg.ok, msg.error);
+  }
+
   function cleanup(reason: string = 'script run completed'): void {
-    if (pending.size === 0) return;
-    const err = new Error(`api proxy: dispatch aborted (${reason})`);
-    for (const p of pending.values()) p.reject(err);
-    pending.clear();
+    if (pending.size > 0) {
+      const err = new Error(`api proxy: dispatch aborted (${reason})`);
+      for (const p of pending.values()) p.reject(err);
+      pending.clear();
+    }
+    if (pendingStreams.size > 0) {
+      // Stream consumers waiting on `onEnd` get a terminal failure event
+      // mirroring `dispatch`-side rejection. Their generator's `finally`
+      // sends `stream-cancel` to clean up the host-side pump as well.
+      for (const s of pendingStreams.values()) {
+        s.onEnd(false, { name: 'AbortError', message: `api proxy: stream aborted (${reason})` });
+      }
+      pendingStreams.clear();
+    }
   }
 
   return {
     api: {
-      utils, broadcast, variables, db, scriptStorage, ui, llm,
-      chat, chats, characters, worldInfo, databanks, personas, presets, images, imageGen, oauth, theme, council,
+      utils, broadcast, variables, db, scriptStorage, ui, llm, connections, webSearch, users, version,
+      chat, chats, characters, worldInfo, databanks, memories, personas, presets, images, imageGen, oauth, theme, council,
       files, enclave, tokens, events, commands, tools, macros,
       json,
       rpc,
     },
     script,
     handleResponse,
+    handleStreamChunk,
+    handleStreamEnd,
     cleanup,
     flush,
   };

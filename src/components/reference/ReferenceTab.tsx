@@ -73,7 +73,7 @@ export const EVENTS: EventRow[] = [
   { group: 'Generation', name: 'GENERATION_STARTED',         payload: '{ generationId, chatId, model }', fires: 'At the start of a new generation, **before prompt assembly + interceptor invocation** in the same generation pipeline. `api.chat.inject(...)` calls from this handler ARE picked up by this generation. Symmetric pre-assembly hook to `MESSAGE_SENT` — use whichever fits the script flow.' },
   { group: 'Generation', name: 'GENERATION_ENDED',           payload: '{ generationId, chatId, messageId, content }', fires: 'Assistant-side message arrival (the counterpart to `MESSAGE_SENT` for user messages). Fires **after** the generation completes — `api.chat.inject(...)` calls from this handler are too late for the just-finished generation but WILL be picked up by the next one. Payload has no `swipeId` — look it up via `api.chat.getMessages` if needed.' },
   { group: 'Generation', name: 'GENERATION_STOPPED',         payload: '{ generationId, chatId, content }' },
-  { group: 'Generation', name: 'STREAM_TOKEN_RECEIVED',      payload: '{ generationId, chatId, token }' },
+  { group: 'Generation', name: 'STREAM_TOKEN_RECEIVED',      payload: '{ generationId, chatId, token }', fires: 'Once per streamed token — **high-frequency**. Deliberately NOT offered in the editor event picker (wiring a whole script body per token is rarely intended); advanced use only.' },
   { group: 'Entities',   name: 'CHAT_CHANGED',               payload: '{ chatId }', fires: 'Chat **metadata** mutations only (rename, etc.). Does NOT fire on chat open/switch — use `CHAT_SWITCHED` for that.' },
   { group: 'Entities',   name: 'CHAT_SWITCHED',              payload: '{ chatId: string | null }  // null on return-to-home — NO characterId on the payload', fires: 'Active chat opens, switches, or closes (chatId becomes null on return-to-home). **Important — Phase-1/Phase-2 character resolution**: triggers fire during Phase 1 (chatId set sync); characterId is resolved Phase-2 ~10–15 ms later via async lookup. So `data.characterId` does NOT exist on the payload, and reading the active-context characterId at trigger-fire time can see null/stale. **Pattern**: call `api.chats.getActive()` and read `chat.characterId` — that hits the host\'s live state which has it populated regardless of Phase-2 status.' },
   { group: 'Entities',   name: 'CHARACTER_EDITED',           payload: '{ id, character: Character }' },
@@ -90,7 +90,7 @@ export const EVENTS: EventRow[] = [
   { group: 'Settings',   name: 'CONNECTION_PROFILE_LOADED',  payload: '{ connectionId }' },
   { group: 'Settings',   name: 'REGEX_SCRIPT_CHANGED',       payload: '{ id, script: RegexScriptInfo }  // create / update / duplicate / reorder / enable / disable. Requires regex_scripts permission.' },
   { group: 'Settings',   name: 'REGEX_SCRIPT_DELETED',       payload: '{ id }  // Requires regex_scripts permission.' },
-  { group: 'Tools',      name: 'TOOL_INVOCATION',            payload: '{ toolName, requestId, args }' },
+  { group: 'Tools',      name: 'TOOL_INVOCATION',            payload: '{ toolName, requestId, args }', fires: 'Internal routing for `api.tools.register` handlers — NOT a user-wireable trigger (not in the editor picker). Register a tool and the host dispatches Council/LLM invocations to your handler; you do not subscribe to this event directly.' },
 ];
 
 const EventsTable: FC = () => {
@@ -163,9 +163,14 @@ export const PERM_GROUPS: PermGroup[] = [
     group: 'LLM',
     rows: [
       { method: 'api.llm.generate', perms: ['generation'] },
+      { method: 'api.llm.generateStream', perms: ['generation'] },
       { method: 'api.llm.generateStructured', perms: ['generation'] },
       { method: 'api.llm.generateWithTools', perms: ['generation'] },
       { method: 'api.llm.dryRun', perms: ['generation'] },
+      { method: 'api.connections.* (read-only)', perms: [] },
+      { method: 'api.webSearch.*', perms: ['web_search'] },
+      { method: 'api.users.* (read-only)', perms: [] },
+      { method: 'api.version.* (read-only)', perms: [] },
     ],
   },
   {
@@ -189,11 +194,16 @@ export const PERM_GROUPS: PermGroup[] = [
       { method: 'api.ui.confirm', perms: [] },
       { method: 'api.ui.showModal', perms: [] },
       { method: 'api.ui.showAdvancedModal', perms: ['app_manipulation'] },
+      { method: 'api.ui.mountApp', perms: ['app_manipulation'] },
       { method: 'api.ui.editText', perms: [] },
       { method: 'api.ui.pushNotification', perms: ['push_notification'] },
       { method: 'api.ui.getPushStatus', perms: ['push_notification'] },
       { method: 'api.ui.createFloatWidget', perms: ['ui_panels'] },
+      { method: 'api.ui.openDrawerTab / closeDrawer / openSettings / openCommandPalette / getDrawerTabs (navigation)', perms: [] },
+      { method: 'api.ui.pickFile (native file picker)', perms: [] },
+      { method: 'api.ui.events.* (reactive UI state)', perms: [] },
       { method: 'api.ui.dom.*', perms: ['app_manipulation'] },
+      { method: 'api.ui.components.*', perms: ['app_manipulation'] },
     ],
   },
   {
@@ -213,6 +223,7 @@ export const PERM_GROUPS: PermGroup[] = [
       { method: 'api.worldInfo.registerInterceptor / listInterceptors', perms: ['generation'] },
       { method: 'api.personas.*', perms: ['personas'] },
       { method: 'api.presets.*', perms: ['presets'] },
+      { method: 'api.memories.* (Memory Cortex + chat memory)', perms: ['memories'] },
       { method: 'api.regexScripts.*', perms: ['regex_scripts'] },
       { method: 'api.images.*', perms: ['images'] },
       { method: 'api.imageGen.*', perms: ['image_gen'] },
@@ -1069,6 +1080,24 @@ export const KEY_TYPES: TypeDoc[] = [
     ],
   },
   {
+    name: 'MountAppOptions',
+    note: 'Options for api.ui.mountApp(). All optional.',
+    fields: [
+      { field: 'className?', type: 'string',                          optional: true, desc: 'CSS class applied to the mount container.' },
+      { field: 'position?',  type: "'start' | 'end' | 'app-overlay'",  optional: true, desc: "Where the portal sits: before / after the main view, or covering it ('app-overlay'). Default host-defined." },
+    ],
+  },
+  {
+    name: 'MountedAppHandle',
+    note: 'Returned by api.ui.mountApp(). A route-persistent full-bleed document.body portal. Body DOM is script-owned via root (DOMHandle); the root element carries data-ls-script + data-ls-mount so api.ui.dom.addStyle() @scope rules match content inside.',
+    fields: [
+      { field: 'mountId',            type: 'string',           optional: false, desc: 'UUID identifying this mount. Available synchronously.' },
+      { field: 'root',               type: 'DOMHandle',        optional: false, desc: "DOMHandle bound to the mount's content container. Render + wire via api.ui.dom.*; calls are buffered until the frontend has created the mount." },
+      { field: 'setVisible(visible)', type: '(boolean) => void', optional: false, desc: 'Show or hide the mount without destroying it.' },
+      { field: 'destroy()',          type: '() => void',       optional: false, desc: 'Remove the mount from the app shell. Idempotent — subsequent calls and method invocations are silent no-ops.' },
+    ],
+  },
+  {
     name: 'DrawerTabOptions',
     note: 'Options for api.ui.registerDrawerTab(). Tab appears in the ViewportDrawer sidebar and is automatically searchable in the command palette.',
     fields: [
@@ -1094,6 +1123,76 @@ export const KEY_TYPES: TypeDoc[] = [
       { field: 'activate()',             type: '() => void',                   optional: false, desc: 'Programmatically switch the drawer to this tab.' },
       { field: 'onActivate(handler)',    type: '(fn: () => void) => () => void', optional: false, desc: 'Register an activation handler. Multiple handlers supported. Returns unsubscribe.' },
       { field: 'destroy()',              type: '() => void',                   optional: false, desc: 'Remove the tab from the sidebar and detach all handlers. Idempotent.' },
+    ],
+  },
+  {
+    name: 'UIDrawerTab',
+    note: 'A drawer tab discoverable via api.ui.getDrawerTabs() — built-in or extension-contributed. The id is what you pass to api.ui.openDrawerTab().',
+    fields: [
+      { field: 'id',             type: 'string',                    optional: false, desc: 'Stable tab id (→ openDrawerTab(id)).' },
+      { field: 'shortName',      type: 'string',                    optional: false, desc: 'Short label shown beneath the sidebar icon.' },
+      { field: 'tabName',        type: 'string',                    optional: false, desc: 'Full title shown in menus and the command palette.' },
+      { field: 'tabDescription', type: 'string',                    optional: false, desc: 'One-line description shown in the command palette.' },
+      { field: 'keywords',       type: 'string[]',                  optional: false, desc: 'Keywords used for command-palette fuzzy search.' },
+      { field: 'source',         type: "'builtin' | 'extension'",   optional: false, desc: 'Whether the tab is built into Lumiverse or contributed by an extension.' },
+      { field: 'extensionId?',   type: 'string',                    optional: true,  desc: "For extension-contributed tabs, the owning extension's identifier." },
+    ],
+  },
+  {
+    name: 'UISettingsTab',
+    note: 'A settings tab discoverable via api.ui.getSettingsTabs(). Role-restricted tabs are filtered out for users lacking the role. The id is what you pass to api.ui.openSettings().',
+    fields: [
+      { field: 'id',             type: 'string',              optional: false, desc: 'Stable tab id (→ openSettings(id)).' },
+      { field: 'shortName',      type: 'string',              optional: false, desc: 'Short label shown in the settings sidebar.' },
+      { field: 'tabName',        type: 'string',              optional: false, desc: 'Full title shown in the settings header / command palette.' },
+      { field: 'tabDescription', type: 'string',              optional: false, desc: 'One-line description shown in the command palette.' },
+      { field: 'keywords',       type: 'string[]',            optional: false, desc: 'Keywords used for command-palette fuzzy search.' },
+      { field: 'role?',          type: "'admin' | 'owner'",   optional: true,  desc: 'Set when the tab is only visible to certain roles.' },
+    ],
+  },
+  {
+    name: 'PickFileOptions',
+    note: 'Options for api.ui.pickFile().',
+    fields: [
+      { field: 'accept?',       type: 'string[]', optional: true, desc: "File-type filters — extensions and/or MIME types (e.g. ['.json', 'application/json'])." },
+      { field: 'multiple?',     type: 'boolean',  optional: true, desc: 'Allow selecting more than one file. Default: false.' },
+      { field: 'maxSizeBytes?', type: 'number',   optional: true, desc: 'Maximum size per file in bytes. pickFile() rejects if a selected file exceeds this.' },
+    ],
+  },
+  {
+    name: 'PickedFile',
+    note: 'A file returned by api.ui.pickFile(). bytes is the raw Uint8Array — decode text via new TextDecoder().decode(bytes), or pass to api.images.upload / api.files.',
+    fields: [
+      { field: 'name',      type: 'string',     optional: false, desc: 'Original file name.' },
+      { field: 'mimeType',  type: 'string',     optional: false, desc: "MIME type (falls back to 'application/octet-stream')." },
+      { field: 'sizeBytes', type: 'number',     optional: false, desc: 'File size in bytes.' },
+      { field: 'bytes',     type: 'Uint8Array', optional: false, desc: 'Raw file contents.' },
+    ],
+  },
+  {
+    name: 'UIKeyboardState',
+    note: 'Snapshot from api.ui.events.getKeyboardState() / onKeyboardChange().',
+    fields: [
+      { field: 'visible',        type: 'boolean', optional: false, desc: 'True when the host believes a virtual keyboard is currently visible.' },
+      { field: 'insetBottom',    type: 'number',  optional: false, desc: 'Safe bottom inset in CSS pixels that keeps content above the keyboard.' },
+      { field: 'viewportWidth',  type: 'number',  optional: false, desc: 'Current visual viewport width in CSS pixels.' },
+      { field: 'viewportHeight', type: 'number',  optional: false, desc: 'Current visual viewport height in CSS pixels.' },
+    ],
+  },
+  {
+    name: 'UIDrawerState',
+    note: 'Snapshot from api.ui.events.getDrawerState() / onDrawerChange().',
+    fields: [
+      { field: 'open',  type: 'boolean',        optional: false, desc: 'Whether the side drawer is currently open.' },
+      { field: 'tabId', type: 'string | null',  optional: false, desc: 'Active drawer tab id, or null.' },
+    ],
+  },
+  {
+    name: 'UISettingsState',
+    note: 'Snapshot from api.ui.events.getSettingsState() / onSettingsChange().',
+    fields: [
+      { field: 'open', type: 'boolean', optional: false, desc: 'Whether the settings modal is currently open.' },
+      { field: 'view', type: 'string',  optional: false, desc: 'Active settings view identifier.' },
     ],
   },
   // ─── DOM Injection ───────────────────────────────────────────────────────────
@@ -1144,6 +1243,246 @@ export const KEY_TYPES: TypeDoc[] = [
       { field: 'makeDraggable(handleSelector?)', type: 'void',               optional: false, desc: 'Enable frontend-only drag. Optional CSS selector picks a drag handle child; the root element moves. Without a selector, the whole element is draggable.' },
       { field: 'injectChild(target, html, options?)', type: 'DOMHandle',     optional: false, desc: 'Inject HTML as a descendant of this handle\'s bound element. Target selector resolved RELATIVE to this element via the backend\'s element-map ref. Use when the parent may be orphaned at inject time (drawer tabs, modal bodies pre-mount). Sanitised via DOMPurify on the same FORBID_TAGS config as `api.ui.dom.inject` (`iframe` / `frame` / `object` / `embed` / `form` + default `on*` / `formaction` / `srcdoc` / `javascript:` strip).' },
       { field: 'read(options?)', type: 'Promise<SerializedDOMElement | null>', optional: false, desc: 'Read a snapshot of this element\'s current DOM state (tag, attrs, text, childCount, optionally innerHTML). Returns `null` when the FE no longer has the element (host shell tore down a parent, etc.). Throws DomHandleReleasedError if the handle was already removed (`.remove()` or `api.ui.dom.cleanup()`). Async — uses the same request-response IPC pattern as api.ui.showContextMenu. Common uses: verify an injection rendered as expected, inspect script-controlled widget state, walk markup via `{ html: true }`. For form-control live values use `delegate(selector, \'input\', ...)` instead — `.value` is a DOM property, not an attribute.' },
+    ],
+  },
+  {
+    name: 'MountedComponentHandle',
+    note: 'Returned synchronously by api.ui.components.mountBadge / mountSpinner (display-only components). Methods are fire-and-forget.',
+    fields: [
+      { field: 'id',            type: 'string',                optional: false, desc: 'Unique component ID (host-assigned).' },
+      { field: 'update(patch)', type: 'void',                  optional: false, desc: 'Merge a partial of the original mount options into the live component. Pass only the fields to change. Fire-and-forget (no round-trip).' },
+      { field: 'destroy()',     type: 'void',                  optional: false, desc: 'Unmount the component and release host resources. The container element you mounted into is left in place. Idempotent.' },
+    ],
+  },
+  {
+    name: 'MountedValueComponentHandle',
+    note: 'Generic `MountedValueComponentHandle<TOptions, TValue>`. Returned by interactive mounts (api.ui.components.mountSwitch → boolean, mountTextInput → string). Extends MountedComponentHandle with an async getValue().',
+    fields: [
+      { field: 'id',            type: 'string',                optional: false, desc: 'Unique component ID.' },
+      { field: 'update(patch)', type: 'void',                  optional: false, desc: 'Merge a partial of the mount options into the live component. Fire-and-forget.' },
+      { field: 'destroy()',     type: 'void',                  optional: false, desc: 'Unmount + release. Also drops the component\'s registered callbacks. Idempotent.' },
+      { field: 'getValue()',    type: 'Promise<TValue>',       optional: false, desc: 'Read the component\'s current value. ASYNC here (a frontend round-trip across the worker boundary), unlike the host\'s synchronous getValue(). Same reason DOMHandle.read() is async. Auto-controlled state lives host-side — you don\'t need to mirror it.' },
+    ],
+  },
+  {
+    name: 'SpindleBadgeOptions',
+    note: 'Options for api.ui.components.mountBadge().',
+    fields: [
+      { field: 'text?',  type: 'string',  optional: true, desc: 'Badge text. Default "".' },
+      { field: 'color?', type: "'neutral' | 'primary' | 'success' | 'warning' | 'danger' | 'info'", optional: true, desc: "Accent color. Default 'neutral'." },
+      { field: 'size?',  type: "'sm' | 'md' | 'pill'", optional: true, desc: "Visual size. Default 'md'." },
+    ],
+  },
+  {
+    name: 'SpindleSpinnerOptions',
+    note: 'Options for api.ui.components.mountSpinner().',
+    fields: [
+      { field: 'size?', type: 'number',  optional: true, desc: 'Diameter in CSS pixels. Default 16.' },
+      { field: 'fast?', type: 'boolean', optional: true, desc: 'Use the faster rotation variant. Default false.' },
+    ],
+  },
+  {
+    name: 'SpindleSwitchOptions',
+    note: 'Options for api.ui.components.mountSwitch(). onChange fires into your script on every toggle.',
+    fields: [
+      { field: 'checked?',   type: 'boolean',                optional: true, desc: 'Initial state. Default false.' },
+      { field: 'onChange?',  type: '(checked: boolean) => void', optional: true, desc: 'Fired on every toggle with the new state. Can be async; the host keeps the per-fire run alive across awaits.' },
+      { field: 'size?',      type: "'sm' | 'md'",            optional: true, desc: "Visual size. Default 'md'." },
+      { field: 'disabled?',  type: 'boolean',                optional: true, desc: 'Disable user interaction. Default false.' },
+      { field: 'ariaLabel?', type: 'string',                 optional: true, desc: 'Accessible label.' },
+    ],
+  },
+  {
+    name: 'SpindleTextInputOptions',
+    note: 'Options for api.ui.components.mountTextInput(). onChange fires on every user change.',
+    fields: [
+      { field: 'value?',       type: 'string',               optional: true, desc: 'Initial value. Default "".' },
+      { field: 'onChange?',    type: '(value: string) => void', optional: true, desc: 'Fired on every user change with the full current text. Can be async.' },
+      { field: 'placeholder?', type: 'string',               optional: true, desc: 'Placeholder text.' },
+      { field: 'autoFocus?',   type: 'boolean',              optional: true, desc: 'Focus on mount. Default false.' },
+      { field: 'disabled?',    type: 'boolean',              optional: true, desc: 'Disable user interaction. Default false.' },
+      { field: 'className?',   type: 'string',               optional: true, desc: 'Additional CSS class on the wrapper.' },
+      { field: 'ariaLabel?',   type: 'string',               optional: true, desc: 'Accessible label.' },
+    ],
+  },
+  {
+    name: 'SpindleTextAreaOptions',
+    note: 'Options for api.ui.components.mountTextArea(). Like SpindleTextInputOptions plus rows.',
+    fields: [
+      { field: 'value?',       type: 'string',               optional: true, desc: 'Initial value. Default "".' },
+      { field: 'onChange?',    type: '(value: string) => void', optional: true, desc: 'Fired on every user change. Can be async.' },
+      { field: 'placeholder?', type: 'string',               optional: true, desc: 'Placeholder text.' },
+      { field: 'rows?',        type: 'number',               optional: true, desc: 'Visible rows. Default 4.' },
+      { field: 'disabled?',    type: 'boolean',              optional: true, desc: 'Disable user interaction. Default false.' },
+      { field: 'className?',   type: 'string',               optional: true, desc: 'Additional CSS class.' },
+      { field: 'ariaLabel?',   type: 'string',               optional: true, desc: 'Accessible label.' },
+    ],
+  },
+  {
+    name: 'SpindleNumericInputOptions',
+    note: 'Options for api.ui.components.mountNumericInput(). Value is number | null (null = empty when allowEmpty).',
+    fields: [
+      { field: 'value?',       type: 'number | null',        optional: true, desc: 'Initial value. null = empty. Default null.' },
+      { field: 'onChange?',    type: '(value: number | null) => void', optional: true, desc: 'Fired on every user change.' },
+      { field: 'allowEmpty?',  type: 'boolean',              optional: true, desc: 'Allow null (empty) as a valid value. Default false.' },
+      { field: 'integer?',     type: 'boolean',              optional: true, desc: 'Restrict to integers. Default false.' },
+      { field: 'min?',         type: 'number',               optional: true, desc: 'Lower bound.' },
+      { field: 'max?',         type: 'number',               optional: true, desc: 'Upper bound.' },
+      { field: 'step?',        type: 'number',               optional: true, desc: 'Native step size.' },
+      { field: 'placeholder?', type: 'string',               optional: true, desc: 'Placeholder text.' },
+      { field: 'disabled?',    type: 'boolean',              optional: true, desc: 'Disable user interaction. Default false.' },
+    ],
+  },
+  {
+    name: 'SpindleNumberStepperOptions',
+    note: 'Options for api.ui.components.mountNumberStepper(). Like SpindleNumericInputOptions minus integer; step defaults to 1.',
+    fields: [
+      { field: 'value?',       type: 'number | null',        optional: true, desc: 'Initial value. null = empty. Default null.' },
+      { field: 'onChange?',    type: '(value: number | null) => void', optional: true, desc: 'Fired on every user change.' },
+      { field: 'allowEmpty?',  type: 'boolean',              optional: true, desc: 'Allow null (empty). Default false.' },
+      { field: 'min?',         type: 'number',               optional: true, desc: 'Lower bound.' },
+      { field: 'max?',         type: 'number',               optional: true, desc: 'Upper bound.' },
+      { field: 'step?',        type: 'number',               optional: true, desc: 'Step size. Default 1.' },
+      { field: 'placeholder?', type: 'string',               optional: true, desc: 'Placeholder text.' },
+      { field: 'disabled?',    type: 'boolean',              optional: true, desc: 'Disable user interaction. Default false.' },
+    ],
+  },
+  {
+    name: 'SpindleCheckboxOptions',
+    note: 'Options for api.ui.components.mountCheckbox().',
+    fields: [
+      { field: 'checked?',   type: 'boolean',                optional: true, desc: 'Initial state. Default false.' },
+      { field: 'onChange?',  type: '(checked: boolean) => void', optional: true, desc: 'Fired on every toggle.' },
+      { field: 'label?',     type: 'string',                 optional: true, desc: 'Label rendered next to the checkbox.' },
+      { field: 'hint?',      type: 'string',                 optional: true, desc: 'Helper text under the label.' },
+      { field: 'disabled?',  type: 'boolean',                optional: true, desc: 'Disable user interaction. Default false.' },
+    ],
+  },
+  {
+    name: 'SpindleRangeSliderOptions',
+    note: 'Options for api.ui.components.mountRangeSlider(). onCommit fires once when a drag/tap ends; onDragValue fires live during a drag.',
+    fields: [
+      { field: 'min',          type: 'number',               optional: false, desc: 'REQUIRED. Inclusive lower bound.' },
+      { field: 'max',          type: 'number',               optional: false, desc: 'REQUIRED. Inclusive upper bound.' },
+      { field: 'value?',       type: 'number',               optional: true,  desc: 'Initial committed value. Default min.' },
+      { field: 'step?',        type: 'number',               optional: true,  desc: 'Snap increment. Default 1.' },
+      { field: 'integer?',     type: 'boolean',              optional: true,  desc: 'Round to integers. Default false.' },
+      { field: 'onCommit?',    type: '(value: number) => void', optional: true, desc: 'Fired once when the gesture ends (NOT during drag).' },
+      { field: 'onDragValue?', type: '(value: number | null) => void', optional: true, desc: 'Fired with the live value during a drag; null if the gesture ends without committing.' },
+      { field: 'label?',       type: 'string',               optional: true,  desc: 'Renders a header with label + live value.' },
+      { field: 'hint?',        type: 'string',               optional: true,  desc: 'Helper text under the header. Ignored without label.' },
+      { field: 'format?',      type: 'SpindleRangeSliderFormat', optional: true, desc: '{ decimals?, prefix?, suffix? } for the header value. Ignored without label.' },
+      { field: 'disabled?',    type: 'boolean',              optional: true,  desc: 'Dim the track and ignore input. Default false.' },
+      { field: 'className?',   type: 'string',               optional: true,  desc: 'Additional CSS class on the track area.' },
+    ],
+  },
+  {
+    name: 'SpindleSelectOption',
+    note: 'A single option in api.ui.components.mountSelect() / mountMultiSelect().',
+    fields: [
+      { field: 'value',     type: 'string',                    optional: false, desc: 'Stable value emitted to onChange.' },
+      { field: 'label',     type: 'string',                    optional: false, desc: 'Display label.' },
+      { field: 'sublabel?', type: 'string',                    optional: true,  desc: 'Secondary text beneath the label.' },
+      { field: 'group?',    type: 'string',                    optional: true,  desc: 'Group key — shared-group options cluster under a header.' },
+      { field: 'leading?',  type: 'SpindleSelectOptionLeading', optional: true, desc: 'Leading cell: { type: "image"|"icon-svg"|"icon-url"|"swatch"|"initial", ... }.' },
+      { field: 'disabled?', type: 'boolean',                   optional: true,  desc: 'Render as disabled.' },
+    ],
+  },
+  {
+    name: 'SpindleSelectOptions',
+    note: 'Options for api.ui.components.mountSelect() (single-select). Extends SpindleSelectOptionsBase (options, placeholder, searchPlaceholder, searchThreshold, emptyMessage, noResultsMessage, triggerLabel, triggerIcon, portal, align, maxHeight, minWidth, disabled, className).',
+    fields: [
+      { field: 'value?',      type: 'string',                  optional: true, desc: 'Currently selected value.' },
+      { field: 'onChange?',   type: '(value: string) => void', optional: true, desc: 'Fired when the user picks an option.' },
+      { field: 'options?',    type: 'SpindleSelectOption[]',   optional: true, desc: 'Available choices.' },
+      { field: 'clearable?',  type: 'boolean',                 optional: true, desc: 'Show a pinned "None" option that emits onChange("").' },
+      { field: 'clearLabel?', type: 'string',                  optional: true, desc: 'Label for the clear option. Default "None".' },
+    ],
+  },
+  {
+    name: 'SpindleMultiSelectOptions',
+    note: 'Options for api.ui.components.mountMultiSelect(). Same base as SpindleSelectOptions but value/onChange use string[].',
+    fields: [
+      { field: 'value?',    type: 'string[]',                  optional: true, desc: 'Currently selected values.' },
+      { field: 'onChange?', type: '(value: string[]) => void', optional: true, desc: 'Fired when the selection changes.' },
+      { field: 'options?',  type: 'SpindleSelectOption[]',     optional: true, desc: 'Available choices.' },
+    ],
+  },
+  {
+    name: 'SpindleFolderDropdownOptions',
+    note: 'Options for api.ui.components.mountFolderDropdown().',
+    fields: [
+      { field: 'folders?',        type: 'string[]',               optional: true, desc: 'Available folder names.' },
+      { field: 'value?',          type: 'string',                 optional: true, desc: 'Currently selected folder.' },
+      { field: 'onChange?',       type: '(folder: string) => void', optional: true, desc: 'Fired when the user picks a folder.' },
+      { field: 'onCreateFolder?', type: '(name: string) => void', optional: true, desc: 'Fired when the user creates a folder inline.' },
+      { field: 'placeholder?',    type: 'string',                 optional: true, desc: 'Placeholder when no folder is selected.' },
+      { field: 'disabled?',       type: 'boolean',                optional: true, desc: 'Disable interaction.' },
+    ],
+  },
+  {
+    name: 'SpindleModelComboboxOptions',
+    note: 'Options for api.ui.components.mountModelCombobox(). Connection-bound mode (connection) is recommended; manual mode uses models + onRefresh.',
+    fields: [
+      { field: 'value?',       type: 'string',                  optional: true, desc: 'Currently entered model ID.' },
+      { field: 'onChange?',    type: '(value: string) => void', optional: true, desc: 'Fired on every change.' },
+      { field: 'connection?',  type: '{ kind: "llm"|"image"|"tts"|"embedding"; id? }', optional: true, desc: 'Bind to a host-managed connection; host fetches + updates the model list. embedding is manual-mode-only.' },
+      { field: 'models?',      type: 'string[]',                optional: true, desc: 'Manual mode: explicit model list.' },
+      { field: 'modelLabels?', type: 'Record<string, string>',  optional: true, desc: 'Manual mode: id → human label.' },
+      { field: 'loading?',     type: 'boolean',                 optional: true, desc: 'Manual mode: show the refresh spinner.' },
+      { field: 'onRefresh?',   type: '() => void',              optional: true, desc: 'Manual mode: invoked on refresh click.' },
+      { field: 'appearance?',  type: "'compact' | 'standard' | 'editor'", optional: true, desc: "Visual density. Default 'compact'." },
+      { field: 'placeholder?', type: 'string',                  optional: true, desc: 'Placeholder text.' },
+    ],
+  },
+  {
+    name: 'SpindlePaginationOptions',
+    note: 'Options for api.ui.components.mountPagination(). Fully controlled — currentPage/totalPages/onPageChange are REQUIRED; call handle.update({currentPage}) after navigating.',
+    fields: [
+      { field: 'currentPage',     type: 'number',               optional: false, desc: 'REQUIRED. Current page index (1-based).' },
+      { field: 'totalPages',      type: 'number',               optional: false, desc: 'REQUIRED. Total page count.' },
+      { field: 'onPageChange',    type: '(page: number) => void', optional: false, desc: 'REQUIRED. Fired when the user clicks a page.' },
+      { field: 'perPage?',        type: 'number',               optional: true,  desc: 'Current per-page selection (omit to hide the selector).' },
+      { field: 'perPageOptions?', type: 'number[]',             optional: true,  desc: 'Page-size choices.' },
+      { field: 'onPerPageChange?', type: '(n: number) => void', optional: true,  desc: 'Fired when the user changes per-page.' },
+      { field: 'totalItems?',     type: 'number',               optional: true,  desc: 'Total item count for the "Showing X–Y of N" summary.' },
+    ],
+  },
+  {
+    name: 'SpindleCloseButtonOptions',
+    note: 'Options for api.ui.components.mountCloseButton().',
+    fields: [
+      { field: 'onClick?',  type: '() => void',            optional: true, desc: 'Click handler.' },
+      { field: 'size?',     type: "'sm' | 'md'",           optional: true, desc: "Visual size. Default 'md'." },
+      { field: 'variant?',  type: "'subtle' | 'solid'",    optional: true, desc: "Visual variant. Default 'subtle'." },
+      { field: 'position?', type: "'static' | 'absolute'", optional: true, desc: "Positioning behavior. Default 'static'." },
+      { field: 'iconSize?', type: 'number',                optional: true, desc: 'Icon size override in CSS pixels.' },
+    ],
+  },
+  {
+    name: 'SpindleCollapsibleSectionOptions',
+    note: 'Options for api.ui.components.mountCollapsibleSection(). title is REQUIRED.',
+    fields: [
+      { field: 'title',            type: 'string',          optional: false, desc: 'REQUIRED. Header text.' },
+      { field: 'iconSvg?',         type: 'string',          optional: true,  desc: 'Inline SVG icon next to the title.' },
+      { field: 'iconUrl?',         type: 'string',          optional: true,  desc: 'Icon image URL. Mutually exclusive with iconSvg.' },
+      { field: 'badge?',           type: 'string | number', optional: true,  desc: 'Optional badge text next to the title.' },
+      { field: 'defaultExpanded?', type: 'boolean',         optional: true,  desc: 'Initial expanded state. Default true.' },
+      { field: 'onToggle?',        type: '(expanded: boolean) => void', optional: true, desc: 'Fired whenever the user toggles the section.' },
+    ],
+  },
+  {
+    name: 'MountedCollapsibleSectionHandle',
+    note: 'Returned by api.ui.components.mountCollapsibleSection(). The host owns the header chrome; your script owns the body.',
+    fields: [
+      { field: 'id',           type: 'string',            optional: false, desc: 'Unique component ID.' },
+      { field: 'body',         type: 'DOMHandle',         optional: false, desc: 'The section body — a DOMHandle your script owns. Use body.inject(...)/update(...)/on(...) to fill + wire it, exactly like any injected element.' },
+      { field: 'update(patch)', type: 'void',             optional: false, desc: 'Merge a partial of the mount options (title/badge/etc.) into the live section. Fire-and-forget.' },
+      { field: 'destroy()',    type: 'void',              optional: false, desc: 'Unmount the section + release. Idempotent.' },
+      { field: 'isExpanded()', type: 'Promise<boolean>',  optional: false, desc: 'Read the current expanded state. ASYNC (a frontend round-trip), like getValue().' },
+      { field: 'expand()',     type: 'void',              optional: false, desc: 'Open the section. Fire-and-forget.' },
+      { field: 'collapse()',   type: 'void',              optional: false, desc: 'Close the section. Fire-and-forget.' },
+      { field: 'toggle()',     type: 'void',              optional: false, desc: 'Flip the section. Fire-and-forget.' },
     ],
   },
   {
@@ -1234,6 +1573,61 @@ export const KEY_TYPES: TypeDoc[] = [
     ],
   },
   {
+    name: 'Connection',
+    note: "Read-only view of an LLM connection profile (api.connections.*). snake_case, mirrors the host ConnectionProfileDTO. NEVER contains the API key — only has_api_key. id/name map to LLMOptions.connectionId/connectionName.",
+    fields: [
+      { field: 'id',                 type: 'string',                       optional: false, desc: 'Stable connection ID (→ LLMOptions.connectionId).' },
+      { field: 'name',               type: 'string',                       optional: false, desc: 'Human-readable name (→ LLMOptions.connectionName).' },
+      { field: 'provider',           type: 'string',                       optional: false, desc: 'Provider identifier (e.g. "anthropic", "openai").' },
+      { field: 'api_url',            type: 'string',                       optional: false, desc: 'Provider API base URL.' },
+      { field: 'model',              type: 'string',                       optional: false, desc: 'Model identifier.' },
+      { field: 'preset_id',          type: 'string | null',                optional: false, desc: 'Bound generation preset ID, or null.' },
+      { field: 'is_default',         type: 'boolean',                      optional: false, desc: "Whether this is the user's default connection." },
+      { field: 'has_api_key',        type: 'boolean',                      optional: false, desc: 'Whether a key is stored. NEVER the key itself.' },
+      { field: 'metadata',           type: 'Record<string, unknown>',      optional: false, desc: 'Raw provider-specific metadata bag (provider-quirk flags, etc.).' },
+      { field: 'reasoning_bindings', type: 'Record<string, unknown> | null', optional: false, desc: 'Parsed reasoning bindings, or null when the connection has none.' },
+      { field: 'created_at',         type: 'number',                       optional: false, desc: 'Unix-ms creation timestamp.' },
+      { field: 'updated_at',         type: 'number',                       optional: false, desc: 'Unix-ms last-update timestamp.' },
+    ],
+  },
+  {
+    name: 'WebSearchOptions',
+    note: 'Passed to api.webSearch.query().',
+    fields: [
+      { field: 'query',   type: 'string',  optional: false, desc: 'Free-text query (required). Trimmed by the host; empty is rejected.' },
+      { field: 'count?',  type: 'number',  optional: true,  desc: 'Desired result count. Clamped to maxResultCount; omit for defaultResultCount.' },
+      { field: 'scrape?', type: 'boolean', optional: true,  desc: 'Default true → scrape top results + assemble context. false → only results (no documents/context).' },
+    ],
+  },
+  {
+    name: 'WebSearchResponse',
+    note: 'Returned by api.webSearch.query(). documents/context are omitted when scrape:false.',
+    fields: [
+      { field: 'query',      type: 'string',               optional: false, desc: 'The (trimmed) query that ran.' },
+      { field: 'results',    type: 'WebSearchResult[]',     optional: false, desc: 'Normalized results { title, url, snippet, engine?, score? }.' },
+      { field: 'documents?', type: 'WebSearchDocument[]',   optional: true,  desc: 'Per-result scraped content { ..., content?, contentLength?, sourceType?, error? }. Absent when scrape:false.' },
+      { field: 'context?',   type: 'string',                optional: true,  desc: 'Pre-assembled prompt-ready context (query + scraped docs). Absent when scrape:false.' },
+    ],
+  },
+  {
+    name: 'WebSearchSettings',
+    note: 'Returned by api.webSearch.getSettings(). Safe view — NEVER the API key (only hasApiKey).',
+    fields: [
+      { field: 'enabled',            type: 'boolean',     optional: false, desc: 'Whether web search is configured + enabled. Check before query().' },
+      { field: 'provider',           type: 'string',      optional: false, desc: "Provider identifier (currently 'searxng')." },
+      { field: 'apiUrl',             type: 'string',      optional: false, desc: 'Provider API base URL.' },
+      { field: 'hasApiKey',          type: 'boolean',     optional: false, desc: 'Whether a key is stored. NEVER the key itself.' },
+      { field: 'defaultResultCount', type: 'number',      optional: false, desc: 'Result count when query.count is omitted.' },
+      { field: 'maxResultCount',     type: 'number',      optional: false, desc: 'Upper bound (count is clamped to this).' },
+      { field: 'maxPagesToScrape',   type: 'number',      optional: false, desc: 'How many top results get scraped when scrape:true.' },
+      { field: 'maxCharsPerPage',    type: 'number',      optional: false, desc: 'Per-page scraped-text character cap.' },
+      { field: 'language',           type: 'string',      optional: false, desc: 'Search language code.' },
+      { field: 'safeSearch',         type: '0 | 1 | 2',   optional: false, desc: 'SafeSearch: 0 off, 1 moderate, 2 strict.' },
+      { field: 'engines',            type: 'string[]',    optional: false, desc: 'Provider engines to query.' },
+      { field: 'requestTimeoutMs',   type: 'number',      optional: false, desc: 'Per-request timeout in ms.' },
+    ],
+  },
+  {
     name: 'DryRunOptions',
     note: 'Passed to api.llm.dryRun(options?). All fields are optional; defaults use the active context.',
     fields: [
@@ -1261,6 +1655,15 @@ export const KEY_TYPES: TypeDoc[] = [
       { field: 'content?',    type: 'T',          optional: true, desc: 'Final step: JSON-parsed and Zod-validated result typed as T (the schema you passed as the 4th arg to generateWithTools).' },
       { field: 'tool_calls?', type: 'ToolCall[]', optional: true, desc: 'Intermediate steps: function calls requested by the LLM. When present, content is absent.' },
       { field: 'reasoning_content?', type: 'string', optional: true, desc: "Thinking-mode reasoning content from this turn. Same semantics as LLMRawResult.reasoning_content — copy onto the next assistant turn for DeepSeek-thinking tool loops." },
+    ],
+  },
+  {
+    name: 'StreamChunk',
+    note: 'One chunk yielded by api.llm.generateStream. Discriminated union — switch on the `type` field. snake_case throughout, mirroring LLMRawResult and the upstream StreamChunkDTO.',
+    fields: [
+      { field: "{ type: 'token', token }",                                                                   type: '', optional: false, desc: 'Incremental visible content chunk. Concatenate token across all token chunks to assemble the streamed text.' },
+      { field: "{ type: 'reasoning', token }",                                                               type: '', optional: false, desc: 'Incremental chain-of-thought chunk. Thinking-mode models only (DeepSeek-thinking, Anthropic extended-thinking, …). Other providers skip these.' },
+      { field: "{ type: 'done', content, reasoning?, finish_reason, tool_calls?, usage? }",                  type: '', optional: false, desc: "Terminal chunk emitted exactly once on successful completion. content is the full aggregated text; reasoning the full aggregated reasoning (when present); finish_reason is 'stop' | 'length' | 'tool_calls' | 'content_filter' | provider-specific; tool_calls is set when finish_reason === 'tool_calls'; usage is { prompt_tokens, completion_tokens, total_tokens } when the provider reports it. Breaking out of the for await loop before this arrives means you won't see it." },
     ],
   },
   {
@@ -1331,6 +1734,7 @@ export const KEY_TYPES: TypeDoc[] = [
       { field: 'chunksAvailable',  type: 'number',  optional: false, desc: 'Total vectorized chunks available.' },
       { field: 'chunksPending',    type: 'number',  optional: false, desc: 'Chunks awaiting vectorization (results may be incomplete if > 0).' },
       { field: 'injectionMethod',  type: "'macro' | 'fallback' | 'disabled'", optional: false, desc: 'How memories are injected into the prompt.' },
+      { field: 'retrievalMode?',   type: "'vector' | 'recency' | 'empty' | 'disabled'", optional: true, desc: 'How chunks were retrieved (real vector search vs recency fallback). Absent until the chat-memory cache is populated.' },
       { field: 'queryPreview',     type: 'string',  optional: false, desc: 'The query string used for the vector search.' },
       { field: 'settingsSource',   type: "'global' | 'per_chat'",    optional: false, desc: 'Whether memory settings come from global or per-chat config.' },
     ],
@@ -1359,9 +1763,10 @@ export const KEY_TYPES: TypeDoc[] = [
   },
   {
     name: 'TempWriteOptions',
-    note: 'Passed to api.files.tempWrite(path, data, options?).',
+    note: 'Passed to api.files.tempWrite / tempWriteBinary (path, data, options?).',
     fields: [
-      { field: 'ttlMs?', type: 'number', optional: true, desc: 'Time-to-live in milliseconds. If omitted the file persists until deleted or restart.' },
+      { field: 'ttlMs?',         type: 'number', optional: true, desc: 'Time-to-live in milliseconds. If omitted the file persists until deleted or restart.' },
+      { field: 'reservationId?', type: 'string', optional: true, desc: 'Charge this write against a tempRequestBlock reservation, so a large write can\'t fail partway through on a full pool.' },
     ],
   },
   {
@@ -1382,6 +1787,39 @@ export const KEY_TYPES: TypeDoc[] = [
       { field: 'sizeBytes',   type: 'number', optional: false, desc: 'File size in bytes.' },
       { field: 'createdAt',   type: 'string', optional: false, desc: 'ISO 8601 creation timestamp.' },
       { field: 'expiresAt?',  type: 'string', optional: true,  desc: 'ISO 8601 expiration timestamp. Absent if no TTL was set.' },
+    ],
+  },
+  {
+    name: 'TempRequestBlockOptions',
+    note: 'Passed to api.files.tempRequestBlock(sizeBytes, options?).',
+    fields: [
+      { field: 'ttlMs?',  type: 'number', optional: true, desc: 'Time-to-live for the reservation in milliseconds.' },
+      { field: 'reason?', type: 'string', optional: true, desc: 'Free-text reason recorded with the reservation (diagnostics only).' },
+    ],
+  },
+  {
+    name: 'TempReservation',
+    note: 'Returned by api.files.tempRequestBlock(). Pass reservationId to tempWrite/tempWriteBinary options, or to tempReleaseBlock.',
+    fields: [
+      { field: 'reservationId', type: 'string', optional: false, desc: 'The reservation handle.' },
+      { field: 'sizeBytes',     type: 'number', optional: false, desc: 'The reserved size in bytes.' },
+      { field: 'expiresAt',     type: 'string', optional: false, desc: 'ISO 8601 timestamp when the reservation expires if unused.' },
+    ],
+  },
+  {
+    name: 'TempPoolStatus',
+    note: 'Returned by api.files.tempGetPoolStatus(). Global = across all extensions; extension* = this extension only.',
+    fields: [
+      { field: 'globalMaxBytes',          type: 'number', optional: false, desc: 'Total ephemeral pool size across all extensions.' },
+      { field: 'globalUsedBytes',         type: 'number', optional: false, desc: 'Bytes currently stored across all extensions.' },
+      { field: 'globalReservedBytes',     type: 'number', optional: false, desc: 'Bytes currently reserved (not yet written) across all extensions.' },
+      { field: 'globalAvailableBytes',    type: 'number', optional: false, desc: 'Bytes still available globally (max − used − reserved).' },
+      { field: 'extensionMaxBytes',       type: 'number', optional: false, desc: "This extension's ephemeral quota." },
+      { field: 'extensionUsedBytes',      type: 'number', optional: false, desc: 'Bytes this extension is currently storing.' },
+      { field: 'extensionReservedBytes',  type: 'number', optional: false, desc: 'Bytes this extension currently has reserved.' },
+      { field: 'extensionAvailableBytes', type: 'number', optional: false, desc: 'Bytes this extension still has available.' },
+      { field: 'fileCount',               type: 'number', optional: false, desc: 'Number of ephemeral files this extension currently holds.' },
+      { field: 'fileCountMax',            type: 'number', optional: false, desc: 'Maximum file count allowed for this extension.' },
     ],
   },
   // ─── Characters ──────────────────────────────────────────────────────────────
@@ -1475,7 +1913,7 @@ export const KEY_TYPES: TypeDoc[] = [
     note: 'A single memory chunk inside ChatMemoryResult.chunks.',
     fields: [
       { field: 'content',  type: 'string',                  optional: false, desc: 'Chunk text (concatenated messages from a conversation segment).' },
-      { field: 'score',    type: 'number',                  optional: false, desc: 'Cosine similarity score (lower = more similar to the query).' },
+      { field: 'score',    type: 'number | null',           optional: false, desc: 'Vector distance (lower = more similar). null for keyword-only / recency-fallback hits — do not treat a missing score as a zero-distance match.' },
       { field: 'metadata', type: 'Record<string, unknown>', optional: false, desc: 'Chunk metadata (may include startIndex, endIndex, etc.).' },
     ],
   },
@@ -1491,6 +1929,7 @@ export const KEY_TYPES: TypeDoc[] = [
       { field: 'chunksPending',   type: 'number',           optional: false, desc: 'Chunks awaiting vectorization. Results may be incomplete if > 0.' },
       { field: 'queryPreview',    type: 'string',           optional: false, desc: 'The query used for the vector search.' },
       { field: 'settingsSource',  type: "'global' | 'per_chat'", optional: false, desc: 'Whether memory settings come from global or per-chat config.' },
+      { field: 'retrievalMode?',  type: "'vector' | 'recency' | 'empty' | 'disabled'", optional: true, desc: 'How chunks were retrieved (vector search vs recency fallback). Absent until the chat-memory cache is populated.' },
     ],
   },
   // ─── World Info ───────────────────────────────────────────────────────────────
@@ -2144,6 +2583,240 @@ export const KEY_TYPES: TypeDoc[] = [
     ],
   },
 
+  // ─── Memories (Memory Cortex + LTCM) ─────────────────────────────────────────
+  {
+    name: 'CortexQuery',
+    note: 'Input to api.memories.cortex.query(). chatId + queryText are required; the active userId is folded in by LumiScript.',
+    fields: [
+      { field: 'chatId',                 type: 'string',                       optional: false, desc: 'The chat to retrieve from.' },
+      { field: 'queryText',              type: 'string',                       optional: false, desc: 'Free-text retrieval query.' },
+      { field: 'entityFilter?',          type: 'string[]',                     optional: true,  desc: 'Restrict to memories mentioning these entity names.' },
+      { field: 'timeRange?',             type: '{ start?: number; end?: number }', optional: true, desc: 'Restrict to a time window (Unix ms).' },
+      { field: 'emotionalContext?',      type: 'EmotionalTag[]',               optional: true,  desc: "Bias scoring toward emotional tags (e.g. 'betrayal', 'fury', 'grief')." },
+      { field: 'generationType?',        type: 'string',                       optional: true,  desc: 'Host hint for retrieval tuning.' },
+      { field: 'topK?',                  type: 'number',                       optional: true,  desc: 'Number of memories to return.' },
+      { field: 'includeConsolidations?', type: 'boolean',                      optional: true,  desc: 'Include narrative-arc consolidations in the candidate pool.' },
+      { field: 'includeRelationships?',  type: 'boolean',                      optional: true,  desc: 'Include the active relationship edges in the result.' },
+      { field: 'excludeMessageIds?',     type: 'string[]',                     optional: true,  desc: 'Exclude chunks tied to these message ids.' },
+    ],
+  },
+  {
+    name: 'CortexResult',
+    note: 'Returned by api.memories.cortex.query() / getCached(). The same shape the host uses internally during prompt assembly.',
+    fields: [
+      { field: 'memories',            type: 'CortexMemory[]',     optional: false, desc: 'Ranked memories: { source ("chunk"|"consolidation"), sourceId, content, finalScore, components, emotionalTags, entityNames, messageRange, timeRange }.' },
+      { field: 'entityContext',       type: 'EntitySnapshot[]',   optional: false, desc: 'Entities in context: { id, name, type, status, description, lastSeenAt, mentionCount, topFacts, emotionalProfile, relationships }.' },
+      { field: 'activeRelationships', type: 'RelationEdge[]',     optional: false, desc: 'Active edges: { sourceName, targetName, type, label, strength, sentiment }.' },
+      { field: 'arcContext',          type: 'string | null',      optional: false, desc: 'The current narrative arc summary, or null.' },
+      { field: 'stats',               type: 'CortexStats',        optional: false, desc: 'Retrieval diagnostics: { candidatePoolSize, vectorSearchResults, entitiesMatched, scoreFusionApplied, topScore, retrievalTimeMs, timedOut?, aborted? }.' },
+    ],
+  },
+  {
+    name: 'LinkedCortexResult',
+    note: 'Returned by api.memories.cortex.queryLinked() / getCachedLinked(). Attached vaults + interlink targets.',
+    fields: [
+      { field: 'vaults',     type: 'VaultCortexData[]',     optional: false, desc: 'Per attached vault: { vaultId, vaultName, sourceChatId?, entities, relations, memories?, arcContext? }.' },
+      { field: 'interlinks', type: 'InterlinkCortexData[]', optional: false, desc: 'Per interlinked chat: { targetChatId, targetChatName, result: CortexResult }.' },
+    ],
+  },
+  {
+    name: 'MemoryCortexConfig',
+    note: 'Returned by api.memories.cortex.getConfig(); patch with putConfig(). Permissive — only top-level toggles are typed; advanced + host-added fields pass through the index signature.',
+    fields: [
+      { field: 'enabled',              type: 'boolean', optional: false, desc: 'Master Memory Cortex toggle.' },
+      { field: 'entityTracking',       type: 'boolean', optional: false, desc: 'Whether entity extraction runs.' },
+      { field: 'entityExtractionMode', type: 'string',  optional: false, desc: "e.g. 'heuristic' / 'sidecar'." },
+      { field: 'salienceScoring',      type: 'boolean', optional: false, desc: 'Whether per-chunk salience scoring runs.' },
+      { field: '[advanced]',           type: 'unknown', optional: true,  desc: 'retrieval / decay / consolidation / entityPruning / sidecar tuning + any host-added fields pass through unchanged.' },
+    ],
+  },
+  {
+    name: 'ChatChunk',
+    note: 'Returned by api.memories.chatMemory.listChunks(). A vectorized chat chunk — the {{memories}} retrieval unit.',
+    fields: [
+      { field: 'id',             type: 'string',          optional: false, desc: 'Chunk id.' },
+      { field: 'chatId',         type: 'string',          optional: false, desc: 'Owning chat.' },
+      { field: 'content',        type: 'string',          optional: false, desc: 'Chunk text.' },
+      { field: 'messageIds',     type: 'string[]',        optional: false, desc: 'Source message ids (startMessageId..endMessageId).' },
+      { field: 'tokenCount',     type: 'number',          optional: false, desc: 'Approx token count.' },
+      { field: 'vectorizedAt',   type: 'number | null',   optional: false, desc: 'When embedded (Unix ms), or null if pending.' },
+      { field: 'retrievalCount', type: 'number',          optional: false, desc: 'How many times retrieved.' },
+    ],
+  },
+  {
+    name: 'ChatMemoryWarmupResult',
+    note: 'Returned by api.memories.chatMemory.warm().',
+    fields: [
+      { field: 'status',                type: "'skipped' | 'complete' | 'rebuilding' | 'queued' | 'error'", optional: false, desc: "'skipped' (e.g. vectorization disabled), etc." },
+      { field: 'reason?',               type: 'string',  optional: true, desc: 'Human-readable detail (e.g. \'chat_vectorization_disabled\').' },
+      { field: 'rebuilt?',              type: 'boolean', optional: true, desc: 'Whether chunks were rebuilt.' },
+      { field: 'vectorizationsQueued?', type: 'number',  optional: true, desc: 'How many vectorizations were queued.' },
+    ],
+  },
+  {
+    name: 'CortexUsageStats',
+    note: 'Returned by api.memories.stats.usage(). Host gc fields (mention counts, last GC, etc.) pass through.',
+    fields: [
+      { field: 'entityCount',         type: 'number', optional: false, desc: 'Tracked entities.' },
+      { field: 'relationCount',       type: 'number', optional: false, desc: 'Relation edges.' },
+      { field: 'salienceRecordCount', type: 'number', optional: false, desc: 'Per-chunk salience records.' },
+      { field: 'consolidationCount',  type: 'number', optional: false, desc: 'Narrative-arc consolidations.' },
+    ],
+  },
+  {
+    name: 'CortexIngestionStatus',
+    note: 'Returned by api.memories.stats.ingestionStatus(), or null when never ingested.',
+    fields: [
+      { field: 'chatId',      type: 'string',                                                              optional: false, desc: 'The chat.' },
+      { field: 'status',      type: "'idle' | 'processing' | 'complete' | 'error'",                         optional: false, desc: 'Overall ingestion status.' },
+      { field: 'phase',       type: "'queued'|'font'|'heuristics'|'sidecar'|'persisting'|'complete'|'error'", optional: false, desc: 'Current pipeline phase.' },
+      { field: 'pendingJobs', type: 'number',                                                              optional: false, desc: 'Queued ingestion jobs.' },
+      { field: 'timings?',    type: 'CortexIngestionTimings | null',                                       optional: true,  desc: 'Last per-phase timings.' },
+    ],
+  },
+  {
+    name: 'CortexIngestionTelemetry',
+    note: 'Returned by api.memories.stats.ingestionTelemetry().',
+    fields: [
+      { field: 'samples',  type: 'number',                       optional: false, desc: 'Number of ingestion samples averaged.' },
+      { field: 'last',     type: 'CortexIngestionTimings | null', optional: false, desc: 'The most recent ingestion timing sample.' },
+      { field: 'averages', type: '{ fontMs, heuristicMs, sidecarMs, graphMs, dbMs, totalMs }', optional: false, desc: 'Per-phase average ms over recent ingestions.' },
+    ],
+  },
+  {
+    name: 'MemoryEntity',
+    note: 'A tracked entity in the cortex graph. Returned by api.memories.entities.* and inside CortexResult.entityContext (as the lighter EntitySnapshot).',
+    fields: [
+      { field: 'id',               type: 'string',                 optional: false, desc: 'Entity id.' },
+      { field: 'chatId',           type: 'string',                 optional: false, desc: 'Owning chat.' },
+      { field: 'name',             type: 'string',                 optional: false, desc: 'Canonical name.' },
+      { field: 'entityType',       type: "EntityType",             optional: false, desc: "'character' | 'location' | 'item' | 'faction' | 'concept' | 'event'." },
+      { field: 'aliases',          type: 'string[]',               optional: false, desc: 'Known aliases (matched by findByName / upsert).' },
+      { field: 'description',      type: 'string',                 optional: false, desc: 'Entity description.' },
+      { field: 'status',           type: 'EntityStatus',           optional: false, desc: "'active' | 'inactive' | 'deceased' | 'destroyed' | 'unknown'." },
+      { field: 'facts',            type: 'string[]',               optional: false, desc: 'Up to 20 most-recent facts.' },
+      { field: 'emotionalValence', type: 'Record<string, number>', optional: false, desc: 'Running emotional-valence map.' },
+      { field: 'mentionCount',     type: 'number',                 optional: false, desc: 'Total mentions.' },
+      { field: 'salienceAvg',      type: 'number',                 optional: false, desc: 'Average salience (orders list()).' },
+      { field: 'confidence',       type: "'confirmed' | 'provisional'", optional: false, desc: 'Promotion confidence.' },
+      { field: '…',                type: 'more',                   optional: true,  desc: 'Plus firstSeen*/lastSeen*, statusChangedAt, factExtraction*, salienceBreakdown, recentMentionCount, metadata, createdAt, updatedAt, userEditedAt — see the host DTO.' },
+    ],
+  },
+  {
+    name: 'MemoryEntityUpsert',
+    note: 'Input to api.memories.entities.upsert(). Matches the extractor shape so a script can replay its own NER results.',
+    fields: [
+      { field: 'name',         type: 'string',     optional: false, desc: 'Canonical name (matched against existing names + aliases).' },
+      { field: 'type',         type: 'EntityType', optional: false, desc: "'character' | 'location' | 'item' | 'faction' | 'concept' | 'event'." },
+      { field: 'aliases?',     type: 'string[]',   optional: true,  desc: 'Alternate names.' },
+      { field: 'confidence?',  type: 'number',     optional: true,  desc: 'Raw [0,1] extractor confidence; below the configured threshold the host drops it.' },
+      { field: 'role?',        type: 'MentionRole', optional: true, desc: "'subject' | 'object' | 'present' | 'referenced' | 'absent'." },
+      { field: 'provisional?', type: 'boolean',    optional: true,  desc: 'Mark as needing corroboration before promotion.' },
+    ],
+  },
+  {
+    name: 'MemoryRelation',
+    note: 'A typed relation edge. Returned by api.memories.relations.*.',
+    fields: [
+      { field: 'id',             type: 'string',         optional: false, desc: 'Edge id.' },
+      { field: 'sourceEntityId', type: 'string',         optional: false, desc: 'Source entity id.' },
+      { field: 'targetEntityId', type: 'string',         optional: false, desc: 'Target entity id.' },
+      { field: 'relationType',   type: 'RelationType',   optional: false, desc: "'ally' | 'enemy' | 'lover' | 'rival' | 'owns' | 'member_of' | 'located_in' | … | 'custom'." },
+      { field: 'relationLabel',  type: 'string | null',  optional: false, desc: 'Free-text label (e.g. "duel pending").' },
+      { field: 'strength',       type: 'number',         optional: false, desc: 'Edge strength.' },
+      { field: 'sentiment',      type: 'number',         optional: false, desc: 'Edge sentiment [-1, 1].' },
+      { field: 'status',         type: 'RelationStatus', optional: false, desc: "'active' | 'broken' | 'dormant' | 'former'." },
+      { field: '…',              type: 'more',           optional: true,  desc: 'Plus evidenceChunkIds, edgeSalience, decayRate, contradictionFlag, supersededBy, arcIds, timestamps — see the host DTO.' },
+    ],
+  },
+  {
+    name: 'MemoryRelationUpsert',
+    note: 'Input to api.memories.relations.upsert(). Uses entity NAMES — both endpoints must already exist in the graph or the edge is silently dropped.',
+    fields: [
+      { field: 'source',    type: 'string',       optional: false, desc: 'Source entity name (resolved to id server-side).' },
+      { field: 'target',    type: 'string',       optional: false, desc: 'Target entity name.' },
+      { field: 'type',      type: 'RelationType', optional: false, desc: "Relation type (e.g. 'rival', 'ally', 'custom')." },
+      { field: 'label',     type: 'string',       optional: false, desc: 'Free-text label.' },
+      { field: 'sentiment', type: 'number',       optional: false, desc: 'Sentiment [-1, 1].' },
+    ],
+  },
+  {
+    name: 'MemoryConsolidation',
+    note: 'A narrative-arc consolidation. Returned by api.memories.consolidations.list / latestArc.',
+    fields: [
+      { field: 'id',          type: 'string',          optional: false, desc: 'Consolidation id.' },
+      { field: 'tier',        type: 'number',          optional: false, desc: 'Arc tier (1 = scene, 2 = chapter, …).' },
+      { field: 'title',       type: 'string | null',   optional: false, desc: 'Arc title, or null.' },
+      { field: 'summary',     type: 'string',          optional: false, desc: 'Compressed summary text.' },
+      { field: 'entityIds',   type: 'string[]',        optional: false, desc: 'Entities featured in the arc.' },
+      { field: 'emotionalTags', type: 'EmotionalTag[]', optional: false, desc: 'Dominant emotional tags.' },
+      { field: '…',           type: 'more',            optional: true,  desc: 'Plus sourceChunkIds, messageRange*, timeRange*, salienceAvg, tokenCount, vectorizedAt, timestamps.' },
+    ],
+  },
+  {
+    name: 'MemorySalience',
+    note: 'A per-chunk salience record. Returned by api.memories.salience.list.',
+    fields: [
+      { field: 'chunkId',        type: 'string',          optional: false, desc: 'The scored chunk.' },
+      { field: 'score',          type: 'number',          optional: false, desc: 'Salience score.' },
+      { field: 'scoreSource',    type: "'heuristic' | 'sidecar'", optional: false, desc: 'How it was scored.' },
+      { field: 'emotionalTags',  type: 'EmotionalTag[]',  optional: false, desc: 'Emotional tags detected.' },
+      { field: 'narrativeFlags', type: 'NarrativeFlag[]', optional: false, desc: "e.g. 'first_meeting', 'death', 'confession'." },
+      { field: 'statusChanges',  type: '{ entity, change, detail }[]', optional: false, desc: 'Detected entity status changes.' },
+      { field: 'scoredAt',       type: 'number',          optional: false, desc: 'When scored (Unix ms). Orders list().' },
+    ],
+  },
+  {
+    name: 'Vault',
+    note: 'A frozen cortex snapshot. Returned by api.memories.vaults.list / create; inside VaultWithContents.vault.',
+    fields: [
+      { field: 'id',             type: 'string',         optional: false, desc: 'Vault id.' },
+      { field: 'name',           type: 'string',         optional: false, desc: 'Vault name.' },
+      { field: 'description',    type: 'string',         optional: false, desc: 'Vault description.' },
+      { field: 'sourceChatId',   type: 'string | null',  optional: false, desc: 'The chat snapshotted, or null.' },
+      { field: 'sourceChatName', type: 'string | null',  optional: false, desc: 'Source chat name.' },
+      { field: 'entityCount',    type: 'number',         optional: false, desc: 'Entities in the snapshot.' },
+      { field: 'relationCount',  type: 'number',         optional: false, desc: 'Relations in the snapshot.' },
+      { field: 'chunkCount',     type: 'number',         optional: false, desc: 'Chunks copied.' },
+      { field: 'createdAt',      type: 'number',         optional: false, desc: 'Unix-ms creation timestamp.' },
+    ],
+  },
+  {
+    name: 'VaultCreate',
+    note: 'Input to api.memories.vaults.create().',
+    fields: [
+      { field: 'chatId',       type: 'string', optional: false, desc: 'The chat to snapshot.' },
+      { field: 'name',         type: 'string', optional: false, desc: 'Vault name.' },
+      { field: 'description?', type: 'string', optional: true,  desc: 'Optional description.' },
+    ],
+  },
+  {
+    name: 'ChatLink',
+    note: 'A vault attach or chat interlink. Returned by api.memories.links.list / attach.',
+    fields: [
+      { field: 'id',             type: 'string',         optional: false, desc: 'Link id.' },
+      { field: 'chatId',         type: 'string',         optional: false, desc: 'The chat the link is attached to.' },
+      { field: 'linkType',       type: "'vault' | 'interlink'", optional: false, desc: 'Link kind.' },
+      { field: 'vaultId',        type: 'string | null',  optional: false, desc: 'Attached vault id (vault links).' },
+      { field: 'targetChatId',   type: 'string | null',  optional: false, desc: 'Interlinked chat id (interlinks).' },
+      { field: 'label',          type: 'string',         optional: false, desc: 'Link label.' },
+      { field: 'enabled',        type: 'boolean',        optional: false, desc: 'Whether the link is active.' },
+      { field: '…',              type: 'more',           optional: true,  desc: 'Plus vaultName, vaultEntityCount/RelationCount, targetChatName, targetChatExists, priority, createdAt.' },
+    ],
+  },
+  {
+    name: 'ChatLinkAttach',
+    note: 'Input to api.memories.links.attach(). Provide vaultId for a vault attach, or targetChatId for an interlink.',
+    fields: [
+      { field: 'chatId',         type: 'string',                optional: false, desc: 'The chat to attach to.' },
+      { field: 'linkType',       type: "'vault' | 'interlink'", optional: false, desc: 'Link kind.' },
+      { field: 'vaultId?',       type: 'string',                optional: true,  desc: 'Vault to attach (linkType: vault).' },
+      { field: 'targetChatId?',  type: 'string',                optional: true,  desc: 'Chat to interlink (linkType: interlink).' },
+      { field: 'label?',         type: 'string',                optional: true,  desc: 'Optional label.' },
+      { field: 'bidirectional?', type: 'boolean',               optional: true,  desc: 'Interlinks only — also create the reverse link on the target chat.' },
+    ],
+  },
+
   // ─── Images ──────────────────────────────────────────────────────────────────
   {
     name: 'ImageInfo',
@@ -2399,9 +3072,40 @@ export const API_GROUPS: FnGroup[] = [
     group: 'api.llm',
     rows: [
       { name: 'generate',             args: 'messages, options?',               desc: 'Generate a text response from the LLM.' },
+      { name: 'generateStream',       args: 'messages, options?',               desc: 'Streaming variant of generate. Async iterator of StreamChunk values (token / reasoning / done). Break out of for await or pass options.signal to cancel.' },
       { name: 'generateStructured',   args: 'messages, schema, options?',       desc: 'Generate and parse a structured JSON response against a Zod or JSON Schema.' },
       { name: 'generateWithTools',    args: 'messages, tools, options?, schema?', desc: 'Generate with tool schemas. Returns text or function calls for an agentic loop.' },
       { name: 'dryRun',               args: 'options?',                         desc: 'Assemble the full prompt without calling the LLM. Returns messages, token counts, WI stats.' },
+    ],
+  },
+  {
+    group: 'api.connections',
+    rows: [
+      { name: 'list',       args: '—',            desc: "List the user's LLM connection profiles (read-only; never includes API keys — only has_api_key). Returns Connection[]. Free tier. Pair with api.ui.components.mountSelect/mountModelCombobox for pickers." },
+      { name: 'get',        args: 'connectionId', desc: 'Get a connection profile by ID, or null if not found/accessible. Returns Connection | null.' },
+      { name: 'getDefault', args: '—',            desc: "Get the user's default connection (is_default, or the first available), or null." },
+      { name: 'findByName', args: 'name',         desc: 'Find a connection by name (case-insensitive), or null. The id/name map to api.llm options.connectionId/connectionName.' },
+    ],
+  },
+  {
+    group: 'api.webSearch',
+    rows: [
+      { name: 'query',       args: 'options', desc: 'Search the user\'s configured provider (SearXNG). options: { query (required), count?, scrape? (default true) }. Returns WebSearchResponse { query, results: WebSearchResult[], documents?, context? }. With scrape (default) you also get scraped documents + a prompt-ready context block; scrape:false returns only results (titles/URLs/snippets). Rejects "Web search is disabled" if no provider configured. Requires web_search.' },
+      { name: 'getSettings', args: '—',       desc: 'Read the safe web-search config (NEVER the API key — only hasApiKey). Returns WebSearchSettings { enabled, provider, apiUrl, defaultResultCount, maxResultCount, maxPagesToScrape, maxCharsPerPage, language, safeSearch, engines, hasApiKey, requestTimeoutMs }. Branch on enabled before query(). Requires web_search.' },
+    ],
+  },
+  {
+    group: 'api.users',
+    rows: [
+      { name: 'isVisible', args: '—', desc: 'True if the active user has the app visible in at least one session; false if every session is hidden/backgrounded or there is no open session. Returns Promise<boolean>. Free tier. Use to gate push notifications (when hidden) vs. in-app UI (when visible).' },
+      { name: 'getRole',   args: '—', desc: "The active user's Lumiverse role: 'operator' | 'admin' | 'user' (internal owners report as operator). Returns Promise<UserRole>. Free tier." },
+    ],
+  },
+  {
+    group: 'api.version',
+    rows: [
+      { name: 'getBackend',  args: '—', desc: "The running Lumiverse backend server's semantic version string (e.g. '1.2.0'). Returns Promise<string>. Free tier. Pair with feature gating / compatibility checks." },
+      { name: 'getFrontend', args: '—', desc: "The running Lumiverse frontend bundle's semantic version string. Returns Promise<string>. Free tier." },
     ],
   },
   {
@@ -2468,10 +3172,31 @@ export const API_GROUPS: FnGroup[] = [
       { name: 'showContextMenu', args: 'options',                    desc: "Show a themed context menu at a screen position and await the user's selection. Resolves with the chosen item's key, or null if dismissed. Options: { position: { x, y }, items: [{ key, label, type?, disabled?, danger?, active? }] }. Pair with a contextmenu event listener using { preventDefault: true } to suppress the native browser menu. Free-tier." },
       { name: 'registerInputBarAction', args: 'options',             desc: 'Register an action inside the chat input-bar Extras popover. Extension actions are visually grouped under a teal-badged extension header. Optional subtitle adds a second line under the label (status text, shortcut, etc.) — settable via setSubtitle for live updates. Limits: 4 per script (pre-checked backend-side), 12 global. Returns InputBarActionHandle { actionId, setLabel, setSubtitle, setEnabled, onClick, destroy }. Free-tier.' },
       { name: 'createFloatWidget', args: 'options',                  desc: 'Create a small draggable widget overlaying the app. Body DOM is fully script-owned via handle.root (DOMHandle). Supports snap-to-edge, chromeless mode, drag-end callbacks for position persistence. Limits: 2 widgets per script (pre-checked backend-side), 8 global. Returns FloatWidgetHandle { widgetId, root, moveTo, getPosition, setVisible, isVisible, onDragEnd, destroy }. Requires ui_panels.' },
+      { name: 'mountApp', args: 'options?',                          desc: "Mount a route-persistent, full-bleed document.body portal — full-screen overlays or persistent chrome beyond dock / drawer / float. options: { className?, position? ('start'|'end'|'app-overlay') }. Body DOM is fully script-owned via handle.root (DOMHandle); render + wire it via api.ui.dom.*. Returns MountedAppHandle { mountId, root, setVisible, destroy }. Requires app_manipulation." },
       { name: 'registerDrawerTab', args: 'options',                  desc: 'Register a tab in the ViewportDrawer sidebar. Body DOM is script-owned via handle.root (DOMHandle). Tabs auto-appear in the command palette (Ctrl+K) searchable by title, shortName, description terms, keywords, and the extension name. Limits: 1 tab per script (LumiScript-enforced), 4 total across all LumiScript scripts (Spindle host cap), 8 global. Returns DrawerTabHandle { tabId, root, setTitle, setShortName, setBadge, activate, onActivate, destroy }. Free-tier.' },
       { name: 'editText',  args: 'title?, value?, options?',         desc: 'Open the native Lumiverse expanded text editor with macro syntax highlighting. Blocks until close. Returns edited text or null if cancelled. Options: placeholder.' },
       { name: 'pushNotification', args: 'title, body, options?',   desc: 'Send an OS push notification. Only delivered when app is unfocused. Returns { sent }. Options: tag (dedup), url, icon, rawTitle, image. Requires push_notification.' },
       { name: 'getPushStatus', args: '—',                          desc: 'Check if push notifications are available. Returns { available, subscriptionCount }. Requires push_notification.' },
+      { name: 'getDrawerTabs', args: '—',                          desc: 'List discoverable drawer tabs (built-in + extension-contributed) visible to the user. Returns UIDrawerTab[] { id, shortName, tabName, tabDescription, keywords, source ("builtin"|"extension"), extensionId? }. Pair with openDrawerTab(id) to build a custom jump-to picker. Free-tier.' },
+      { name: 'getSettingsTabs', args: '—',                        desc: 'List discoverable settings tabs visible to the user (role-restricted tabs are filtered out). Returns UISettingsTab[] { id, shortName, tabName, tabDescription, keywords, role? }. Free-tier.' },
+      { name: 'openDrawerTab', args: 'tabId',                      desc: 'Open the drawer to a specific tab id (built-in or extension-contributed — ids from getDrawerTabs). Resolves once the host dispatches the navigation; the frontend applies it asynchronously. Free-tier.' },
+      { name: 'closeDrawer', args: '—',                            desc: 'Close the drawer if it is currently open. Free-tier.' },
+      { name: 'openSettings', args: 'viewId?',                     desc: "Open the settings modal to a tab id (e.g. 'connections', 'display' — ids from getSettingsTabs). Omit viewId to land on 'display'. Free-tier." },
+      { name: 'closeSettings', args: '—',                          desc: 'Close the settings modal if it is currently open. Free-tier.' },
+      { name: 'openCommandPalette', args: '—',                     desc: 'Open the command palette overlay (the Ctrl+K surface). Free-tier.' },
+      { name: 'closeCommandPalette', args: '—',                    desc: 'Close the command palette overlay if it is currently open. Free-tier.' },
+      { name: 'pickFile', args: 'options?',                        desc: "Open the browser's native file picker and return the selected file(s). options: { accept? (string[] of extensions/MIME types), multiple? (default false), maxSizeBytes? }. Returns Promise<PickedFile[]> where PickedFile is { name, mimeType, sizeBytes, bytes: Uint8Array }. Resolves [] if the user cancels; REJECTS if a file exceeds maxSizeBytes (mirrors the host throw). The native dialog is the user-action gate, so free-tier. Feed bytes into api.images.upload / api.db / api.files; decode text via new TextDecoder().decode(file.bytes)." },
+    ],
+  },
+  {
+    group: 'api.ui.events',
+    rows: [
+      { name: 'getKeyboardState', args: '—', desc: 'The current virtual-keyboard snapshot. Returns Promise<UIKeyboardState> { visible, insetBottom, viewportWidth, viewportHeight }. Free-tier. Resolves from a backend cache the frontend keeps fresh.' },
+      { name: 'onKeyboardChange', args: 'handler', desc: 'Subscribe to keyboard visibility / safe-area changes. handler receives UIKeyboardState. Returns an unsubscribe fn. Free-tier. The subscription keeps the script alive while registered and is torn down on disable. Primary use: mobile-safe widget positioning (reposition on insetBottom).' },
+      { name: 'getDrawerState',   args: '—', desc: 'The current side-drawer snapshot. Returns Promise<UIDrawerState> { open, tabId }. Free-tier.' },
+      { name: 'onDrawerChange',   args: 'handler', desc: 'Subscribe to drawer open/close + tab changes. handler receives UIDrawerState. Returns an unsubscribe fn. Free-tier.' },
+      { name: 'getSettingsState', args: '—', desc: 'The current settings-modal snapshot. Returns Promise<UISettingsState> { open, view }. Free-tier.' },
+      { name: 'onSettingsChange', args: 'handler', desc: 'Subscribe to settings open/close + active-view changes. handler receives UISettingsState. Returns an unsubscribe fn. Free-tier.' },
     ],
   },
   {
@@ -2479,9 +3204,30 @@ export const API_GROUPS: FnGroup[] = [
     rows: [
       { name: 'inject',          args: 'target, html, options?',     desc: 'Inject sanitized HTML at a CSS selector. Returns DOMHandle { id, update, remove, on }. Options object (single arg — NOT `inject(target, html, position, options)`): `position` (default "beforeend"), `id` (stable ID for idempotent injection — re-firing with the same id triggers in-place innerHTML update via dom_update IPC instead of a fresh insert). **Note**: when the injected HTML contains an inline `<style>` block (the host-CSS-targeting pattern — see api.ui.dom NAMESPACE_CONCEPTS), do NOT use `id`-dedup. The dom_update path replaces wrapper innerHTML, and browsers don\'t reliably reactivate `<style>` blocks added that way — second fire silently loses every CSS rule. Pattern for inline-style scripts that re-fire: drop `id`, call `api.ui.dom.cleanup()` at body start instead. Requires app_manipulation.' },
       { name: 'injectAtMessage', args: 'messageId, html, options?', desc: 'Inject sanitized HTML into a message bubble. Waits up to 5 s for the element if not yet rendered. Options: position ("footer" default / "header"), id (stable ID). Returns DOMHandle. Requires app_manipulation.' },
-      { name: 'addStyle',         args: 'css, opts?',               desc: 'Add a `<style>` element scoped to this script via `@scope ([data-ls-script="<id>"])`. Returns `{ remove() }`. Use `--lumiverse-*` CSS variables for theming. Pass `{ id: \'foo\' }` for idempotent re-injection — calling `addStyle` again with the same id removes the prior stylesheet first (useful for dev-iteration where the CSS source changes between fires). Without an id, every call adds a fresh stylesheet. **Scope limitation**: rules ONLY match descendants of script-injected DOM. Cannot reach host elements (chat input bar, message bubbles, toolbar buttons, the body, etc.) because `@scope` excludes everything outside the script\'s wrappers. To style host UI, include an inline `<style>` block inside an `inject()` HTML payload instead — CSS rules in a `<style>` element are document-global regardless of where the tag sits. See api.ui.dom NAMESPACE_CONCEPTS for the full pattern. Requires app_manipulation permission.' },
+      { name: 'addStyle',         args: 'css, opts?',               desc: 'Add a `<style>` element scoped to this script via `@scope ([data-ls-script="<id>"])`. Returns `{ remove() }`. Use `--lumiverse-*` CSS variables for theming. Pass `{ id: \'foo\' }` for idempotent re-injection — calling `addStyle` again with the same id removes the prior stylesheet first (useful for dev-iteration where the CSS source changes between fires). Without an id, every call adds a fresh stylesheet. **Scope limitation**: rules ONLY match descendants of script-injected DOM. Cannot reach host elements (chat input bar, message bubbles, toolbar buttons, the body, etc.) because `@scope` excludes everything outside the script\'s wrappers. To style host UI, include an inline `<style>` block inside an `inject()` HTML payload instead — CSS rules in a `<style>` element are document-global regardless of where the tag sits. **Top-level at-rules** (`@font-face`, `@keyframes`) are likewise dropped here — they\'re invalid nested inside `@scope`, so the browser silently discards them; deliver those via an inline `<style>` block too, never `addStyle`. See api.ui.dom NAMESPACE_CONCEPTS for the full pattern. Requires app_manipulation permission.' },
       { name: 'delegate',         args: 'selector, event, handler, options?', desc: 'Attach an event-delegated listener at a known root, matching descendants by CSS selector. Lets scripts react to clicks/changes on DOM the script didn\'t inject — e.g. interactive elements emitted by the LLM in chat-message content. Single host-side capture listener per (root, event) tuple regardless of how many scripts subscribe; selector matching happens frontend-side via event.target.closest(). Default scope (options.root: "chat") restricts matching to chat content; "document" matches anywhere on the page. Returns an unsubscribe function. Requires app_manipulation.' },
       { name: 'cleanup',          args: '—',                        desc: 'Remove all DOM injections, styles, and delegations created by THIS script (other scripts\' DOM is untouched). Auto-fired on script disable / delete — manual call is for re-fire scenarios where you want to wipe and rebuild from scratch. **Canonical use**: at the top of a script body that combines re-firing triggers (`ls:startup` + `CHAT_SWITCHED` + manual Run) with inline `<style>` blocks in injected HTML. Calling `cleanup()` then `inject(...)` guarantees a fresh-inject path on every fire — which parses `<style>` correctly — instead of dom_update-via-id-dedup which doesn\'t reactivate inline styles. Requires app_manipulation.' },
+    ],
+  },
+  {
+    group: 'api.ui.components',
+    rows: [
+      { name: 'mountBadge',     args: 'target, options?', desc: 'Mount a themed host badge into a script-owned slot. `target` is a DOMHandle (inject an empty container via api.ui.dom.inject first). Options: text, color ("neutral"|"primary"|"success"|"warning"|"danger"|"info"), size ("sm"|"md"|"pill"). Returns MountedComponentHandle { id, update(patch), destroy() } synchronously. update/destroy are fire-and-forget. Requires app_manipulation.' },
+      { name: 'mountSpinner',   args: 'target, options?', desc: 'Mount a themed loading spinner into a script-owned slot (DOMHandle target). Options: size (px, default 16), fast (boolean). Returns MountedComponentHandle. Requires app_manipulation.' },
+      { name: 'mountSwitch',    args: 'target, options?', desc: 'Mount a themed toggle switch into a script-owned slot (DOMHandle target). Options: checked, onChange(checked:boolean), size ("sm"|"md"), disabled, ariaLabel. Returns MountedValueComponentHandle { id, update, destroy, getValue(): Promise<boolean> } — getValue() is ASYNC (a frontend round-trip), unlike the host\'s sync getValue. onChange fires into your script on every toggle. Requires app_manipulation.' },
+      { name: 'mountTextInput', args: 'target, options?', desc: 'Mount a themed single-line text input into a script-owned slot (DOMHandle target). Options: value, onChange(value:string), placeholder, autoFocus, disabled, className, ariaLabel. Returns MountedValueComponentHandle { ..., getValue(): Promise<string> } (async getValue). onChange fires on every user change. Requires app_manipulation.' },
+      { name: 'mountTextArea',  args: 'target, options?', desc: 'Mount a themed multi-line text editor (DOMHandle target). Options: value, onChange(value:string), placeholder, rows (default 4), disabled, className, ariaLabel. Returns MountedValueComponentHandle (getValue(): Promise<string>). Requires app_manipulation.' },
+      { name: 'mountNumericInput', args: 'target, options?', desc: 'Mount a themed validated number input (DOMHandle target). Options: value (number|null), onChange(value:number|null), allowEmpty, integer, min, max, step, placeholder, disabled. Returns MountedValueComponentHandle (getValue(): Promise<number|null>). Requires app_manipulation.' },
+      { name: 'mountNumberStepper', args: 'target, options?', desc: 'Mount a themed number input with +/- buttons (DOMHandle target). Like mountNumericInput minus integer; step defaults to 1. Returns MountedValueComponentHandle (getValue(): Promise<number|null>). Requires app_manipulation.' },
+      { name: 'mountCheckbox',  args: 'target, options?', desc: 'Mount a themed checkbox (DOMHandle target). Options: checked, onChange(checked:boolean), label, hint, disabled. Returns MountedValueComponentHandle (getValue(): Promise<boolean>). Requires app_manipulation.' },
+      { name: 'mountRangeSlider', args: 'target, options', desc: 'Mount a themed touch-friendly range slider (DOMHandle target). options is REQUIRED (min + max are mandatory). Options: min (required), max (required), value, step, integer, onCommit(v:number) [once per gesture], onDragValue(v:number|null) [live], label, hint, format ({decimals,prefix,suffix}), disabled, className. Returns MountedValueComponentHandle (getValue(): Promise<number>). Requires app_manipulation.' },
+      { name: 'mountSelect',    args: 'target, options?', desc: 'Mount a themed searchable single-select dropdown (DOMHandle target). Options: options (SpindleSelectOption[]), value, onChange(value:string), placeholder, searchPlaceholder, clearable, clearLabel, leading cells, grouping, portal/align/maxHeight/minWidth, disabled, etc. Returns MountedValueComponentHandle (getValue(): Promise<string>). Requires app_manipulation.' },
+      { name: 'mountMultiSelect', args: 'target, options?', desc: 'Mount a themed searchable multi-select (DOMHandle target). Like mountSelect but value/onChange use string[]. Returns MountedValueComponentHandle (getValue(): Promise<string[]>). Requires app_manipulation.' },
+      { name: 'mountFolderDropdown', args: 'target, options?', desc: 'Mount a themed folder picker with inline create-folder (DOMHandle target). Options: folders (string[]), value, onChange(folder:string), onCreateFolder(name:string), placeholder, disabled. Returns MountedValueComponentHandle (getValue(): Promise<string>). Requires app_manipulation.' },
+      { name: 'mountModelCombobox', args: 'target, options?', desc: 'Mount the themed connection-aware model picker (DOMHandle target). Connection-bound mode: pass connection {kind:"llm"|"image"|"tts"|"embedding", id?} and the host manages the model list. Manual mode: pass models[] + onRefresh. Other options: value, onChange(model:string), appearance, placeholder, etc. Returns MountedValueComponentHandle (getValue(): Promise<string>). NOTE: the handle\'s refresh() method is a deferred follow-up; connection-bound mode auto-manages the list without it. Requires app_manipulation.' },
+      { name: 'mountPagination', args: 'target, options', desc: 'Mount themed page navigation (DOMHandle target). options is REQUIRED (currentPage, totalPages, onPageChange(page:number) are mandatory). Optional: perPage, perPageOptions, onPerPageChange(n:number), totalItems. Fully controlled — call handle.update({currentPage}) after navigation. Returns MountedComponentHandle (no getValue). Requires app_manipulation.' },
+      { name: 'mountCloseButton', args: 'target, options?', desc: 'Mount a themed close (X) button (DOMHandle target). Options: onClick(), size ("sm"|"md"), variant ("subtle"|"solid"), position ("static"|"absolute"), iconSize. Returns MountedComponentHandle (no getValue). Requires app_manipulation.' },
+      { name: 'mountCollapsibleSection', args: 'target, options', desc: 'Mount a collapsible section (DOMHandle target). options is REQUIRED (title is mandatory). Options: title (required), iconSvg, iconUrl, badge, defaultExpanded (default true), onToggle(expanded:boolean). The host owns the header chrome; the returned MountedCollapsibleSectionHandle adds: body (a DOMHandle you inject/update content into), isExpanded(): Promise<boolean>, expand(), collapse(), toggle(). Requires app_manipulation.' },
     ],
   },
   {
@@ -2512,11 +3258,16 @@ export const API_GROUPS: FnGroup[] = [
     group: 'api.files — temp* (TTL-bound, requires ephemeral_storage)',
     rows: [
       { name: 'tempRead',         args: 'path',               desc: 'Read a file as UTF-8 text.' },
-      { name: 'tempWrite',        args: 'path, data, options?', desc: 'Write UTF-8 text. Options: { ttlMs } for expiry.' },
+      { name: 'tempWrite',        args: 'path, data, options?', desc: 'Write UTF-8 text. Options: { ttlMs?, reservationId? } — ttlMs sets expiry; reservationId charges the write against a tempRequestBlock reservation.' },
+      { name: 'tempReadBinary',   args: 'path',               desc: 'Read a file as raw bytes. Returns Promise<Uint8Array>. Pair with tempWriteBinary for caching images / PDFs / other binary blobs within quota.' },
+      { name: 'tempWriteBinary',  args: 'path, data, options?', desc: 'Write raw bytes (Uint8Array). Options: { ttlMs?, reservationId? }, same as tempWrite. Bytes cross the IPC intact (no base64).' },
       { name: 'tempDelete',       args: 'path',               desc: 'Delete a file.' },
       { name: 'tempList',         args: 'prefix?',            desc: 'List files under a prefix.' },
       { name: 'tempStat',         args: 'path',               desc: 'Get file metadata (sizeBytes, createdAt, expiresAt?).' },
       { name: 'tempClearExpired', args: '—',                  desc: 'Remove all expired files. Returns count removed.' },
+      { name: 'tempGetPoolStatus', args: '—',                 desc: 'Read the ephemeral-storage quota snapshot. Returns TempPoolStatus — global + this-extension max/used/reserved/available bytes plus fileCount / fileCountMax. Check available before a large write.' },
+      { name: 'tempRequestBlock', args: 'sizeBytes, options?', desc: 'Reserve sizeBytes of quota up front (so a large write can\'t fail partway). Options: { ttlMs?, reason? }. Returns TempReservation { reservationId, sizeBytes, expiresAt } — pass reservationId to tempWrite/tempWriteBinary options, or tempReleaseBlock to free it.' },
+      { name: 'tempReleaseBlock', args: 'reservationId',      desc: 'Release a reservation from tempRequestBlock you did not use.' },
     ],
   },
   {
@@ -2582,6 +3333,94 @@ export const API_GROUPS: FnGroup[] = [
     ],
   },
   {
+    group: 'api.memories.cortex',
+    rows: [
+      { name: 'getConfig',             args: '—',               desc: 'Get the Memory Cortex configuration (MemoryCortexConfig — permissive; advanced/host-added fields pass through). Requires memories permission.' },
+      { name: 'putConfig',             args: 'patch',           desc: 'Patch the Memory Cortex configuration (deep merge; unspecified fields untouched). Returns the updated config. Requires memories permission.' },
+      { name: 'query',                 args: 'query',           desc: 'Fused-score retrieval (semantic + salience + recency + reinforcement + emotional + entity). query: CortexQuery { chatId (required), queryText (required), entityFilter?, timeRange?, emotionalContext?, generationType?, topK?, includeConsolidations?, includeRelationships?, excludeMessageIds? }. Returns CortexResult { memories, entityContext, activeRelationships, arcContext, stats }. Server-cached ~5 min per chat + query shape. Requires memories permission.' },
+      { name: 'queryLinked',           args: 'chatId, options?', desc: 'Resolve every attached vault + interlink target in parallel. options: { queryText? } — pass queryText to rank by relevance. Returns LinkedCortexResult { vaults, interlinks }. Requires memories permission.' },
+      { name: 'getCached',             args: 'chatId',          desc: 'Read the warm cortex cache without re-running retrieval. Returns CortexResult or null (no/expired cache). Requires memories permission.' },
+      { name: 'getCachedLinked',       args: 'chatId',          desc: 'Read the cached linked-cortex result. Returns LinkedCortexResult or null. Requires memories permission.' },
+      { name: 'invalidateCache',       args: 'chatId',          desc: 'Drop the warm cortex cache for a chat. Requires memories permission.' },
+      { name: 'invalidateLinkedCache', args: 'chatId',          desc: 'Drop the warm linked-cortex cache for a chat. Requires memories permission.' },
+    ],
+  },
+  {
+    group: 'api.memories.entities',
+    rows: [
+      { name: 'list',                   args: 'chatId, options?', desc: 'List entities for a chat. options: { activeOnly? (default true), limit? }. Ordered by salience. Returns MemoryEntity[]. Requires memories permission.' },
+      { name: 'get',                    args: 'entityId',         desc: 'Get an entity by id, or null if not found / not owned. Requires memories permission.' },
+      { name: 'findByName',             args: 'chatId, name',     desc: 'Find an entity by canonical name OR known alias, or null. Requires memories permission.' },
+      { name: 'upsert',                 args: 'chatId, entity, options?', desc: 'Smart-merge upsert against canonical name + aliases. entity: MemoryEntityUpsert { name, type ("character"|"location"|"item"|"faction"|"concept"|"event"), aliases?, confidence?, role?, provisional? }. options: { chunkId?, createdAt? } attribute the mention. Returns the merged MemoryEntity. Requires memories permission.' },
+      { name: 'updateStatus',           args: 'entityId, patch',  desc: "Update status. patch: { status ('active'|'inactive'|'deceased'|'destroyed'|'unknown'), statusChangedAt? }. Returns MemoryEntity. Requires memories permission." },
+      { name: 'addFacts',               args: 'entityId, facts',  desc: 'Append facts (string[]); deduplicated, keeps the most recent 20. Returns MemoryEntity. Requires memories permission.' },
+      { name: 'getFacts',               args: 'entityId',         desc: 'Read an entity\'s facts (string[]; tagged branch facts stripped). Requires memories permission.' },
+      { name: 'updateEmotionalValence', args: 'entityId, valence', desc: 'Replace the running emotional-valence map (Record<string, number>, e.g. { betrayal: 0.6, grief: 0.4 }). Returns MemoryEntity. Requires memories permission.' },
+    ],
+  },
+  {
+    group: 'api.memories.relations',
+    rows: [
+      { name: 'list',        args: 'chatId',                  desc: 'Active relation edges for a chat (excludes superseded / merged). Returns MemoryRelation[]. Requires memories permission.' },
+      { name: 'listAll',     args: 'chatId',                  desc: 'Every relation edge including superseded / merged — for diagnostics. Requires memories permission.' },
+      { name: 'forEntity',   args: 'chatId, entityId',        desc: 'Active edges incident to one entity. Requires memories permission.' },
+      { name: 'forEntities', args: 'chatId, entityIds, options?', desc: 'Active edges across a set of entity ids. options: { limit? }. Requires memories permission.' },
+      { name: 'upsert',      args: 'chatId, relation, options?', desc: 'Upsert a relation by entity NAMES (not ids — the host resolves them). relation: MemoryRelationUpsert { source, target, type (RelationType), label, sentiment }. BOTH endpoints must already exist in the graph (call entities.upsert first) — returns the row or null if silently dropped. options: { chunkId? } attributes evidence. Requires memories permission.' },
+    ],
+  },
+  {
+    group: 'api.memories.consolidations',
+    rows: [
+      { name: 'list',      args: 'chatId, options?', desc: 'List narrative-arc consolidations (compressed summaries). options: { tier? } (1 = scene, 2 = chapter, …). Ordered most-recent first. Returns MemoryConsolidation[]. Requires memories permission.' },
+      { name: 'latestArc', args: 'chatId',           desc: 'The most recent arc across all tiers, or null. Requires memories permission.' },
+      { name: 'run',       args: 'chatId',           desc: 'Trigger a background EXTRACTIVE consolidation pass (heuristic only — no sidecar LLM). Fire-and-forget: returns immediately; new arcs surface via list() once the job completes. Requires memories permission.' },
+    ],
+  },
+  {
+    group: 'api.memories.salience',
+    rows: [
+      { name: 'list', args: 'chatId, options?', desc: 'Per-chunk salience records, ordered by scoredAt desc. options: { limit? (max 500/page), offset? }. Returns MemorySalience[] { chunkId, score, scoreSource, emotionalTags, narrativeFlags, statusChanges, hasDialogue/Action/InternalThought, wordCount, scoredAt }. Requires memories permission.' },
+    ],
+  },
+  {
+    group: 'api.memories.vaults',
+    rows: [
+      { name: 'list',      args: '—',          desc: 'All vaults owned by the active user (Vault[]). Requires memories permission.' },
+      { name: 'get',       args: 'vaultId',    desc: 'A vault with its entities + relations (VaultWithContents), or null if not found / not owned. Requires memories permission.' },
+      { name: 'getChunks', args: 'vaultId',    desc: 'The chunk snapshot copied into the vault at creation (VaultChunk[]). Requires memories permission.' },
+      { name: 'create',    args: 'input',      desc: 'Snapshot a chat into a new vault. input: VaultCreate { chatId, name, description? }. Entities + relations copy synchronously; LanceDB chunks copy in the background (queryable structural-only until done). Returns Vault. Requires memories permission.' },
+      { name: 'rename',    args: 'vaultId, name', desc: 'Rename a vault. Returns true if renamed. Requires memories permission.' },
+      { name: 'delete',    args: 'vaultId',    desc: 'Delete a vault + its chunks + attached links. Returns true if deleted. Requires memories permission.' },
+      { name: 'reindex',   args: 'vaultId',    desc: 'Re-run the LanceDB chunk copy from the source chat (e.g. after an embedding-model swap). Returns VaultReindexResult { mode, chunkCount }. Requires memories permission.' },
+    ],
+  },
+  {
+    group: 'api.memories.links',
+    rows: [
+      { name: 'list',   args: 'chatId',                  desc: 'All links attached to a chat — vault attaches + interlinks (ChatLink[]). Requires memories permission.' },
+      { name: 'attach', args: 'input',                   desc: "Attach a vault as read-only knowledge, or interlink two chats. input: ChatLinkAttach { chatId, linkType ('vault'|'interlink'), vaultId? (for vault), targetChatId? (for interlink), label?, bidirectional? (interlinks — also creates the reverse link) }. Returns the created ChatLink(s). Requires memories permission." },
+      { name: 'remove', args: 'chatId, linkId',          desc: 'Remove a link. Returns true if removed. Requires memories permission.' },
+      { name: 'toggle', args: 'chatId, linkId, enabled', desc: 'Enable / disable a link without removing it. Returns true if toggled. Requires memories permission.' },
+    ],
+  },
+  {
+    group: 'api.memories.chatMemory',
+    rows: [
+      { name: 'listChunks', args: 'chatId',           desc: 'All vectorized chunks for a chat, oldest first (ChatChunk[]). The raw index behind the {{memories}} macro. Requires memories permission.' },
+      { name: 'get',        args: 'chatId, options?', desc: 'Top-K hybrid (vector + BM25) retrieval. options: { topK? }. Returns ChatMemoryResult { chunks, formatted, count, enabled, queryPreview, settingsSource, chunksAvailable, chunksPending } — same payload as the {{memories}} macro (equivalent to api.chats.getMemories but under the memories permission). Requires memories permission.' },
+      { name: 'warm',       args: 'chatId, options?', desc: 'Rebuild stale chunks + queue pending vectorizations. options: { force? }. Returns ChatMemoryWarmupResult { status, reason?, rebuilt?, vectorizationsQueued? }. No-op (status:\'skipped\') when chat vectorization is disabled. Requires memories permission.' },
+      { name: 'invalidate', args: 'chatId',           desc: 'Drop the cached {{memories}} retrieval result for a chat. Requires memories permission.' },
+    ],
+  },
+  {
+    group: 'api.memories.stats',
+    rows: [
+      { name: 'usage',               args: 'chatId', desc: 'Entity / relation / consolidation / salience counts (CortexUsageStats; host gc fields pass through). Requires memories permission.' },
+      { name: 'ingestionStatus',     args: 'chatId', desc: 'Live ingestion phase + pending job count (CortexIngestionStatus), or null when the chat was never ingested. Requires memories permission.' },
+      { name: 'ingestionTelemetry',  args: 'chatId', desc: 'Last sample + per-phase averages over recent ingestions (CortexIngestionTelemetry). Requires memories permission.' },
+    ],
+  },
+  {
     group: 'api.personas',
     rows: [
       { name: 'list',         args: 'options?',           desc: 'List personas (paginated).' },
@@ -2591,7 +3430,7 @@ export const API_GROUPS: FnGroup[] = [
       { name: 'create',       args: 'input',              desc: 'Create a persona.' },
       { name: 'update',       args: 'personaId, input',   desc: 'Update a persona.' },
       { name: 'delete',       args: 'personaId',          desc: 'Delete a persona.' },
-      { name: 'switchActive', args: 'personaId | null',   desc: 'Switch the active persona. Pass null to deactivate.' },
+      { name: 'switchActive', args: 'personaId',          desc: 'Switch the active persona. Pass `personaId: string` to activate a persona, or `null` to deactivate.' },
       { name: 'getWorldBook', args: 'personaId',          desc: 'Get the world book attached to a persona.' },
     ],
   },
@@ -2654,7 +3493,7 @@ export const API_GROUPS: FnGroup[] = [
     group: 'api.theme',
     rows: [
       { name: 'apply',             args: 'overrides',         desc: "Apply CSS variable overrides on top of the user's current theme. `overrides.variables` is a flat map applied regardless of mode; `overrides.variablesByMode.{dark,light}` is mode-selected at apply time by the host. LumiScript maintains per-script attribution — multiple scripts' apply calls merge with per-key last-applied-wins semantics. Requires app_manipulation permission." },
-      { name: 'applyPalette',      args: 'palette | null',    desc: "Apply a palette-driven theme. `palette.accent` is `{h, s, l}` and Lumiverse generates the full variable set coherently, preserving the user's glass/radius/font/UI-scale. Pass `null` to drop this script's palette contribution. Across LumiScript scripts: most-recent-script-wins. Requires app_manipulation permission." },
+      { name: 'applyPalette',      args: 'palette',           desc: "Apply a palette-driven theme. Pass `palette: ThemePaletteConfig` where `palette.accent` is `{h, s, l}` and Lumiverse generates the full variable set coherently, preserving the user's glass/radius/font/UI-scale. Pass `null` to drop this script's palette contribution. Across LumiScript scripts: most-recent-script-wins. Requires app_manipulation permission." },
       { name: 'clear',             args: '—',                 desc: 'Drop this script\'s contributions from the per-script override registry, re-merge, push the post-clear result to spindle.theme.{apply,applyPalette}. Auto-called on script disable / delete. Requires app_manipulation permission.' },
       { name: 'getCurrent',        args: '—',                 desc: "Get a read-only snapshot of the user's current theme configuration (NOT including any extension overrides). Returns ThemeInfo with id, name, mode ('light' | 'dark'), accent (HSL), enableGlass, radiusScale, fontScale, uiScale, characterAware. Requires app_manipulation permission." },
       { name: 'extractColors',     args: 'imageId',           desc: "Extract a color palette from an image stored in Lumiverse's image system. `imageId` is a host-side UUID (sources: `character.imageId`, `api.images.upload(...).id`). Returns ColorExtractionInfo with dominant + per-region RGB + flatness scores + isLight + dominantHsl (ready to pass to applyPalette). Throws if the id is unknown. Requires app_manipulation permission." },
@@ -3061,6 +3900,9 @@ export const NAMESPACE_CONCEPTS: Record<string, string> = {
   'api.files — user* (per-user persistent)':
     'Three storage tiers, each with its own method-name prefix. `user*` is per-user persistent (survives extension reload, scoped to the active user). `shared*` is extension-wide persistent (shared across users). `temp*` is TTL-bound (deleted after `ttlMs` expires; requires `ephemeral_storage` permission). Same operations across tiers — read / write / delete / exists / list / mkdir / stat / move — just with the tier prefix on each method name.',
 
+  'api.files — temp* (TTL-bound, requires ephemeral_storage)':
+    'TTL-bound ephemeral storage (`spindle.ephemeral`), gated by `allowDangerous` + `ephemeral_storage`. Text I/O (`tempRead` / `tempWrite`) AND **binary I/O** (`tempReadBinary` → `Uint8Array`, `tempWriteBinary(path, Uint8Array, options?)`) — use the binary pair for images / PDFs / any non-text blob; bytes cross the IPC intact (no base64 hop). `tempWrite` / `tempWriteBinary` options are `{ ttlMs?, reservationId? }`. Files auto-expire after `ttlMs`; `tempClearExpired()` sweeps expired entries early. **Quota subsystem**: the ephemeral pool is bounded per-extension AND globally. `tempGetPoolStatus()` returns the snapshot (`TempPoolStatus` — global + this-extension max/used/reserved/available bytes + fileCount / fileCountMax). For a large write, **reserve up front** with `tempRequestBlock(sizeBytes, { ttlMs?, reason? })` → `TempReservation { reservationId, sizeBytes, expiresAt }`, pass that `reservationId` to the write options so it can\'t fail partway through on a full pool, and `tempReleaseBlock(reservationId)` if you end up not using it. **Use cases**: cache a downloaded asset across two fires, buffer intermediate state during a long job — anything large + transient where you don\'t want to spend durable storage. For persistent bytes use `api.files.user*` / `shared*`; for images Lumiverse should own use `api.images.*`.',
+
   'api.db':
     'Per-script schema-validated JSON collections. Each collection is a typed array of records persisted under the owning script\'s storage path; collections never leak across scripts. Optional Zod schema validates writes (insert + update). Built-in fields `id` / `createdAt` / `updatedAt` are reserved and auto-managed; Zod\'s `.strict()` / unknown-key stripping preserves them. Use for structured per-script data; for cross-script shared state see `api.variables.global`.',
 
@@ -3068,7 +3910,7 @@ export const NAMESPACE_CONCEPTS: Record<string, string> = {
     'Per-script in-memory key/value store for session state. Closes the "where does my script keep its session state?" UX gap that was previously covered by the `globalThis.__lumiscript_script_<id>_*` convention (verbose, easy to forget the prefix). **Free tier — no permission required.**\n\n**Picking the right storage primitive** — the LumiScript storage story now has three tiers, picked by intent:\n  - `api.scriptStorage` — in-memory, session-scoped, free-tier. Best for "remember this for the session" flags (tracker rerun-inflight, current selection, transient cache).\n  - `api.variables.*` — disk-persisted, scope-tiered (local/global/character/chat), free-tier. Best for "remember this across restarts" state.\n  - `api.db.*` — disk-persisted, structured collections with schema + filters + queries. Best for record-shaped data you want to search / aggregate.\n\n**Lifecycle**: in-memory only — values live in a parent-side `Map<scriptId, Map<key, value>>`, no disk write. Survives worker eviction / respawn (parent-side state, not in worker memory). Survives script edit / hot-reload (matches the `globalThis` convention — preserves dev iteration state). Cleared on script disable / delete via the `teardownDisabledScript` path. Lost on full backend restart.\n\n**Size cap**: 1 MB per script on the JSON-serialised size of the full map. `set()` throws `"capacity exceeded"` cleanly when a write would cross the cap, with a migration hint pointing to `api.variables.*` / `api.db.*`. The cap is intentional — scriptStorage is a "small bag of session flags" surface, not bulk storage.\n\n**Broadcasts**: every mutation fires an `ls:scriptStorage:*` event on the broadcast bus. `ls:scriptStorage:set` carries `{ scriptId, key, value }`; `ls:scriptStorage:delete` carries `{ scriptId, key }`; `ls:scriptStorage:clear` carries `{ scriptId }`. No-op `delete` / empty `clear` calls don\'t fire. The `ls:*` prefix avoids the eviction-pinning policy. Useful for debug / admin tooling; user scripts typically don\'t need to subscribe.\n\n**Values must be JSON-serialisable.** Passing functions / symbols / DOM elements throws at the IPC boundary — same posture as `api.broadcast.emit` and `api.variables.*`.\n\n**Cross-script isolation**: per-script via `scriptId`-keyed outer Map. Script A\'s writes never appear in Script B\'s reads. (Cross-script visibility for debug tooling is available via the broadcast events above.)',
 
   'api.broadcast':
-    'In-memory real-time pub/sub between scripts. Events are NOT persisted — handlers fire synchronously when an event is emitted, and there\'s no replay across script reloads. Subscriptions persist between trigger runs (host wipes them at the START of each new run, not the end), so a "subscriber-only" script can watch events from a script it isn\'t co-triggered with. The `ls:*` prefix is reserved for system events; scripts should namespace their own events with a project-specific prefix. **Distinct from `api.events`** — that one is for persistent event tracking; this one is for real-time messaging.\n\n**Payload size cap + emit rate limit.** `api.broadcast.emit(event, payload)` synchronously throws if the JSON-serialised payload exceeds **1 MB** (matches the `api.scriptStorage` per-value ceiling), OR if the calling script has emitted more than **100 events/sec sustained** (token bucket with **1000-emit burst capacity**). Errors carry clear migration hints. The caps apply at the `api.broadcast.emit` proxy entry (NOT at the underlying bus, so internal `ls:*` events the engine emits are unaffected). For high-frequency data flow, push the data to `api.db.*` or `api.scriptStorage` and emit a small "data updated" notification on the bus instead.',
+    'In-memory real-time pub/sub between scripts. Events are NOT persisted — handlers fire synchronously when an event is emitted, and there\'s no replay across script reloads. Subscriptions persist between trigger runs, so a "subscriber-only" script can watch events from a script it isn\'t co-triggered with. The owning script\'s next run clears its subscriptions at the START (then the body re-registers them) — so a re-firing script never stacks duplicate listeners, while a script that fires once (e.g. on `ls:startup`) keeps its subscriptions until it\'s disabled or deleted. The `ls:*` prefix is reserved for system events; scripts should namespace their own events with a project-specific prefix. **Distinct from `api.events`** — that one is for persistent event tracking; this one is for real-time messaging.\n\n**Payload size cap + emit rate limit.** `api.broadcast.emit(event, payload)` synchronously throws if the JSON-serialised payload exceeds **1 MB** (matches the `api.scriptStorage` per-value ceiling), OR if the calling script has emitted more than **100 events/sec sustained** (token bucket with **1000-emit burst capacity**). Errors carry clear migration hints. The caps apply at the `api.broadcast.emit` proxy entry (NOT at the underlying bus, so internal `ls:*` events the engine emits are unaffected). For high-frequency data flow, push the data to `api.db.*` or `api.scriptStorage` and emit a small "data updated" notification on the bus instead.',
 
   'api.rpc':
     'Cross-extension shared RPC pool. Wraps Spindle\'s `spindle.rpcPool` with two-tier namespacing: every endpoint is fully-qualified as `lumiscript.<scriptSlug>.<channel>` where `scriptSlug` auto-derives from the calling script\'s name (overridable via `options.as`). Use `sync(channel, value)` to publish a latest-value snapshot and `handle(channel, fn)` to register on-demand handlers — other LumiScript scripts AND other Lumiverse extensions can `read(endpoint)` from these channels. Free tier (no permission). Endpoints auto-unregister on script disable / delete / stale-after-re-run. **Permission delegation**: `options.policy` controls how owner permissions flow to readers. Omit for the legacy "requester inherits every owner permission" guard; pass `{ requires: [] }` for intentionally narrow / public endpoints; pass `{ requires: [\'name\'] }` to scope delegated permissions explicitly. Handlers receive `effectivePermissions` on the `RpcRequestContext` so they can branch on what\'s actually delegated to this call. **Distinct from `api.broadcast`** — broadcast is in-process pub/sub between LumiScript user-scripts; rpc is cross-extension, asks-the-pool RPC where the caller knows the target endpoint by name. Backend-console logs registrations for cross-extension exposure visibility.',
@@ -3085,8 +3927,41 @@ export const NAMESPACE_CONCEPTS: Record<string, string> = {
   'api.tools':
     'Tool-registration surface. All tools you register via `api.tools.register` are **extension tools** — they bypass any sidecar LLM and are invoked directly by the host with `(args, ctx?)` where `ctx` carries `{councilMember?, contextMessages?, requestId?, __deadlineMs}` on Council-driven invocations. The "two execution paths" framing applies to **Lumiverse built-in tools** (which DO go through a sidecar LLM with description-as-prompt — that\'s how the Council reasons about which to invoke); LumiScript scripts can\'t register sidecar-LLM-driven tools. Practical implication: do your own analysis inside the handler — `generateStructured` against a fast connection is the canonical pattern. One-line tool descriptions are sufficient for extension tools — the description doesn\'t prompt anything; it\'s purely a human label shown in the tool inspector. Set `council_eligible: true` on the definition to make the tool selectable for Council `chance` rolls (the tool then receives Council context on invocation); leave it false for tools only invoked via `api.tools.invoke` or `api.llm.generateWithTools`.',
 
+  'api.webSearch':
+    'Native web search against the user\'s configured provider (SearXNG today). `query({ query, count?, scrape? })` returns ranked `results` (title / url / snippet); with `scrape` (default **true**) it ALSO scrapes the top pages into `documents` (full text) and assembles a prompt-ready `context` string — drop `context` straight into an LLM prompt for grounding / RAG. `scrape: false` is the fast path: titles / URLs / snippets only, no page fetches. `query` REJECTS with "Web search is disabled" when the user has no provider configured — branch on `getSettings().enabled` first. `getSettings()` returns the SAFE config (provider, limits, language, safeSearch, engines, `hasApiKey`) — NEVER the API key itself. The active userId is folded in implicitly. Use cases: Council "look it up" tools, grounding a reply in current info, RAG over fresh results. Requires `web_search` permission.',
+
+  'api.connections':
+    'Read-only view of the user\'s LLM connection profiles — the same profiles `api.llm` resolves against. `list()` / `get(id)` / `getDefault()` (the `is_default` profile, else the first available) / `findByName(name)` (case-insensitive). Each `Connection` is snake_case (mirrors the host DTO: `id`, `name`, `provider`, `api_url`, `model`, `preset_id`, `is_default`, `has_api_key`, `metadata`, `reasoning_bindings`) and is a SAFE view — it carries `has_api_key: boolean`, NEVER the key. `id` / `name` map straight to `api.llm` options `connectionId` / `connectionName`, so you can let the user pick a connection (pair with `api.ui.components.mountSelect` / `mountModelCombobox`) and route a generation to it. **Intentionally read-only** — connections hold provider credentials and are managed by the user in Lumiverse settings, never by scripts (no create / update / delete). Free tier. The active userId is folded in implicitly.',
+
+  'api.users':
+    'Active-user context probes. `isVisible()` — true if the user has the app visible in at least one session, false if every session is hidden / backgrounded (or there is no open session); use it to choose a push notification (when the user is away) vs. an in-app toast / UI update (when present), or to defer background work. `getRole()` — the user\'s Lumiverse role: `\'operator\' | \'admin\' | \'user\'` (internal owners report as `operator`); gate operator-only diagnostics or admin-only actions on it. Free tier; the active userId is folded in implicitly.',
+
+  'api.version':
+    'The running Lumiverse versions: `getBackend()` and `getFrontend()` each return a semver string. Use for feature-gating — branch a script on whether the host is new enough for a given event or API. Compare numerically (split on `.`, strip any `-rc` / `+build` suffix) rather than string `===`; LumiScript\'s own `host-version.ts` `compareVersions` helper is the reference implementation. Free tier. (This is the script-facing view of the same version probe LumiScript uses internally for its `minimum_lumiverse_version` check.)',
+
   'api.databanks':
     'Three ownership scopes — `global` (no owner key), `character` (owned by character UUID), `chat` (owned by chat UUID). Documents within a databank inherit their parent\'s scope. Document ingestion is **asynchronous**: `documents.create()` returns immediately with `status: \'pending\'`; use `documents.waitUntilReady(docId)` to await chunking + vectorization. For input-bar actions or other UI surfaces that need ready-state confirmation, prefer `waitUntilReady` over manual polling.\n\n**File-type constraint**: Lumiverse accepts text-oriented uploads only — `.txt`, `.md`, `.markdown`, `.csv`, `.tsv`, `.json`, `.xml`, `.html`, `.htm`, `.yaml`, `.yml`, `.log`, `.rst`, `.rtf`. PDFs, images, archives, audio, and other binary payloads are rejected at ingestion even though `DatabankDocumentCreateInput.data` is typed `string | Uint8Array`. For non-text persistence, use `api.files.*` (UTF-8 strings — base64-encode binary first) or `api.images.*` (raw image bytes). Max 10 MB per document.',
+
+  'api.memories.cortex':
+    '`api.memories.*` bridges Lumiverse\'s **hybrid memory architecture**, under one `memories` permission. Two halves: the **Memory Cortex** (entity/relation graph + narrative-arc consolidations + salience + vaults + chat interlinks + fused retrieval) and **Long-Term Chat Memory** (the vectorized chunk store behind the `{{memories}}` macro — see `api.memories.chatMemory`). **Distinct from `api.databanks`** — databanks are explicitly-uploaded reference documents; the cortex is what Lumiverse automatically *remembers* about a chat. The active userId is folded in implicitly, and **every chat-scoped call is ownership-checked** host-side (other users\' chats return `null` on reads / throw on writes). `cortex.query(CortexQueryDTO)` is the headline call: it fuses semantic search + salience + recency + reinforcement + emotional + entity components into a ranked `CortexResult` (the same shape the host uses during prompt assembly) — use it for grounding/RAG over what the chat remembers. Results are server-cached ~5 min per chat+query shape; `getCached` / `getCachedLinked` read that warm cache without re-querying (return `null` when empty/expired); `invalidateCache` drops it. `queryLinked` resolves every attached vault + interlink target in parallel. `getConfig` / `putConfig` read + patch the (permissive, host-owned) cortex configuration.',
+
+  'api.memories.entities':
+    'The cortex **entity graph** — characters, locations, items, factions, concepts, events. `list` defaults to active-only, ordered by salience; `findByName` matches canonical name OR known aliases. `upsert` is a **smart merge** against the canonical name + aliases (not a blind insert) — pass `MemoryEntityUpsert { name, type, aliases?, confidence?, role?, provisional? }`; entities below the configured confidence threshold are dropped host-side. Mutators: `updateStatus` (active / inactive / deceased / destroyed / unknown), `addFacts` (deduplicated, keeps the most recent 20), `updateEmotionalValence` (replaces the running valence map). Use to build entity dashboards, replay your own NER into the graph, or correct what Lumiverse extracted.',
+
+  'api.memories.relations':
+    'The typed **relation graph** between entities. `list` is active edges only; `listAll` includes superseded/merged (diagnostics); `forEntity` / `forEntities` filter by incident entity. **`upsert` uses entity NAMES, not ids** (`MemoryRelationUpsert { source, target, type, label, sentiment }`) — the host resolves canonical ids server-side. **Gotcha: both endpoints must already exist in the entity graph** — call `entities.upsert` for source + target first, or the relation is silently dropped and `upsert` returns `null` (not the row). Always null-check the return.',
+
+  'api.memories.consolidations':
+    'Narrative-arc **consolidations** — compressed summaries across a tier of chunks (tier 1 = scene, 2 = chapter, …). `list` (optionally tier-filtered, most-recent-first) and `latestArc` read them; `run` triggers a background pass. **`run` is extractive / heuristic only — it does NOT call a sidecar LLM** (sidecar-driven consolidation is host-owned and runs automatically during ingestion). `run` is fire-and-forget: it returns immediately and new arcs surface via `list()` once the background job finishes.',
+
+  'api.memories.vaults':
+    '**Vaults** are frozen cortex snapshots — capture a chat\'s entities + relations + chunk content for reuse. `create({ chatId, name, description? })` copies entities + relations **synchronously** but copies the LanceDB chunks **in the background** (the vault is queryable in structural-only mode until that finishes); `reindex` re-runs the chunk copy (e.g. after an embedding-model swap). `get` returns the vault + entities + relations; `getChunks` the chunk snapshot. Attach a vault to other chats as read-only knowledge via `api.memories.links`.',
+
+  'api.memories.links':
+    'Chat **links** — two kinds via `attach(ChatLinkAttach)`: a **vault attach** (`linkType: \'vault\'`, `vaultId`) gives a chat read-only access to a frozen snapshot, and an **interlink** (`linkType: \'interlink\'`, `targetChatId`) makes two chats see each other\'s live entities/relations (pass `bidirectional: true` to also create the reverse edge on the target). `list` enumerates a chat\'s links; `toggle` enables/disables without removing; `remove` deletes. Linked data surfaces through `cortex.queryLinked`.',
+
+  'api.memories.chatMemory':
+    'Long-Term Chat Memory — the vectorized **chunk store behind the `{{memories}}` macro**. `get(chatId, { topK })` runs the same top-K hybrid (vector + BM25) retrieval the macro uses and returns `ChatMemoryResult { chunks, formatted, count, … }` — **equivalent to `api.chats.getMemories()`** but under the `memories` permission (use that lighter alias if `memories` is overkill). `listChunks` inspects the raw index; `warm` rebuilds stale chunks + queues pending vectorizations (no-op `status: \'skipped\'` when chat vectorization is disabled — check the user\'s embedding config first); `invalidate` drops the cached retrieval. **Distinct from `cortex`** — chatMemory is flat semantic chunk retrieval; cortex is the structured graph + fused scoring.',
 
   'api.images':
     'Thin wrapper over Lumiverse\'s image store. Use cases: persist generated / fetched / pasted images and obtain an `imageId` that can be passed to `api.theme.extractColors` for palette derivation, stored on a character avatar, or attached to a databank document. **Two upload paths**: `upload({data: Uint8Array, ...})` for raw bytes (sourceable from `api.utils.http.*` with `responseType: \'arraybuffer\'`, `api.utils.image.dataUrlToBytes(...).data`, `api.files.*`, etc.); `uploadFromDataUrl(dataUrl, options?)` for `data:image/...;base64,...` URLs. Both return `ImageInfo` whose `id` is the persisted UUID. **Distinct from `api.utils.image.*`** — those are CHILD-side byte-manipulation helpers (mime sniff, dataUrl ↔ bytes conversion); `api.images.*` is HOST-side persistence. Requires `images` permission.',
@@ -3100,8 +3975,14 @@ export const NAMESPACE_CONCEPTS: Record<string, string> = {
   'api.theme':
     'Lumiverse theme manipulation surface. Three usage tiers, increasing in flexibility: **simple** — `applyPalette({accent: {h, s, l}})` and let Lumiverse generate the full coherent ~80+ CSS variable set; **mode-aware** — `apply({variablesByMode: {dark: {...}, light: {...}}})` and the host dispatches per-mode at apply time; **expert** — `generateVariables(config)` → tweak → `apply({variables: ...})` for full programmatic control. **Per-script attribution**: multiple LumiScript scripts can apply themes concurrently — LumiScript maintains a per-script override registry and merges before pushing to spindle. Conflict resolution: per-key last-applied-wins for variables, most-recent-script-wins for palette. Auto-cleared on script disable / delete (no manual `clear()` needed for normal disable flows). **Cookbook pattern for interactive UI scripts**: scripts that combine theme apply with interactive DOM should clear their theme in the close / dismiss handler symmetric to DOM removal — `clear()` drops just this script\'s contributions, other scripts\' themes survive. `extractColors(imageId)` pairs cleanly with `applyPalette({accent: result.dominantHsl})` for image-driven theming (avatar-themed UI, dynamic mood theming, etc.). Requires `app_manipulation` permission.',
 
+  'api.ui':
+    'User-facing UI surface — notifications (`toast`, `pushNotification`), dialogs (`prompt`, `confirm`, `editText`, `showModal`, `showContextMenu`), script-owned regions (`showAdvancedModal`, `createFloatWidget`, `registerDrawerTab`), the native file picker (`pickFile`), and **navigation**. The sub-namespaces `api.ui.dom.*` (DOM injection), `api.ui.components.*` (host components), and `api.ui.events.*` (reactive keyboard / drawer / settings state) have their own concept entries. `pickFile(options?)` opens the browser\'s native file picker and resolves with the selected `PickedFile[]` (bytes as `Uint8Array`) — free tier (the native dialog is the user-action gate); rejects if a file exceeds `maxSizeBytes`, resolves `[]` on cancel. **Script-owned UI regions** form a ladder of increasing scope: `showAdvancedModal` (a modal), `createFloatWidget` (a draggable overlay, `ui_panels`), `registerDrawerTab` (a sidebar tab), and `mountApp(options?)` — a route-persistent, full-bleed `document.body` portal (`position: \'start\' | \'end\' | \'app-overlay\'`) for full-screen overlays / persistent chrome beyond the others. All hand back a `.root` DOMHandle you fill via `api.ui.dom.*`; `mountApp` / `showAdvancedModal` / DOM / components require `app_manipulation`. **Navigate vs. contribute** is the key distinction for the navigation methods: `registerDrawerTab` *contributes* a new tab your script owns, whereas `openDrawerTab(id)` / `openSettings(viewId?)` / `openCommandPalette()` *navigate* the user to surfaces that already exist (built-in OR contributed by any extension). Enumerate targets with `getDrawerTabs()` / `getSettingsTabs()` (each returns id + names + keywords + source) and deep-link by id — you can jump into another extension\'s tab if you know its id. Navigation calls resolve once the host dispatches the event (the frontend applies it asynchronously); `closeDrawer` / `closeSettings` / `closeCommandPalette` reverse them. Use for onboarding nudges ("open the Connections drawer"), agent-driven walkthroughs, and "fix it" deep links. The navigation methods are free tier — other `api.ui.*` methods carry their own permissions (see the per-method rows).',
+
+  'api.ui.events':
+    'Reactive Lumiverse UI state — virtual keyboard, side drawer, settings modal. Each surface has BOTH a snapshot getter and a change subscription. **Snapshots** (`getKeyboardState` / `getDrawerState` / `getSettingsState`) resolve with the latest known state (keyboard `{ visible, insetBottom, viewportWidth, viewportHeight }`, drawer `{ open, tabId }`, settings `{ open, view }`) — async because they cross the worker boundary, but served from a cache the frontend keeps fresh (no per-call round-trip). **Subscriptions** (`onKeyboardChange` / `onDrawerChange` / `onSettingsChange`) fire on every change with the new state and return an unsubscribe fn. **Primary use case: mobile-safe positioning** — reposition float widgets / injected DOM when the on-screen keyboard opens (`insetBottom`) or the visual viewport changes. Free tier. Lifecycle: a live subscription keeps the script pinned (it won\'t be evicted while a handler is registered) and is torn down automatically on script disable — call the returned unsub when you\'re done to release the pin sooner. Keyboard events are most relevant on mobile / PWA; on desktop the drawer + settings channels are the active ones.',
+
   'api.ui.dom':
-    'DOM injection surface. `inject(target, html, position?)` returns a `DOMHandle`; subsequent calls go through the handle (`update`, `remove`, `on`, `injectChild`, `read`, `makeDraggable`). `addStyle(css)` adds a scoped stylesheet (wrapped in `@scope ([data-ls-script="<id>"])` — only matches script-injected DOM, doesn\'t cascade into the host app shell). `injectAtMessage(messageId, html, options?)` attaches DOM to a specific chat message (header, before, after, footer positions). `delegate(selector, event, handler, options?)` installs a capture-phase event-delegated listener at a known root — use to react to events on host DOM you didn\'t inject (e.g. LLM-emitted interactive elements inside `.mes_text` content). `cleanup()` removes ALL of this script\'s DOM in one call. Requires `app_manipulation` permission.\n\n**Styling host UI requires inline `<style>` injection, NOT `addStyle`.** Because `addStyle` wraps its CSS in `@scope ([data-ls-script="<id>"])`, every rule only matches descendants of script-injected DOM — host elements (chat input bar, message bubbles, toolbar buttons, the body itself) are unreachable. To style host DOM (`button[aria-label="..."]`, `[class*="hostClass"]`, `body:has(.my-toggle:checked) ...` selectors, etc.), include a `<style>` block in your `inject()` HTML. CSS rules inside a `<style>` element are document-global regardless of where the tag sits in the DOM, so they reach host elements. The wrapper (`data-ls-script="<id>"`) still carries cleanup attribution — script disable removes the wrapper, the `<style>` goes with it, host UI returns to baseline. Same lifecycle as `addStyle`; different reach.\n\n**Inline `<style>` blocks and `opts.id`-dedup DON\'T MIX.** Re-firing `inject(target, html, { id })` with an `id` that already exists triggers the `dom_update` IPC path on the frontend, which replaces the wrapper\'s `innerHTML` in place. Browsers don\'t reliably reactivate `<style>` elements added via `innerHTML` — the tag is in the DOM but its rules don\'t register into the active stylesheet list. Net effect: first fire works, second fire silently loses every CSS rule from the inline `<style>` (host elements re-appear; the script\'s own UI loses its styling too). For scripts that combine inline `<style>` blocks with re-firing triggers (`ls:startup` + `CHAT_SWITCHED` + manual Run-button), DROP the `id` and call `api.ui.dom.cleanup()` at the top of the body instead. `cleanup()` removes only THIS script\'s DOM + styles, leaves other scripts untouched, and forces every fire to take the fresh-inject path which parses `<style>` correctly.\n\n**HTML sanitisation.** Every HTML payload — `inject`, `update`, `injectChild`, `injectAtMessage` — is run through DOMPurify with strict defaults plus `FORBID_TAGS: [\'iframe\', \'frame\', \'object\', \'embed\', \'form\']` (matching the host\'s three-layer CSP + DOMPurify + X-Frame-Options policy). DOMPurify defaults strip all `on*` event handler attributes (`onclick`, `onerror`, `onload`, `onmouseover`, etc.), `<script>` tags, `javascript:` URLs, `data:` URLs on dangerous elements, the `formaction` attribute, and other XSS vectors. **When content is stripped, the affected script\'s editor console gets a `[security]` entry** naming what was removed (tells you why your `<button onclick="...">` button doesn\'t work).\n\n**Event handlers — use delegation, not inline.** Inline `onclick="..."` attributes are stripped by sanitisation. The replacement is `DOMHandle.on(event, handler)` event delegation with a `data-*` attribute on the trigger element:\n\n```js\n// Stripped at injection — button does nothing:\nhandle.update(\'<button onclick="doThing()">Click</button>\');\n\n// Recommended:\nhandle.update(\'<button data-action="do-thing">Click</button>\');\nhandle.on(\'click\', (ev) => {\n  if (ev.target.dataset.action !== \'do-thing\') return;\n  // ...do thing\n});\n```\n\nThe delegation reads `event.target.dataset.action` (not a `closest()` walk), so when the visible button content is bigger than its padded text area (icon SVG, `<img>`, decorative `<span>`), the click target can be the inner element — which lacks the `data-*` attribute, so the handler silently no-ops. Standard fix: `pointer-events: none` on the decorative inner content so clicks pass through to the button itself.\n\n**Read access.** `handle.read(options?)` returns a `SerializedDOMElement` snapshot of the bound element — `tag`, `attrs` (with internal `data-ls-*` and `data-spindle-ext` stripped), `text`, `childCount`, plus optional `html` for the inner markup. Async because it awaits a frontend roundtrip. Multi-root or text-only injections return the LumiScript wrapper snapshot; single-root injections return the user\'s element directly. Returns `null` if the element vanished on the frontend (live DOM raced ahead of script logic) — distinct from `DomHandleReleasedError` which throws after `handle.remove()`.\n\n**Spindle wrapper nesting (gotcha).** `ctx.dom.inject` wraps every payload in a Spindle wrapper `<div data-spindle-ext>` containing a LumiScript wrapper `<div data-ls-el data-ls-script>` containing your HTML. Two levels of wrapper sit ABOVE your root element. Code that walks down to the user\'s root must do `wrapper.firstElementChild?.firstElementChild`. The `data-ls-script` attribute is what `addStyle`\'s `@scope` rules match.',
+    'DOM injection surface. `inject(target, html, position?)` returns a `DOMHandle`; subsequent calls go through the handle (`update`, `remove`, `on`, `injectChild`, `read`, `makeDraggable`). `addStyle(css)` adds a scoped stylesheet (wrapped in `@scope ([data-ls-script="<id>"])` — only matches script-injected DOM, doesn\'t cascade into the host app shell). `injectAtMessage(messageId, html, options?)` attaches DOM to a specific chat message (header, before, after, footer positions). `delegate(selector, event, handler, options?)` installs a capture-phase event-delegated listener at a known root — use to react to events on host DOM you didn\'t inject (e.g. LLM-emitted interactive elements inside `.mes_text` content). `cleanup()` removes ALL of this script\'s DOM in one call. Requires `app_manipulation` permission.\n\n**Styling host UI requires inline `<style>` injection, NOT `addStyle`.** Because `addStyle` wraps its CSS in `@scope ([data-ls-script="<id>"])`, every rule only matches descendants of script-injected DOM — host elements (chat input bar, message bubbles, toolbar buttons, the body itself) are unreachable. To style host DOM (`button[aria-label="..."]`, `[class*="hostClass"]`, `body:has(.my-toggle:checked) ...` selectors, etc.), include a `<style>` block in your `inject()` HTML. CSS rules inside a `<style>` element are document-global regardless of where the tag sits in the DOM, so they reach host elements. The wrapper (`data-ls-script="<id>"`) still carries cleanup attribution — script disable removes the wrapper, the `<style>` goes with it, host UI returns to baseline. Same lifecycle as `addStyle`; different reach.\n\n**Top-level at-rules don\'t survive `addStyle`.** `addStyle` wraps the whole stylesheet in its `@scope` block, and at-rules CSS only permits at the top level — `@font-face`, `@keyframes`, and similar — are invalid nested inside `@scope`, so the browser silently drops them (the surrounding scoped style rules still apply, which makes the failure easy to miss: a custom `@font-face` never registers and the text falls back to a default face, with no error and no console entry). Put any such at-rule in an inline `<style>` block inside an `inject()` HTML payload instead — that `<style>` is document-global (NOT `@scope`-wrapped), so the `@font-face` / `@keyframes` registers normally. Same split as host-UI styling above: descendant-scoped rules go through `addStyle`; anything that must live at stylesheet top level goes in an inline `<style>`.\n\n**Inline `<style>` blocks and `opts.id`-dedup DON\'T MIX.** Re-firing `inject(target, html, { id })` with an `id` that already exists triggers the `dom_update` IPC path on the frontend, which replaces the wrapper\'s `innerHTML` in place. Browsers don\'t reliably reactivate `<style>` elements added via `innerHTML` — the tag is in the DOM but its rules don\'t register into the active stylesheet list. Net effect: first fire works, second fire silently loses every CSS rule from the inline `<style>` (host elements re-appear; the script\'s own UI loses its styling too). For scripts that combine inline `<style>` blocks with re-firing triggers (`ls:startup` + `CHAT_SWITCHED` + manual Run-button), DROP the `id` and call `api.ui.dom.cleanup()` at the top of the body instead. `cleanup()` removes only THIS script\'s DOM + styles, leaves other scripts untouched, and forces every fire to take the fresh-inject path which parses `<style>` correctly.\n\n**HTML sanitisation.** Every HTML payload — `inject`, `update`, `injectChild`, `injectAtMessage` — is run through DOMPurify with strict defaults plus `FORBID_TAGS: [\'iframe\', \'frame\', \'object\', \'embed\', \'form\']` (matching the host\'s three-layer CSP + DOMPurify + X-Frame-Options policy). DOMPurify defaults strip all `on*` event handler attributes (`onclick`, `onerror`, `onload`, `onmouseover`, etc.), `<script>` tags, `javascript:` URLs, `data:` URLs on dangerous elements, the `formaction` attribute, and other XSS vectors. **When content is stripped, the affected script\'s editor console gets a `[security]` entry** naming what was removed (tells you why your `<button onclick="...">` button doesn\'t work).\n\n**Event handlers — use delegation, not inline.** Inline `onclick="..."` attributes are stripped by sanitisation. The replacement is `DOMHandle.on(event, handler)` event delegation with a `data-*` attribute on the trigger element:\n\n```js\n// Stripped at injection — button does nothing:\nhandle.update(\'<button onclick="doThing()">Click</button>\');\n\n// Recommended:\nhandle.update(\'<button data-action="do-thing">Click</button>\');\nhandle.on(\'click\', (ev) => {\n  if (ev.target.dataset.action !== \'do-thing\') return;\n  // ...do thing\n});\n```\n\nThe delegation reads `event.target.dataset.action` (not a `closest()` walk), so when the visible button content is bigger than its padded text area (icon SVG, `<img>`, decorative `<span>`), the click target can be the inner element — which lacks the `data-*` attribute, so the handler silently no-ops. Standard fix: `pointer-events: none` on the decorative inner content so clicks pass through to the button itself.\n\n**Read access.** `handle.read(options?)` returns a `SerializedDOMElement` snapshot of the bound element — `tag`, `attrs` (with internal `data-ls-*` and `data-spindle-ext` stripped), `text`, `childCount`, plus optional `html` for the inner markup. Async because it awaits a frontend roundtrip. Multi-root or text-only injections return the LumiScript wrapper snapshot; single-root injections return the user\'s element directly. Returns `null` if the element vanished on the frontend (live DOM raced ahead of script logic) — distinct from `DomHandleReleasedError` which throws after `handle.remove()`.\n\n**Spindle wrapper nesting (gotcha).** `ctx.dom.inject` wraps every payload in a Spindle wrapper `<div data-spindle-ext>` containing a LumiScript wrapper `<div data-ls-el data-ls-script>` containing your HTML. Two levels of wrapper sit ABOVE your root element. Code that walks down to the user\'s root must do `wrapper.firstElementChild?.firstElementChild`. The `data-ls-script` attribute is what `addStyle`\'s `@scope` rules match.',
 };
 
 /**
@@ -3119,7 +4000,7 @@ export const NAMESPACE_CONCEPTS: Record<string, string> = {
  * top of a section.
  */
 export const PERMISSION_MODEL_INTRO: string =
-  '**DO NOT WRITE `// @permissions` OR `// @permission` IN YOUR SCRIPT.** Neither is a LumiScript directive. **LumiScript does not parse ANY script-header directives currently** — including `// @triggers`, which despite the name is purely a documentary comment with no runtime effect (event wiring happens in the editor UI; see the **Trigger model** section). Writing `@permissions` or `@permission` in a script header is a **no-op** — it looks like it grants permissions but actually does nothing; your script will then fail at runtime when it calls a gated method. This is the single most common script-permission-bug we see; if you find yourself reaching for an `@permission` directive, stop and re-read this section.\n\n' +
+  '**DO NOT WRITE `// @permissions` OR `// @permission` IN YOUR SCRIPT.** Neither is a LumiScript directive. **LumiScript does not parse `@permissions`, `@permission`, or `@triggers` directives** — `// @triggers`, despite the name, is purely a documentary comment with no runtime effect (event wiring happens in the editor UI; see the **Trigger model** section). (The one script-header directive LumiScript *does* read is the unrelated `// @ls:reload-on-edit` hot-reload opt-in — nothing to do with permissions or wiring.) Writing `@permissions` or `@permission` in a script header is a **no-op** — it looks like it grants permissions but actually does nothing; your script will then fail at runtime when it calls a gated method. This is the single most common script-permission-bug we see; if you find yourself reaching for an `@permission` directive, stop and re-read this section.\n\n' +
   'How permissions actually work: LumiScript permissions are declared **at the extension level** in `spindle.json` and granted once by the user when the extension is enabled. **There are no per-script permission declarations** — every script inside the LumiScript extension shares the same grant set. The user (not the script author) controls what\'s granted. ' +
   '(Earlier mental models à la SillyTavern, where each script declares its own perms, do NOT apply here.)\n\n' +
   '**Permissions gate `api.*` method calls, NOT the `data` trigger global.** Reading `data.message.content` from a `MESSAGE_SENT` trigger does NOT require `chat_mutation` — the host already routed the event payload to your script for free. Permissions only kick in when your script reaches back through the API (e.g. `api.chat.getMessages`, `api.chat.editMessage`). Don\'t list a permission unless your script actually calls a gated method.\n\n' +
@@ -3153,9 +4034,11 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   tools:             'Register Council-eligible LLM tools via `api.tools.*`.',
   event_tracking:    'Record + query persistent events via `api.events.*`.',
   databanks:         'CRUD on databanks + their documents via `api.databanks.*` (vectorised reference material attached to global / character / chat scopes).',
+  memories:          'Full access to Lumiverse\'s hybrid memory architecture via `api.memories.*` — the Memory Cortex (entity/relation graph, narrative-arc consolidations, salience, vault snapshots, chat interlinks, fused retrieval) and Long-Term Chat Memory (the vectorized chunk store behind the `{{memories}}` macro). Read + write; every chat-scoped call is ownership-checked against the active user.',
   images:            'Persist + retrieve images in Lumiverse\'s image store via `api.images.*`. Returns `ImageInfo` whose `id` can be passed to `api.theme.extractColors`, stored on a character avatar, or attached to a databank document.',
   image_gen:         'Generate images via `api.imageGen.*` against the user\'s configured image-gen connection profiles. Returns `ImageGenResult` with both a base64 data URL (immediate render) and (when persisted) a canonical `imageId` accepted by `api.images.get` / `api.theme.extractColors` / `characters.setAvatar`, plus an auth-free `imageUrl` for push notifications. Provider/connection metadata available for dynamic parameter UIs.',
   oauth:             'OAuth callback handling via `api.oauth.*` — the only inbound-HTTP hook Spindle exposes to extensions. Wrapper is intentionally thin: it covers the callback registration, CSRF state nonce, and the callback URL path. Constructing the authorize URL, exchanging the code for a token, and persisting + refreshing tokens are the script\'s responsibility (pair with `api.utils.http` + `api.enclave`).',
+  web_search:        'Run web searches via `api.webSearch.*` against the user\'s configured search provider (e.g. SearXNG). `query` returns ranked results plus optional scraped page content + an assembled context string; `getSettings` exposes the safe provider config (never the API key — only `hasApiKey`).',
 };
 
 /**
@@ -3199,7 +4082,7 @@ export const TRIGGER_MODEL_INTRO: string =
   'For state that needs to survive across fires, pick one of:\n\n' +
   '- **`globalThis.<key>`** — process-scoped, persists for the lifetime of the script-runner subprocess (i.e. until the extension reloads). Cheapest option; ideal for in-memory caches. Example: `globalThis.lsScoringBankId ??= await ensureBank();`. (Note: globalThis values survive *editor saves* too — see the saved memory note about globalThis-cache-invalidation traps if you cache anything keyed on script identity.)\n' +
   '- **`api.variables.{local,global,character,chat}`** — durable JSON-serialised stores with explicit scope semantics. Survives extension reloads.\n' +
-  '- **Registered handlers** (`api.broadcast.on(event, handler)`, `api.macros.register(...)`, `api.tools.register(...)`, `api.chat.registerContentProcessor(...)`, etc.) — these capture closures over the proxy and *do* survive across fires until the script is disabled or deleted. Useful for "subscriber-only" patterns where a script registers a handler in one fire and that handler fires later from a different source.\n\n' +
+  '- **Registered handlers** (`api.macros.register(...)`, `api.tools.register(...)`, `api.chat.registerContentProcessor(...)`, etc.) — these capture closures over the proxy and *do* survive across fires until the script is disabled or deleted. Useful for "subscriber-only" patterns where a script registers a handler in one fire and it fires later from a different source. **`api.broadcast.on(...)` is the one exception**: its subscriptions also persist between fires, but the owning script\'s next run clears them at its START and the body re-registers — so a re-firing script never stacks duplicate listeners, and a fire-once script (e.g. wired to `ls:startup`) keeps them until disabled or deleted.\n\n' +
   '**Common misconception**: "the local variable persists until the extension reloads." It does NOT. Each fire is its own scope. The boundary is per-fire, not per-extension-load.\n\n' +
   "**Three similar-sounding systems, three different problems** — keep them straight:\n\n" +
   "- **Editor-UI event wiring** — react to Lumiverse host *lifecycle* events (MESSAGE_SENT, GENERATION_ENDED, CHAT_CHANGED, ...). Configured per-script in the script editor.\n" +
@@ -3463,12 +4346,16 @@ if (data.__event === 'MESSAGE_SENT') {
           reloads.
         </li>
         <li>
-          Registered handlers (<Code>api.broadcast.on</Code>,
-          {' '}<Code>api.macros.register</Code>, <Code>api.tools.register</Code>,
+          Registered handlers (<Code>api.macros.register</Code>,
+          {' '}<Code>api.tools.register</Code>,
           {' '}<Code>api.chat.registerContentProcessor</Code>, …) — capture closures
           over the proxy and survive across fires until the script is disabled or
           deleted. Useful for "subscriber-only" patterns where a script registers a
-          handler in one fire and that handler fires later from a different source.
+          handler in one fire and it fires later from a different source.
+          {' '}<Code>api.broadcast.on</Code> is the exception — subscriptions persist
+          between fires too, but the next run of the owning script clears them at its
+          start and the body re-registers, so re-firing never stacks duplicates while
+          a fire-once script keeps them until disabled or deleted.
         </li>
       </ul>
 

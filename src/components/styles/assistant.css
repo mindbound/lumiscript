@@ -44,6 +44,7 @@
   max-height: 88vh;
   display: flex;
   flex-direction: column;
+  position: relative; /* positioning context for the Memory panel overlay */
   background: var(--lumiverse-bg-elevated, rgb(10, 10, 10));
   border: 1px solid var(--lumiverse-border, hsla(255, 100%, 56%, 0.12));
   border-radius: var(--lumiverse-radius, 8px);
@@ -139,16 +140,6 @@
   letter-spacing: 0.06em;
   color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.55));
 }
-.ls-asst-connection-select {
-  flex: 1;
-  padding: 6px 10px;
-  font-size: 12px;
-  font-family: inherit;
-  color: var(--lumiverse-text, rgba(255, 255, 255, 0.92));
-  background: var(--lumiverse-fill-2, rgba(255, 255, 255, 0.04));
-  border: 1px solid var(--lumiverse-border-light, rgba(128, 128, 128, 0.18));
-  border-radius: var(--lumiverse-radius-sm, 6px);
-}
 .ls-asst-connection-empty {
   font-size: 11px;
   color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.55));
@@ -175,11 +166,31 @@
 }
 .ls-asst-empty p { margin: 0 0 8px; }
 .ls-asst-empty ul {
-  margin: 6px 0 0;
-  padding-left: 20px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
   text-align: left;
 }
-.ls-asst-empty li { margin: 3px 0; }
+.ls-asst-empty li { margin: 4px 0; }
+/* Clickable starter prompts — fill the composer on click. */
+.ls-asst-example {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.88));
+  background: var(--lumiverse-fill-2, rgba(255, 255, 255, 0.05));
+  border: 1px solid var(--lumiverse-border-light, rgba(128, 128, 128, 0.2));
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 120ms, border-color 120ms;
+}
+.ls-asst-example:hover {
+  background: color-mix(in srgb, var(--lumiverse-accent, rgb(147, 112, 219)) 16%, transparent);
+  border-color: var(--lumiverse-accent, rgb(147, 112, 219));
+}
 .ls-asst-empty code {
   font-family: var(--lumiverse-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   font-size: 11px;
@@ -212,10 +223,36 @@
 }
 
 .ls-asst-bubble-role {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.55));
+}
+/* Hover-revealed "copy reply" button in the assistant bubble's role row. */
+.ls-asst-bubble-copy {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 4px;
+  background: transparent;
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.55));
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms, color 120ms, background 120ms;
+}
+.ls-asst-bubble:hover .ls-asst-bubble-copy,
+.ls-asst-bubble-copy:focus-visible {
+  opacity: 1;
+}
+.ls-asst-bubble-copy:hover {
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.92));
+  background: var(--lumiverse-fill-3, rgba(255, 255, 255, 0.12));
 }
 
 /* User-stopped bubble. */
@@ -303,6 +340,199 @@
   color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.65));
   cursor: help;
 }
+
+/* "Applied to «X»" transcript marker — a centered pill between bubbles marking
+   where the user applied assistant-proposed code to a script. */
+.ls-asst-applied {
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px auto;
+  padding: 3px 12px;
+  font-size: 11px;
+  border-radius: 999px;
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.6));
+  background: var(--lumiverse-fill-1, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--lumiverse-border-light, rgba(128, 128, 128, 0.18));
+}
+.ls-asst-applied svg { flex-shrink: 0; color: rgb(142, 209, 134); }
+.ls-asst-applied strong { color: var(--lumiverse-text, rgba(255, 255, 255, 0.9)); font-weight: 600; }
+
+/* ── Memory panel (editable view of Lisa's persistent notes) ─────────────── */
+.ls-mem-panel {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  padding: 14px 18px 16px;
+  /* Near-opaque — the panel covers chat content, so it must NOT be translucent
+     like the modal's `--lumiverse-bg-elevated` (which only reads solid over the
+     dimmed backdrop). Reuse the host's modal-surface token (≈98% opaque). */
+  background: var(--lumiverse-gradient-modal, linear-gradient(135deg, rgba(35, 30, 48, 0.98), rgba(20, 17, 28, 0.98)));
+  border-radius: var(--lumiverse-radius, 8px);
+  overflow: hidden;
+}
+.ls-mem-header { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.ls-mem-title {
+  flex: 1;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.92));
+}
+.ls-mem-count { font-size: 11px; font-weight: 600; color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.5)); }
+.ls-mem-intro {
+  margin: 8px 0 12px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.6));
+}
+.ls-mem-consolidate {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.9));
+  background: var(--lumiverse-fill-2, rgba(255, 255, 255, 0.06));
+  border: 1px solid var(--lumiverse-border-light, rgba(128, 128, 128, 0.25));
+  border-radius: var(--lumiverse-radius-sm, 6px);
+  cursor: pointer;
+  transition: background 120ms, border-color 120ms;
+}
+.ls-mem-consolidate:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--lumiverse-accent, rgb(147, 112, 219)) 18%, transparent);
+  border-color: var(--lumiverse-accent, rgb(147, 112, 219));
+}
+.ls-mem-consolidate:disabled { opacity: 0.5; cursor: not-allowed; }
+.ls-mem-status {
+  margin: 10px 0 0;
+  padding: 6px 10px;
+  font-size: 11.5px;
+  border-radius: var(--lumiverse-radius-sm, 6px);
+}
+.ls-mem-status-success {
+  color: rgb(142, 209, 134);
+  background: rgba(142, 209, 134, 0.12);
+  border: 1px solid rgba(142, 209, 134, 0.3);
+}
+.ls-mem-status-error {
+  color: rgb(246, 130, 130);
+  background: rgba(246, 130, 130, 0.12);
+  border: 1px solid rgba(246, 130, 130, 0.3);
+}
+.ls-mem-add {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  margin-bottom: 12px;
+  background: var(--lumiverse-fill-2, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--lumiverse-border-light, rgba(128, 128, 128, 0.18));
+  border-radius: var(--lumiverse-radius-sm, 6px);
+}
+.ls-mem-add-row { display: flex; align-items: center; gap: 6px; }
+.ls-mem-input, .ls-mem-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 9px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.92));
+  background: var(--lumiverse-fill-1, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--lumiverse-border-light, rgba(128, 128, 128, 0.18));
+  border-radius: var(--lumiverse-radius-sm, 6px);
+  outline: none;
+}
+.ls-mem-input:focus, .ls-mem-textarea:focus { border-color: var(--lumiverse-accent, rgb(147, 112, 219)); }
+.ls-mem-textarea { resize: vertical; }
+.ls-mem-input-cat { flex: 1; }
+.ls-mem-add-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--lumiverse-accent-fg, #fff);
+  background: var(--lumiverse-accent, rgb(147, 112, 219));
+  border: 1px solid transparent;
+  border-radius: var(--lumiverse-radius-sm, 6px);
+  cursor: pointer;
+}
+.ls-mem-add-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.ls-mem-list { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+.ls-mem-empty {
+  padding: 24px 8px;
+  text-align: center;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.5));
+}
+.ls-mem-group { display: flex; flex-direction: column; gap: 6px; }
+.ls-mem-group-head {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.45));
+}
+.ls-mem-note {
+  padding: 8px 10px;
+  background: var(--lumiverse-fill-1, rgba(255, 255, 255, 0.03));
+  border: 1px solid var(--lumiverse-border-light, rgba(128, 128, 128, 0.14));
+  border-radius: var(--lumiverse-radius-sm, 6px);
+}
+.ls-mem-note-main { display: flex; align-items: baseline; gap: 8px; }
+.ls-mem-note-hook { flex: 1; font-size: 12.5px; color: var(--lumiverse-text, rgba(255, 255, 255, 0.92)); }
+.ls-mem-src {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 1px 6px;
+  border-radius: 999px;
+}
+.ls-mem-src-lisa { background: rgba(147, 112, 219, 0.18); color: rgb(187, 154, 247); }
+.ls-mem-src-user { background: rgba(142, 209, 134, 0.16); color: rgb(142, 209, 134); }
+.ls-mem-note-detail {
+  margin-top: 5px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.65));
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.ls-mem-note-actions, .ls-mem-edit-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px; }
+.ls-mem-edit { display: flex; flex-direction: column; gap: 6px; }
+.ls-mem-edit-actions { align-items: center; }
+.ls-mem-edit-actions .ls-mem-input-cat { margin-right: auto; }
+.ls-mem-mini {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  font-size: 11px;
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.7));
+  background: var(--lumiverse-fill-2, rgba(255, 255, 255, 0.05));
+  border: 1px solid var(--lumiverse-border-light, rgba(128, 128, 128, 0.18));
+  border-radius: 4px;
+  cursor: pointer;
+}
+.ls-mem-mini:hover { color: var(--lumiverse-text, rgba(255, 255, 255, 0.95)); }
+.ls-mem-mini-save {
+  color: var(--lumiverse-accent-fg, #fff);
+  background: var(--lumiverse-accent, rgb(147, 112, 219));
+  border-color: transparent;
+  font-weight: 600;
+}
+.ls-mem-mini-save:disabled { opacity: 0.45; cursor: not-allowed; }
+.ls-mem-mini-danger:hover { color: rgb(246, 130, 130); border-color: rgba(246, 130, 130, 0.4); }
 .ls-asst-toolchip code {
   font-size: 10.5px;
   color: var(--lumiverse-accent, rgb(147, 112, 219));
@@ -328,12 +558,41 @@
 
 .ls-asst-error {
   align-self: stretch;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   padding: 10px 12px;
   background: rgba(239, 68, 68, 0.12);
   border: 1px solid rgba(239, 68, 68, 0.35);
   border-radius: var(--lumiverse-radius-sm, 6px);
   color: rgb(239, 68, 68);
   font-size: 12px;
+}
+.ls-asst-error-text {
+  flex: 1;
+  min-width: 0;
+}
+.ls-asst-retry-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: rgb(239, 68, 68);
+  background: transparent;
+  border: 1px solid rgba(239, 68, 68, 0.45);
+  border-radius: var(--lumiverse-radius-sm, 6px);
+  cursor: pointer;
+  transition: background 120ms;
+}
+.ls-asst-retry-btn:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.18);
+}
+.ls-asst-retry-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* Inline "Apply to script" toast — appears at the bottom of the message
@@ -393,9 +652,117 @@
 
 .ls-asst-composer {
   display: flex;
+  flex-direction: column;
   gap: 8px;
   padding: 12px 22px 14px;
   border-top: 1px solid var(--lumiverse-border-light, rgba(128, 128, 128, 0.12));
+}
+/* Input row — textarea + send button side by side. `position: relative` so
+   the @-mention menu can float above it (bottom: 100%). */
+.ls-asst-composer-row {
+  display: flex;
+  gap: 8px;
+  position: relative;
+}
+
+/* ── Attached-script chips (above the composer) ────────────────────────── */
+.ls-asst-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.ls-asst-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 4px 3px 8px;
+  max-width: 220px;
+  font-size: 11.5px;
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.92));
+  background: color-mix(in srgb, var(--lumiverse-accent, rgb(147, 112, 219)) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--lumiverse-accent, rgb(147, 112, 219)) 40%, transparent);
+  border-radius: 999px;
+}
+.ls-asst-chip svg { flex-shrink: 0; opacity: 0.85; }
+.ls-asst-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ls-asst-chip-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  flex-shrink: 0;
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.6));
+  background: transparent;
+  border: none;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 120ms, color 120ms;
+}
+.ls-asst-chip-remove:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.95));
+}
+
+/* ── @-mention menu (floats above the input row) ───────────────────────── */
+.ls-asst-mention-menu {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  margin-bottom: 6px;
+  width: min(360px, 100%);
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--lumiverse-gradient-modal, linear-gradient(135deg, rgba(35, 30, 48, 0.99), rgba(20, 17, 28, 0.99)));
+  border: 1px solid var(--lumiverse-border, rgba(128, 128, 128, 0.3));
+  border-radius: var(--lumiverse-radius-sm, 6px);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
+  z-index: 10;
+}
+.ls-asst-mention-empty {
+  padding: 8px 10px;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.55));
+}
+.ls-asst-mention-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  font-size: 12.5px;
+  text-align: left;
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.92));
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.ls-asst-mention-item svg { flex-shrink: 0; opacity: 0.8; }
+.ls-asst-mention-item-active,
+.ls-asst-mention-item:hover {
+  background: color-mix(in srgb, var(--lumiverse-accent, rgb(147, 112, 219)) 22%, transparent);
+}
+.ls-asst-mention-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ls-asst-mention-type {
+  flex-shrink: 0;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.5));
 }
 .ls-asst-input {
   flex: 1;
@@ -413,6 +780,217 @@
   border-color: var(--lumiverse-accent, rgb(147, 112, 219));
 }
 .ls-asst-input:disabled { opacity: 0.55; }
+
+/* ── Attached-file chips + attach-file affordance ──────────────────────── */
+/* File chips reuse .ls-asst-chip but tint neutral (vs the accent of script
+   chips) so the two attachment kinds read distinctly in the tray. */
+.ls-asst-chip-file {
+  background: var(--lumiverse-fill-3, rgba(255, 255, 255, 0.1));
+  border-color: var(--lumiverse-border-light, rgba(128, 128, 128, 0.3));
+}
+
+/* Paperclip button in the composer row — muted icon button, bottom-aligned to
+   flank the textarea opposite the send button. */
+.ls-asst-attach {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  align-self: flex-end;
+  flex-shrink: 0;
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.6));
+  background: var(--lumiverse-fill-2, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--lumiverse-border-light, rgba(128, 128, 128, 0.18));
+  border-radius: var(--lumiverse-radius-sm, 6px);
+  cursor: pointer;
+  transition: color 120ms, background 120ms, border-color 120ms;
+}
+.ls-asst-attach:hover:not(:disabled),
+.ls-asst-attach-on {
+  color: var(--lumiverse-accent, rgb(147, 112, 219));
+  border-color: var(--lumiverse-accent, rgb(147, 112, 219));
+}
+.ls-asst-attach:disabled { opacity: 0.5; cursor: default; }
+
+/* ── File picker popover (floats above the input row, like the @-mention menu) ── */
+.ls-asst-filepicker {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  margin-bottom: 6px;
+  width: min(380px, 100%);
+  display: flex;
+  flex-direction: column;
+  background: var(--lumiverse-gradient-modal, linear-gradient(135deg, rgba(35, 30, 48, 0.99), rgba(20, 17, 28, 0.99)));
+  border: 1px solid var(--lumiverse-border, rgba(128, 128, 128, 0.3));
+  border-radius: var(--lumiverse-radius-sm, 6px);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
+  z-index: 11;
+}
+.ls-asst-filepicker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.92));
+  border-bottom: 1px solid var(--lumiverse-border-light, rgba(128, 128, 128, 0.16));
+}
+.ls-asst-filepicker-close {
+  display: inline-flex;
+  padding: 2px;
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.6));
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.ls-asst-filepicker-close:hover { background: rgba(255, 255, 255, 0.12); }
+.ls-asst-filepicker-error {
+  margin: 8px 10px 0;
+  padding: 6px 8px;
+  font-size: 11.5px;
+  color: var(--lumiverse-danger, rgb(246, 130, 130));
+  background: color-mix(in srgb, var(--lumiverse-danger, rgb(246, 130, 130)) 14%, transparent);
+  border-radius: 4px;
+}
+.ls-asst-filepicker-list {
+  max-height: 200px;
+  overflow-y: auto;
+  padding: 4px;
+}
+.ls-asst-filepicker-empty {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 10px;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.55));
+}
+.ls-asst-filepicker-empty code {
+  font-style: normal;
+  font-size: 11px;
+  padding: 1px 4px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+}
+.ls-asst-filerow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 4px;
+}
+.ls-asst-filerow:hover { background: rgba(255, 255, 255, 0.05); }
+.ls-asst-filerow-on { background: color-mix(in srgb, var(--lumiverse-accent, rgb(147, 112, 219)) 14%, transparent); }
+.ls-asst-filerow-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  font-size: 12.5px;
+  text-align: left;
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.92));
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.ls-asst-filerow-main svg { flex-shrink: 0; opacity: 0.8; }
+.ls-asst-filerow-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ls-asst-filerow-size {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.5));
+}
+.ls-asst-filerow-check { color: var(--lumiverse-accent, rgb(147, 112, 219)); opacity: 1; }
+.ls-asst-filerow-del {
+  display: inline-flex;
+  padding: 4px;
+  margin-right: 4px;
+  flex-shrink: 0;
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.5));
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.ls-asst-filerow-del:hover { color: var(--lumiverse-danger, rgb(246, 130, 130)); background: rgba(255, 255, 255, 0.08); }
+.ls-asst-filepicker-addbtn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px;
+  padding: 7px 8px;
+  font-size: 12px;
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.85));
+  background: transparent;
+  border: 1px dashed var(--lumiverse-border, rgba(128, 128, 128, 0.35));
+  border-radius: 4px;
+  cursor: pointer;
+}
+.ls-asst-filepicker-addbtn:hover {
+  border-color: var(--lumiverse-accent, rgb(147, 112, 219));
+  color: var(--lumiverse-accent, rgb(147, 112, 219));
+}
+.ls-asst-filepicker-add {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border-top: 1px solid var(--lumiverse-border-light, rgba(128, 128, 128, 0.16));
+}
+.ls-asst-filepicker-name,
+.ls-asst-filepicker-content {
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.92));
+  background: var(--lumiverse-fill-2, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--lumiverse-border-light, rgba(128, 128, 128, 0.18));
+  border-radius: 4px;
+  padding: 6px 8px;
+}
+.ls-asst-filepicker-content { resize: vertical; }
+.ls-asst-filepicker-name:focus,
+.ls-asst-filepicker-content:focus { outline: none; border-color: var(--lumiverse-accent, rgb(147, 112, 219)); }
+.ls-asst-filepicker-add-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.ls-asst-fp-ghost,
+.ls-asst-fp-accent {
+  padding: 5px 12px;
+  font-size: 12px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.ls-asst-fp-ghost {
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.7));
+  background: transparent;
+  border: 1px solid var(--lumiverse-border-light, rgba(128, 128, 128, 0.25));
+}
+.ls-asst-fp-ghost:hover { color: var(--lumiverse-text, rgba(255, 255, 255, 0.95)); }
+.ls-asst-fp-accent {
+  color: var(--lumiverse-accent-fg, #ffffff);
+  background: var(--lumiverse-accent, rgb(147, 112, 219));
+  border: 1px solid var(--lumiverse-accent, rgb(147, 112, 219));
+}
+.ls-asst-fp-accent:disabled { opacity: 0.5; cursor: default; }
+.ls-asst-filepicker-hint {
+  font-size: 10.5px;
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.45));
+}
 
 .ls-asst-send {
   display: inline-flex;
@@ -643,13 +1221,26 @@
   margin: 8px 0;
 }
 
-/* Hover-revealed apply button — top-right of the code block. Renders only
-   when the assistant's AssistantApplyContext provider is present (i.e.
-   in the modal; not in tool-chip viewers or other markdown surfaces). */
-.ls-asst-md-apply {
+/* Action row — top-right of a code block. Holds Copy (always present) and,
+   when an AssistantApplyContext provider is mounted (the modal), Apply.
+   Revealed together on hover / focus-within so the block stays clean at rest. */
+.ls-asst-md-code-actions {
   position: absolute;
   top: 6px;
   right: 6px;
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 120ms;
+}
+.ls-asst-md-code-wrap:hover .ls-asst-md-code-actions,
+.ls-asst-md-code-wrap:focus-within .ls-asst-md-code-actions {
+  opacity: 1;
+}
+/* Shared chrome for the Copy + Apply controls. */
+.ls-asst-md-copy,
+.ls-asst-md-apply {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -661,17 +1252,64 @@
   border: 1px solid var(--lumiverse-border-light, rgba(128, 128, 128, 0.28));
   border-radius: 4px;
   cursor: pointer;
-  opacity: 0;
-  transition: opacity 120ms, background 120ms, border-color 120ms;
+  transition: background 120ms, border-color 120ms, color 120ms;
 }
-.ls-asst-md-code-wrap:hover .ls-asst-md-apply,
-.ls-asst-md-apply:focus-visible {
-  opacity: 1;
-}
+.ls-asst-md-copy:hover,
 .ls-asst-md-apply:hover {
   background: var(--lumiverse-accent, rgb(147, 112, 219));
   color: var(--lumiverse-accent-fg, #ffffff);
   border-color: var(--lumiverse-accent, rgb(147, 112, 219));
+}
+
+/* Apply MENU (apply-to-existing) — shown when scripts are @-attached. The wrap
+   sits inside the code-actions row; `position: relative` anchors its drop-down
+   menu directly beneath the button. */
+.ls-asst-md-apply-wrap {
+  position: relative;
+}
+.ls-asst-md-apply-wrap .ls-asst-md-apply {
+  position: static;
+  top: auto;
+  right: auto;
+}
+.ls-asst-md-apply-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  min-width: 180px;
+  max-width: 280px;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--lumiverse-gradient-modal, linear-gradient(135deg, rgba(35, 30, 48, 0.99), rgba(20, 17, 28, 0.99)));
+  border: 1px solid var(--lumiverse-border, rgba(128, 128, 128, 0.3));
+  border-radius: 6px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
+  z-index: 10;
+}
+.ls-asst-md-apply-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 6px 8px;
+  font-size: 11.5px;
+  text-align: left;
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.92));
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.ls-asst-md-apply-item svg { flex-shrink: 0; opacity: 0.85; }
+.ls-asst-md-apply-item span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ls-asst-md-apply-item:hover {
+  background: color-mix(in srgb, var(--lumiverse-accent, rgb(147, 112, 219)) 22%, transparent);
 }
 
 .ls-asst-md ul,

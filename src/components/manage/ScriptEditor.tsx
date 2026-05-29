@@ -9,6 +9,7 @@ import { TriggersSection } from './TriggersSection.js';
 import { LUMISCRIPT_DEFS } from '../../types/editor-lib.js';
 import { ReferenceTab } from '../reference/ReferenceTab.js';
 import { dispatchOpenAssistant } from '../assistant/openAssistant.js';
+import { PromptDialog } from '../common/PromptDialog.js';
 
 // Register the LumiScript ambient type definitions with Monaco's JavaScript
 // language service once — subsequent editor mounts reuse the existing registration.
@@ -44,6 +45,7 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
   const [viewMode, setViewMode] = useState<'code' | 'docs'>('code');
   const [copied, setCopied] = useState(false);
   const [confirmDangerous, setConfirmDangerous] = useState(false);
+  const [namingFolder, setNamingFolder] = useState(false);
   // v0.27.5 — Monaco init-success detection. Surfaces a troubleshooting
   // overlay if the editor either fails to mount within 15s ('mount-timeout')
   // or mounts but its input pipeline doesn't respond to user clicks
@@ -300,6 +302,7 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
   const fmt = (ms: number) => new Date(ms).toLocaleString();
 
   return (
+    <>
     <div className="ls-editor-root">
       {/* Top bar */}
       <div className="ls-editor-topbar">
@@ -347,38 +350,24 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
         </button>
 
         {/* v0.30.x — open the in-app code assistant (persona: Lisa) directly
-            from the editor topbar. Cross-root dispatch via window event;
-            the modal lives in the SettingsPanel React root.
-            Square icon-only treatment matches Run's height + border for
-            toolbar rhythm. `align-self: stretch` makes height auto-match
-            whatever Run renders to (Run's text line-height pushes its
-            content area ~17px, taller than a 15px icon alone — so a pure
-            padding-based calc undershoots Run by 2-3px depending on
-            host theme/font). `aspect-ratio: 1` then locks width = height,
-            yielding a clean square that tracks Run automatically.
-            `borderColor` borrows Run's accent purple via the same token
-            Run uses — only the colour, not the fill, so Lisa reads as a
-            secondary affordance rather than a duplicate primary action.
-            Styles are inline (rather than via a `.ls-btn-square` class in
-            base.css) because the host can be flaky about reloading the
-            CSS-in-JS bundle on extension toggle, and inline always wins
-            on specificity. Tooltip carries the affordance copy. */}
+            from the editor topbar. Cross-root dispatch via window event; the
+            modal lives in the SettingsPanel React root. Icon + label matches
+            Run's shape (so heights track automatically), but with an accent
+            BORDER instead of Run's accent FILL — so Lisa reads as a secondary
+            affordance, not a duplicate primary action. The inline `borderColor`
+            (vs a base.css class) is deliberate: the host can be flaky about
+            reloading the CSS-in-JS bundle on extension toggle, and inline wins
+            on specificity. */}
         <button
           type="button"
           className="ls-btn"
-          style={{
-            alignSelf: 'stretch',
-            aspectRatio: '1',
-            padding: 0,
-            justifyContent: 'center',
-            boxSizing: 'border-box',
-            borderColor: 'var(--lumiverse-accent)',
-          }}
+          style={{ borderColor: 'var(--lumiverse-accent)' }}
           onClick={() => dispatchOpenAssistant()}
           title="Ask Lisa about LumiScript"
           aria-label="Ask Lisa about LumiScript"
         >
           <MessageCircle size={15} />
+          Lisa
         </button>
 
         {/* v1.0 Phase F — manual "Reload script" affordance. Sends
@@ -386,25 +375,19 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
             event. Always fires (the `@ls:reload-on-edit` directive gates
             only the autosave-driven path — manual reload works
             unconditionally). Trigger-only (libraries have no body to
-            re-fire). Square icon-only treatment matches the Lisa button
-            — see comment on that button above for the styling rationale. */}
+            re-fire). Icon + label + accent border, matching the Lisa button
+            — see its comment for the styling rationale. */}
         {script.type !== 'library' && (
           <button
             type="button"
             className="ls-btn"
-            style={{
-              alignSelf: 'stretch',
-              aspectRatio: '1',
-              padding: 0,
-              justifyContent: 'center',
-              boxSizing: 'border-box',
-              borderColor: 'var(--lumiverse-accent)',
-            }}
+            style={{ borderColor: 'var(--lumiverse-accent)' }}
             onClick={() => sendToBackend({ type: 'reload_script', id: script.id })}
             title="Reload script — re-fire the body to refresh handler closures. Works for any enabled trigger script regardless of directives."
             aria-label="Reload script"
           >
             <RotateCcw size={15} />
+            Reload
           </button>
         )}
 
@@ -559,10 +542,7 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
             onChange={e => {
               const val = e.target.value;
               if (val === '__new__') {
-                const name = window.prompt('New folder name:');
-                if (name?.trim()) {
-                  sendToBackend({ type: 'update_script', id: script.id, patch: { folder: name.trim() } });
-                }
+                setNamingFolder(true);
               } else {
                 sendToBackend({ type: 'update_script', id: script.id, patch: { folder: val } });
               }
@@ -592,5 +572,19 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
         </span>
       </div>
     </div>
+
+    {namingFolder && (
+      <PromptDialog
+        title="New folder"
+        label="Folder name:"
+        confirmLabel="Create"
+        onConfirm={name => {
+          sendToBackend({ type: 'update_script', id: script.id, patch: { folder: name } });
+          setNamingFolder(false);
+        }}
+        onCancel={() => setNamingFolder(false)}
+      />
+    )}
+    </>
   );
 };

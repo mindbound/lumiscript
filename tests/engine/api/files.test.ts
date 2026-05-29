@@ -45,6 +45,11 @@ describe('guard checks', () => {
     expect(() => api.tempList()).toThrow('Allow Dangerous');
     expect(() => api.tempStat('f')).toThrow('Allow Dangerous');
     expect(() => api.tempClearExpired()).toThrow('Allow Dangerous');
+    expect(() => api.tempReadBinary('f')).toThrow('Allow Dangerous');
+    expect(() => api.tempWriteBinary('f', new Uint8Array())).toThrow('Allow Dangerous');
+    expect(() => api.tempGetPoolStatus()).toThrow('Allow Dangerous');
+    expect(() => api.tempRequestBlock(10)).toThrow('Allow Dangerous');
+    expect(() => api.tempReleaseBlock('r')).toThrow('Allow Dangerous');
   });
 
   test('temp* methods throw when ephemeral_storage permission denied', () => {
@@ -119,5 +124,56 @@ describe('temp storage delegation', () => {
     mockSpindle.ephemeral.clearExpired.mockReturnValueOnce(Promise.resolve(5));
     const api = buildApi({ script: { allowDangerous: true } });
     expect(await api.tempClearExpired()).toBe(5);
+  });
+
+  test('tempWrite forwards reservationId', async () => {
+    const api = buildApi({ script: { allowDangerous: true } });
+    await api.tempWrite('cache.bin', 'x', { reservationId: 'res-1', ttlMs: 5000 });
+    expect(mockSpindle.ephemeral.write).toHaveBeenCalledWith('cache.bin', 'x', { reservationId: 'res-1', ttlMs: 5000 });
+  });
+
+  test('tempReadBinary delegates to spindle.ephemeral.readBinary and returns bytes', async () => {
+    const bytes = new Uint8Array([1, 2, 3]);
+    mockSpindle.ephemeral.readBinary.mockReturnValueOnce(Promise.resolve(bytes));
+    const api = buildApi({ script: { allowDangerous: true } });
+    const out = await api.tempReadBinary('blob.bin');
+    expect(mockSpindle.ephemeral.readBinary).toHaveBeenCalledWith('blob.bin');
+    expect(Array.from(out)).toEqual([1, 2, 3]);
+  });
+
+  test('tempWriteBinary passes bytes + options to spindle.ephemeral.writeBinary', async () => {
+    const bytes = new Uint8Array([9, 8, 7]);
+    const api = buildApi({ script: { allowDangerous: true } });
+    await api.tempWriteBinary('blob.bin', bytes, { ttlMs: 1000, reservationId: 'r2' });
+    expect(mockSpindle.ephemeral.writeBinary).toHaveBeenCalledWith('blob.bin', bytes, { ttlMs: 1000, reservationId: 'r2' });
+  });
+
+  test('tempGetPoolStatus delegates to spindle.ephemeral.getPoolStatus', async () => {
+    mockSpindle.ephemeral.getPoolStatus.mockReturnValueOnce(Promise.resolve({
+      globalMaxBytes: 1000, globalUsedBytes: 100, globalReservedBytes: 50, globalAvailableBytes: 850,
+      extensionMaxBytes: 500, extensionUsedBytes: 40, extensionReservedBytes: 10, extensionAvailableBytes: 450,
+      fileCount: 3, fileCountMax: 100,
+    }));
+    const api = buildApi({ script: { allowDangerous: true } });
+    const status = await api.tempGetPoolStatus();
+    expect(status.extensionAvailableBytes).toBe(450);
+    expect(status.fileCount).toBe(3);
+  });
+
+  test('tempRequestBlock passes sizeBytes + options and returns the reservation', async () => {
+    mockSpindle.ephemeral.requestBlock.mockReturnValueOnce(
+      Promise.resolve({ reservationId: 'res-9', sizeBytes: 2048, expiresAt: '2026-01-03' }),
+    );
+    const api = buildApi({ script: { allowDangerous: true } });
+    const res = await api.tempRequestBlock(2048, { ttlMs: 30000, reason: 'upload buffer' });
+    expect(mockSpindle.ephemeral.requestBlock).toHaveBeenCalledWith(2048, { ttlMs: 30000, reason: 'upload buffer' });
+    expect(res.reservationId).toBe('res-9');
+    expect(res.sizeBytes).toBe(2048);
+  });
+
+  test('tempReleaseBlock delegates to spindle.ephemeral.releaseBlock', async () => {
+    const api = buildApi({ script: { allowDangerous: true } });
+    await api.tempReleaseBlock('res-9');
+    expect(mockSpindle.ephemeral.releaseBlock).toHaveBeenCalledWith('res-9');
   });
 });

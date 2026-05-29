@@ -43,15 +43,18 @@ export function buildFilesAPI(deps: APIBuildDeps): LumiScriptAPI['files'] {
     sharedMkdir:  (path) => { danger(); return spindle.storage.mkdir(path); },
     sharedMove:   (from, to) => { danger(); return spindle.storage.move(from, to); },
 
-    // ── Temp storage (ephemeral, TTL-bound) ────────────────────────────────
-    tempRead:   (path) => { dangerTemp(); return spindle.ephemeral.read(path); },
-    tempWrite:  (path, data, options) => {
-      dangerTemp();
-      return spindle.ephemeral.write(path, data, options?.ttlMs !== undefined ? { ttlMs: options.ttlMs } : undefined);
-    },
-    tempDelete: (path) => { dangerTemp(); return spindle.ephemeral.delete(path); },
-    tempList:   (prefix) => { dangerTemp(); return spindle.ephemeral.list(prefix); },
-    tempStat:   (path) => {
+    // ── Temp storage (ephemeral, TTL-bound, quota-managed) ──────────────────
+    // TempWriteOptions ({ ttlMs?, reservationId? }) is structurally identical to
+    // the host's write options, so it passes straight through. Uint8Array args/
+    // returns cross the child↔parent IPC intact (same path as api.images.upload
+    // / api.utils.http arraybuffer) — no base64 needed.
+    tempRead:        (path) => { dangerTemp(); return spindle.ephemeral.read(path); },
+    tempWrite:       (path, data, options) => { dangerTemp(); return spindle.ephemeral.write(path, data, options); },
+    tempReadBinary:  (path) => { dangerTemp(); return spindle.ephemeral.readBinary(path); },
+    tempWriteBinary: (path, data, options) => { dangerTemp(); return spindle.ephemeral.writeBinary(path, data, options); },
+    tempDelete:      (path) => { dangerTemp(); return spindle.ephemeral.delete(path); },
+    tempList:        (prefix) => { dangerTemp(); return spindle.ephemeral.list(prefix); },
+    tempStat:        (path) => {
       dangerTemp();
       return spindle.ephemeral.stat(path).then(s => ({
         sizeBytes: s.sizeBytes,
@@ -60,5 +63,12 @@ export function buildFilesAPI(deps: APIBuildDeps): LumiScriptAPI['files'] {
       }));
     },
     tempClearExpired: () => { dangerTemp(); return spindle.ephemeral.clearExpired(); },
+
+    // ── Temp storage quota subsystem ────────────────────────────────────────
+    // Structural pass-throughs: the host DTOs match TempPoolStatus / TempReservation
+    // field-for-field.
+    tempGetPoolStatus: () => { dangerTemp(); return spindle.ephemeral.getPoolStatus(); },
+    tempRequestBlock:  (sizeBytes, options) => { dangerTemp(); return spindle.ephemeral.requestBlock(sizeBytes, options); },
+    tempReleaseBlock:  (reservationId) => { dangerTemp(); return spindle.ephemeral.releaseBlock(reservationId); },
   };
 }

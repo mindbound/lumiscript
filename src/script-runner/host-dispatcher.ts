@@ -56,6 +56,10 @@ import type {
   ScriptUnregisterMessage,
   ScriptStateSnapshot,
   ScriptStateSyncMessage,
+  StreamRequest,
+  StreamCancelRequest,
+  StreamChunkMessage,
+  StreamEndMessage,
 } from '../types/script-runner-ipc.js';
 import type {
   LumiScriptAPI,
@@ -71,15 +75,21 @@ import type {
   DOMInjectOptions,
   DOMMessageInjectOptions,
   DOMEventData,
+  MountedComponentHandle,
   AdvancedModalHandle,
   AdvancedModalOptions,
   InputBarActionHandle,
   InputBarActionOptions,
   FloatWidgetHandle,
   FloatWidgetOptions,
+  MountedAppHandle,
+  MountAppOptions,
   DrawerTabHandle,
   DrawerTabOptions,
   RpcRequestContext,
+  UIKeyboardState,
+  UIDrawerState,
+  UISettingsState,
 } from '../types/script.js';
 import type {
   AdvancedModalDismissedNotice,
@@ -112,6 +122,11 @@ import {
   type ScriptRegistrationCounts,
 } from '../engine/script-pinning.js';
 import { countUserEventSubscriptionsByScriptId } from '../engine/broadcast-bus.js';
+import {
+  addKeyboardHandler,
+  addDrawerHandler,
+  addSettingsHandler,
+} from '../engine/ui-event-registry.js';
 import {
   collectDescendantIds,
   listStableIdsForScript,
@@ -803,6 +818,25 @@ function getOrCreateForwarderTable(scriptId: string): Map<string, () => void> {
 
 const abortControllers = new Map<string, AbortController>();
 
+// ─── In-flight LLM streams (v1.0.0-rc.9) ────────────────────────────────────
+//
+// `api.llm.generateStream` is the only streaming-IPC surface currently. Each
+// active stream gets an entry here keyed by `requestId`; the entry holds the
+// upstream iterator so we can call `.return()` on consumer cancel, the
+// worker-key for routing chunk/end messages back, and the runId so worker-
+// scoped cleanup can sweep streams whose owning run died mid-stream.
+//
+// Entries are removed: on natural iterator completion, on consumer-issued
+// `stream-cancel`, on AbortSignal-driven teardown (the iterator rejects
+// from inside), and on worker-scoped cleanup (`cleanupRunsForDeadWorker`).
+type PendingStreamEntry = {
+  iterator:  AsyncGenerator<unknown, unknown, unknown>;
+  workerKey: ScriptRunnerWorkerKey;
+  runId:     string;
+  scriptId:  string;
+};
+const pendingStreams = new Map<string, PendingStreamEntry>();
+
 // ─── In-flight handler calls (Phase 9d.3) ────────────────────────────────────
 //
 // When the host's macro engine / tool dispatcher / etc. invokes a wrapper
@@ -1069,6 +1103,71 @@ function dropAllPendingDomHandlesForScript(scriptId: string): void {
   pendingDomHandles.delete(scriptId);
 }
 
+// ─── Mounted shared-component handles (api.ui.components.*, v1.0.0-rc.9) ─────
+//
+// Exact parallel of `pendingDomHandles`. `api.ui.components.mountX` returns a
+// `MountedComponentHandle` whose methods can't cross IPC, so the canonical
+// handle is captured host-side keyed by `(scriptId, componentId)` and the
+// child gets back just the componentId string. Subsequent `ui._components.*`
+// method dispatches look the handle up here. Persistent-kind, so cleanup is
+// the same as DOMHandle: explicit `destroy()`, per-script teardown, and the
+// test-reset clear.
+const pendingComponents = new Map<string, Map<string, MountedComponentHandle>>();
+
+function storePendingComponent(scriptId: string, componentId: string, handle: MountedComponentHandle): void {
+  let scriptHandles = pendingComponents.get(scriptId);
+  if (!scriptHandles) {
+    scriptHandles = new Map();
+    pendingComponents.set(scriptId, scriptHandles);
+  }
+  scriptHandles.set(componentId, handle);
+}
+
+function lookupPendingComponent(scriptId: string, componentId: string): MountedComponentHandle | undefined {
+  return pendingComponents.get(scriptId)?.get(componentId);
+}
+
+function dropPendingComponent(scriptId: string, componentId: string): void {
+  const scriptHandles = pendingComponents.get(scriptId);
+  if (!scriptHandles) return;
+  scriptHandles.delete(componentId);
+  if (scriptHandles.size === 0) pendingComponents.delete(scriptId);
+}
+
+// ─── Component callback routes (v1.0.0-rc.9) ────────────────────────────────
+//
+// The FE addresses a fired callback by `componentId` alone (it has no scriptId
+// on the frontend), so this is a FLAT componentId → {scriptId, callbacks}
+// registry (callbacks = callbackName → child handler-id). Populated at mount
+// from the child-threaded `_callbacks`; `dispatchComponentCallback` reads it
+// when a `component_callback` arrives and fires the child closure via
+// `sendRunHandlerRequest`. Dropped on component destroy + per-script teardown.
+interface ComponentCallbackRoute {
+  scriptId:  string;
+  callbacks: Record<string, string>;
+}
+const componentCallbackRoutes = new Map<string, ComponentCallbackRoute>();
+
+function dropComponentRoutesForScript(scriptId: string): void {
+  for (const [componentId, route] of componentCallbackRoutes) {
+    if (route.scriptId === scriptId) componentCallbackRoutes.delete(componentId);
+  }
+}
+
+/**
+ * Route a `component_callback` from the frontend to the owning script's
+ * handler closure. Called by `backend.ts`'s frontend-message handler.
+ * Fire-and-forget — a slow/failed handler must not block the message loop.
+ */
+export function dispatchComponentCallback(componentId: string, callbackName: string, value: unknown): void {
+  const route = componentCallbackRoutes.get(componentId);
+  if (!route) return; // unknown / already-destroyed — no-op
+  const handlerId = route.callbacks[callbackName];
+  if (!handlerId) return;
+  void sendRunHandlerRequest(route.scriptId, handlerId, 'componentCallback', [value], 5_000)
+    .catch(() => { /* handler errors are surfaced via the child's console; nothing actionable here */ });
+}
+
 // ─── Advanced-modal open-confirmation awaiter table (Phase 9d.4.d Option B) ──
 //
 // Closes the frontend-side race that bit us during initial bring-up: a
@@ -1314,6 +1413,68 @@ function dropPendingFloatWidget(scriptId: string, widgetId: string): void {
   if (!scriptWidgets) return;
   scriptWidgets.delete(widgetId);
   if (scriptWidgets.size === 0) pendingFloatWidgets.delete(scriptId);
+}
+
+// ─── App-mount create-confirmation awaiter (v1.0.0-rc.9) ────────────────────
+//
+// Same Option-B pattern as float widgets / advanced modals. Keyed by mountId
+// (UUID, child-generated, threaded via the @internal `_mountId` option).
+const pendingAppMountCreates = new Map<string, {
+  resolve: () => void;
+  reject:  (err: Error) => void;
+  timer:   ReturnType<typeof setTimeout>;
+}>();
+
+/**
+ * Frontend confirmed the app mount is created + its `.root` bound. Resolves the
+ * awaiter so `handleMountAppRequest` returns the api-response. Idempotent on
+ * missing mountId (late echo after timeout). Exported for backend.ts's
+ * `ls_app_mount_created` handler.
+ */
+export function notifyAppMountCreated(mountId: string): void {
+  const awaiter = pendingAppMountCreates.get(mountId);
+  if (!awaiter) return;
+  clearTimeout(awaiter.timer);
+  pendingAppMountCreates.delete(mountId);
+  awaiter.resolve();
+}
+
+function awaitAppMountCreate(mountId: string): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const timeoutMs = getOpenAwaitTimeoutMs();
+    const timer = setTimeout(() => {
+      pendingAppMountCreates.delete(mountId);
+      reject(new Error(
+        `api.ui.mountApp: create confirmation from frontend timed out after ` +
+        `${timeoutMs}ms (frontend may be disconnected; this is rare and usually ` +
+        `indicates the WS layer dropped a message during reconnect)`,
+      ));
+    }, timeoutMs);
+    pendingAppMountCreates.set(mountId, { resolve, reject, timer });
+  });
+}
+
+// ─── Per-script app-mount handle map (v1.0.0-rc.9) ──────────────────────────
+const pendingAppMounts = new Map<string, Map<string, MountedAppHandle>>();
+
+function storePendingAppMount(scriptId: string, mountId: string, handle: MountedAppHandle): void {
+  let scriptMounts = pendingAppMounts.get(scriptId);
+  if (!scriptMounts) {
+    scriptMounts = new Map();
+    pendingAppMounts.set(scriptId, scriptMounts);
+  }
+  scriptMounts.set(mountId, handle);
+}
+
+function lookupPendingAppMount(scriptId: string, mountId: string): MountedAppHandle | undefined {
+  return pendingAppMounts.get(scriptId)?.get(mountId);
+}
+
+function dropPendingAppMount(scriptId: string, mountId: string): void {
+  const scriptMounts = pendingAppMounts.get(scriptId);
+  if (!scriptMounts) return;
+  scriptMounts.delete(mountId);
+  if (scriptMounts.size === 0) pendingAppMounts.delete(scriptId);
 }
 
 // ─── Drawer-tab register-confirmation awaiter (Phase 9d.4.e-3-a) ────────────
@@ -2137,6 +2298,14 @@ function handleChildMessage(payload: unknown, processId: string): void {
       void handleApiRequest(msg, sourceWorkerKey);
       break;
 
+    case 'stream-request':
+      void handleStreamRequest(msg, sourceWorkerKey);
+      break;
+
+    case 'stream-cancel':
+      handleStreamCancelRequest(msg);
+      break;
+
     case 'broadcast-subscribe':
       handleBroadcastSubscribe(msg);
       break;
@@ -2877,6 +3046,41 @@ function handleRegisterHandler(msg: RegisterHandler): void {
       break;
     }
 
+    // v1.0.0-rc.9 — api.ui.events.on*Change subscriptions. The wrapper fires
+    // the script's handler with the changed UI state (a fresh per-fire run via
+    // sendRunHandlerRequest). The registry's add*Handler returns the unsub we
+    // record into handlerCleanups (which both pins the script and is invoked on
+    // explicit unsubscribe). 5_000ms timeout matches the other on* handlers.
+    case 'uiKeyboardChange': {
+      const wrapper = (state: UIKeyboardState): void => {
+        sendRunHandlerRequest(msg.scriptId, msg.handlerId, 'uiKeyboardChange', [state], 5_000)
+          .catch((err) => spindle.log.warn(
+            `[script-runner] api.ui.events.onKeyboardChange handler threw for ${msg.scriptId}: ${String(err)}`));
+      };
+      recordHandlerCleanup(msg.scriptId, msg.handlerId, addKeyboardHandler(msg.scriptId, wrapper));
+      break;
+    }
+
+    case 'uiDrawerChange': {
+      const wrapper = (state: UIDrawerState): void => {
+        sendRunHandlerRequest(msg.scriptId, msg.handlerId, 'uiDrawerChange', [state], 5_000)
+          .catch((err) => spindle.log.warn(
+            `[script-runner] api.ui.events.onDrawerChange handler threw for ${msg.scriptId}: ${String(err)}`));
+      };
+      recordHandlerCleanup(msg.scriptId, msg.handlerId, addDrawerHandler(msg.scriptId, wrapper));
+      break;
+    }
+
+    case 'uiSettingsChange': {
+      const wrapper = (state: UISettingsState): void => {
+        sendRunHandlerRequest(msg.scriptId, msg.handlerId, 'uiSettingsChange', [state], 5_000)
+          .catch((err) => spindle.log.warn(
+            `[script-runner] api.ui.events.onSettingsChange handler threw for ${msg.scriptId}: ${String(err)}`));
+      };
+      recordHandlerCleanup(msg.scriptId, msg.handlerId, addSettingsHandler(msg.scriptId, wrapper));
+      break;
+    }
+
     case 'oauthCallback': {
       // v1.0.0-rc.5 — api.oauth.onCallback() handler. Single-handler-per-
       // extension semantics: the host's `spindle.oauth.onCallback` stores
@@ -3016,11 +3220,15 @@ function handleUnregisterHandler(msg: UnregisterHandler): void {
     case 'inputBarActionClick':
     case 'floatWidgetDragEnd':
     case 'drawerTabActivate':
+    case 'uiKeyboardChange':
+    case 'uiDrawerChange':
+    case 'uiSettingsChange':
     case 'oauthCallback': {
       // Phase 9d.3.d / 9d.4.c-2 / 9d.4.e-1-b / 9d.4.e-2-b / 9d.4.e-3-b
-      // + v0.27.0 (worldInfoInterceptor) + v0.27.1 (domDelegate) — same
-      // shape as commandsOnInvoked: handlerId-based, canonical's unsub fn
-      // (or `handle.remove()`) was stored under handlerId.
+      // + v0.27.0 (worldInfoInterceptor) + v0.27.1 (domDelegate)
+      // + v1.0.0-rc.9 (ui*Change) — same shape as commandsOnInvoked:
+      // handlerId-based, canonical's unsub fn (or `handle.remove()`) was
+      // stored under handlerId.
       if (msg.handlerId === undefined) {
         spindle.log.warn(`[script-runner] unregister-handler kind=${msg.kind} missing handlerId`);
         return;
@@ -3098,6 +3306,204 @@ function handleAbortRequest(msg: AbortRequest): void {
   if (!controller) return; // unknown / already-cleaned — no-op
   controller.abort();
   abortControllers.delete(msg.requestId);
+}
+
+/**
+ * Send a parent-to-child stream-pump IPC. Worker is captured in the
+ * `pendingStreams` entry at stream-open time, so even if the source
+ * worker churns mid-stream (lifecycle event drops/respawns the child)
+ * the messages route to the right destination. If the worker handle is
+ * gone (child died), drop silently — the cleanup paths reject the
+ * consumer's iterator separately.
+ */
+function sendStreamMessage(
+  workerKey: ScriptRunnerWorkerKey,
+  msg:       StreamChunkMessage | StreamEndMessage,
+): void {
+  const handle = getChildHandle(workerKey);
+  if (!handle) return;
+  try {
+    handle.send(msg);
+  } catch (err) {
+    spindle.log.warn(
+      `[script-runner] stream-${msg.type === 'stream-chunk' ? 'chunk' : 'end'} send to worker '${workerKey}' failed: ${String(err)}`,
+    );
+  }
+}
+
+/**
+ * Handle a child `stream-request`. Currently only `'llm.generateStream'`
+ * is supported. Flow:
+ *
+ *   1. Resolve the active run (same three-tier fallback as `handleApiRequest`).
+ *   2. Inject AbortSignal into the request opts (reuses the existing
+ *      `abortControllers` plumbing; child sends `AbortRequest` on
+ *      user-signal fire).
+ *   3. Call `active.api.llm.generateStream(...)` to get the upstream
+ *      iterator. Register the iterator in `pendingStreams` keyed by
+ *      requestId for cancel-routing.
+ *   4. Pump: `for await (const chunk of iterator) sendStreamMessage(...)`.
+ *   5. On completion: send terminal `stream-end { ok: true }`.
+ *   6. On error: send terminal `stream-end { ok: false, error }`.
+ *   7. In `finally`: drop the pendingStreams + abortControllers entries.
+ */
+async function handleStreamRequest(
+  req:             StreamRequest,
+  sourceWorkerKey: ScriptRunnerWorkerKey | null,
+): Promise<void> {
+  // Same resolution path as `handleApiRequest`. Cast through the same
+  // shape — the `policy: 'api-request'` branch is appropriate here too
+  // (the diagnostic tagging is identical between streams and unary).
+  const active = resolveActiveRun(
+    {
+      scriptId:     req.scriptId,
+      runId:        req.runId,
+      runIdSource:  req._runIdSource,
+      method:       req.method,
+    },
+    'api-request',
+  );
+
+  const responseWorkerKey = active?.workerKey ?? sourceWorkerKey;
+  if (!active || responseWorkerKey === null) {
+    // Late request — run already completed. Send terminal stream-end
+    // with a RunCompletedError so the child's pendingStreams consumer
+    // rejects cleanly. Mirrors the late-handleApiRequest path.
+    if (responseWorkerKey !== null) {
+      sendStreamMessage(responseWorkerKey, {
+        type:      'stream-end',
+        requestId: req.requestId,
+        ok:        false,
+        error: {
+          name:    'RunCompletedError',
+          message:
+            `api-proxy host: late stream-request "${req.method}" from script "${req.scriptId}" arrived ` +
+            `after run ${req.runId} ended (requestId=${req.requestId})`,
+        },
+      });
+    }
+    return;
+  }
+
+  // AbortSignal injection — same pattern as `handleApiRequest`. Stream
+  // teardown via signal flows through the iterator's rejection.
+  if (req.hasSignal === true) {
+    const controller = new AbortController();
+    abortControllers.set(req.requestId, controller);
+    for (let i = req.args.length - 1; i >= 0; i--) {
+      const arg = req.args[i];
+      if (typeof arg === 'object' && arg !== null && !Array.isArray(arg)) {
+        req.args[i] = { ...arg, signal: controller.signal };
+        break;
+      }
+    }
+  }
+
+  // Only `llm.generateStream` is currently routed here. Future streaming
+  // surfaces would branch on `req.method`.
+  if (req.method !== 'llm.generateStream') {
+    sendStreamMessage(responseWorkerKey, {
+      type:      'stream-end',
+      requestId: req.requestId,
+      ok:        false,
+      error: {
+        name:    'TypeError',
+        message: `host stream dispatcher: unknown streaming method "${req.method}"`,
+      },
+    });
+    if (req.hasSignal === true) abortControllers.delete(req.requestId);
+    return;
+  }
+
+  let iterator: AsyncGenerator<unknown, unknown, unknown>;
+  try {
+    // assertPerm / assertProvider run synchronously here — same fail-fast
+    // semantics as the engine-level api. A throw here doesn't yield any
+    // chunks; it surfaces as a stream-end {ok: false}.
+    iterator = active.api.llm.generateStream(
+      req.args[0] as Parameters<LumiScriptAPI['llm']['generateStream']>[0],
+      req.args[1] as Parameters<LumiScriptAPI['llm']['generateStream']>[1],
+    ) as AsyncGenerator<unknown, unknown, unknown>;
+  } catch (err) {
+    sendStreamMessage(responseWorkerKey, {
+      type:      'stream-end',
+      requestId: req.requestId,
+      ok:        false,
+      error:     serializeUnknown(err),
+    });
+    if (req.hasSignal === true) abortControllers.delete(req.requestId);
+    return;
+  }
+
+  pendingStreams.set(req.requestId, {
+    iterator,
+    workerKey: responseWorkerKey,
+    runId:     req.runId,
+    scriptId:  req.scriptId,
+  });
+
+  try {
+    for await (const chunk of iterator) {
+      // Skip the entry-removal check on each chunk — the iterator's
+      // `.return()` will cleanly terminate the for-await when cancel
+      // is called. (Calling `.return()` resolves the next .next() with
+      // `done: true`, exiting the loop.)
+      sendStreamMessage(responseWorkerKey, {
+        type:      'stream-chunk',
+        requestId: req.requestId,
+        chunk,
+      });
+    }
+    sendStreamMessage(responseWorkerKey, {
+      type:      'stream-end',
+      requestId: req.requestId,
+      ok:        true,
+    });
+  } catch (err) {
+    sendStreamMessage(responseWorkerKey, {
+      type:      'stream-end',
+      requestId: req.requestId,
+      ok:        false,
+      error:     serializeUnknown(err),
+    });
+  } finally {
+    pendingStreams.delete(req.requestId);
+    if (req.hasSignal === true) {
+      abortControllers.delete(req.requestId);
+    }
+  }
+}
+
+/**
+ * Child requested teardown of an in-flight stream (consumer broke out of
+ * `for await`, or threw inside the loop body). Idempotent: repeated cancels
+ * for the same requestId are no-ops. Calling `.return()` on the upstream
+ * iterator resolves any pending `.next()` with `done: true`, which exits
+ * the `for await` loop in `handleStreamRequest` and triggers its `finally`
+ * — pendingStreams entry is removed there.
+ */
+function handleStreamCancelRequest(msg: StreamCancelRequest): void {
+  const entry = pendingStreams.get(msg.requestId);
+  if (!entry) return;
+  // Fire-and-forget; iterator return() is async but we don't need to
+  // await it here. The pendingStreams entry is dropped in the for-await
+  // pump's finally block once the iteration ends.
+  void entry.iterator.return(undefined).catch(() => { /* defensive — return() failures are not actionable */ });
+}
+
+/**
+ * Best-effort helper for surfacing thrown values across the IPC boundary.
+ * Mirrors the child-side `serializeError` shape exactly.
+ */
+function serializeUnknown(err: unknown): { name: string; message: string; stack?: string } {
+  if (err instanceof Error) {
+    return {
+      name:    err.name || 'Error',
+      message: err.message || String(err),
+      stack:   err.stack,
+    };
+  }
+  return { name: 'Error', message: String(err) };
 }
 
 /**
@@ -3360,6 +3766,13 @@ async function handleApiRequest(
       response = await handleDomInjectRequest(req, active);
     } else if (req.method.startsWith('ui._dom.')) {
       response = await handleInternalDomRequest(req, active);
+    } else if (req.method.startsWith('ui.components.mount')) {
+      // v1.0.0-rc.9 — same handle-capture pattern as ui.dom.inject. The
+      // canonical mountX returns a MountedComponentHandle whose methods
+      // can't cross IPC; capture it keyed by componentId, return the id.
+      response = await handleComponentMountRequest(req, active);
+    } else if (req.method.startsWith('ui._components.')) {
+      response = await handleInternalComponentRequest(req, active);
     } else if (req.method === 'ui.dom.cleanup') {
       // Special-case cleanup() so we can drop our pendingDomHandles
       // entries alongside the canonical's per-script teardown.
@@ -3389,6 +3802,14 @@ async function handleApiRequest(
       response = await handleCreateFloatWidgetRequest(req, active);
     } else if (req.method.startsWith('ui._floatWidget.')) {
       response = await handleInternalFloatWidgetRequest(req, active);
+    } else if (req.method === 'ui.mountApp') {
+      // v1.0.0-rc.9 — same shape as createFloatWidget: capture canonical handle
+      // by (scriptId, mountId), store .root in pendingDomHandles for `ui._dom.*`
+      // lookups, wait for FE create-echo, return api-response. setVisible /
+      // destroy go through `'ui._appMount.*'` below.
+      response = await handleMountAppRequest(req, active);
+    } else if (req.method.startsWith('ui._appMount.')) {
+      response = await handleInternalAppMountRequest(req, active);
     } else if (req.method === 'ui.registerDrawerTab') {
       // Phase 9d.4.e-3-a — capture canonical handle by (scriptId, tabId),
       // store .root in pendingDomHandles, wait for FE register-echo, return
@@ -3619,6 +4040,134 @@ async function handleInternalModalRequest(
  * eliminate the alias accumulation by pre-populating the proxy's
  * stableId cache from the parent's view before the script body runs.
  */
+/**
+ * v1.0.0-rc.9 — mount a host shared-component (`api.ui.components.mountX`).
+ * Mirrors `handleDomInjectRequest`: the canonical mount returns a
+ * `MountedComponentHandle` whose methods can't cross IPC, so we capture it
+ * keyed by `(scriptId, componentId)` and return just the componentId string.
+ *
+ * The proxy sends `[targetElementId, options]` where `options._componentId`
+ * is the child-allocated id (honoured by the canonical via `takeComponentId`).
+ * We pass a minimal `{ id: targetElementId }` DOMHandle stub as the mount
+ * target — the canonical only reads `.id` off it.
+ */
+async function handleComponentMountRequest(
+  req:    ApiProxyRequest,
+  active: ActiveRun,
+): Promise<ApiProxyResponse> {
+  const requestId  = req.requestId;
+  const methodName = req.method.slice('ui.components.'.length); // e.g. 'mountBadge'
+  try {
+    const targetElementId = req.args[0] as string;
+    const options         = (req.args[1] ?? {}) as Record<string, unknown>;
+    const targetStub      = { id: targetElementId } as DOMHandle;
+    const componentsApi   = active.api.ui.components as unknown as Record<
+      string,
+      (target: DOMHandle, options?: Record<string, unknown>) => MountedComponentHandle
+    >;
+    const mountFn = componentsApi[methodName];
+    if (typeof mountFn !== 'function') {
+      return {
+        type: 'api-response', requestId, ok: false,
+        error: { name: 'TypeError', message: `${req.method}: unknown component mount method` },
+      };
+    }
+    const handle = mountFn(targetStub, options);
+    storePendingComponent(active.scriptId, handle.id, handle);
+    // Body-slot components (collapsibleSection) carry a `.body` DOMHandle.
+    // Store it in pendingDomHandles so the child's `handle.body.*` dispatches
+    // (which route as `ui._dom.*` against the body's elementId) resolve.
+    const bodyHandle = (handle as { body?: DOMHandle }).body;
+    if (bodyHandle) {
+      storePendingDomHandle(active.scriptId, bodyHandle.id, bodyHandle);
+    }
+    // Register callback routes (componentId → handler-ids) so a fired
+    // `component_callback` from the FE can reach the child closure. The child
+    // threads the name → handler-id map via `_callbacks`.
+    const callbacksMap = (options as { _callbacks?: Record<string, string> })._callbacks;
+    if (callbacksMap && Object.keys(callbacksMap).length > 0) {
+      componentCallbackRoutes.set(handle.id, { scriptId: active.scriptId, callbacks: callbacksMap });
+    }
+    return { type: 'api-response', requestId, ok: true, value: handle.id };
+  } catch (err) {
+    return {
+      type: 'api-response', requestId, ok: false,
+      error: {
+        name:    err instanceof Error ? (err.name || 'Error') : 'Error',
+        message: err instanceof Error ? err.message : String(err),
+        ...(err instanceof Error && err.stack ? { stack: err.stack } : {}),
+      },
+    };
+  }
+}
+
+/**
+ * v1.0.0-rc.9 — internal dispatch routes for `MountedComponentHandle`
+ * methods. The proxy dispatches `ui._components.update` / `.destroy` with
+ * `[componentId, ...methodArgs]`; look up the canonical handle and invoke.
+ */
+async function handleInternalComponentRequest(
+  req:    ApiProxyRequest,
+  active: ActiveRun,
+): Promise<ApiProxyResponse> {
+  const requestId   = req.requestId;
+  const action      = req.method.slice('ui._components.'.length);
+  const componentId = req.args[0] as string;
+  if (typeof componentId !== 'string' || componentId.length === 0) {
+    return {
+      type: 'api-response', requestId, ok: false,
+      error: { name: 'TypeError', message: `${req.method}: missing componentId arg` },
+    };
+  }
+  const handle = lookupPendingComponent(active.scriptId, componentId);
+  if (!handle) {
+    return {
+      type: 'api-response', requestId, ok: false,
+      error: {
+        name:    'ComponentReleasedError',
+        message: `${req.method}: component ${componentId} not found (already destroyed, never mounted, or owned by a different script)`,
+      },
+    };
+  }
+  try {
+    // update/destroy have host-side side effects (destroy drops the component
+    // + callback-route maps), so they're handled explicitly. Every other
+    // method (getValue, isExpanded, expand, collapse, toggle, …) is dispatched
+    // generically onto the canonical handle: void methods return undefined,
+    // value methods return their awaited result. The proxy only ever sends a
+    // method the mounted handle actually has (value handles → getValue,
+    // collapsibles → expand/etc.), so a missing method is a real error.
+    if (action === 'update') {
+      handle.update((req.args[1] ?? {}) as Record<string, unknown>);
+      return { type: 'api-response', requestId, ok: true, value: undefined };
+    }
+    if (action === 'destroy') {
+      handle.destroy();
+      dropPendingComponent(active.scriptId, componentId);
+      componentCallbackRoutes.delete(componentId);
+      return { type: 'api-response', requestId, ok: true, value: undefined };
+    }
+    const fn = (handle as unknown as Record<string, unknown>)[action];
+    if (typeof fn !== 'function') {
+      return {
+        type: 'api-response', requestId, ok: false,
+        error: { name: 'TypeError', message: `${req.method}: component ${componentId} has no method '${action}'` },
+      };
+    }
+    const value = await (fn as (...a: unknown[]) => unknown).apply(handle, req.args.slice(1));
+    return { type: 'api-response', requestId, ok: true, value };
+  } catch (err) {
+    return {
+      type: 'api-response', requestId, ok: false,
+      error: {
+        name:    err instanceof Error ? (err.name || 'Error') : 'Error',
+        message: err instanceof Error ? err.message : String(err),
+        ...(err instanceof Error && err.stack ? { stack: err.stack } : {}),
+      },
+    };
+  }
+}
+
 async function handleDomInjectRequest(
   req:    ApiProxyRequest,
   active: ActiveRun,
@@ -4408,6 +4957,123 @@ async function handleInternalFloatWidgetRequest(
 }
 
 /**
+ * v1.0.0-rc.9 — `'ui.mountApp'` special-case. Trimmed mirror of
+ * `handleCreateFloatWidgetRequest`: validate proxy-supplied `_mountId` +
+ * `_rootElementId`, register the FE create-echo awaiter, call the canonical
+ * (sync — registers + sends `ls_app_mount_create`), store the handle +
+ * mirror `.root` into pendingDomHandles, then block on the FE confirm before
+ * returning. setVisible / destroy go through `'ui._appMount.*'`.
+ */
+async function handleMountAppRequest(
+  req:    ApiProxyRequest,
+  active: ActiveRun,
+): Promise<ApiProxyResponse> {
+  const requestId = req.requestId;
+  try {
+    const options = req.args[0] as MountAppOptions;
+    if (typeof options?._mountId !== 'string' || options._mountId.length === 0) {
+      return {
+        type: 'api-response', requestId, ok: false,
+        error: { name: 'InternalError', message: 'ui.mountApp: proxy did not supply options._mountId — child/parent id contract violated' },
+      };
+    }
+    if (typeof options?._rootElementId !== 'string' || options._rootElementId.length === 0) {
+      return {
+        type: 'api-response', requestId, ok: false,
+        error: { name: 'InternalError', message: 'ui.mountApp: proxy did not supply options._rootElementId — child/parent id contract violated' },
+      };
+    }
+
+    const createPromise = awaitAppMountCreate(options._mountId);
+
+    const handle = active.api.ui.mountApp(options);
+
+    storePendingAppMount(active.scriptId, handle.mountId, handle);
+    storePendingDomHandle(active.scriptId, handle.root.id, handle.root);
+
+    try {
+      await createPromise;
+    } catch (err) {
+      dropPendingAppMount(active.scriptId, handle.mountId);
+      dropPendingDomHandle(active.scriptId, handle.root.id);
+      return {
+        type: 'api-response', requestId, ok: false,
+        error: {
+          name:    err instanceof Error ? (err.name || 'Error') : 'Error',
+          message: err instanceof Error ? err.message : String(err),
+          ...(err instanceof Error && err.stack ? { stack: err.stack } : {}),
+        },
+      };
+    }
+
+    return { type: 'api-response', requestId, ok: true, value: handle.mountId };
+  } catch (err) {
+    return {
+      type: 'api-response', requestId, ok: false,
+      error: {
+        name:    err instanceof Error ? (err.name || 'Error') : 'Error',
+        message: err instanceof Error ? err.message : String(err),
+        ...(err instanceof Error && err.stack ? { stack: err.stack } : {}),
+      },
+    };
+  }
+}
+
+/**
+ * v1.0.0-rc.9 — internal dispatch routes for MountedAppHandle methods:
+ *   - `'ui._appMount.setVisible'` with `[mountId, visible]`
+ *   - `'ui._appMount.destroy'`    with `[mountId]`
+ */
+async function handleInternalAppMountRequest(
+  req:    ApiProxyRequest,
+  active: ActiveRun,
+): Promise<ApiProxyResponse> {
+  const requestId = req.requestId;
+  const action    = req.method.slice('ui._appMount.'.length);
+  const mountId   = req.args[0] as string;
+  if (typeof mountId !== 'string' || mountId.length === 0) {
+    return {
+      type: 'api-response', requestId, ok: false,
+      error: { name: 'TypeError', message: `${req.method}: missing mountId arg` },
+    };
+  }
+  const handle = lookupPendingAppMount(active.scriptId, mountId);
+  if (!handle) {
+    return {
+      type: 'api-response', requestId, ok: false,
+      error: {
+        name:    'AppMountReleasedError',
+        message: `${req.method}: app mount ${mountId} not found (already destroyed, never created, or owned by a different script)`,
+      },
+    };
+  }
+  try {
+    if (action === 'setVisible') {
+      handle.setVisible(req.args[1] as boolean);
+    } else if (action === 'destroy') {
+      handle.destroy();
+      dropPendingAppMount(active.scriptId, mountId);
+      dropPendingDomHandle(active.scriptId, handle.root.id);
+    } else {
+      return {
+        type: 'api-response', requestId, ok: false,
+        error: { name: 'TypeError', message: `${req.method}: unknown internal app-mount action "${action}"` },
+      };
+    }
+    return { type: 'api-response', requestId, ok: true, value: undefined };
+  } catch (err) {
+    return {
+      type: 'api-response', requestId, ok: false,
+      error: {
+        name:    err instanceof Error ? (err.name || 'Error') : 'Error',
+        message: err instanceof Error ? err.message : String(err),
+        ...(err instanceof Error && err.stack ? { stack: err.stack } : {}),
+      },
+    };
+  }
+}
+
+/**
  * Phase 9d.4.e-3-a — `'ui.registerDrawerTab'` special-case. Mirror of
  * `handleCreateFloatWidgetRequest` for drawer tabs:
  *   1. Validate proxy-supplied `_rootElementId` (sync error if missing).
@@ -4942,6 +5608,18 @@ function cleanupRunsForDeadWorker(
   // the respawn path's next dispatch must re-send the snapshot to seed
   // the fresh child's cache.
   scriptsSeenPerWorker.delete(workerKey);
+  // v1.0.0-rc.9 — sweep any in-flight streams owned by the dead worker.
+  // Cancelling the upstream iterator tears down the underlying HTTP
+  // request; the for-await pump's `finally` removes the entry. No need
+  // to send a final stream-end IPC — the child is dead, the receiver
+  // is gone with it.
+  for (const [requestId, entry] of pendingStreams) {
+    if (entry.workerKey === workerKey) {
+      void entry.iterator.return(undefined).catch(() => { /* defensive */ });
+      pendingStreams.delete(requestId);
+      abortControllers.delete(requestId);
+    }
+  }
 }
 
 function handleLifecycle(event: BackendProcessLifecycleEventDTO): void {
@@ -5809,9 +6487,12 @@ export function unregisterScriptFromChild(scriptId: string): void {
   // its outermost level, so a single delete is sufficient.
   pendingModals.delete(scriptId);
   pendingDomHandles.delete(scriptId);
+  pendingComponents.delete(scriptId);
+  dropComponentRoutesForScript(scriptId);
   pendingAdvancedModals.delete(scriptId);
   pendingInputBarActions.delete(scriptId);
   pendingFloatWidgets.delete(scriptId);
+  pendingAppMounts.delete(scriptId);
   pendingDrawerTabs.delete(scriptId);
   handlerCleanups.delete(scriptId);
   domListenerHandlers.delete(scriptId);
@@ -7234,6 +7915,14 @@ export function __resetForTests(): void {
   trackingSetsByRunId.clear();
   pendingHandlerCalls.clear();
   abortControllers.clear();
+  // v1.0.0-rc.9 — abandon any in-flight streams the previous test left.
+  // Don't await iterator.return() in a test-reset path; the tests own
+  // the lifecycle of the spindle mock and don't care about hard upstream
+  // teardown here. Just drop the map so it doesn't carry across tests.
+  for (const entry of pendingStreams.values()) {
+    void entry.iterator.return(undefined).catch(() => { /* defensive */ });
+  }
+  pendingStreams.clear();
   persistentHandles.clear();
   persistentObjToHandleId.clear();
   broadcastForwarders.clear();
@@ -7243,18 +7932,23 @@ export function __resetForTests(): void {
   domListenerHandlers.clear();
   pendingModals.clear();
   pendingDomHandles.clear();
+  pendingComponents.clear();
+  componentCallbackRoutes.clear();
   pendingAdvancedModals.clear();
   pendingInputBarActions.clear();
   pendingFloatWidgets.clear();
+  pendingAppMounts.clear();
   pendingDrawerTabs.clear();
 
   // Awaiter tables with timers — clearTimeout each entry before dropping
   for (const a of pendingAdvancedModalOpens.values())     clearTimeout(a.timer);
   for (const a of pendingInputBarActionRegisters.values()) clearTimeout(a.timer);
   for (const a of pendingFloatWidgetCreates.values())     clearTimeout(a.timer);
+  for (const a of pendingAppMountCreates.values())        clearTimeout(a.timer);
   for (const a of pendingDrawerTabRegisters.values())     clearTimeout(a.timer);
   pendingAdvancedModalOpens.clear();
   pendingInputBarActionRegisters.clear();
   pendingFloatWidgetCreates.clear();
+  pendingAppMountCreates.clear();
   pendingDrawerTabRegisters.clear();
 }

@@ -25,13 +25,14 @@ If you're contributing to the LumiScript extension itself (not writing scripts t
 | Understand how registered handlers (`broadcast.on`, `commands.onInvoked`, `macros.register`, etc.) survive past the body that registered them | [Handler lifetime](concepts/handler-lifetime.md) |
 | Know which `api.*` namespace covers which use case | The in-app **Reference** tab (auto-generated, comprehensive — open the LumiScript panel and switch to the Reference tab) |
 | Look up a specific method's signature, args, permissions | Same place — the in-app Reference, or the exported cheat-sheet (`src/assistant/corpus/cheat-sheet.md`) |
-| Build a specific feature (DOM injection, LLM, macros, tools, broadcast bus, OAuth, theming, image generation, world info, databanks, persistent events, cross-extension RPC, etc.) | [DOM injection](guides/dom-injection.md) · [Calling the LLM](guides/llm.md) · [Custom macros](guides/macros.md) · [Registering tools](guides/tools.md) · [Broadcast bus](guides/broadcast.md) · [OAuth callbacks](guides/oauth.md) · [Theming the host UI](guides/theme.md) · [Generating images](guides/image-gen.md) · [World info](guides/world-info.md) · [Databanks](guides/databanks.md) · [Persistent events](guides/persistent-events.md) · [Cross-extension RPC](guides/rpc.md) — more guides coming, by topic |
+| Ask LumiScript questions while you write — and have the assistant draft or fix scripts | [Working with Lisa](guides/lisa.md) |
+| Build a specific feature (DOM injection, LLM, macros, tools, broadcast bus, OAuth, theming, image generation, world info, databanks, persistent events, cross-extension RPC, shared components, web search, connection profiles, UI navigation, host/user context, etc.) | [DOM injection](guides/dom-injection.md) · [Calling the LLM](guides/llm.md) · [Custom macros](guides/macros.md) · [Registering tools](guides/tools.md) · [Broadcast bus](guides/broadcast.md) · [OAuth callbacks](guides/oauth.md) · [Theming the host UI](guides/theme.md) · [Generating images](guides/image-gen.md) · [World info](guides/world-info.md) · [Databanks](guides/databanks.md) · [Persistent events](guides/persistent-events.md) · [Cross-extension RPC](guides/rpc.md) · [Shared components](guides/components.md) · [Web search](guides/web-search.md) · [Connection profiles](guides/connections.md) · [UI navigation](guides/ui-navigation.md) · [Host & user context](guides/host-context.md) · [Picking files](guides/file-picker.md) · [Reactive UI state](guides/ui-events.md) · [Memory Cortex & chat memory](guides/memories.md) · [Mounting a full-bleed surface](guides/app-mount.md) — more guides coming, by topic |
 | Find a recipe for a common pattern | `cookbook/*` *(coming, by recipe)* |
 
 ## Where things live
 
 - **In-app Reference tab.** Authoritative auto-generated reference for every `api.*` method, key type, event, permission, broadcast event, and runtime directive. Always current with whatever LumiScript version you're running — these prose docs may lag, the Reference doesn't. **Treat it as the source of truth for surface details.**
-- **In-app Lisa (the assistant).** Built-in chat assistant for LumiScript scripting questions. Has the same corpus the Reference renders, plus extra context (REDIRECTS for common hallucinations, namespace concept paragraphs, the trigger / permission model intros). Good for "I want to do X, what's the right primitive?" queries.
+- **In-app Lisa (the assistant).** Built-in chat assistant for LumiScript scripting questions. Has the same corpus the Reference renders, plus extra context (REDIRECTS for common hallucinations, namespace concept paragraphs, the trigger / permission model intros). Good for "I want to do X, what's the right primitive?" queries. See [Working with Lisa](guides/lisa.md) for the full walkthrough.
 - **Editor console.** Inside the script editor, every `console.log` / `warn` / `error` your script emits lands here, plus any rejected security pattern surfaces as a `[security]` entry. The editor console is what you tail while you iterate.
 - **These docs.** Narrative explanations of how the pieces fit together, the "why this is shaped this way" you can't get from a method-list, and recipes for common patterns.
 
@@ -39,7 +40,7 @@ If you're contributing to the LumiScript extension itself (not writing scripts t
 
 - **Code blocks are runnable.** If a snippet looks self-contained — copy-paste into a script and it works, modulo any permission your script needs to have granted.
 - **Permissions are flagged explicitly.** When a method requires a Spindle permission and/or the per-script `allowDangerous` toggle, we say so inline.
-- **Versions** are noted where behaviour differs across LumiScript versions. The current target is **v1.0.0-rc.7+**.
+- **Versions** are noted where behaviour differs across LumiScript versions. The current target is **v1.0.0-rc.9+**.
 - **Cross-references** to topics that haven't been written yet are bracketed *(coming next)* or *(coming, by topic)* — they'll resolve as the docs fill in.
 
 ## A note on what's NOT here

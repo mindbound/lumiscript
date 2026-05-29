@@ -89,6 +89,9 @@ export function createMockSpindle() {
         content: '',
         reasoning: '',
       })),
+      rawStream: mock(() => (async function* () {
+        yield { type: 'done', content: '', finish_reason: 'stop' };
+      })()),
     },
 
     // ─── Storage ───────────────────────────────────────────────────────
@@ -162,6 +165,105 @@ export function createMockSpindle() {
     connections: {
       list: mock(() => Promise.resolve([])),
       get: mock(() => Promise.resolve(null)),
+    },
+
+    // ─── Memories (gated: memories) — Phase 1: cortex + chatMemory + stats ──
+    memories: {
+      cortex: {
+        getConfig: mock(() => Promise.resolve({ enabled: false, entityTracking: false, entityExtractionMode: 'heuristic', salienceScoring: false })),
+        putConfig: mock(() => Promise.resolve({ enabled: false, entityTracking: false, entityExtractionMode: 'heuristic', salienceScoring: false })),
+        query: mock(() => Promise.resolve({ memories: [], entityContext: [], activeRelationships: [], arcContext: null, stats: { candidatePoolSize: 0, vectorSearchResults: 0, entitiesMatched: 0, scoreFusionApplied: false, topScore: 0, retrievalTimeMs: 0 } })),
+        queryLinked: mock(() => Promise.resolve({ vaults: [], interlinks: [] })),
+        getCached: mock(() => Promise.resolve(null)),
+        getCachedLinked: mock(() => Promise.resolve(null)),
+        invalidateCache: mock(() => Promise.resolve()),
+        invalidateLinkedCache: mock(() => Promise.resolve()),
+      },
+      entities: {
+        list: mock(() => Promise.resolve([])),
+        get: mock(() => Promise.resolve(null)),
+        findByName: mock(() => Promise.resolve(null)),
+        upsert: mock(() => Promise.resolve({ id: 'mock-entity', name: 'Mock', entityType: 'character' })),
+        updateStatus: mock(() => Promise.resolve({ id: 'mock-entity' })),
+        addFacts: mock(() => Promise.resolve({ id: 'mock-entity' })),
+        getFacts: mock(() => Promise.resolve([])),
+        updateEmotionalValence: mock(() => Promise.resolve({ id: 'mock-entity' })),
+      },
+      relations: {
+        list: mock(() => Promise.resolve([])),
+        listAll: mock(() => Promise.resolve([])),
+        forEntity: mock(() => Promise.resolve([])),
+        forEntities: mock(() => Promise.resolve([])),
+        upsert: mock(() => Promise.resolve(null)),
+      },
+      consolidations: {
+        list: mock(() => Promise.resolve([])),
+        latestArc: mock(() => Promise.resolve(null)),
+        run: mock(() => Promise.resolve()),
+      },
+      salience: {
+        list: mock(() => Promise.resolve([])),
+      },
+      vaults: {
+        list: mock(() => Promise.resolve([])),
+        get: mock(() => Promise.resolve(null)),
+        getChunks: mock(() => Promise.resolve([])),
+        create: mock(() => Promise.resolve({ id: 'mock-vault', name: 'Mock', entityCount: 0, relationCount: 0, chunkCount: 0 })),
+        rename: mock(() => Promise.resolve(true)),
+        delete: mock(() => Promise.resolve(true)),
+        reindex: mock(() => Promise.resolve({ mode: 'structural', chunkCount: 0 })),
+      },
+      links: {
+        list: mock(() => Promise.resolve([])),
+        attach: mock(() => Promise.resolve([])),
+        remove: mock(() => Promise.resolve(true)),
+        toggle: mock(() => Promise.resolve(true)),
+      },
+      chatMemory: {
+        listChunks: mock(() => Promise.resolve([])),
+        get: mock(() => Promise.resolve({ chunks: [], formatted: '', count: 0, enabled: false, queryPreview: '', settingsSource: 'global', chunksAvailable: 0, chunksPending: 0 })),
+        warm: mock(() => Promise.resolve({ status: 'skipped', reason: 'chat_vectorization_disabled' })),
+        invalidate: mock(() => Promise.resolve()),
+      },
+      stats: {
+        usage: mock(() => Promise.resolve({ entityCount: 0, relationCount: 0, salienceRecordCount: 0, consolidationCount: 0 })),
+        ingestionStatus: mock(() => Promise.resolve(null)),
+        ingestionTelemetry: mock(() => Promise.resolve({ samples: 0, last: null, averages: { fontMs: 0, heuristicMs: 0, sidecarMs: 0, graphMs: 0, dbMs: 0, totalMs: 0 } })),
+      },
+    },
+
+    // ─── Web search (gated: web_search) ────────────────────────────────
+    webSearch: {
+      query: mock(() => Promise.resolve({ query: '', results: [] })),
+      getSettings: mock(() => Promise.resolve({
+        enabled: false, provider: 'searxng', apiUrl: '', requestTimeoutMs: 10000,
+        defaultResultCount: 5, maxResultCount: 20, maxPagesToScrape: 3,
+        maxCharsPerPage: 4000, language: 'en', safeSearch: 1, engines: [], hasApiKey: false,
+      })),
+    },
+
+    // ─── Users (free tier) ─────────────────────────────────────────────
+    users: {
+      isVisible: mock(() => Promise.resolve(true)),
+      getRole: mock(() => Promise.resolve('user')),
+    },
+
+    // ─── Version (free tier) ───────────────────────────────────────────
+    version: {
+      getBackend: mock(() => Promise.resolve('1.0.0')),
+      getFrontend: mock(() => Promise.resolve('1.0.0')),
+    },
+
+    // ─── UI navigation (free tier) ─────────────────────────────────────
+    ui: {
+      getDrawerTabs:       mock(() => Promise.resolve([])),
+      getSettingsTabs:     mock(() => Promise.resolve([])),
+      openDrawerTab:       mock(() => Promise.resolve()),
+      closeDrawer:         mock(() => Promise.resolve()),
+      openSettings:        mock(() => Promise.resolve()),
+      closeSettings:       mock(() => Promise.resolve()),
+      openCommandPalette:  mock(() => Promise.resolve()),
+      closeCommandPalette: mock(() => Promise.resolve()),
     },
 
     // ─── Characters ────────────────────────────────────────────────────

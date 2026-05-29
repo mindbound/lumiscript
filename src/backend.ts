@@ -89,12 +89,24 @@ import {
   dispatchDragEnd as dispatchWidgetDragEnd,
 } from './engine/float-widget-registry.js';
 import {
+  liveAppMountsByScript,
+  destroyAppMount as destroyAppMountInRegistry,
+  dropEntry as dropAppMountEntry,
+} from './engine/app-mount-registry.js';
+import {
   listByScript as listTabsByScript,
   clearByScript as clearTabsByScript,
   dispatchActivation as dispatchTabActivation,
 } from './engine/drawer-tab-registry.js';
-import { resolveContextMenu } from './engine/api/ui.js';
+import { resolveContextMenu, resolvePickFile } from './engine/api/ui.js';
+import {
+  dispatchKeyboardChange,
+  dispatchDrawerChange,
+  dispatchSettingsChange,
+  clearByScript as clearUiEventHandlersByScript,
+} from './engine/ui-event-registry.js';
 import { resolveDomRead } from './engine/api/dom.js';
+import { resolveComponentValue } from './engine/api/components.js';
 import { checkMinimumHostVersion } from './utils/host-version.js';
 import {
   enumerateAllCollections,
@@ -110,10 +122,12 @@ import { clearCommandHandlerByScriptId } from './engine/api/commands.js';
 import { buildReplayMessages } from './engine/replay.js';
 import {
   spawnScriptRunner,
+  dispatchComponentCallback,
   notifyAdvancedModalOpened,
   notifyAdvancedModalOpenFailed,
   notifyInputBarActionRegistered,
   notifyFloatWidgetCreated,
+  notifyAppMountCreated,
   sendFloatWidgetPositionNotice,
   notifyDrawerTabRegistered,
   setScriptResolver,
@@ -136,6 +150,15 @@ import {
   type AssistantProbeResult,
 } from './engine/diagnostics.js';
 import { runAssistantTurn } from './assistant/agent.js';
+import { isEligibleUserFile, normalizeUserPath, MAX_USER_FILE_BYTES, USER_FILES_ROOT, userFileDisplayName, toUserFilePath } from './assistant/user-files.js';
+import {
+  memoryIndex as loadMemoryIndex,
+  loadNotes as loadMemoryNotes,
+  remember as addMemoryNote,
+  editNote as editMemoryNote,
+  forget as deleteMemoryNote,
+} from './engine/assistant-memory.js';
+import { consolidateMemory } from './assistant/consolidate-memory.js';
 import { LOOKUP_TABLE } from './assistant/corpus/lookup-table.js';
 import {
   loadThreadIndex,
@@ -892,6 +915,12 @@ async function teardownDisabledScript(scriptId: string, disabledScript: Script |
     send({ type: 'ls_float_widget_destroy', widgetId });
     dropWidgetEntry(widgetId);
   }
+  // Destroy any app mounts this script created (same lifecycle as widgets).
+  for (const mountId of liveAppMountsByScript(scriptId)) {
+    destroyAppMountInRegistry(mountId);
+    send({ type: 'ls_app_mount_destroy', mountId });
+    dropAppMountEntry(mountId);
+  }
   // Destroy any drawer tabs this script has registered. Simple
   // lifecycle like input-bar actions — emit destroy messages,
   // then clear the registry entries.
@@ -899,6 +928,7 @@ async function teardownDisabledScript(scriptId: string, disabledScript: Script |
     send({ type: 'ls_drawer_tab_destroy', scriptId, tabId });
   }
   clearTabsByScript(scriptId);
+  clearUiEventHandlersByScript(scriptId);
   cleanupDOMScript(scriptId);
   send({ type: 'dom_cleanup_script', scriptId });
   // Phase 9f-1 — fully unregister the script from the script-runner
@@ -1013,10 +1043,17 @@ async function wipeScriptStateForReload(scriptId: string): Promise<void> {
     send({ type: 'ls_float_widget_destroy', widgetId });
     dropWidgetEntry(widgetId);
   }
+  // Destroy any app mounts this script created (same lifecycle as widgets).
+  for (const mountId of liveAppMountsByScript(scriptId)) {
+    destroyAppMountInRegistry(mountId);
+    send({ type: 'ls_app_mount_destroy', mountId });
+    dropAppMountEntry(mountId);
+  }
   for (const tabId of listTabsByScript(scriptId)) {
     send({ type: 'ls_drawer_tab_destroy', scriptId, tabId });
   }
   clearTabsByScript(scriptId);
+  clearUiEventHandlersByScript(scriptId);
   // DOM — old injected elements + their listeners from the previous run.
   cleanupDOMScript(scriptId);
   send({ type: 'dom_cleanup_script', scriptId });
@@ -1112,6 +1149,40 @@ function pushAssistantThreads(): void {
   });
 }
 
+/** Cheap non-crypto hash (djb2) for change-detecting attached-script code
+ *  across assistant turns. A collision would only miss one change-flag —
+ *  harmless — so cryptographic strength isn't needed. */
+function hashScriptCode(code: string): string {
+  let h = 5381;
+  for (let i = 0; i < code.length; i++) h = (((h << 5) + h) + code.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+
+async function listAttachableUserFiles(
+  userId: string | undefined,
+): Promise<Array<{ path: string; name: string; sizeBytes: number }>> {
+  let rel: string[] = [];
+  try {
+    rel = await spindle.userStorage.list(USER_FILES_ROOT, userId);
+  } catch {
+    return []; // reserved folder doesn't exist yet → nothing attachable
+  }
+  const out: Array<{ path: string; name: string; sizeBytes: number }> = [];
+  for (const r of rel) {
+    // list(prefix) returns paths RELATIVE to the prefix (native separators on
+    // Windows) — normalize + prepend the reserved root back on.
+    const path = USER_FILES_ROOT + normalizeUserPath(r);
+    if (!isEligibleUserFile(path)) continue;
+    try {
+      const st = await spindle.userStorage.stat(path, userId);
+      if (!st.exists || !st.isFile || st.sizeBytes > MAX_USER_FILE_BYTES) continue;
+      out.push({ path, name: userFileDisplayName(path), sizeBytes: st.sizeBytes });
+    } catch { /* skip unreadable / vanished entry */ }
+  }
+  out.sort((a, b) => a.name.localeCompare(b.name));
+  return out;
+}
+
 function pushActiveThreadLoaded(): void {
   if (!activeAssistantThread) return;
   spindle.sendToFrontend({
@@ -1119,7 +1190,40 @@ function pushActiveThreadLoaded(): void {
     threadId: activeAssistantThread.id,
     title:    activeAssistantThread.title,
     messages: activeAssistantThread.messages,
+    contextScriptIds: activeAssistantThread.contextScriptIds ?? [],
+    contextFilePaths: activeAssistantThread.contextFilePaths ?? [],
+    appliedEvents: activeAssistantThread.appliedEvents ?? [],
   });
+}
+
+/** Push the user's current memory notes to the Memory panel. Best-effort —
+ *  sends an empty list on a read failure rather than breaking the panel. */
+async function pushAssistantMemory(userId: string): Promise<void> {
+  try {
+    spindle.sendToFrontend({ type: 'assistant_memory', notes: await loadMemoryNotes(userId) });
+  } catch (err) {
+    spindle.log.warn(`[LumiScript] pushAssistantMemory failed: ${err instanceof Error ? err.message : String(err)}`);
+    spindle.sendToFrontend({ type: 'assistant_memory', notes: [] });
+  }
+}
+
+/** Record an "Apply to script" event on the active thread (parallel to
+ *  `messages`, never sent to the LLM) so it renders as a transcript marker and
+ *  survives reload. Anchored after the current message count. No-op without an
+ *  active thread / user. */
+function recordAppliedEvent(
+  name: string,
+  type: import('./types/script.js').ScriptType,
+  updated: boolean,
+): void {
+  if (!activeAssistantThread || !activeUserId) return;
+  (activeAssistantThread.appliedEvents ??= []).push({
+    afterMessageCount: activeAssistantThread.messages.length,
+    scriptName: name,
+    scriptType: type,
+    updated,
+  });
+  void persistActiveThread(activeUserId);
 }
 
 async function persistActiveThread(userId: string): Promise<void> {
@@ -1497,7 +1601,11 @@ spindle.onFrontendMessage(async (raw, userId) => {
 
       // ── In-app assistant ────────────────────────────────────────────────
       case 'assistant_send': {
-        spindle.sendToFrontend({ type: 'assistant_user_turn', content: msg.content });
+        // Skip the user-turn echo on retry: the failed attempt's bubble is
+        // still shown (it was never persisted), so re-echoing would duplicate it.
+        if (!msg.isRetry) {
+          spindle.sendToFrontend({ type: 'assistant_user_turn', content: msg.content });
+        }
         if (!activeUserId) {
           spindle.sendToFrontend({
             type: 'assistant_error',
@@ -1535,6 +1643,65 @@ spindle.onFrontendMessage(async (raw, userId) => {
           if (typeof s.assistantMaxTokens   === 'number') parameters.max_tokens        = s.assistantMaxTokens;
           parameters.parallel_tool_calls = s.assistantParallelToolCalls;
 
+          // Resolve @-mentioned script IDs to their CURRENT code for read-
+          // context. Re-resolved fresh on every send (never persisted into
+          // thread history), so edits the user makes between turns are always
+          // reflected. Unknown IDs (e.g. deleted since attaching) are skipped.
+          const allScriptsForContext = scriptStorage.getScripts();
+          // Per-thread change detection: compare each attached script's current
+          // code hash to the baseline from the last turn it was shown. A script
+          // whose hash differs (and had a prior baseline) is flagged `changed`,
+          // so the agent notes it — covers both the user applying a suggestion
+          // and a manual edit between turns. First-seen scripts get no flag.
+          const prevSeenHashes = activeAssistantThread.seenScriptHashes ?? {};
+          const nextSeenHashes: Record<string, string> = {};
+          const attachedScripts = (msg.contextScriptIds ?? [])
+            .map((id) => allScriptsForContext.find((sc) => sc.id === id))
+            .filter((sc): sc is NonNullable<typeof sc> => sc != null)
+            .map((sc) => {
+              const hash = hashScriptCode(sc.code);
+              nextSeenHashes[sc.id] = hash;
+              const prior = prevSeenHashes[sc.id];
+              return {
+                id: sc.id, name: sc.name, type: sc.type, code: sc.code,
+                changed: prior !== undefined && prior !== hash,
+              };
+            });
+          // Persist the context set + the new seen-hash baseline onto the thread
+          // (persistActiveThread runs after the turn). contextScriptIds restores
+          // the chip tray on reload; seenScriptHashes makes change-detection
+          // survive reload. Baseline tracks only currently-attached scripts.
+          activeAssistantThread.contextScriptIds = msg.contextScriptIds ?? [];
+          activeAssistantThread.seenScriptHashes = nextSeenHashes;
+
+          // Resolve @-attached user files (reserved "userfiles/" folder). Read
+          // fresh each turn via userStorage so edits reflect; eligibility-gated
+          // (root + extension) + size-capped; unknown/oversized/unreadable paths
+          // are skipped. Hashed for change-detection, mirroring scripts.
+          const prevSeenFileHashes = activeAssistantThread.seenFileHashes ?? {};
+          const nextSeenFileHashes: Record<string, string> = {};
+          const attachedFiles: { path: string; content: string; changed: boolean }[] = [];
+          for (const rawPath of (msg.contextFilePaths ?? [])) {
+            const path = normalizeUserPath(rawPath);
+            if (!isEligibleUserFile(path)) continue;
+            try {
+              const st = await spindle.userStorage.stat(path, activeUserId ?? undefined);
+              if (!st.exists || !st.isFile || st.sizeBytes > MAX_USER_FILE_BYTES) continue;
+              const content = await spindle.userStorage.read(path, activeUserId ?? undefined);
+              const hash = hashScriptCode(content);
+              nextSeenFileHashes[path] = hash;
+              const prior = prevSeenFileHashes[path];
+              attachedFiles.push({ path, content, changed: prior !== undefined && prior !== hash });
+            } catch { /* skip unreadable / vanished file */ }
+          }
+          activeAssistantThread.contextFilePaths = msg.contextFilePaths ?? [];
+          activeAssistantThread.seenFileHashes = nextSeenFileHashes;
+
+          // Load this user's memory index (hooks) for the SESSION NOTES section.
+          // Best-effort — a memory read failure must never break a turn.
+          let memIndexStr = '';
+          try { memIndexStr = await loadMemoryIndex(activeUserId); } catch { /* leave empty */ }
+
           const result = await runAssistantTurn(
             {
               history: activeAssistantThread.messages,
@@ -1544,6 +1711,9 @@ spindle.onFrontendMessage(async (raw, userId) => {
               signal: assistantAbortController.signal,
               parameters,
               ...(msg.connectionId ? { connectionId: msg.connectionId } : {}),
+              ...(attachedScripts.length > 0 ? { attachedScripts } : {}),
+              ...(attachedFiles.length > 0 ? { attachedFiles } : {}),
+              ...(memIndexStr ? { memoryIndex: memIndexStr } : {}),
             },
             {
               onToken: (token) => {
@@ -1594,6 +1764,119 @@ spindle.onFrontendMessage(async (raw, userId) => {
         activeAssistantThread = createNewThread();
         pushAssistantThreads();
         pushActiveThreadLoaded();
+        break;
+      }
+
+      // Persist the active thread's attached-script context set (chip tray).
+      // Fired by the frontend on attach/detach so the set survives reload even
+      // without a send. Only persists once the thread has content — an empty
+      // brand-new thread holds the set in memory until its first message
+      // (avoids littering storage with never-used thread files).
+      case 'assistant_set_context': {
+        if (!activeUserId || !assistantInitialized || !activeAssistantThread) break;
+        activeAssistantThread.contextScriptIds = msg.scriptIds;
+        activeAssistantThread.contextFilePaths = msg.filePaths ?? [];
+        // Context-only persist: write the body WITHOUT bumping updatedAt or
+        // touching the index — toggling a chip shouldn't reorder the sidebar or
+        // count as thread activity. Only persists once the thread has content
+        // (mirrors persistActiveThread; empty new threads hold the set in memory
+        // until their first message). saveThread with bumpUpdatedAt:false returns
+        // the same object, so no reassignment / switch-race concern.
+        if (activeAssistantThread.messages.some((m) => m.role !== 'system')) {
+          void saveThread(activeUserId, activeAssistantThread, { bumpUpdatedAt: false })
+            .catch((err) => spindle.log.warn(
+              `[LumiScript] assistant_set_context persist failed: ` +
+              (err instanceof Error ? err.message : String(err)),
+            ));
+        }
+        break;
+      }
+
+      // ── Attachable user files ("Lisa files" reserved folder) ────────────
+      case 'request_user_files': {
+        if (activeUserId) {
+          const files = await listAttachableUserFiles(activeUserId);
+          spindle.sendToFrontend({ type: 'user_files', files });
+        }
+        break;
+      }
+      case 'add_user_file': {
+        if (activeUserId) {
+          const path = toUserFilePath(msg.name);
+          const errs: string[] = [];
+          if (!msg.name.trim()) errs.push('Enter a file name.');
+          else if (!isEligibleUserFile(path)) errs.push('Use an allowed text extension (e.g. .md, .txt, .json, .csv).');
+          if (new TextEncoder().encode(msg.content).length > MAX_USER_FILE_BYTES) errs.push('File is too large (256 KB max).');
+          if (errs.length === 0) {
+            try {
+              await spindle.userStorage.write(path, msg.content, activeUserId);
+            } catch (err) {
+              errs.push('Could not save the file.');
+              spindle.log.warn(`[LumiScript] add_user_file failed: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+          const files = await listAttachableUserFiles(activeUserId);
+          spindle.sendToFrontend({ type: 'user_files', files, ...(errs.length ? { error: errs.join(' ') } : {}) });
+        }
+        break;
+      }
+      case 'delete_user_file': {
+        if (activeUserId) {
+          const path = normalizeUserPath(msg.path);
+          if (isEligibleUserFile(path)) {
+            try {
+              await spindle.userStorage.delete(path, activeUserId);
+            } catch (err) {
+              spindle.log.warn(`[LumiScript] delete_user_file failed: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+          const files = await listAttachableUserFiles(activeUserId);
+          spindle.sendToFrontend({ type: 'user_files', files });
+        }
+        break;
+      }
+
+      // ── Lisa memory panel (user curation: list / add / edit / delete) ───
+      case 'request_assistant_memory': {
+        if (activeUserId) await pushAssistantMemory(activeUserId);
+        break;
+      }
+      case 'assistant_memory_add': {
+        if (!activeUserId) break;
+        await addMemoryNote(activeUserId, {
+          hook: msg.hook,
+          ...(msg.detail ? { detail: msg.detail } : {}),
+          ...(msg.category ? { category: msg.category } : {}),
+          source: 'user',
+        });
+        await pushAssistantMemory(activeUserId);
+        break;
+      }
+      case 'assistant_memory_edit': {
+        if (!activeUserId) break;
+        await editMemoryNote(activeUserId, msg.id, {
+          hook: msg.hook,
+          detail: msg.detail,
+          category: msg.category,
+        });
+        await pushAssistantMemory(activeUserId);
+        break;
+      }
+      case 'assistant_memory_delete': {
+        if (!activeUserId) break;
+        await deleteMemoryNote(activeUserId, msg.id);
+        await pushAssistantMemory(activeUserId);
+        break;
+      }
+      case 'assistant_memory_consolidate': {
+        if (!activeUserId) break;
+        const res = await consolidateMemory(activeUserId, msg.connectionId);
+        if (res.ok) {
+          await pushAssistantMemory(activeUserId);
+          spindle.sendToFrontend({ type: 'assistant_memory_consolidated', before: res.before, after: res.after });
+        } else {
+          spindle.sendToFrontend({ type: 'assistant_memory_consolidated', before: 0, after: 0, error: res.error });
+        }
         break;
       }
 
@@ -1732,6 +2015,36 @@ spindle.onFrontendMessage(async (raw, userId) => {
         // for the modal's inline confirmation.
         try {
           const codeRaw = msg.code ?? '';
+
+          // ── Update an existing (attached) script in place ──────────────────
+          // When the user picked "Update «script»" from the apply menu, the
+          // frontend sends the target id. Replace its code verbatim — no
+          // provenance header, no rename — then refresh (mirrors the create
+          // path's post-write calls). The destructive-overwrite confirm was
+          // already shown frontend-side.
+          if (msg.targetScriptId) {
+            const target = scriptStorage.getScript(msg.targetScriptId);
+            if (!target) {
+              spindle.sendToFrontend({
+                type:  'assistant_apply_error',
+                error: 'That script no longer exists — it may have been deleted since you attached it.',
+              });
+              break;
+            }
+            await scriptStorage.updateScript(msg.targetScriptId, { code: codeRaw });
+            pushScripts();
+            void syncTriggers();
+            pushTools();
+            recordAppliedEvent(target.name, target.type, true);
+            spindle.sendToFrontend({
+              type:       'assistant_apply_success',
+              scriptName: target.name,
+              scriptType: target.type,
+              updated:    true,
+            });
+            break;
+          }
+
           // Classification heuristic: presence-based, conservative defaults.
           //   - `// @triggers` comment anywhere → trigger (user is writing
           //     a trigger-shaped script even if @triggers is documentary)
@@ -1773,10 +2086,12 @@ spindle.onFrontendMessage(async (raw, userId) => {
           pushScripts();
           void syncTriggers();
           pushTools();
+          recordAppliedEvent(derivedName, scriptType, false);
           spindle.sendToFrontend({
             type:       'assistant_apply_success',
             scriptName: derivedName,
             scriptType,
+            updated:    false,
           });
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : String(err);
@@ -2327,6 +2642,12 @@ spindle.onFrontendMessage(async (raw, userId) => {
           send({ type: 'ls_float_widget_destroy', widgetId });
           dropWidgetEntry(widgetId);
         }
+        // Destroy app mounts — see the matching block in `update_script`.
+        for (const mountId of liveAppMountsByScript(msg.id)) {
+          destroyAppMountInRegistry(mountId);
+          send({ type: 'ls_app_mount_destroy', mountId });
+          dropAppMountEntry(mountId);
+        }
         // Destroy drawer tabs — see the matching block in `update_script`.
         for (const tabId of listTabsByScript(msg.id)) {
           send({ type: 'ls_drawer_tab_destroy', scriptId: msg.id, tabId });
@@ -2489,6 +2810,32 @@ spindle.onFrontendMessage(async (raw, userId) => {
         break;
       }
 
+      // ── File picker result ─────────────────────────────────────────────
+      // Frontend echoes this after `ctx.uploads.pickFile` settles. On error
+      // (e.g. oversize) the awaiting `api.ui.pickFile` promise rejects; else it
+      // resolves with the decoded files (empty = user cancelled).
+      // `resolvePickFile` no-ops on unknown requestId (stale after teardown).
+      case 'ls_pick_file_result': {
+        resolvePickFile(msg.requestId, { files: msg.files, error: msg.error });
+        break;
+      }
+
+      // ── UI state changes (api.ui.events) ───────────────────────────────
+      // Frontend pushes initial state on connect + every change. Update the
+      // cache + fan out to subscribers.
+      case 'ls_ui_keyboard_changed': {
+        dispatchKeyboardChange(msg.state);
+        break;
+      }
+      case 'ls_ui_drawer_changed': {
+        dispatchDrawerChange(msg.state);
+        break;
+      }
+      case 'ls_ui_settings_changed': {
+        dispatchSettingsChange(msg.state);
+        break;
+      }
+
       // ── DOM read response (v1.0.0-rc.6) ────────────────────────────────
       // Frontend echoes this after building a `SerializedDOMElement`
       // snapshot for a `DOMHandle.read()` call (or `null` if the
@@ -2497,6 +2844,23 @@ spindle.onFrontendMessage(async (raw, userId) => {
       // after script teardown / cancellation just gets dropped.
       case 'dom_read_response': {
         resolveDomRead(msg.requestId, msg.snapshot);
+        break;
+      }
+
+      // ── Shared component callback (api.ui.components.*, v1.0.0-rc.9) ────
+      // A mounted component fired a registered callback (e.g. switch onChange).
+      // Route to the owning script's handler closure via the dispatcher's
+      // callback-route registry.
+      case 'component_callback': {
+        dispatchComponentCallback(msg.componentId, msg.callbackName, msg.value);
+        break;
+      }
+
+      // ── Shared component getValue() response (v1.0.0-rc.9) ──────────────
+      // Frontend reply to a `comp_get_value` request. `resolveComponentValue`
+      // no-ops on an unknown requestId (stale response after teardown).
+      case 'comp_value_result': {
+        resolveComponentValue(msg.requestId, msg.value);
         break;
       }
 
@@ -2526,6 +2890,12 @@ spindle.onFrontendMessage(async (raw, userId) => {
       // to the script-runner host-dispatcher's awaiter table.
       case 'ls_float_widget_created': {
         notifyFloatWidgetCreated(msg.widgetId);
+        break;
+      }
+
+      // ── App mount create confirmation (Option B) ───────────────────────
+      case 'ls_app_mount_created': {
+        notifyAppMountCreated(msg.mountId);
         break;
       }
 
@@ -2770,10 +3140,10 @@ spindle.onFrontendMessage(async (raw, userId) => {
       // ── Phase F (v1.0 runtime-isolation) ───────────────────────────────
       case 'reload_script': {
         // Manual "Reload script" action — fires `ls:reload` for the given
-        // script regardless of the `@no-reload-on-edit` directive (the
-        // directive only gates the autosave-driven path; manual reloads
-        // always fire). Library scripts are silently skipped — there's no
-        // body to re-run.
+        // script regardless of the `@ls:reload-on-edit` directive (that
+        // directive only gates the autosave-driven reload path; manual
+        // reloads always fire, present or not). Library scripts are silently
+        // skipped — there's no body to re-run.
         const script = scriptStorage.getScript(msg.id);
         if (!script) {
           send({ type: 'error', message: `Script not found: ${msg.id}` });

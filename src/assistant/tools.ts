@@ -22,6 +22,7 @@
 
 import { LOOKUP_TABLE } from './corpus/lookup-table.js';
 import type { LookupEntry } from './types.js';
+import { remember, recall, forget } from '../engine/assistant-memory.js';
 
 // ─── Tool schemas (for api.llm.generateWithTools) ────────────────────────────
 
@@ -57,12 +58,63 @@ const LOOKUP_API_SPEC: AssistantToolSpec = {
   },
 };
 
+// ─── Memory tools (Phase 1) — durable, user-editable notes about THIS user ────
+
+const REMEMBER_SPEC: AssistantToolSpec = {
+  name: 'remember',
+  description:
+    'Save a durable note about THIS user so you recall it in future sessions. Use a concise one-line `hook` (it shows in your always-loaded SESSION NOTES index) plus optional longer `detail`. ' +
+    'Remember things like: coding-style preferences, naming conventions, recurring project facts, decisions you agreed on, or a correction to something you learned earlier in conversation. ' +
+    'Do NOT remember: API facts (the reference is the source of truth — if you think it is wrong, tell the user instead), the current code of a script (that comes live from @-attached scripts), or transient chat detail. Keep hooks specific and self-contained.',
+  parameters: {
+    type: 'object',
+    properties: {
+      hook:     { type: 'string', description: 'Concise one-line summary — the index entry. Required.' },
+      detail:   { type: 'string', description: 'Optional longer detail, retrieved later via recall().' },
+      category: { type: 'string', description: 'Optional grouping, e.g. "preference", "project", "correction".' },
+    },
+    required: ['hook'],
+    additionalProperties: false,
+  },
+};
+
+const RECALL_SPEC: AssistantToolSpec = {
+  name: 'recall',
+  description:
+    'Search your saved notes about this user and return matches with their full detail. Call this when a hook in the SESSION NOTES index looks relevant to the current question and you want the detail behind it. Terms are matched case-insensitively (all terms must match); an empty query returns every note.',
+  parameters: {
+    type: 'object',
+    properties: {
+      query: { type: 'string', description: 'Search terms. Empty string returns all notes.' },
+    },
+    required: ['query'],
+    additionalProperties: false,
+  },
+};
+
+const FORGET_SPEC: AssistantToolSpec = {
+  name: 'forget',
+  description:
+    'Delete a saved note by its id (shown as "(id)" in the SESSION NOTES index). Use when a note is stale or wrong — to correct earlier knowledge, forget the old note and remember the corrected one.',
+  parameters: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', description: 'The id of the note to remove.' },
+    },
+    required: ['id'],
+    additionalProperties: false,
+  },
+};
+
 /**
  * All tool specs the assistant has available. Pass directly into
  * `api.llm.generateWithTools(messages, ASSISTANT_TOOLS, ...)`.
  */
 export const ASSISTANT_TOOLS: readonly AssistantToolSpec[] = Object.freeze([
   LOOKUP_API_SPEC,
+  REMEMBER_SPEC,
+  RECALL_SPEC,
+  FORGET_SPEC,
 ]);
 
 // ─── Tool handlers ───────────────────────────────────────────────────────────
@@ -231,24 +283,78 @@ function suggestNearbyKeys(attempted: string): string[] {
   return fallback;
 }
 
+// ─── Memory tool handlers (Phase 1) ──────────────────────────────────────────
+
+async function handleRemember(args: Record<string, unknown>, userId: string): Promise<ToolResult> {
+  const hook = typeof args.hook === 'string' ? args.hook : '';
+  if (!hook.trim()) {
+    return { content: JSON.stringify({ error: 'remember requires a non-empty `hook`.' }), isError: true };
+  }
+  const res = await remember(userId, {
+    hook,
+    ...(typeof args.detail === 'string' ? { detail: args.detail } : {}),
+    ...(typeof args.category === 'string' ? { category: args.category } : {}),
+    source: 'lisa',
+  });
+  return res.ok
+    ? { content: JSON.stringify({ saved: true, id: res.id }), isError: false }
+    : { content: JSON.stringify({ error: res.error }), isError: true };
+}
+
+async function handleRecall(args: Record<string, unknown>, userId: string): Promise<ToolResult> {
+  const query = typeof args.query === 'string' ? args.query : '';
+  const matches = await recall(userId, query);
+  return {
+    content: JSON.stringify({
+      count: matches.length,
+      notes: matches.map((n) => ({
+        id:   n.id,
+        hook: n.hook,
+        ...(n.detail ? { detail: n.detail } : {}),
+        ...(n.category ? { category: n.category } : {}),
+      })),
+    }),
+    isError: false,
+  };
+}
+
+async function handleForget(args: Record<string, unknown>, userId: string): Promise<ToolResult> {
+  const id = typeof args.id === 'string' ? args.id : '';
+  if (!id) return { content: JSON.stringify({ error: 'forget requires an `id`.' }), isError: true };
+  const removed = await forget(userId, id);
+  return {
+    content: JSON.stringify(removed ? { forgotten: id } : { error: `No note with id "${id}".` }),
+    isError: !removed,
+  };
+}
+
 // ─── Dispatch ────────────────────────────────────────────────────────────────
 
 /**
  * Route a tool invocation to its handler. Called by the backend agent loop
- * when the LLM returns a `tool_calls` array — for each call, the loop
- * passes the name + parsed args to this dispatcher, takes the returned
- * string, and feeds it back to the LLM as the tool's reply.
+ * when the LLM returns a `tool_calls` array — for each call, the loop passes
+ * the name + parsed args (+ turn context) to this dispatcher, takes the
+ * returned string, and feeds it back to the LLM as the tool's reply.
  *
- * Unknown tool names return an error envelope rather than throwing — keeps
- * the loop resilient if the LLM hallucinates a tool name.
+ * Async because the memory tools (`remember` / `recall` / `forget`) touch
+ * `userStorage`; `lookup_api` stays a pure synchronous lookup, just returned
+ * from the async fn. Unknown tool names return an error envelope rather than
+ * throwing — keeps the loop resilient if the LLM hallucinates a tool name.
  */
-export function dispatchAssistantTool(
+export async function dispatchAssistantTool(
   name: string,
   args: Record<string, unknown>,
-): ToolResult {
+  ctx: { userId: string },
+): Promise<ToolResult> {
   switch (name) {
     case 'lookup_api':
       return handleLookupApi(args);
+    case 'remember':
+      return handleRemember(args, ctx.userId);
+    case 'recall':
+      return handleRecall(args, ctx.userId);
+    case 'forget':
+      return handleForget(args, ctx.userId);
     default:
       return {
         content: JSON.stringify({

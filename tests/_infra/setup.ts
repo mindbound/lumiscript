@@ -18,6 +18,8 @@ import { resetContext } from '../../src/engine/binding.js';
 import { executionStatusStore } from '../../src/engine/execution-status.js';
 import { clearAllCommandHandlers } from '../../src/engine/api/commands.js';
 import { __reset as resetDOMRegistry } from '../../src/engine/dom-registry.js';
+import { __reset as resetUiEventRegistry } from '../../src/engine/ui-event-registry.js';
+import { __resetComponentValuesForTests } from '../../src/engine/api/components.js';
 import { __reset as resetMacroInterceptorRegistry } from '../../src/engine/macro-interceptor-registry.js';
 import { __reset as resetMessageContentProcessorRegistry } from '../../src/engine/message-content-processor-registry.js';
 // v1.0.0-rc.3+ — additional pinning-registry resets so eviction-pinning
@@ -28,6 +30,7 @@ import { __reset as resetDrawerTabRegistry }            from '../../src/engine/d
 import { __reset as resetInputBarActionRegistry }      from '../../src/engine/input-bar-action-registry.js';
 import { __reset as resetWorldInfoInterceptorRegistry } from '../../src/engine/world-info-interceptor-registry.js';
 import { __reset as resetFloatWidgetRegistry }         from '../../src/engine/float-widget-registry.js';
+import { __reset as resetAppMountRegistry }            from '../../src/engine/app-mount-registry.js';
 import { __reset as resetAdvancedModalRegistry }       from '../../src/engine/advanced-modal-registry.js';
 import { __resetForTests as resetThemeStore }           from '../../src/engine/theme-store.js';
 // Phase 11.A — script-runner module-state resets so dispatcher / api-proxy
@@ -52,12 +55,15 @@ beforeEach(() => {
   executionStatusStore.clear();
   clearAllCommandHandlers();
   resetDOMRegistry();
+  resetUiEventRegistry();
+  __resetComponentValuesForTests();
   resetMacroInterceptorRegistry();
   resetMessageContentProcessorRegistry();
   resetDrawerTabRegistry();
   resetInputBarActionRegistry();
   resetWorldInfoInterceptorRegistry();
   resetFloatWidgetRegistry();
+  resetAppMountRegistry();
   resetAdvancedModalRegistry();
   resetThemeStore();
   // Script-runner subsystem — Phase 11.A

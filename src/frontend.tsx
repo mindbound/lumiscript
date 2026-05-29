@@ -8,9 +8,12 @@ import type { FrontendToBackend } from './types/messages.js';
 import { installDOMHandler } from './dom-handler.js';
 import { installModalHandler } from './modal-handler.js';
 import { installContextMenuHandler } from './context-menu-handler.js';
+import { installPickFileHandler } from './pick-file-handler.js';
 import { installInputBarActionHandler } from './input-bar-action-handler.js';
 import { installFloatWidgetHandler } from './float-widget-handler.js';
+import { installAppMountHandler } from './app-mount-handler.js';
 import { installDrawerTabHandler } from './drawer-tab-handler.js';
+import { setHostComponents } from './host-ui.js';
 
 // ─── LumiScript Frontend ──────────────────────────────────────────────────
 // Runs in the browser via dynamic import.
@@ -86,6 +89,31 @@ export function setup(ctx: SpindleFrontendContext) {
   const cleanupContextMenu = installContextMenuHandler(ctx, virtualOnBackendMessage, sendToBackend);
   cleanups.push(cleanupContextMenu);
 
+  // ─── File-picker handler ────────────────────────────────────────────────
+  // Stateless request-response proxy for `api.ui.pickFile` — receives
+  // `ls_pick_file_request`, calls `ctx.uploads.pickFile`, base64-encodes the
+  // selected file bytes, and echoes them back via `ls_pick_file_result`.
+  const cleanupPickFile = installPickFileHandler(ctx, virtualOnBackendMessage, sendToBackend);
+  cleanups.push(cleanupPickFile);
+
+  // ─── UI events bridge (api.ui.events) ───────────────────────────────────
+  // Subscribe ONCE to the host's reactive UI state and forward to the backend,
+  // which caches the latest (for `api.ui.events.getX` snapshots) and fans out
+  // to script subscribers. Push the initial snapshot on connect so the cache
+  // isn't stale before the first change. Guarded for older hosts that predate
+  // `ctx.ui.events`.
+  const uiEvents = ctx.ui?.events;
+  if (uiEvents) {
+    try {
+      sendToBackend({ type: 'ls_ui_keyboard_changed', state: uiEvents.getKeyboardState() });
+      sendToBackend({ type: 'ls_ui_drawer_changed',   state: uiEvents.getDrawerState() });
+      sendToBackend({ type: 'ls_ui_settings_changed', state: uiEvents.getSettingsState() });
+    } catch { /* initial snapshot best-effort */ }
+    cleanups.push(uiEvents.onKeyboardChange((state) => sendToBackend({ type: 'ls_ui_keyboard_changed', state })));
+    cleanups.push(uiEvents.onDrawerChange((state) => sendToBackend({ type: 'ls_ui_drawer_changed', state })));
+    cleanups.push(uiEvents.onSettingsChange((state) => sendToBackend({ type: 'ls_ui_settings_changed', state })));
+  }
+
   // ─── Input-bar action handler ───────────────────────────────────────────
   // Lifecycle proxy for `api.ui.registerInputBarAction`. Maintains a local
   // map of Spindle handles so set-label / set-enabled / destroy messages
@@ -102,6 +130,13 @@ export function setup(ctx: SpindleFrontendContext) {
   // stays authoritative and script `onDragEnd` handlers fire.
   const cleanupFloatWidgets = installFloatWidgetHandler(ctx, virtualOnBackendMessage, sendToBackend);
   cleanups.push(cleanupFloatWidgets);
+
+  // ─── App mount handler ──────────────────────────────────────────────────
+  // Lifecycle proxy for `api.ui.mountApp`. Binds each mount's `.root` element
+  // into the shared DOM map (same trick as float widgets), echoes the
+  // Option-B `ls_app_mount_created` confirm, and handles set-visible / destroy.
+  const cleanupAppMounts = installAppMountHandler(ctx, virtualOnBackendMessage, sendToBackend);
+  cleanups.push(cleanupAppMounts);
 
   // ─── Drawer tab handler ─────────────────────────────────────────────────
   // Lifecycle proxy for `api.ui.registerDrawerTab`. Same root-element
@@ -127,6 +162,11 @@ export function setup(ctx: SpindleFrontendContext) {
   //     widgets, and DOM content come back without user-script code
   //     re-running.
   sendToBackend({ type: 'frontend_ready' });
+
+  // Park the host shared-component factory so the (ctx-free) React trees can
+  // reach it via `getHostComponents()` (see host-ui.ts). Older hosts may not
+  // expose `ctx.components` — the accessor stays null and callers fall back.
+  setHostComponents(ctx.components);
 
   // ─── Dock Panel ─────────────────────────────────────────────────────────
   // We request `edge: 'right'` unconditionally — Lumiverse upstream

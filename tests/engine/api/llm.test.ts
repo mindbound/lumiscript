@@ -650,3 +650,171 @@ describe('messageContentToString', () => {
     expect(messageContentToString([])).toBe('');
   });
 });
+
+// ─── generateStream ──────────────────────────────────────────────────────────
+
+describe('generateStream', () => {
+  function makeStream(chunks: any[]): AsyncGenerator<any, void, void> {
+    return (async function* () {
+      for (const c of chunks) yield c;
+    })();
+  }
+
+  test('yields token then done chunks in order', async () => {
+    mockSpindle.connections.list.mockReturnValueOnce(Promise.resolve([]));
+    mockSpindle.generate.rawStream.mockReturnValueOnce(
+      makeStream([
+        { type: 'token', token: 'Hel' },
+        { type: 'token', token: 'lo' },
+        { type: 'done',  content: 'Hello', finish_reason: 'stop' },
+      ]),
+    );
+
+    const api = buildApi();
+    const collected: any[] = [];
+    for await (const chunk of api.generateStream([{ role: 'user', content: 'hi' }])) {
+      collected.push(chunk);
+    }
+
+    expect(collected).toHaveLength(3);
+    expect(collected[0]).toEqual({ type: 'token', token: 'Hel' });
+    expect(collected[1]).toEqual({ type: 'token', token: 'lo' });
+    expect(collected[2]).toEqual({ type: 'done', content: 'Hello', finish_reason: 'stop' });
+  });
+
+  test('forwards messages, connection_id, and parameters', async () => {
+    mockSpindle.connections.get.mockReturnValueOnce(
+      Promise.resolve({ id: 'conn-x', model: 'gpt-4o', provider: 'openai' }),
+    );
+    mockSpindle.generate.rawStream.mockReturnValueOnce(
+      makeStream([{ type: 'done', content: '', finish_reason: 'stop' }]),
+    );
+
+    const api = buildApi();
+    const messages = [{ role: 'user' as const, content: 'hi' }];
+    for await (const _ of api.generateStream(messages, {
+      connectionId: 'conn-x',
+      temperature: 0.4,
+      maxTokens: 50,
+    })) {
+      // drain
+    }
+
+    const call = mockSpindle.generate.rawStream.mock.calls[0] as any;
+    expect(call[0].type).toBe('raw');
+    expect(call[0].messages).toEqual(messages);
+    expect(call[0].connection_id).toBe('conn-x');
+    expect(call[0].parameters.temperature).toBe(0.4);
+    expect(call[0].parameters.max_tokens).toBe(50);
+  });
+
+  test('forwards opts.signal into the request DTO', async () => {
+    mockSpindle.connections.list.mockReturnValueOnce(Promise.resolve([]));
+    mockSpindle.generate.rawStream.mockReturnValueOnce(
+      makeStream([{ type: 'done', content: '', finish_reason: 'stop' }]),
+    );
+    const ctrl = new AbortController();
+    const api = buildApi();
+    for await (const _ of api.generateStream([{ role: 'user', content: 'hi' }], { signal: ctrl.signal })) {
+      // drain
+    }
+    const call = mockSpindle.generate.rawStream.mock.calls[0] as any;
+    expect(call[0].signal).toBe(ctrl.signal);
+  });
+
+  test('throws PERMISSION_DENIED synchronously (before iteration begins)', () => {
+    const api = buildApi({ hasPerm: () => false });
+    // Should throw on the call itself, NOT on the first .next() — fail-fast
+    // semantics matter so consumers don't have to start iterating to learn
+    // they aren't authorised.
+    expect(() => api.generateStream([{ role: 'user', content: 'hi' }])).toThrow('PERMISSION_DENIED');
+    expect(mockSpindle.generate.rawStream).not.toHaveBeenCalled();
+  });
+
+  test('throws unknown provider synchronously (before iteration begins)', () => {
+    const api = buildApi();
+    expect(() =>
+      api.generateStream([{ role: 'user', content: 'hi' }], { provider: 'fake_provider' as any }),
+    ).toThrow('unknown provider');
+    expect(mockSpindle.generate.rawStream).not.toHaveBeenCalled();
+  });
+
+  test('breaking out of the consumer loop calls .return() on the upstream stream', async () => {
+    mockSpindle.connections.list.mockReturnValueOnce(Promise.resolve([]));
+
+    // Native async generator: when the for-await consumer breaks, the
+    // runtime calls .return() on us, which runs `finally` and sets the
+    // cancellation flag.
+    let cancelled = false;
+    const upstream = (async function* () {
+      try {
+        yield { type: 'token', token: 'A' };
+        // After yielding 'A', the consumer breaks. Subsequent yields are
+        // never reached because .return() resolves the iterator early.
+        yield { type: 'token', token: 'B' };
+        yield { type: 'done', content: 'AB', finish_reason: 'stop' };
+      } finally {
+        cancelled = true;
+      }
+    })();
+    mockSpindle.generate.rawStream.mockReturnValueOnce(upstream as any);
+
+    const api = buildApi();
+    for await (const chunk of api.generateStream([{ role: 'user', content: 'hi' }])) {
+      expect(chunk).toEqual({ type: 'token', token: 'A' });
+      break; // consumer aborts — should propagate .return() to upstream
+    }
+
+    expect(cancelled).toBe(true);
+  });
+
+  test('forwards opts.signal to upstream and propagates a mid-stream AbortError', async () => {
+    mockSpindle.connections.list.mockReturnValueOnce(Promise.resolve([]));
+
+    const ctrl = new AbortController();
+    // Upstream mock simulates a provider that honours request.signal: it
+    // yields two chunks, then — on the pull AFTER the consumer has aborted —
+    // throws an AbortError (exactly what spindle.generate.rawStream does when
+    // the real HTTP request is torn down). Reading req.signal here also
+    // verifies the engine threaded the signal into the request DTO.
+    (mockSpindle.generate.rawStream as any).mockImplementationOnce((req: any) =>
+      (async function* () {
+        yield { type: 'token', token: 'A' };
+        yield { type: 'token', token: 'B' };
+        if (req?.signal?.aborted) {
+          const err = new Error('The operation was aborted');
+          err.name = 'AbortError';
+          throw err;
+        }
+        yield { type: 'done', content: 'AB', finish_reason: 'stop' };
+      })(),
+    );
+
+    const api = buildApi();
+    const seen: string[] = [];
+    let caught: any = null;
+    try {
+      for await (const chunk of api.generateStream(
+        [{ role: 'user', content: 'hi' }],
+        { signal: ctrl.signal },
+      )) {
+        if (chunk.type === 'token') {
+          seen.push(chunk.token);
+          if (seen.length === 2) ctrl.abort(); // abort mid-stream after 2 chunks
+        }
+      }
+    } catch (e) {
+      caught = e;
+    }
+
+    // Chunks before the abort were delivered…
+    expect(seen).toEqual(['A', 'B']);
+    // …and the upstream AbortError propagated through the engine generator
+    // to the consumer's for-await loop.
+    expect(caught).not.toBeNull();
+    expect(caught.name).toBe('AbortError');
+    // The signal must have reached the request DTO the upstream received.
+    const call = (mockSpindle.generate.rawStream as any).mock.calls[0];
+    expect(call[0].signal).toBe(ctrl.signal);
+  });
+});

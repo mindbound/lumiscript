@@ -792,3 +792,219 @@
 .ls-edit-body .ls-drop-actions {
   flex-shrink: 0;
 }
+
+/* ─── Generic confirm / alert dialog ──────────────────────────────────────
+ *
+ * The Lumiverse-native replacement for `window.confirm()` / `window.alert()`,
+ * used across the editor UI (script delete, pack import, import errors, …).
+ * Shares the `.ls-modal-*` chrome and is shaped like the Storage tab's
+ * drop-confirm dialog, but with content-agnostic, generically-named classes
+ * so any caller can reuse it. Component: `components/common/ConfirmDialog.tsx`.
+ *
+ * Portal-token caveat (same as `.ls-drop-btn-confirm` / `.ls-edit-btn-save`):
+ * these dialogs render under <body>, where `--lumiverse-accent` / `-danger`
+ * may be unset. Every themed token below carries a hard-coded RGB fallback so
+ * the buttons + warning never collapse into the backdrop.
+ */
+.ls-confirm-card {
+  width: min(440px, 92vw);
+  height: auto;   /* override the modal-card full-height default */
+  max-height: 90vh;
+}
+
+.ls-confirm-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px 16px;
+}
+
+.ls-confirm-message {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--lumiverse-text-2, rgba(255, 255, 255, 0.75));
+}
+.ls-confirm-message strong {
+  color: var(--lumiverse-text-1, rgba(255, 255, 255, 0.95));
+  font-weight: 600;
+  word-break: break-word;
+}
+
+/* Scrollable item list (e.g. the scripts in a pack-import confirm). Capped
+ * so a large pack can't push the action buttons past the card's max-height
+ * (the card clips via `.ls-modal-card { overflow: hidden }`). */
+.ls-confirm-list {
+  margin: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 6px 8px;
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 4px;
+  background: var(--lumiverse-fill-1, rgba(255, 255, 255, 0.04));
+}
+.ls-confirm-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 3px 4px;
+  min-width: 0;
+}
+.ls-confirm-list-type {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 1px 6px;
+  border-radius: 2px;
+  background: var(--lumiverse-fill-2, rgba(255, 255, 255, 0.08));
+  color: var(--lumiverse-text-2, rgba(255, 255, 255, 0.7));
+}
+.ls-confirm-list-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--lumiverse-text-1, rgba(255, 255, 255, 0.95));
+}
+
+/* Optional emphasis line (e.g. "This action cannot be undone.") */
+.ls-confirm-warning {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--lumiverse-danger, rgb(246, 130, 130));
+  background: rgba(246, 130, 130, 0.1);
+  border: 1px solid rgba(246, 130, 130, 0.25);
+  border-radius: 3px;
+}
+
+.ls-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.ls-confirm-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 14px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 120ms, border-color 120ms, filter 120ms;
+}
+.ls-confirm-btn-cancel {
+  background: var(--lumiverse-fill-1, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--lumiverse-border);
+  color: var(--lumiverse-text-1);
+}
+.ls-confirm-btn-cancel:hover {
+  background: var(--lumiverse-fill-2, rgba(255, 255, 255, 0.08));
+}
+.ls-confirm-btn-cancel:focus-visible {
+  outline: 2px solid var(--lumiverse-accent, rgb(147, 112, 219));
+  outline-offset: 1px;
+}
+/* Neutral affirmative — accent-filled. */
+.ls-confirm-btn-primary {
+  background: var(--lumiverse-accent, rgb(147, 112, 219));
+  border: 1px solid transparent;
+  color: var(--lumiverse-accent-fg, #ffffff);
+  font-weight: 600;
+}
+.ls-confirm-btn-primary:not(:disabled):hover {
+  background: var(--lumiverse-accent, rgb(167, 132, 239));
+  filter: brightness(1.08);
+}
+.ls-confirm-btn-primary:focus-visible {
+  outline: 2px solid var(--lumiverse-accent, rgb(147, 112, 219));
+  outline-offset: 2px;
+}
+/* Destructive affirmative — red-filled. */
+.ls-confirm-btn-danger {
+  background: var(--lumiverse-danger, rgb(246, 130, 130));
+  border: 1px solid transparent;
+  color: #1a0606;
+  font-weight: 600;
+}
+.ls-confirm-btn-danger:not(:disabled):hover {
+  background: rgb(252, 150, 150);
+}
+.ls-confirm-btn-danger:focus-visible {
+  outline: 2px solid var(--lumiverse-danger, rgb(246, 130, 130));
+  outline-offset: 2px;
+}
+.ls-confirm-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ─── Prompt dialog input (PromptDialog — window.prompt replacement) ─────── */
+.ls-prompt-label {
+  font-size: 12px;
+  color: var(--lumiverse-text-2, rgba(255, 255, 255, 0.75));
+}
+.ls-prompt-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  font-size: 13px;
+  background: var(--lumiverse-fill-1, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 4px;
+  color: var(--lumiverse-text-1, rgba(255, 255, 255, 0.95));
+  outline: none;
+  transition: border-color 120ms;
+}
+.ls-prompt-input:focus {
+  /* Portal-token caveat — hard-coded accent fallback (see `.ls-edit-btn-save`). */
+  border-color: var(--lumiverse-accent, rgb(147, 112, 219));
+}
+.ls-prompt-input::placeholder {
+  color: var(--lumiverse-text-3, rgba(255, 255, 255, 0.4));
+}
+.ls-prompt-error {
+  margin: 0;
+  font-size: 11px;
+  color: var(--lumiverse-danger, rgb(246, 130, 130));
+}
+
+/* ─── Host shared-component wrappers (components/common/HostSelect) ────────
+ *
+ * HostSelect mounts the host's first-party `select` into this container; the
+ * host component themes itself, so the wrapper only owns layout (fills its
+ * flex parent). The `> *` rule nudges the host's mounted root to fill width.
+ */
+.ls-host-select {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+}
+.ls-host-select > * {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Fallback native <select> (hosts predating ctx.components). */
+.ls-host-select-native {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.92));
+  background: var(--lumiverse-fill-2, rgba(255, 255, 255, 0.06));
+  border: 1px solid var(--lumiverse-border, rgba(128, 128, 128, 0.25));
+  border-radius: var(--lumiverse-radius, 6px);
+}

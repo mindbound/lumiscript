@@ -46,6 +46,7 @@ import {
 } from './theme-store.js';
 import { countTotal as countDrawerTabs } from './drawer-tab-registry.js';
 import { countLiveWidgetsByScript } from './float-widget-registry.js';
+import { countLiveAppMountsByScript } from './app-mount-registry.js';
 import { countLiveModalsByScript } from './advanced-modal-registry.js';
 import { countByScript as countInputBarActionsByScript } from './input-bar-action-registry.js';
 import {
@@ -260,6 +261,7 @@ export interface ScriptRunnerProbeResult {
           macroInterceptors:     number;
           rpcEndpoints:          number;
           floatWidgets:          number;
+          appMounts:             number;
           advancedModals:        number;
           /**
            * v1.0.0-rc.4+ — DOM event listeners (`handle.on`), DOM
@@ -781,6 +783,7 @@ function formatRegistrationBreakdown(c: {
   macroInterceptors:     number;
   rpcEndpoints:          number;
   floatWidgets:          number;
+  appMounts:             number;
   advancedModals:        number;
   handlerClosures:       number;
   userBroadcastSubs:     number;
@@ -796,6 +799,7 @@ function formatRegistrationBreakdown(c: {
   if (c.macroInterceptors > 0)      parts.push(`macroInterceptors=${c.macroInterceptors}`);
   if (c.rpcEndpoints > 0)           parts.push(`rpcEndpoints=${c.rpcEndpoints}`);
   if (c.floatWidgets > 0)           parts.push(`floatWidgets=${c.floatWidgets}`);
+  if (c.appMounts > 0)              parts.push(`appMounts=${c.appMounts}`);
   if (c.advancedModals > 0)         parts.push(`advancedModals=${c.advancedModals}`);
   if (c.handlerClosures > 0)        parts.push(`handlerClosures=${c.handlerClosures}`);
   if (c.userBroadcastSubs > 0)      parts.push(`userBroadcastSubs=${c.userBroadcastSubs}`);
@@ -881,10 +885,12 @@ function buildRegistrationsSection(deps: DiagnosticsCollectorDeps): DiagnosticSe
   // Per-script registries with no aggregate count export. Iterate scripts
   // and sum. Cheap — typical install is dozens of scripts at most.
   let floatWidgets    = 0;
+  let appMounts       = 0;
   let advancedModals  = 0;
   let inputBarActions = 0;
   for (const s of scripts) {
     floatWidgets    += countLiveWidgetsByScript(s.id);
+    appMounts       += countLiveAppMountsByScript(s.id);
     advancedModals  += countLiveModalsByScript(s.id);
     inputBarActions += countInputBarActionsByScript(s.id);
   }
@@ -963,6 +969,11 @@ function buildRegistrationsSection(deps: DiagnosticsCollectorDeps): DiagnosticSe
         label:   'Float widgets',
         status:  'info',
         message: `${floatWidgets} live`,
+      },
+      {
+        label:   'App mounts',
+        status:  'info',
+        message: `${appMounts} live`,
       },
       {
         label:   'Advanced modals',

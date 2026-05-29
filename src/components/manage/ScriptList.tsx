@@ -1,8 +1,10 @@
 import { FC, useRef, useState } from 'react';
-import { Code2, BookMarked, Plus, Upload, Download, FileCode2, FolderOpen, ChevronDown, ChevronRight, Pencil } from 'lucide-react';
-import type { Script, ScriptType } from '../../types/script.js';
+import { Code2, BookMarked, Plus, Upload, Download, FileCode2, FolderOpen, ChevronDown, ChevronRight, Pencil, AlertTriangle } from 'lucide-react';
+import type { Script, ScriptType, ScriptPackEntry } from '../../types/script.js';
 import type { FrontendToBackend } from '../../types/messages.js';
 import { ScriptListItem, type ExecutionDot } from './ScriptListItem.js';
+import { ConfirmDialog } from '../common/ConfirmDialog.js';
+import { PromptDialog } from '../common/PromptDialog.js';
 import { exportScriptPack, buildScriptPackBytes } from '../../utils/pack-export.js';
 import { parseScriptPack } from '../../utils/pack-import.js';
 
@@ -50,6 +52,12 @@ function groupByFolder(scripts: Script[]): Map<string, Script[]> {
   return sorted;
 }
 
+/** Which text-prompt dialog is open (replaces the former window.prompt calls). */
+type PromptKind =
+  | { kind: 'newScript' }
+  | { kind: 'exportPack' }
+  | { kind: 'renameFolder'; folder: string };
+
 export const ScriptList: FC<ScriptListProps> = ({
   scripts,
   selectedId,
@@ -61,6 +69,12 @@ export const ScriptList: FC<ScriptListProps> = ({
   const [activeType, setActiveType] = useState<ScriptType>('trigger');
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set());
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Pack-import flow: parsed entries awaiting the user's confirm, and a
+  // parse/validation error message to surface in an alert dialog. Both
+  // replace the former window.confirm / window.alert.
+  const [pendingImport, setPendingImport] = useState<ScriptPackEntry[] | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [prompt, setPrompt] = useState<PromptKind | null>(null);
 
   const filtered = scripts.filter(s => s.type === activeType);
   const grouped = groupByFolder(filtered);
@@ -76,12 +90,7 @@ export const ScriptList: FC<ScriptListProps> = ({
   };
 
   const handleNew = () => {
-    const promptLabel =
-      activeType === 'library' ? 'Library name:'
-      : 'Script name:';
-    const name = window.prompt(promptLabel);
-    if (!name?.trim()) return;
-    sendToBackend({ type: 'create_script', name: name.trim(), scriptType: activeType });
+    setPrompt({ kind: 'newScript' });
   };
 
   const handleExport = (e: React.MouseEvent<HTMLButtonElement>) => {
@@ -97,9 +106,7 @@ export const ScriptList: FC<ScriptListProps> = ({
       });
       return;
     }
-    const packName = window.prompt('Pack name:', 'my-scripts');
-    if (!packName?.trim()) return;
-    exportScriptPack(filtered, packName.trim());
+    setPrompt({ kind: 'exportPack' });
   };
 
   const handleImportClick = () => {
@@ -113,16 +120,80 @@ export const ScriptList: FC<ScriptListProps> = ({
     e.target.value = '';
     try {
       const entries = await parseScriptPack(file);
-      const typeMark = (t: string): string =>
-        t === 'library' ? '[L]' : '[T]';
-      const names = entries.map(s => `  ${typeMark(s.type)} ${s.name}`).join('\n');
-      const confirmed = window.confirm(
-        `Import ${entries.length} script${entries.length > 1 ? 's' : ''}?\n\n${names}\n\nImported scripts will be disabled. Review and enable them manually.`,
-      );
-      if (!confirmed) return;
-      sendToBackend({ type: 'import_scripts', entries });
+      // Defer to the native confirm dialog (rendered below) so the user can
+      // review the script list before the import is dispatched.
+      setPendingImport(entries);
     } catch (err) {
-      window.alert(`Import failed: ${err instanceof Error ? err.message : String(err)}`);
+      setImportError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const confirmImport = () => {
+    if (pendingImport) sendToBackend({ type: 'import_scripts', entries: pendingImport });
+    setPendingImport(null);
+  };
+
+  // Single confirm handler for all three text prompts. PromptDialog passes the
+  // already-trimmed value (and guarantees it's non-empty).
+  const handlePromptConfirm = (value: string) => {
+    if (!prompt) return;
+    switch (prompt.kind) {
+      case 'newScript':
+        sendToBackend({ type: 'create_script', name: value, scriptType: activeType });
+        break;
+      case 'exportPack':
+        exportScriptPack(filtered, value);
+        break;
+      case 'renameFolder':
+        for (const s of grouped.get(prompt.folder) ?? []) {
+          sendToBackend({ type: 'update_script', id: s.id, patch: { folder: value } });
+        }
+        break;
+    }
+    setPrompt(null);
+  };
+
+  // Render the active text prompt. Takes the non-null kind as a parameter so
+  // each branch's fields (e.g. `folder`) are captured into plain locals —
+  // discriminated-union narrowing doesn't survive into the `validate` closure.
+  const renderPrompt = (p: PromptKind) => {
+    const onCancel = () => setPrompt(null);
+    switch (p.kind) {
+      case 'newScript':
+        return (
+          <PromptDialog
+            title={`New ${activeType === 'library' ? 'library' : 'script'}`}
+            label={activeType === 'library' ? 'Library name:' : 'Script name:'}
+            confirmLabel="Create"
+            onConfirm={handlePromptConfirm}
+            onCancel={onCancel}
+          />
+        );
+      case 'exportPack':
+        return (
+          <PromptDialog
+            title="Export pack"
+            label="Pack name:"
+            initialValue="my-scripts"
+            confirmLabel="Export"
+            onConfirm={handlePromptConfirm}
+            onCancel={onCancel}
+          />
+        );
+      case 'renameFolder': {
+        const current = p.folder;
+        return (
+          <PromptDialog
+            title="Rename folder"
+            label="Folder name:"
+            initialValue={current}
+            confirmLabel="Rename"
+            validate={v => (v === current ? 'Enter a different folder name.' : null)}
+            onConfirm={handlePromptConfirm}
+            onCancel={onCancel}
+          />
+        );
+      }
     }
   };
 
@@ -143,6 +214,7 @@ export const ScriptList: FC<ScriptListProps> = ({
   };
 
   return (
+    <>
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       {/* Type tabs + New button */}
       <div className="ls-list-header">
@@ -223,11 +295,7 @@ export const ScriptList: FC<ScriptListProps> = ({
                     role="button"
                     onClick={e => {
                       e.stopPropagation();
-                      const newName = window.prompt('Rename folder:', folder);
-                      if (newName === null || newName.trim() === '' || newName.trim() === folder) return;
-                      for (const s of folderScripts) {
-                        sendToBackend({ type: 'update_script', id: s.id, patch: { folder: newName.trim() } });
-                      }
+                      setPrompt({ kind: 'renameFolder', folder });
                     }}
                   >
                     <Pencil size={10} />
@@ -244,5 +312,48 @@ export const ScriptList: FC<ScriptListProps> = ({
         )}
       </div>
     </div>
+
+    {pendingImport !== null && (
+      <ConfirmDialog
+        title={`Import ${pendingImport.length} script${pendingImport.length === 1 ? '' : 's'}?`}
+        icon={<Upload size={15} style={{ color: 'var(--lumiverse-accent, rgb(147, 112, 219))' }} />}
+        confirmLabel="Import"
+        confirmIcon={<Upload size={12} />}
+        onConfirm={confirmImport}
+        onCancel={() => setPendingImport(null)}
+      >
+        <p className="ls-confirm-message">
+          Imported scripts are added <strong>disabled</strong> — review and
+          enable them manually.
+        </p>
+        <ul className="ls-confirm-list">
+          {pendingImport.map((s, i) => (
+            <li key={i}>
+              <span className="ls-confirm-list-type">
+                {s.type === 'library' ? 'Library' : 'Script'}
+              </span>
+              <span className="ls-confirm-list-name">{s.name}</span>
+            </li>
+          ))}
+        </ul>
+      </ConfirmDialog>
+    )}
+
+    {importError !== null && (
+      <ConfirmDialog
+        title="Import failed"
+        icon={<AlertTriangle size={15} style={{ color: 'var(--lumiverse-danger, rgb(246, 130, 130))' }} />}
+        variant="danger"
+        hideCancel
+        confirmLabel="OK"
+        onConfirm={() => setImportError(null)}
+        onCancel={() => setImportError(null)}
+      >
+        <p className="ls-confirm-message">{importError}</p>
+      </ConfirmDialog>
+    )}
+
+    {prompt !== null && renderPrompt(prompt)}
+    </>
   );
 };

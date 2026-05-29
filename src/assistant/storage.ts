@@ -80,15 +80,22 @@ export async function loadThread(
 }
 
 /**
- * Persist a thread body. Bumps `updatedAt` to now BEFORE writing — keeps
- * the file's timestamp in sync with the on-disk content. Caller is
+ * Persist a thread body. By default bumps `updatedAt` to now BEFORE writing —
+ * keeps the file's timestamp in sync with the on-disk content. Caller is
  * responsible for updating the index entry (see `upsertIndexEntry`).
+ *
+ * Pass `{ bumpUpdatedAt: false }` for a SILENT write that preserves the existing
+ * `updatedAt` — used for changes that shouldn't count as "activity" or reorder
+ * the recency-sorted sidebar (e.g. toggling an attached-script chip). Returns
+ * the same object reference in that case (no timestamp spread).
  */
 export async function saveThread(
   userId: string,
   thread: AssistantThread,
+  opts?: { bumpUpdatedAt?: boolean },
 ): Promise<AssistantThread> {
-  const stamped: AssistantThread = { ...thread, updatedAt: Date.now() };
+  const stamped: AssistantThread =
+    opts?.bumpUpdatedAt === false ? thread : { ...thread, updatedAt: Date.now() };
   await spindle.userStorage.setJson(threadPath(stamped.id), stamped, { indent: 2, userId });
   return stamped;
 }
@@ -122,6 +129,8 @@ export function createNewThread(): AssistantThread {
     createdAt: now,
     updatedAt: now,
     messages: [],
+    contextScriptIds: [],
+    contextFilePaths: [],
   };
 }
 

@@ -100,7 +100,8 @@ export type HandleKind =
   | 'MacroInterceptorHandle'
   | 'ContentProcessorHandle'
   | 'StyleHandle'
-  | 'EnclaveHandle';
+  | 'EnclaveHandle'
+  | 'MountedComponent';
 
 /**
  * Serialised form of a thrown error. Errors don't survive structured-clone
@@ -260,7 +261,11 @@ export type HandlerKind =
   | 'floatWidgetDragEnd'     // 9d.4.e-2-b — FloatWidgetHandle.onDragEnd() drag-end handler
   | 'drawerTabActivate'      // 9d.4.e-3-b — DrawerTabHandle.onActivate() activation handler
   | 'rpc'                    // v0.26.0 — api.rpc.handle() on-demand handler (cross-extension RPC pool)
-  | 'oauthCallback';         // v1.0.0-rc.5 — api.oauth.onCallback() inbound-HTTP callback handler
+  | 'oauthCallback'          // v1.0.0-rc.5 — api.oauth.onCallback() inbound-HTTP callback handler
+  | 'componentCallback'      // v1.0.0-rc.9 — api.ui.components.* mount-option callbacks (onChange, etc.)
+  | 'uiKeyboardChange'       // v1.0.0-rc.9 — api.ui.events.onKeyboardChange() subscription
+  | 'uiDrawerChange'         // v1.0.0-rc.9 — api.ui.events.onDrawerChange() subscription
+  | 'uiSettingsChange';      // v1.0.0-rc.9 — api.ui.events.onSettingsChange() subscription
 
 /**
  * Phase 9d.3 — parent firing a registered handler. The child looks up
@@ -457,6 +462,8 @@ export interface ScriptStateSyncMessage {
 export type ParentToChildMessage =
   | RunScriptRequest
   | ApiProxyResponse
+  | StreamChunkMessage
+  | StreamEndMessage
   | BroadcastFireMessage
   | BroadcastClearMessage
   | RunHandlerRequest
@@ -567,6 +574,81 @@ export interface AbortRequest {
 }
 
 /**
+ * Child requesting a streaming api call (v1.0.0-rc.9 — currently only
+ * `'llm.generateStream'`). Wire-shape mirrors `ApiProxyRequest` but the
+ * parent answers with zero-or-more `StreamChunkMessage` followed by a
+ * single terminal `StreamEndMessage`, rather than a single `ApiProxyResponse`.
+ *
+ * `hasSignal` reuses the existing `AbortController`/`AbortRequest` plumbing
+ * — the parent injects a signal into the request options and the child's
+ * `AbortSignal` is wired to emit `AbortRequest` on abort.
+ *
+ * Cancellation paths beyond AbortSignal:
+ *   - Consumer breaks out of the `for await` loop → child sends
+ *     `StreamCancelRequest`. Parent calls `.return()` on the upstream
+ *     iterator, propagating teardown to the underlying HTTP request.
+ *   - Run ends / script torn down → parent sweeps any open streams owned
+ *     by the affected run + sends final `StreamEndMessage { ok: false }`.
+ */
+export interface StreamRequest {
+  type:          'stream-request';
+  requestId:     string;
+  runId:         string;
+  scriptId:      string;
+  /** Currently only `'llm.generateStream'`. Forward-extensible if other streaming methods are added later. */
+  method:        string;
+  args:          unknown[];
+  /** True if `opts.signal` was supplied; child may emit `AbortRequest` later. Same semantics as `ApiProxyRequest.hasSignal`. */
+  hasSignal?:    boolean;
+  /** v0.26.1 — diagnostic-only. Same three-tier resolution as `ApiProxyRequest._runIdSource`. See that field's JSDoc. */
+  _runIdSource?: 'context' | 'latest' | 'ctx';
+}
+
+/**
+ * Parent forwarding one chunk from the upstream `spindle.generate.rawStream`
+ * iterator. The `chunk` payload is structurally a `StreamChunk` from
+ * `src/types/script.ts` — the boundary leaves it as `unknown` so this IPC
+ * type doesn't take a dependency on the user-facing surface.
+ */
+export interface StreamChunkMessage {
+  type:      'stream-chunk';
+  requestId: string;
+  chunk:     unknown;
+}
+
+/**
+ * Parent signalling the end of a stream. Exactly one of these per
+ * `StreamRequest`, after zero-or-more `StreamChunkMessage`s.
+ *
+ *   - `ok: true`  — upstream iterator completed normally. No `error`.
+ *   - `ok: false` — upstream rejected, consumer aborted, or run ended
+ *     mid-stream. `error` carries the serialized failure.
+ */
+export interface StreamEndMessage {
+  type:      'stream-end';
+  requestId: string;
+  ok:        boolean;
+  /** Present when `ok === false`. */
+  error?:    SerializedError;
+}
+
+/**
+ * Child telling the parent that the consumer's `for await` loop ended
+ * before the stream did — typically a `break`, a `throw` propagating out
+ * of the loop body, or the loop's caller throwing. Parent calls `.return()`
+ * on the upstream iterator to tear down the in-flight HTTP request.
+ *
+ * Distinct from `AbortRequest`, which represents an external `AbortSignal`
+ * firing. Both end the stream; cancel is the cooperative path, abort the
+ * imperative one. Idempotent — repeated cancels for the same requestId
+ * are no-ops.
+ */
+export interface StreamCancelRequest {
+  type:      'stream-cancel';
+  requestId: string;
+}
+
+/**
  * Child registering a broadcast subscription on the parent. The handler
  * itself stays in the child's registry; the parent records only the
  * subscription metadata and forwards firings via `BroadcastFireMessage`.
@@ -659,6 +741,34 @@ export type RegisterHandler =
       // global callback per script. Auto-unsubs any prior handler for the
       // same script before registering (canonical behaviour, mirrored on
       // the parent side via `clearCommandHandlerByScriptId`).
+      hasHandler: true;
+    }
+  // v1.0.0-rc.9 — api.ui.events.on{Keyboard,Drawer,Settings}Change subscriptions.
+  // Same shape as commandsOnInvoked (no per-handle id); the fired handler
+  // receives the changed UI state as its single arg. Multiple subscriptions
+  // per script per channel are allowed (each gets a distinct handlerId).
+  | {
+      type:      'register-handler';
+      kind:      'uiKeyboardChange';
+      runId:     string;
+      scriptId:  string;
+      handlerId: string;
+      hasHandler: true;
+    }
+  | {
+      type:      'register-handler';
+      kind:      'uiDrawerChange';
+      runId:     string;
+      scriptId:  string;
+      handlerId: string;
+      hasHandler: true;
+    }
+  | {
+      type:      'register-handler';
+      kind:      'uiSettingsChange';
+      runId:     string;
+      scriptId:  string;
+      handlerId: string;
       hasHandler: true;
     }
   | {
@@ -911,6 +1021,8 @@ export type ChildToParentMessage =
   | RunScriptResult
   | ApiProxyRequest
   | AbortRequest
+  | StreamRequest
+  | StreamCancelRequest
   | BroadcastSubscribeMessage
   | BroadcastUnsubscribeMessage
   | BroadcastHandlerLifecycleNotice
