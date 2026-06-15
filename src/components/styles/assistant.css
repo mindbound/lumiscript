@@ -862,13 +862,18 @@
   padding: 4px;
 }
 .ls-asst-filepicker-empty {
-  display: flex;
-  align-items: center;
-  gap: 6px;
   padding: 12px 10px;
   font-size: 12px;
   font-style: italic;
+  line-height: 1.5;
   color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.55));
+}
+/* The loading row puts a spinner before "Loading…"; keep it inline-aligned now
+   that the container is normal text flow (so the empty-state sentence + its
+   inline <code>userfiles/</code> read naturally instead of being flex items). */
+.ls-asst-filepicker-empty svg {
+  vertical-align: middle;
+  margin-right: 4px;
 }
 .ls-asst-filepicker-empty code {
   font-style: normal;

@@ -7,6 +7,7 @@ import { ConfirmDialog } from '../common/ConfirmDialog.js';
 import { PromptDialog } from '../common/PromptDialog.js';
 import { exportScriptPack, buildScriptPackBytes } from '../../utils/pack-export.js';
 import { parseScriptPack } from '../../utils/pack-import.js';
+import { bytesToBase64, groupByFolder } from './script-list-logic.js';
 
 interface ScriptExecInfo {
   dot: ExecutionDot;
@@ -22,35 +23,7 @@ interface ScriptListProps {
   sendToBackend: (msg: FrontendToBackend) => void;
 }
 
-/**
- * Base64-encode a byte array for transport across the frontend→backend
- * message channel. Uses chunked String.fromCharCode to avoid blowing the
- * call stack on packs larger than the per-call argument limit (~65k).
- */
-function bytesToBase64(bytes: Uint8Array): string {
-  const CHUNK = 0x8000;
-  let binary = '';
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
-  }
-  return btoa(binary);
-}
-
-/** Group scripts by folder. Scripts without a folder go into the '' group. */
-function groupByFolder(scripts: Script[]): Map<string, Script[]> {
-  const groups = new Map<string, Script[]>();
-  for (const s of scripts) {
-    const folder = s.folder ?? '';
-    if (!groups.has(folder)) groups.set(folder, []);
-    groups.get(folder)!.push(s);
-  }
-  // Sort: unfiled first, then alphabetical folder names
-  const sorted = new Map<string, Script[]>();
-  if (groups.has('')) sorted.set('', groups.get('')!);
-  const folderNames = [...groups.keys()].filter(k => k !== '').sort();
-  for (const name of folderNames) sorted.set(name, groups.get(name)!);
-  return sorted;
-}
+// `bytesToBase64` (pack export) + `groupByFolder` live in `./script-list-logic.ts`.
 
 /** Which text-prompt dialog is open (replaces the former window.prompt calls). */
 type PromptKind =

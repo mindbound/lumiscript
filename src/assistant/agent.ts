@@ -310,9 +310,10 @@ export async function runAssistantTurn(
         resolvedProvider = resolvedProvider ?? conn.provider;
         resolvedModel = resolvedModel ?? conn.model;
       } else {
-        const msg = `Connection "${opts.connectionId}" not found.`;
-        events.onError?.(msg);
-        throw new Error(msg);
+        // Not-found is reported once by the outer catch below (which wraps it as
+        // a resolve failure) — do NOT also fire onError here, or the caller sees
+        // the same error twice.
+        throw new Error(`Connection "${opts.connectionId}" not found.`);
       }
     } catch (err) {
       const msg = `Failed to resolve connection "${opts.connectionId}": ` +

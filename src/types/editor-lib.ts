@@ -439,6 +439,13 @@ type LLMProvider =
   | 'openai' | 'openrouter' | 'perplexity' | 'pollinations' | 'siliconflow'
   | 'xai' | 'zai';
 
+type ReasoningEffort = 'auto' | 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'max' | 'xhigh';
+type ThinkingDisplay = 'auto' | 'summarized' | 'omitted';
+/** Per-request reasoning override for api.llm.* — source 'inherit' | 'off' | 'custom'. */
+interface GenerationReasoningOverride { source?: 'inherit' | 'off' | 'custom'; apiReasoning?: boolean; effort?: ReasoningEffort; thinkingDisplay?: ThinkingDisplay; }
+interface ReasoningSettings { apiReasoning: boolean; reasoningEffort: ReasoningEffort; thinkingDisplay: ThinkingDisplay; prefix: string; suffix: string; autoParse: boolean; keepInHistory: number; }
+interface ConnectionReasoningBindings { settings: ReasoningSettings; promptBias?: string; }
+
 interface LLMOptions {
   /** Connection profile ID (takes precedence over all other options). */
   connectionId?: string;
@@ -464,6 +471,9 @@ interface LLMOptions {
    * per-request timeouts, racing multiple calls).
    */
   signal?: AbortSignal;
+  /** Per-request reasoning override (inherit / off / custom effort). The host
+   *  maps it to provider-specific knobs. */
+  reasoning?: GenerationReasoningOverride;
 }
 
 interface ZodLike<T> {
@@ -737,7 +747,7 @@ interface Connection {
   is_default: boolean;
   has_api_key: boolean;
   metadata: Record<string, unknown>;
-  reasoning_bindings: Record<string, unknown> | null;
+  reasoning_bindings: ConnectionReasoningBindings | null;
   created_at: number;
   updated_at: number;
 }

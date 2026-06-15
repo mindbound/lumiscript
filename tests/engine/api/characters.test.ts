@@ -135,6 +135,18 @@ describe('extensions field', () => {
     expect(call[1].name).toBe('Renamed');
     expect(call[1].extensions).toBeUndefined();
   });
+
+  test('omitting name from a partial update does NOT send name (no silent name-wipe)', async () => {
+    mockSpindle.characters.update.mockReturnValueOnce(Promise.resolve(charDTO));
+    const api = buildApi();
+    await api.update('char-1', { description: 'a new description' });
+    const call = mockSpindle.characters.update.mock.calls[0] as any;
+    expect(call[1].description).toBe('a new description');
+    // `name` must be ABSENT from the DTO (host treats absent = "no change").
+    // Regression guard: a prior `toCreateDTO({ name: '', ...input })` shape sent
+    // `name: ''` here, wiping the character's name.
+    expect('name' in call[1]).toBe(false);
+  });
 });
 
 describe('delete', () => {

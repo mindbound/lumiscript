@@ -231,7 +231,7 @@ function getNamespaceSummary(namespace: string): {
       directMethods.push({
         method: e.method,
         signature: e.signature,
-        description: e.kind === 'builtin' ? e.description : e.description,
+        description: e.description,
       });
     } else {
       const subNs = `${namespace}.${remainder.slice(0, dotIdx)}`;

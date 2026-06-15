@@ -76,7 +76,28 @@ function toCreateDTO(
 function toUpdateDTO(
   input: CharacterUpdateInput,
 ): import('lumiverse-spindle-types').CharacterUpdateDTO {
-  return toCreateDTO({ name: '', ...input }) as import('lumiverse-spindle-types').CharacterUpdateDTO;
+  // Partial update: send ONLY the fields the caller actually supplied. The host
+  // treats an absent field as "no change", so an omitted field must be omitted
+  // from the DTO entirely — NOT defaulted. (The previous `toCreateDTO({ name: '',
+  // ...input })` shape sent `name: ''` on every name-omitting update, silently
+  // wiping the character's name host-side.) Mirrors personas/databanks/regex
+  // mapUpdateInput.
+  const dto: import('lumiverse-spindle-types').CharacterUpdateDTO = {};
+  if (input.name !== undefined)                     dto.name = input.name;
+  if (input.description !== undefined)              dto.description = input.description;
+  if (input.personality !== undefined)             dto.personality = input.personality;
+  if (input.scenario !== undefined)                dto.scenario = input.scenario;
+  if (input.firstMessage !== undefined)            dto.first_mes = input.firstMessage;
+  if (input.mesExample !== undefined)              dto.mes_example = input.mesExample;
+  if (input.creatorNotes !== undefined)            dto.creator_notes = input.creatorNotes;
+  if (input.systemPrompt !== undefined)            dto.system_prompt = input.systemPrompt;
+  if (input.postHistoryInstructions !== undefined) dto.post_history_instructions = input.postHistoryInstructions;
+  if (input.tags !== undefined)                    dto.tags = input.tags;
+  if (input.alternateGreetings !== undefined)      dto.alternate_greetings = input.alternateGreetings;
+  if (input.creator !== undefined)                 dto.creator = input.creator;
+  if (input.worldBookIds !== undefined)            dto.world_book_ids = input.worldBookIds;
+  if (input.extensions !== undefined)              dto.extensions = input.extensions;
+  return dto;
 }
 
 // ─── API builder ──────────────────────────────────────────────────────────────

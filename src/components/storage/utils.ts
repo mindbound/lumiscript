@@ -25,6 +25,25 @@ export function formatBytes(bytes: number): string {
   return `${i === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[i]}`;
 }
 
+// ─── Value formatting ────────────────────────────────────────────────────────
+
+/**
+ * Compact one-line preview of an arbitrary variable value for the
+ * Variables inspector. `undefined` / `null` render as their literal
+ * keywords; strings show raw (truncated past 80 chars); everything else
+ * is JSON-stringified (truncated past 80 chars), falling back to
+ * `String(v)` if it can't be serialised (circular refs, etc.).
+ */
+export function formatValue(v: unknown): string {
+  if (v === undefined) return 'undefined';
+  if (v === null) return 'null';
+  if (typeof v === 'string') return v.length > 80 ? v.slice(0, 77) + '…' : v;
+  try {
+    const s = JSON.stringify(v);
+    return s.length > 80 ? s.slice(0, 77) + '…' : s;
+  } catch { return String(v); }
+}
+
 // ─── Time-ago formatting ─────────────────────────────────────────────────────
 
 /**

@@ -42,10 +42,18 @@ export const TRIGGER_EVENT_GROUPS: EventGroup[] = [
     events: [
       { name: 'CHAT_CHANGED',         description: 'A chat was updated (rename, metadata, or message reattribution). Does NOT fire on navigation — use CHAT_SWITCHED for open/close.' },
       { name: 'CHAT_SWITCHED',        description: 'The user opened a chat or returned to the home screen. data.chatId is the new chatId, or null on return-to-home.' },
+      { name: 'CHAT_FORKED',          description: 'A chat was forked (branched) from a message into a new chat sharing the source character. data carries sourceChatId, forkedChatId, chat, branchId, forkedAtMessageId, forkedAtMessageIndex. Emitted by the host branch-chat flow on newer Lumiverse builds.' },
       { name: 'CHARACTER_EDITED',     description: 'A character card was saved' },
       { name: 'CHARACTER_DELETED',    description: 'A character was deleted' },
       { name: 'CHARACTER_DUPLICATED', description: 'A character was duplicated' },
       { name: 'PERSONA_CHANGED',      description: 'Active persona changed' },
+    ],
+  },
+  {
+    label: 'Images',
+    events: [
+      { name: 'IMAGE_UPLOADED', description: 'An image was saved to the image library (manual upload or generated/saved). data.image is the full Image record (includes its id).' },
+      { name: 'IMAGE_DELETED',  description: 'An image was deleted from the library. data.id is the deleted image id.' },
     ],
   },
   {

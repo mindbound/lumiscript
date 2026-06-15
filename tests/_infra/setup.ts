@@ -5,7 +5,7 @@
  * singletons so each test starts with a clean slate.
  */
 
-import { beforeEach } from 'bun:test';
+import { beforeEach, mock } from 'bun:test';
 import { createMockSpindle } from './mock-spindle.js';
 
 // Singleton reset imports
@@ -40,6 +40,20 @@ import { __resetForTests as resetThemeStore }           from '../../src/engine/t
 // init-time side effects (only function bodies touch spindle.*).
 import { __resetForTests as resetHostDispatcher } from '../../src/script-runner/host-dispatcher.js';
 import { __resetForTests as resetApiProxy }       from '../../src/script-runner/api-proxy.js';
+
+// `dom-handler.ts` imports DOMPurify at module load — before any per-file DOM env
+// (`useDOM()`) registers a window — so its DOMPurify has no DOM and `.sanitize` is
+// undefined (throws). Mock `dompurify` to a passthrough at preload time so the
+// sanitizer-touching handlers (scoped `dom_inject` / `dom_update`) can be exercised.
+// Safe globally: no test exercises real `DOMPurify.sanitize` — the strip behaviour is
+// covered by the pure `buildSanitizerStripDetail` tests (synthetic entries). Test
+// runtime only; the shipped frontend bundle uses real DOMPurify.
+mock.module('dompurify', () => ({
+  default: {
+    sanitize: (html: string) => String(html),
+    removed: [],
+  },
+}));
 
 beforeEach(() => {
   // Install fresh spindle mock on globalThis so `declare const spindle` resolves

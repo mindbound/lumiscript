@@ -39,7 +39,10 @@ api.tools.register(
     council_eligible: true,
   },
   async (args, api, ctx) => {
-    const sides  = args.sides;
+    // The Council path doesn't fill your `parameters` (see the note below), so on a
+    // Council fire `args.sides` is undefined — default to a d20 rather than rolling NaN.
+    // Direct callers (api.tools.invoke / generateWithTools) supply it.
+    const sides  = typeof args.sides === 'number' ? args.sides : 20;
     const result = 1 + Math.floor(Math.random() * sides);
     if (ctx?.councilMember) {
       return `${ctx.councilMember.name} rolled a ${sides}-sided die and got ${result}.`;
@@ -50,6 +53,8 @@ api.tools.register(
 ```
 
 Save the script, enable it, assign the tool to a Council member in Lumiverse's Council UI. The tool now fires whenever that member's chance roll succeeds during generation — with the result inlined into the assistant message.
+
+> **Heads-up — the Council doesn't fill your `parameters`.** Direct callers (`api.tools.invoke` / `generateWithTools`, below) supply `sides`, but on the **Council** path Lumiverse invokes extension tools with `{ context, __deadlineMs }` only — it does *not* run a sidecar LLM to populate your schema, so `args.sides` is `undefined` there. That's why the handler defaults it (a Council fire just rolls a d20). A *real* Council tool does better: it reads `args.context` and **decides** its own arguments from the scene. See the cookbook recipe [Register a tool the Council can use](../cookbook/council-tool.md) for that dual-mode pattern.
 
 You can also invoke it directly from any script:
 
@@ -302,7 +307,7 @@ Ownership-verified — only removes the tool if your script owns it. Silent no-o
 
 Two distinct event surfaces fire during tool lifecycle:
 
-- **`TOOL_INVOCATION`** — Lumiverse host event. Fires every time the host dispatches a tool to your handler (Council path). Wire a script to it via the editor's events selector to react to invocations from a *different* script (or to log them globally). Payload: `{ toolName, args, councilMember, requestId, contextMessages }` — `councilMember` and `contextMessages` are populated on Council-driven invocations (when a council member's `chance` roll selected this tool); `requestId` correlates with the eventual `tool_invocation_result` post-back. Useful when an observer script wants to know what's running without owning the tool.
+- **`TOOL_INVOCATION`** — the Lumiverse host event that drives tool dispatch. LumiScript subscribes to it **internally** and routes each invocation to the matching registered handler (the Council path — see `dispatchToolInvocation`). You do **not** wire it yourself: it is **not** in the editor's events selector, and the way you receive invocations is by registering a handler with `api.tools.register`. To **observe** invocations from a *different* script — or log them globally — without owning the tool, use the `ls:tool:invoked` broadcast (below): it carries the `result` + `callMs` timing and fires on both the Council and `invoke()` paths. (For reference, the payload the host hands the dispatcher is `{ toolName, args, councilMember, requestId, contextMessages }` — `councilMember` / `contextMessages` populated on Council-driven invocations; `requestId` correlates with the eventual `tool_invocation_result` post-back.)
 
 - **`ls:tool:registered`** — fires inside `api.tools.register` after successful registration. Payload: `{ name, scriptId }`. Subscribe via `api.broadcast.on('ls:tool:registered', fn)` if you want to watch the tool registry from another script.
 

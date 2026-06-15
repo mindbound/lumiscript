@@ -57,7 +57,7 @@ Calling `sync` on a channel already registered as `handle` (or vice versa) **rep
 
 // Maintain a "messages-this-session" counter, publish on every change.
 globalThis.sessionCount ??= 0;
-if (data.__event === 'MESSAGE_SENT' && data.message.role === 'user') {
+if (data.__event === 'MESSAGE_SENT' && data.message.is_user) {
   globalThis.sessionCount += 1;
 }
 

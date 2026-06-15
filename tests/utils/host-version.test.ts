@@ -4,15 +4,13 @@
  * either suppress legitimate "update Lumiverse" warnings or nag users
  * on hosts that actually satisfy the minimum, both bad UX.
  *
- * `checkMinimumHostVersion` itself is not unit-tested — it calls into
- * spindle.log/toast/version which the infra mocks cover, but its logic
- * reduces to "call compareVersions, branch on result" with no
- * meaningful independent behaviour to assert beyond what's verified
- * at the comparator level.
+ * `checkMinimumHostVersion` (the runtime wrapper) is covered against the mock
+ * spindle: the no-minimum early-return, the host-lookup-failure swallow, and
+ * the fires-toast-when-behind / silent-when-current branches.
  */
 
 import { describe, test, expect } from 'bun:test';
-import { compareVersions } from '../../src/utils/host-version.js';
+import { compareVersions, checkMinimumHostVersion } from '../../src/utils/host-version.js';
 
 describe('compareVersions — equal pairs', () => {
   test('same version returns 0', () => {
@@ -76,5 +74,38 @@ describe('compareVersions — unparseable segments', () => {
     // version strings rather than falsely claiming they need to update.
     expect(compareVersions('1.x.3', '1.2.3')).toBe(0);
     expect(compareVersions('1.2.3', 'abc')).toBe(0);
+  });
+});
+
+describe('checkMinimumHostVersion', () => {
+  test('no manifest minimum → no host lookup, no toast', async () => {
+    const spindle = (globalThis as any).spindle;
+    // The mock manifest declares no `minimum_lumiverse_version` by default.
+    await checkMinimumHostVersion();
+    expect(spindle.version.getBackend).not.toHaveBeenCalled();
+  });
+
+  test('host below minimum → warning toast fires', async () => {
+    const spindle = (globalThis as any).spindle;
+    spindle.manifest.minimum_lumiverse_version = '2.0.0';
+    spindle.version.getBackend.mockReturnValueOnce(Promise.resolve('1.0.0'));
+    await checkMinimumHostVersion();
+    expect(spindle.toast.warning).toHaveBeenCalled();
+  });
+
+  test('host meets minimum → no toast', async () => {
+    const spindle = (globalThis as any).spindle;
+    spindle.manifest.minimum_lumiverse_version = '1.0.0';
+    spindle.version.getBackend.mockReturnValueOnce(Promise.resolve('1.5.0'));
+    await checkMinimumHostVersion();
+    expect(spindle.toast.warning).not.toHaveBeenCalled();
+  });
+
+  test('host lookup failure is swallowed (no toast)', async () => {
+    const spindle = (globalThis as any).spindle;
+    spindle.manifest.minimum_lumiverse_version = '2.0.0';
+    spindle.version.getBackend.mockReturnValueOnce(Promise.reject(new Error('rpc down')));
+    await checkMinimumHostVersion();
+    expect(spindle.toast.warning).not.toHaveBeenCalled();
   });
 });

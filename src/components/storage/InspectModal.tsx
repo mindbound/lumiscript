@@ -29,6 +29,7 @@ import type { DbRecord } from '../../types/script.js';
 import type { CollectionSummary, CollectionStats, FieldStats, StatsTypeTag } from '../../engine/db-admin.js';
 import { formatTimeAgo, copyToClipboard, highlightJson } from './utils.js';
 import { EditRecordModal } from './EditRecordModal.js';
+import { buildInspectRequest, prettyPrintUserData, formatTopValue, formatNum, type FilterMode } from './record-logic.js';
 
 /** Page size used in the panel UI. Backend caps record counts anyway. */
 const PAGE_SIZE = 50;
@@ -80,9 +81,6 @@ export interface InspectModalProps {
   onClose: () => void;
   sendToBackend: (msg: FrontendToBackend) => void;
 }
-
-/** Filter mode — selected by the segmented control next to the search input. */
-type FilterMode = 'shallow' | 'deep' | 'jsonquery';
 
 /** View mode — Records (default) vs Stats (per-field aggregate). */
 type ViewMode = 'records' | 'stats';
@@ -185,25 +183,7 @@ export const InspectModal: FC<InspectModalProps> = ({
   // Empty inputs collapse to `undefined` so the backend's "no filter"
   // path (return everything) takes precedence over filter-with-empty-string.
   useEffect(() => {
-    const trimmed = debouncedFilter.trim();
-    if (filterMode === 'jsonquery') {
-      sendToBackend({
-        type:            'inspect_collection',
-        path,
-        jsonqueryFilter: trimmed || undefined,
-        limit:           PAGE_SIZE,
-        offset:          page * PAGE_SIZE,
-      });
-    } else {
-      sendToBackend({
-        type:       'inspect_collection',
-        path,
-        textFilter: trimmed || undefined,
-        deepFilter: filterMode === 'deep' || undefined,
-        limit:      PAGE_SIZE,
-        offset:     page * PAGE_SIZE,
-      });
-    }
+    sendToBackend(buildInspectRequest(path, filterMode, debouncedFilter, page, PAGE_SIZE));
   }, [path, debouncedFilter, filterMode, page, refreshToken, localRefreshTick, sendToBackend]);
 
   // Close on Escape
@@ -647,7 +627,7 @@ export const InspectModal: FC<InspectModalProps> = ({
                     </div>
                     <pre
                       className="ls-inspect-record-json"
-                      dangerouslySetInnerHTML={{ __html: highlightJson(prettyPrint(r)) }}
+                      dangerouslySetInnerHTML={{ __html: highlightJson(prettyPrintUserData(r)) }}
                     />
                   </div>
                 );
@@ -697,20 +677,8 @@ export const InspectModal: FC<InspectModalProps> = ({
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-/**
- * Pretty-print a record excluding the reserved fields (id / createdAt /
- * updatedAt). Those already show in the row header — repeating them in
- * the JSON body wastes space and draws the eye away from user data.
- */
-function prettyPrint(record: DbRecord): string {
-  const { id: _id, createdAt: _createdAt, updatedAt: _updatedAt, ...user } = record;
-  void _id; void _createdAt; void _updatedAt;
-  try {
-    return JSON.stringify(user, null, 2);
-  } catch {
-    return String(record);
-  }
-}
+// Record pretty-printing (strip reserved fields) now lives in
+// `./record-logic.ts` as `prettyPrintUserData`, shared with EditRecordModal.
 
 // ─── Stats view ──────────────────────────────────────────────────────────────
 
@@ -727,24 +695,6 @@ const TYPE_TAG_CLASS: Record<StatsTypeTag, string> = {
   object:  'ls-stats-type ls-stats-type-complex',
 };
 
-/** Format a primitive value for the top-values chip list. Strings get
- *  quoted; null shows as italic literal; numbers/booleans render
- *  as-is. Long strings are truncated for chip layout. */
-function formatTopValue(value: unknown): string {
-  if (typeof value === 'string') {
-    const inner = value.length > 32 ? value.slice(0, 30) + '…' : value;
-    return `"${inner}"`;
-  }
-  if (value === null) return 'null';
-  return String(value);
-}
-
-/** Format a numeric range — fixed to 2 decimals when fractional,
- *  integer otherwise. Avoids "12.0000000001" style noise. */
-function formatNum(n: number): string {
-  if (!Number.isFinite(n)) return '—';
-  return Number.isInteger(n) ? String(n) : n.toFixed(2);
-}
 
 interface StatsPanelProps { stats: CollectionStats; }
 

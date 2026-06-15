@@ -409,6 +409,7 @@ interface LLMOptions {
   maxTokens?:         number;
   parallelToolCalls?: boolean;
   signal?:            AbortSignal;
+  reasoning?:         GenerationReasoningOverride;
 }
 ```
 
@@ -425,6 +426,38 @@ The connection that actually serves the request is resolved by short-circuiting 
 ### Sampler overrides
 
 `temperature` and `maxTokens` override the connection profile's defaults for this call only. Omitting them lets the profile decide.
+
+### Reasoning — per-call thinking control
+
+`reasoning` (host 0.5.x+) controls whether — and how hard — the model thinks for *this* call, overriding whatever the connection's reasoning bindings or the user's global setting would do. It rides on the request **beside** `parameters`, not inside the sampler bag, so it composes with `temperature` / `maxTokens` rather than competing with them.
+
+```ts
+interface GenerationReasoningOverride {
+  source?:          'inherit' | 'off' | 'custom';
+  apiReasoning?:    boolean;          // master switch (source: 'custom')
+  effort?:          ReasoningEffort;  // 'auto'|'none'|'minimal'|'low'|'medium'|'high'|'max'|'xhigh'
+  thinkingDisplay?: ThinkingDisplay;  // 'auto'|'summarized'|'omitted' — Anthropic-only
+}
+```
+
+The `source` discriminator decides how the effective settings are resolved:
+
+- **`'inherit'`** — the default, and identical to omitting `reasoning` entirely: use the connection's `reasoning_bindings` if it has any, else the user's global reasoning setting. Set it explicitly only to document intent.
+- **`'off'`** — force the provider's no-reasoning switch for this call, even if `parameters` already carry an explicit `thinking` / `reasoning` block. Use it when a script needs a fast, cheap, non-thinking turn on a connection that normally reasons.
+- **`'custom'`** — apply the `apiReasoning` / `effort` / `thinkingDisplay` fields, for this request only. Omitted fields fall back to their defaults (`apiReasoning: true`, `effort: 'auto'`, `thinkingDisplay: 'auto'`). Raw values you pass through `parameters` still win field-by-field — the override only fills what you left unset.
+
+```js
+// Spend a big thinking budget on one hard extraction, without touching the user's settings:
+const verdict = await api.llm.generateStructured(messages, schema, {
+  connectionName: 'fast',
+  reasoning: { source: 'custom', effort: 'high' },
+});
+
+// Force a no-reasoning turn on a connection that normally thinks:
+const quick = await api.llm.generate(messages, { reasoning: { source: 'off' } });
+```
+
+`reasoning` works on every `api.llm` method that calls a provider — `generate`, `generateStream`, `generateStructured`, and `generateWithTools`. The connection's own bound settings are visible read-only at `Connection.reasoning_bindings` (see [Connections](connections.md)).
 
 ### Connection profiles — pick fast for sub-agent work
 
@@ -548,9 +581,9 @@ for (let step = 0; step < 5; step++) {
 
 - **Schema in the 4-arg form validates final content only.** When `tool_calls` come back, the schema isn't enforced on tool args (that's the tool's `parameters` JSON Schema). When the final answer arrives without tool_calls, then it validates.
 
-- **No streaming surface yet.** If you reach for `stream` / `quietStream` / `rawStream` / `AsyncIterable` return types — they don't exist. Track B (LLM streaming) is deferred past v1.0. Full responses only for now.
+- **Streaming is `generateStream` only.** The async-generator [`generateStream`](#generatestreammessages-options--streaming-text) (documented above) is the one streaming surface, shipped in rc.9. Provider-style names — `stream` / `quietStream` / `rawStream` and bare `AsyncIterable` return types on the other methods — don't exist. `generateStructured` and `generateWithTools` have no streaming variant (a structured/tool-loop result isn't useful partially), so reach for `generateStream` when you want incremental text and the full-response methods for everything else.
 
-- **Schema-validation behavior differs between `generateStructured` and `generateWithTools+schema`.** `generateStructured` throws synchronously on validation failure (no retry). The 4-arg `generateWithTools` silently falls back to the raw parsed value on validation failure — covered in [generateWithTools — Key semantics for the 4-arg form](#generatewithtools--key-semantics-for-the-4-arg-form). Wrap with retry logic where you need it; don't assume the throw will happen in the tools-loop path.
+- **Schema-validation behavior differs between `generateStructured` and `generateWithTools+schema`.** `generateStructured` throws synchronously on validation failure (no retry). The 4-arg `generateWithTools` silently falls back to the raw parsed value on validation failure — covered in the **Schema validation — errors, not retries** section above. Wrap with retry logic where you need it; don't assume the throw will happen in the tools-loop path.
 
 - **`role: 'tool'` doesn't exist on `LLMMessage`.** Tool requests + results live inside `content` as `tool_use` / `tool_result` parts (see the LlmMessagePart shape). Don't try to push `{ role: 'tool', content: '...' }` — it'll be rejected.
 
@@ -565,6 +598,6 @@ for (let step = 0; step < 5; step++) {
 - **In-app Reference, "API Functions → api.llm" section** — auto-generated method list with full signatures, permission tags, and per-method notes.
 - **[`concepts/permissions.md`](../concepts/permissions.md)** — `generation` permission, graceful denial handling.
 - **[`concepts/trigger-model.md`](../concepts/trigger-model.md)** — the `data` global your scripts react to + the sandbox boundary.
-- **Macros guide** *(coming next)* — `api.macros.*` for injecting computed content into the prompt assembly pipeline. Pairs naturally with `dryRun()` for inspecting what your macros end up contributing.
-- **Tools guide** *(coming)* — `api.tools.*` for registering tools that the Council / inline function-calling can invoke. Inversion of `generateWithTools`: you're the tool author, not the tool consumer.
+- **[Custom macros](macros.md)** — `api.macros.*` for injecting computed content into the prompt assembly pipeline. Pairs naturally with `dryRun()` for inspecting what your macros end up contributing.
+- **[Registering tools](tools.md)** — `api.tools.*` for registering tools that the Council / inline function-calling can invoke. Inversion of `generateWithTools`: you're the tool author, not the tool consumer.
 - **The `ls:council-prompt` built-in library** — pure helpers for replicating Lumiverse's Council-sidecar prompt shape inside extension-authored tools. See the Reference's "Built-in Libraries" section.

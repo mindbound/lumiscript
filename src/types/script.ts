@@ -940,6 +940,24 @@ export type LLMProvider =
   | 'openai' | 'openrouter' | 'perplexity' | 'pollinations' | 'siliconflow'
   | 'xai' | 'zai';
 
+// ─── Reasoning (per-request override + connection bindings) ────────────────────
+// Host-DTO-backed — the host owns reasoning semantics and translates the
+// high-level intent into per-provider knobs (`thinking`, `reasoning_effort`, …),
+// so these are import-aliased to track `lumiverse-spindle-types` rather than
+// re-drift. `editor-lib.ts` carries the concrete inlined shapes for Monaco.
+/** Per-request reasoning override for `api.llm.*`. `source: 'inherit'` (default —
+ *  use the connection binding / user's global setting), `'off'` (force no reasoning),
+ *  or `'custom'` (set `effort` / `apiReasoning` / `thinkingDisplay` for this call). */
+export type GenerationReasoningOverride = import('lumiverse-spindle-types').GenerationReasoningOverrideDTO;
+/** Reasoning effort tier: 'auto' | 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'max' | 'xhigh'. */
+export type ReasoningEffort = import('lumiverse-spindle-types').ReasoningEffortDTO;
+/** Anthropic-only thinking-block display mode: 'auto' | 'summarized' | 'omitted'. */
+export type ThinkingDisplay = import('lumiverse-spindle-types').ThinkingDisplayDTO;
+/** Full reasoning-settings snapshot (on `Connection.reasoning_bindings.settings`). */
+export type ReasoningSettings = import('lumiverse-spindle-types').ReasoningSettingsDTO;
+/** Reasoning settings bound to a connection profile (overrides the global setting). */
+export type ConnectionReasoningBindings = import('lumiverse-spindle-types').ConnectionReasoningBindingsDTO;
+
 export interface LLMOptions {
   /**
    * Connection profile ID. When provided, the named saved connection is used
@@ -999,6 +1017,18 @@ export interface LLMOptions {
    * ```
    */
   signal?: AbortSignal;
+  /**
+   * Per-request reasoning override — dial reasoning for this call without
+   * touching the connection's saved binding:
+   *  - omitted / `{ source: 'inherit' }` — use the connection's reasoning
+   *    binding if any, else the user's global reasoning setting (default).
+   *  - `{ source: 'off' }` — force no reasoning for this call (cheap / fast).
+   *  - `{ source: 'custom', effort: 'high', apiReasoning: true }` — explicit
+   *    settings for this call only; omitted fields fall back to defaults.
+   * The host maps this to provider-specific knobs, so scripts don't reason
+   * about per-provider quirks. Raw values in `parameters` still win field-wise.
+   */
+  reasoning?: GenerationReasoningOverride;
 }
 
 /**
@@ -1061,27 +1091,11 @@ export interface DryRunTokenCount {
   tokenizerName: string | null;
 }
 
-/** Long-term memory retrieval statistics from a dry run. */
-export interface DryRunMemoryStats {
-  enabled: boolean;
-  chunksRetrieved: number;
-  chunksAvailable: number;
-  chunksPending: number;
-  injectionMethod: 'macro' | 'fallback' | 'disabled';
-  /** How the chunks were retrieved (real vector search vs recency fallback).
-   *  Absent until the chat-memory cache has been populated. */
-  retrievalMode?: 'vector' | 'recency' | 'empty' | 'disabled';
-  retrievedChunks: Array<{
-    /** Vector distance (lower = more similar); `null` for keyword-only or
-     *  recency-fallback hits. */
-    score: number | null;
-    tokenEstimate: number;
-    messageRange: [number, number];
-    preview: string;
-  }>;
-  queryPreview: string;
-  settingsSource: 'global' | 'per_chat';
-}
+/** Long-term memory retrieval statistics from a dry run. Import-aliased to the
+ *  host DTO so it auto-tracks `lumiverse-spindle-types` rather than re-drifting
+ *  (see docs/api-stability.md). `retrievedChunks[].score` is `number | null`.
+ *  `editor-lib.ts` carries the concrete inlined shape for Monaco. */
+export type DryRunMemoryStats = import('lumiverse-spindle-types').MemoryStatsDTO;
 
 /** Result of a dry run — the assembled prompt state without calling the LLM. */
 export interface DryRunResult {
@@ -1367,8 +1381,10 @@ export interface Connection {
   has_api_key: boolean;
   /** Raw provider-specific metadata bag (provider-quirk flags, etc.). */
   metadata: Record<string, unknown>;
-  /** Parsed reasoning bindings, or `null` when the connection has none. */
-  reasoning_bindings: Record<string, unknown> | null;
+  /** Parsed, typed reasoning bindings (settings snapshot + optional promptBias),
+   *  or `null` when the connection has none (generation falls back to the user's
+   *  global reasoning setting). */
+  reasoning_bindings: ConnectionReasoningBindings | null;
   /** Unix-ms creation timestamp. */
   created_at: number;
   /** Unix-ms last-update timestamp. */
@@ -1561,7 +1577,7 @@ export interface HttpRequestOptions {
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
   headers?: Record<string, string>;
   body?: string;
-  /** Timeout in ms */
+  /** Timeout in ms. NOTE: not currently honored — the host CORS proxy ignores this; reserved for a future host capability. */
   timeout?: number;
   /**
    * v1.0.0-rc.5+ — response body decoding hint.
@@ -2323,35 +2339,18 @@ export interface ChatSessionUpdateInput {
   metadata?: Record<string, unknown>;
 }
 
-/** A single long-term memory chunk retrieved via vector search. */
-export interface ChatMemoryChunk {
-  /** The chunk text (concatenated messages from a conversation segment). */
-  content: string;
-  /** Vector distance (lower = more similar). `null` for keyword-only or
-   *  recency-fallback hits, which have no vector distance — do not treat a
-   *  missing score as a perfect (zero-distance) match. */
-  score: number | null;
-  /** Chunk metadata (may include startIndex, endIndex, etc.). */
-  metadata: Record<string, unknown>;
-}
+/** A single long-term memory chunk retrieved via vector search.
+ *  Import-aliased to the host DTO so it auto-tracks `lumiverse-spindle-types`
+ *  rather than re-drifting on each host bump — the chat-memory surface is
+ *  host-DTO-backed (see docs/api-stability.md). `score` is `number | null`
+ *  (null for keyword-only / recency-fallback hits — don't treat missing as
+ *  zero distance). `editor-lib.ts` carries the concrete inlined shape for Monaco. */
+export type ChatMemoryChunk = import('lumiverse-spindle-types').ChatMemoryChunkDTO;
 
-/** Result of a chat memory vector search. */
-export interface ChatMemoryResult {
-  chunks: ChatMemoryChunk[];
-  /** Pre-formatted output using the user's memory template settings. Ready to inject. */
-  formatted: string;
-  count: number;
-  /** Whether chat memory is enabled (requires embedding config + vectorized messages). */
-  enabled: boolean;
-  queryPreview: string;
-  settingsSource: 'global' | 'per_chat';
-  chunksAvailable: number;
-  /** Chunks awaiting vectorization. If > 0, results may be incomplete. */
-  chunksPending: number;
-  /** How the chunks were retrieved (real vector search vs recency fallback).
-   *  Absent until the chat-memory cache has been populated. */
-  retrievalMode?: 'vector' | 'recency' | 'empty' | 'disabled';
-}
+/** Result of a chat-memory vector search (the `{{memories}}` payload). Shared by
+ *  `api.chats.getMemories` + `api.memories.chatMemory.get`. Import-aliased to the
+ *  host DTO — see ChatMemoryChunk above. */
+export type ChatMemoryResult = import('lumiverse-spindle-types').ChatMemoryResultDTO;
 
 export interface ChatsAPI {
   /** List chat sessions, optionally filtered by character. Requires chats permission. */
@@ -4008,7 +4007,7 @@ export interface ShowModalOptions {
   /**
    * When `true`, the user cannot dismiss the modal — the close button, Escape key, and
    * backdrop click are all disabled. The modal can only be closed programmatically
-   * (`api.ui.closeModal()`, pending platform MR) or via extension cleanup.
+   * (`handle.close()` on the returned `ModalHandle`) or via extension cleanup.
    * Default: `false`.
    */
   persistent?: boolean;
@@ -6379,7 +6378,7 @@ export interface ToolsAPI {
    *   return api.llm.generate([
    *     { role: 'system', content: 'Summarise the weather data concisely.' },
    *     { role: 'user',   content: `City: ${args.city}\nContext: ${args.context}` },
-   *   ], { connection: 'my-connection' });
+   *   ], { connectionName: 'my-connection' });
    * });
    */
   register(name: string, def: ToolDefinition, handler: ToolHandler): void;

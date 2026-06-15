@@ -22,23 +22,7 @@ import { createPortal } from 'react-dom';
 import { X, Trash2, AlertTriangle } from 'lucide-react';
 import type { CollectionSummary } from '../../engine/db-admin.js';
 import { formatBytes, SCOPE_LABEL_LONG } from './utils.js';
-
-/**
- * Resolve a "Belongs to: <name>" line for character / chat scopes.
- * Returns null for script scope (the owner script name already covers
- * the identity), or when the host didn't resolve a name (deleted
- * character / chat, permission revoked) — caller can then fall back
- * to displaying just the path, which is enough for disambiguation.
- */
-function scopeIdentityLine(c: CollectionSummary): { label: string; name: string; id: string } | null {
-  if (c.scope === 'character' && c.characterName && c.characterId) {
-    return { label: 'Character', name: c.characterName, id: c.characterId };
-  }
-  if (c.scope === 'chat' && c.chatName && c.chatId) {
-    return { label: 'Chat', name: c.chatName, id: c.chatId };
-  }
-  return null;
-}
+import { scopeIdentityLine } from './collections-logic.js';
 
 export interface DropConfirmDialogProps {
   target: CollectionSummary;

@@ -2,7 +2,7 @@
 
 # LumiScript
 
-A JavaScript scripting platform for [Lumiverse](https://github.com/lumiverse). Write scripts that react to chat events, automate behaviour, inject prompt context, and build interactive UIs — without touching Lumiverse's core code.
+A JavaScript scripting platform for [Lumiverse](https://github.com/prolix-oc/Lumiverse). Write scripts that react to chat events, automate behaviour, inject prompt context, and build interactive UIs — without touching Lumiverse's core code.
 
 ## Install
 
@@ -41,7 +41,7 @@ LumiScript exposes a broad surface area through the `api.*` object available to 
 - Resolve macros (`{{user}}`, `{{char}}`, custom) with or without committing side effects
 
 **LLM and generation**
-- Call any configured connection via `api.llm.generate` / `generateStructured` / `generateWithTools`
+- Call any configured connection via `api.llm.generate` / `generateStructured` / `generateWithTools`, or stream tokens with `generateStream`
 - Register tools usable by Lumiverse Council and inline function-calling
 - Server-side token counting with the actual provider tokenizer
 
@@ -66,17 +66,19 @@ LumiScript exposes a broad surface area through the `api.*` object available to 
 - Cross-extension shared RPC pool via `api.rpc.*`
 
 **Other**
+- Long-term Memory Cortex + chat-memory access (`api.memories.*`) and web search (`api.webSearch.*`)
 - Persistent event tracking with replay and latest-state lookup
 - HTTP requests (text or binary) through Lumiverse's CORS proxy
 - Handlebars templates, UUIDs, image MIME sniffing, base64 helpers
 
 ## Where to learn more
 
-LumiScript ships with extensive in-app documentation that's faster to navigate than any external reference:
+LumiScript ships with extensive documentation — both in the repo and in-app:
 
-- **Reference tab** in the LumiScript panel — the full API surface, method signatures, type definitions, event-payload shapes, and example snippets
+- **The [`docs/`](docs/index.md) tree** — hand-written concept docs, a per-API guide for every namespace, and an end-to-end **cookbook** of runnable recipes
+- **In-app Reference** — the full API surface, method signatures, type definitions, event-payload shapes, and example snippets, always current with your installed version
 - **Lisa** (Settings → Assistant) — in-app code assistant that knows the entire LumiScript API. Ask her to write a script, explain an error, or look up a method
-- **Trigger model section** in the Reference tab — covers the script execution model in detail; worth reading before writing your first non-trivial script
+- **Trigger model** concept doc — covers the script execution model in detail; worth reading before writing your first non-trivial script
 
 ## Sandbox model
 
@@ -86,7 +88,7 @@ A runaway user script can't take down Lumiverse. The supervisor SIGKILLs the scr
 
 ## Requirements
 
-- Lumiverse `v0.9.7` or later
+- Lumiverse `v0.9.9` or later
 
 ## Building from source
 

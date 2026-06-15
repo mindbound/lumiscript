@@ -228,7 +228,7 @@ export function getRegistrationCountsForScript(scriptId: string): ScriptRegistra
 
 /**
  * Fast-path boolean — true iff `scriptId` owns >= 1 entry in any pinning
- * registry. Returns on the first hit to avoid summing all eleven registries
+ * registry. Returns on the first hit to avoid summing all fourteen registries
  * when one entry is enough to gate eviction. Use this in hot paths
  * (eviction sweep filtering); use `getRegistrationCountsForScript` when
  * you need the breakdown (diagnostics).

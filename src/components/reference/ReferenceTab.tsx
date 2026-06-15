@@ -63,23 +63,26 @@ export const EVENTS: EventRow[] = [
   { group: 'LumiScript', name: 'ls:startup',                 payload: '{ __event: "ls:startup" }', fires: 'Per-script when the script enters the active state: at LumiScript boot (extension enable / app start) AND after the user toggles the script from disabled→enabled. Symmetric partner to `ls:teardown`. Use for tool registration, cache pre-warm, broadcast subscription setup, and other init that should run whenever the script becomes runnable. On re-enable the case body re-runs in full — bottom-of-body `api.broadcast.on(...)` calls also re-execute, re-registering the subscriptions disable\'s cleanup wiped, so the case body itself can be empty if all you need is the body firing. **Use the `if (data.__event === "ls:startup")` branch for code that should run EXCLUSIVELY on cold boot — not on every Reload click.** Common cold-boot-only patterns: seeding a default config into `api.scriptStorage`, logging a boot timestamp, one-shot migrations on persistent data. To make init code ALSO re-run on hot reload, branch on `(data.__event === "ls:startup" || data.__event === "ls:reload")`, or put it at the top of the body un-gated (the body re-runs on every fire including `ls:reload`). See `ls:reload` for the hot-reload counterpart.' },
   { group: 'LumiScript', name: 'ls:teardown',                payload: "{ reason: 'disabled' | 'deleted', scriptId, scriptName }", fires: 'Per-script when the script is disabled or deleted. Use for cleanup of external state (dynamic world-book entries, persistent storage migrations, etc.). **NOT fired on hot reload — `ls:reload` performs the per-script state wipe silently. ls:teardown is exclusive to disable / delete.**' },
   { group: 'LumiScript', name: 'ls:reload',                  payload: "{ reason: 'autosave' | 'manual', previousCodeHash, currentCodeHash, previousLength, currentLength, triggeredAt }", fires: 'After a code edit IF the script opts in via the `// @ls:reload-on-edit` directive (~500ms debounce). Body re-runs in its existing worker so registered handlers refresh their closures. Also fires on click of the editor topbar Reload button (manual — bypasses the directive check). Branch on `data.__event === "ls:reload"` to detect. **Pairs with `ls:startup` as the lifecycle distinction**: ls:startup = cold boot (extension boot OR disable→enable transition), ls:reload = hot reload (autosave-with-directive OR manual Reload button click). **Reload performs a full per-script state wipe BEFORE the body re-runs** (DOM injections, modals, float widgets, drawer tabs, input-bar actions, handler closures, broadcast subs, tools, macros, interceptors, injections) while preserving `api.scriptStorage`, `api.theme.*` contributions, and the worker\'s `script.require()` cache. So the body re-running from `ls:reload` lands into a clean slate identical to a fresh `ls:startup` fire — the only difference is `data.__event` + the presence of `data.reason` (`"autosave" | "manual"`). v1.0.0-rc.8+. **NOT in the trigger picker UI**: ls:reload is a deterministic side-effect of the Reload button OR the `@ls:reload-on-edit` directive, not a picker-checkbox subscription (parallel to the Run button, which also has no checkbox).' },
-  { group: 'Chat',       name: 'MESSAGE_SENT',               payload: '{ chatId, message: ChatMessage }', fires: 'Once per **user**-initiated send. Fires **before prompt assembly** for the generation that follows — `api.chat.inject(...)` calls from a `MESSAGE_SENT` handler ARE picked up by the immediate-next generation (host emits via `queueMicrotask`; assembly runs a tick later in the macrotask queue, so the inject lands first). Does NOT fire for assistant-side messages — use `GENERATION_ENDED` for those. Note: `message` does NOT carry the active character — resolve via `api.chats.get(chatId).then(c => c.characterId)` then `api.characters.get(characterId)`.' },
-  { group: 'Chat',       name: 'MESSAGE_EDITED',             payload: '{ chatId, message: ChatMessage }' },
+  { group: 'Chat',       name: 'MESSAGE_SENT',               payload: '{ chatId, message: Message }', fires: 'Once per **user**-initiated send. Fires **before prompt assembly** for the generation that follows — `api.chat.inject(...)` calls from a `MESSAGE_SENT` handler ARE picked up by the immediate-next generation (host emits via `queueMicrotask`; assembly runs a tick later in the macrotask queue, so the inject lands first). Does NOT fire for assistant-side messages — use `GENERATION_ENDED` for those. **`message` is the raw host `Message` record — it uses `is_user` (boolean), NOT `role`, and snake_case fields (`swipe_id`, `swipe_dates`); it is NOT the camelCase `ChatMessage` DTO from `getMessages()`.** Note: `message` does NOT carry the active character — resolve via `api.chats.get(chatId).then(c => c.characterId)` then `api.characters.get(characterId)`.' },
+  { group: 'Chat',       name: 'MESSAGE_EDITED',             payload: '{ chatId, message: Message }' },
   { group: 'Chat',       name: 'MESSAGE_DELETED',            payload: '{ chatId, messageId }' },
-  { group: 'Chat',       name: 'MESSAGE_SWIPED',             payload: '{ chatId, message: ChatMessage, action, swipeId, previousSwipeId? }', fires: 'Twice per swipe-with-regen (initiation + completion); once for swipe-without-regen.' },
-  { group: 'Chat',       name: 'SWIPE_EDITED',               payload: '{ chatId, message: ChatMessage, previousSwipeId }' },
+  { group: 'Chat',       name: 'MESSAGE_SWIPED',             payload: '{ chatId, message: Message, action, swipeId, previousSwipeId? }', fires: 'Twice per swipe-with-regen (initiation + completion); once for swipe-without-regen.' },
+  { group: 'Chat',       name: 'SWIPE_EDITED',               payload: '{ chatId, message: Message, previousSwipeId }' },
   { group: 'Chat',       name: 'CHARACTER_MESSAGE_RENDERED', payload: '{ chatId, messageId }' },
   { group: 'Chat',       name: 'USER_MESSAGE_RENDERED',      payload: '{ chatId, messageId }' },
   { group: 'Generation', name: 'GENERATION_STARTED',         payload: '{ generationId, chatId, model }', fires: 'At the start of a new generation, **before prompt assembly + interceptor invocation** in the same generation pipeline. `api.chat.inject(...)` calls from this handler ARE picked up by this generation. Symmetric pre-assembly hook to `MESSAGE_SENT` — use whichever fits the script flow.' },
   { group: 'Generation', name: 'GENERATION_ENDED',           payload: '{ generationId, chatId, messageId, content }', fires: 'Assistant-side message arrival (the counterpart to `MESSAGE_SENT` for user messages). Fires **after** the generation completes — `api.chat.inject(...)` calls from this handler are too late for the just-finished generation but WILL be picked up by the next one. Payload has no `swipeId` — look it up via `api.chat.getMessages` if needed.' },
   { group: 'Generation', name: 'GENERATION_STOPPED',         payload: '{ generationId, chatId, content }' },
   { group: 'Generation', name: 'STREAM_TOKEN_RECEIVED',      payload: '{ generationId, chatId, token }', fires: 'Once per streamed token — **high-frequency**. Deliberately NOT offered in the editor event picker (wiring a whole script body per token is rarely intended); advanced use only.' },
-  { group: 'Entities',   name: 'CHAT_CHANGED',               payload: '{ chatId }', fires: 'Chat **metadata** mutations only (rename, etc.). Does NOT fire on chat open/switch — use `CHAT_SWITCHED` for that.' },
+  { group: 'Entities',   name: 'CHAT_CHANGED',               payload: '{ chat, changedFields }  // chat = the full updated Chat; chatId is `chat.id`, not flat', fires: 'Chat **metadata** mutations only (rename, etc.). The primary emission carries `{ chat, changedFields }` (read the id as `chat.id`). Does NOT fire on chat open/switch — use `CHAT_SWITCHED` for that.' },
   { group: 'Entities',   name: 'CHAT_SWITCHED',              payload: '{ chatId: string | null }  // null on return-to-home — NO characterId on the payload', fires: 'Active chat opens, switches, or closes (chatId becomes null on return-to-home). **Important — Phase-1/Phase-2 character resolution**: triggers fire during Phase 1 (chatId set sync); characterId is resolved Phase-2 ~10–15 ms later via async lookup. So `data.characterId` does NOT exist on the payload, and reading the active-context characterId at trigger-fire time can see null/stale. **Pattern**: call `api.chats.getActive()` and read `chat.characterId` — that hits the host\'s live state which has it populated regardless of Phase-2 status.' },
+  { group: 'Entities',   name: 'CHAT_FORKED',                payload: '{ sourceChatId, forkedChatId, chat, branchId, forkedAtMessageId, forkedAtMessageIndex }', fires: 'A chat was forked (branched) from a message into a new chat that shares the source character — messages up to and including the fork point are copied. `forkedChatId === chat.id`; the forked `chat.metadata` carries `branched_from` + `branch_at_message`. Use it to clone per-chat state into the fork, log lineage, or re-decorate the new chat. Emitted by the host branch-chat flow on newer Lumiverse builds.' },
   { group: 'Entities',   name: 'CHARACTER_EDITED',           payload: '{ id, character: Character }' },
   { group: 'Entities',   name: 'CHARACTER_DELETED',          payload: '{ id }' },
   { group: 'Entities',   name: 'CHARACTER_DUPLICATED',       payload: '{ id, newId }' },
   { group: 'Entities',   name: 'PERSONA_CHANGED',            payload: '{ persona: Persona }' },
+  { group: 'Images',     name: 'IMAGE_UPLOADED',             payload: '{ image }', fires: 'An image was saved to the user image library — manual upload OR generated/saved via api.imageGen / api.images. `data.image` is the full Image record (carries its `id`, usable with api.images.get / api.theme.extractColors / spindle.characters.setAvatar). NOTE: host docs list `{ imageId }` — that is stale; the real payload is `{ image }`.' },
+  { group: 'Images',     name: 'IMAGE_DELETED',              payload: '{ id }', fires: 'An image was deleted from the library. `data.id` is the removed image id. (Host docs list `{ imageId }` — stale; real payload is `{ id }`.)' },
   { group: 'World Info', name: 'WORLD_INFO_ACTIVATED',       payload: '{ entries: WorldInfoEntry[] }', fires: 'World Info entries were activated during prompt assembly.' },
   { group: 'World Info', name: 'WORLD_BOOK_CHANGED',         payload: '{ id, worldBook: WorldInfo }', fires: 'Coarse-grained: world book was created, updated, had its semantic-activation toggled, or had any of its entries mutated (entry create / update / delete / reorder / bulk-op / import). Fires alongside `WORLD_BOOK_ENTRY_CHANGED` on per-entry mutations — handlers subscribed to both see two events per change. Bulk imports suppress per-entry events and emit this once at the end.' },
   { group: 'World Info', name: 'WORLD_BOOK_DELETED',         payload: '{ id }', fires: 'World book was deleted.' },
@@ -90,7 +93,6 @@ export const EVENTS: EventRow[] = [
   { group: 'Settings',   name: 'CONNECTION_PROFILE_LOADED',  payload: '{ connectionId }' },
   { group: 'Settings',   name: 'REGEX_SCRIPT_CHANGED',       payload: '{ id, script: RegexScriptInfo }  // create / update / duplicate / reorder / enable / disable. Requires regex_scripts permission.' },
   { group: 'Settings',   name: 'REGEX_SCRIPT_DELETED',       payload: '{ id }  // Requires regex_scripts permission.' },
-  { group: 'Tools',      name: 'TOOL_INVOCATION',            payload: '{ toolName, requestId, args }', fires: 'Internal routing for `api.tools.register` handlers — NOT a user-wireable trigger (not in the editor picker). Register a tool and the host dispatches Council/LLM invocations to your handler; you do not subscribe to this event directly.' },
 ];
 
 const EventsTable: FC = () => {
@@ -522,7 +524,7 @@ export const BROADCAST_EVENTS: BroadcastEventRow[] = [
   {
     name:      'ls:tool:invoked',
     payload:   '{ name, args, result, scriptId, callMs, councilMember? }',
-    emittedBy: 'api.tools.invoke() + TOOL_INVOCATION handler',
+    emittedBy: 'api.tools.invoke() + host tool dispatch (Council / direct LLM)',
   },
   {
     name:      'ls:macro:registered',
@@ -815,6 +817,20 @@ export const KEY_TYPES: TypeDoc[] = [
       { field: 'swipes',     type: 'string[]',                        optional: false, desc: 'All swipe variants. swipes[swipeId] equals content.' },
       { field: 'swipeDates', type: 'number[]',                        optional: false, desc: 'Per-swipe creation timestamps (unix epoch seconds), aligned with swipes.' },
       { field: 'extra',      type: 'Record<string, unknown>',         optional: false, desc: 'Host-maintained bag: reasoning text/duration, attachments, hidden flag, etc. Keys depend on host build — treat as opaque. Empty object on older hosts.' },
+    ],
+  },
+  {
+    name: 'Message',
+    note: 'The RAW host message record delivered as `data.message` by chat events (MESSAGE_SENT, MESSAGE_EDITED, MESSAGE_SWIPED, SWIPE_EDITED). Snake_case — distinct from the camelCase `ChatMessage` DTO returned by api.chat.getMessages(). Most importantly it uses `is_user` (boolean), NOT `role`.',
+    fields: [
+      { field: 'id',          type: 'string',                  optional: false, desc: 'Message identifier.' },
+      { field: 'content',     type: 'string',                  optional: false, desc: 'Plain-text message content.' },
+      { field: 'is_user',     type: 'boolean',                 optional: false, desc: 'True for a user message, false for an assistant message. There is NO `role` field — use this.' },
+      { field: 'name',        type: 'string',                  optional: false, desc: 'Sender display name.' },
+      { field: 'swipe_id',    type: 'number',                  optional: false, desc: 'Index of the active swipe variant.' },
+      { field: 'swipes',      type: 'string[]',                optional: false, desc: 'All swipe variants.' },
+      { field: 'swipe_dates', type: 'number[]',                optional: false, desc: 'Per-swipe creation timestamps (unix epoch seconds), aligned with swipes.' },
+      { field: 'extra',       type: 'Record<string, unknown>', optional: false, desc: 'Host-maintained bag (reasoning, attachments, hidden flag, etc.). Treat as opaque.' },
     ],
   },
   {
@@ -1570,6 +1586,7 @@ export const KEY_TYPES: TypeDoc[] = [
       { field: 'maxTokens?',      type: 'number',      optional: true, desc: 'Override max tokens.' },
       { field: 'parallelToolCalls?', type: 'boolean',  optional: true, desc: 'When false, forces one tool call per turn. Only meaningful for generateWithTools(). Needed for Mistral and other providers that require serialised tool use.' },
       { field: 'signal?',         type: 'AbortSignal', optional: true, desc: 'Cancel an in-flight generation. On abort the promise rejects with an AbortError. The worker auto-aborts on extension teardown — use this for script-level cancellation (timeouts, user cancel, races).' },
+      { field: 'reasoning?',      type: 'GenerationReasoningOverride', optional: true, desc: "Per-request reasoning/thinking control (host 0.5.x+). source: 'inherit' (default — use the connection's bindings) | 'off' (force no reasoning) | 'custom' (use the effort/thinkingDisplay fields). Rides beside parameters on the request, not inside the sampler bag." },
     ],
   },
   {
@@ -1585,9 +1602,27 @@ export const KEY_TYPES: TypeDoc[] = [
       { field: 'is_default',         type: 'boolean',                      optional: false, desc: "Whether this is the user's default connection." },
       { field: 'has_api_key',        type: 'boolean',                      optional: false, desc: 'Whether a key is stored. NEVER the key itself.' },
       { field: 'metadata',           type: 'Record<string, unknown>',      optional: false, desc: 'Raw provider-specific metadata bag (provider-quirk flags, etc.).' },
-      { field: 'reasoning_bindings', type: 'Record<string, unknown> | null', optional: false, desc: 'Parsed reasoning bindings, or null when the connection has none.' },
+      { field: 'reasoning_bindings', type: 'ConnectionReasoningBindings | null', optional: false, desc: 'Typed reasoning bindings (a settings snapshot + optional promptBias), or null when the connection has none.' },
       { field: 'created_at',         type: 'number',                       optional: false, desc: 'Unix-ms creation timestamp.' },
       { field: 'updated_at',         type: 'number',                       optional: false, desc: 'Unix-ms last-update timestamp.' },
+    ],
+  },
+  {
+    name: 'GenerationReasoningOverride',
+    note: "Per-request reasoning control, passed as LLMOptions.reasoning (host 0.5.x+). Resolved by the 'source' discriminator; rides beside parameters on the request, not inside the sampler bag. Mirrors the host GenerationReasoningOverrideDTO.",
+    fields: [
+      { field: 'source?',          type: "'inherit' | 'off' | 'custom'", optional: true, desc: "How the backend resolves reasoning. 'inherit' (default; same as omitting reasoning): use the connection's reasoning_bindings, else the user's global setting. 'off': force the provider's no-reasoning switch, even if parameters carry a thinking block. 'custom': use the fields below for this call only." },
+      { field: 'apiReasoning?',    type: 'boolean',                      optional: true, desc: "Master switch — whether the provider emits thinking. Meaningful with source: 'custom' (default true)." },
+      { field: 'effort?',          type: 'ReasoningEffort',              optional: true, desc: "Effort tier: 'auto' | 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'max' | 'xhigh'. source: 'custom' only (default 'auto')." },
+      { field: 'thinkingDisplay?', type: 'ThinkingDisplay',              optional: true, desc: "How thinking is surfaced: 'auto' | 'summarized' | 'omitted'. Anthropic-only. source: 'custom' only (default 'auto')." },
+    ],
+  },
+  {
+    name: 'ConnectionReasoningBindings',
+    note: "Typed value of Connection.reasoning_bindings (api.connections.*). Read-only snapshot of the reasoning settings bound to a profile; these override the user's global reasoning settings on this connection. Mirrors the host ConnectionReasoningBindingsDTO.",
+    fields: [
+      { field: 'settings',    type: 'ReasoningSettings', optional: false, desc: 'Reasoning settings snapshot: { apiReasoning, reasoningEffort, thinkingDisplay, prefix, suffix, autoParse, keepInHistory }. Only apiReasoning/reasoningEffort/thinkingDisplay affect the provider request; prefix/suffix/autoParse/keepInHistory drive the delimited-reasoning parser.' },
+      { field: 'promptBias?', type: 'string',            optional: true,  desc: "Optional \"Start Reply With\" assistant prefill captured with the snapshot; overrides the user's global promptBias for this connection." },
     ],
   },
   {
@@ -2303,17 +2338,17 @@ export const KEY_TYPES: TypeDoc[] = [
   },
   {
     name: 'ToolInvocationArgs',
-    note: 'Parameter passed to tool handler callbacks registered via api.tools.register(). Contains well-known Lumiverse fields plus tool-specific parameters.',
+    note: 'Parameter passed to tool handler callbacks registered via api.tools.register(). Always carries the well-known Lumiverse fields (context / __userId / __deadlineMs) on a host invocation; your registration-schema parameters are filled only on the DIRECT paths (api.tools.invoke + api.llm.generateWithTools), NOT on the Council path — see the [key] field.',
     fields: [
       { field: 'context?',     type: 'string', optional: true, desc: 'Formatted chat context provided by Lumiverse (character info, world info, recent messages).' },
       { field: '__userId?',    type: 'string', optional: true, desc: 'User ID of the invoking user. Use for scoped api.* operations inside the handler.' },
       { field: '__deadlineMs?', type: 'number', optional: true, desc: 'Timestamp (ms) by which the handler must return a result.' },
-      { field: '[key]',        type: 'unknown', optional: true, desc: 'Tool-specific parameters from the registration schema are available as additional fields.' },
+      { field: '[key]',        type: 'unknown', optional: true, desc: 'Tool-specific parameters from your registration schema — available as additional fields ONLY on the direct paths (api.tools.invoke + api.llm.generateWithTools), where the caller/model supplies them. On the Council path they are absent: the host invokes extension tools with just context + __deadlineMs (no sidecar LLM fills your schema), so read args.context and decide the values yourself.' },
     ],
   },
   {
     name: 'ToolInvocationContext',
-    note: 'Optional third parameter passed to tool handlers. Populated when invoked via Lumiverse TOOL_INVOCATION; undefined when invoked via api.tools.invoke() (script-to-script). The Council-path fields (requestId, councilMember, contextMessages) are populated together; the script-to-script path leaves them all undefined.',
+    note: 'Optional third parameter passed to tool handlers. Populated when the host invokes the tool (Council / direct-LLM function-call); undefined when invoked via api.tools.invoke() (script-to-script). The Council-path fields (requestId, councilMember, contextMessages) are populated together; the script-to-script path leaves them all undefined.',
     fields: [
       { field: 'requestId?',       type: 'string',                optional: true, desc: 'Host-side correlation id for this invocation. Useful for matching handler-side logs against Lumiverse server logs.' },
       { field: 'councilMember?',   type: 'CouncilMemberContext',  optional: true, desc: 'Personality snapshot of the Council member that triggered the invocation. Populated only when the tool ran as part of a Council execution cycle; undefined for inline function-calling, api.tools.invoke(), and older hosts.' },
@@ -3511,7 +3546,7 @@ export const API_GROUPS: FnGroup[] = [
   {
     group: 'api.tools',
     rows: [
-      { name: 'register',   args: 'name, def, handler',  desc: 'Register an LLM tool. Handler receives (args, api, ctx?) and must return a string. ctx is populated when invoked via Lumiverse TOOL_INVOCATION — read ctx.councilMember to personalise output per Council member, ctx.requestId to correlate with host-side logging.' },
+      { name: 'register',   args: 'name, def, handler',  desc: 'Register an LLM tool. Handler receives (args, api, ctx?) and must return a string. ctx is populated when the host invokes the tool (Council / direct LLM) — read ctx.councilMember to personalise output per Council member, ctx.requestId to correlate with host-side logging.' },
       { name: 'unregister', args: 'name',                desc: "Unregister a tool registered by this script. No-op if not found." },
       { name: 'list',       args: '—',                   desc: 'List all currently registered tools across all scripts.' },
       { name: 'invoke',     args: 'name, args?',         desc: 'Invoke a registered tool handler directly (for use inside an agentic loop).' },
@@ -3925,7 +3960,7 @@ export const NAMESPACE_CONCEPTS: Record<string, string> = {
     'Two registration modes. **Pull mode** (`register(name, handler)`): handler runs at macro-resolution time, can be sync or async (function-reference form; string-handler form is sync-only). **Push mode** (`register(name)` + `updateMacroValue(name, value)`): register once with no handler, push values whenever they change — avoids RPC latency at generation time. Pull is simpler but pays per-resolve cost; push is faster but requires upstream "value changed" knowledge. Pick based on whether macro resolution is hot.',
 
   'api.tools':
-    'Tool-registration surface. All tools you register via `api.tools.register` are **extension tools** — they bypass any sidecar LLM and are invoked directly by the host with `(args, ctx?)` where `ctx` carries `{councilMember?, contextMessages?, requestId?, __deadlineMs}` on Council-driven invocations. The "two execution paths" framing applies to **Lumiverse built-in tools** (which DO go through a sidecar LLM with description-as-prompt — that\'s how the Council reasons about which to invoke); LumiScript scripts can\'t register sidecar-LLM-driven tools. Practical implication: do your own analysis inside the handler — `generateStructured` against a fast connection is the canonical pattern. One-line tool descriptions are sufficient for extension tools — the description doesn\'t prompt anything; it\'s purely a human label shown in the tool inspector. Set `council_eligible: true` on the definition to make the tool selectable for Council `chance` rolls (the tool then receives Council context on invocation); leave it false for tools only invoked via `api.tools.invoke` or `api.llm.generateWithTools`.',
+    'Tool-registration surface. All tools you register via `api.tools.register` are **extension tools** — they bypass any sidecar LLM and are invoked directly by the host with `(args, ctx?)`. On a Council invocation `args` is `{context, __deadlineMs}` only — your registration-schema parameters are NOT filled (no sidecar LLM runs to populate an extension tool\'s schema), so read `args.context` and decide the values yourself — and `ctx` carries `{councilMember?, contextMessages?, requestId?}`. The "two execution paths" framing applies to **Lumiverse built-in tools** (which DO go through a sidecar LLM with description-as-prompt — that\'s how the Council reasons about which to invoke); LumiScript scripts can\'t register sidecar-LLM-driven tools. Practical implication: do your own analysis inside the handler — `generateStructured` against a fast connection is the canonical pattern. One-line tool descriptions are sufficient for extension tools — the description doesn\'t prompt anything; it\'s purely a human label shown in the tool inspector. Set `council_eligible: true` on the definition to make the tool selectable for Council `chance` rolls (the tool then receives Council context on invocation); leave it false for tools only invoked via `api.tools.invoke` or `api.llm.generateWithTools`. To **observe** invocations of your registered tools (Council or direct) with their result + timing, subscribe to the `ls:tool:invoked` broadcast via `api.broadcast.on` (fires after each handler returns; payload `{ name, args, result, scriptId, callMs, councilMember? }`) — the host delivers only invocations of YOUR tools, so built-in / DLC tools (pure LLM prompts) and tools owned by other extensions are not visible.',
 
   'api.webSearch':
     'Native web search against the user\'s configured provider (SearXNG today). `query({ query, count?, scrape? })` returns ranked `results` (title / url / snippet); with `scrape` (default **true**) it ALSO scrapes the top pages into `documents` (full text) and assembles a prompt-ready `context` string — drop `context` straight into an LLM prompt for grounding / RAG. `scrape: false` is the fast path: titles / URLs / snippets only, no page fetches. `query` REJECTS with "Web search is disabled" when the user has no provider configured — branch on `getSettings().enabled` first. `getSettings()` returns the SAFE config (provider, limits, language, safeSearch, engines, `hasApiKey`) — NEVER the API key itself. The active userId is folded in implicitly. Use cases: Council "look it up" tools, grounding a reply in current info, RAG over fresh results. Requires `web_search` permission.',

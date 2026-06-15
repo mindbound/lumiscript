@@ -102,7 +102,7 @@ This is the part to internalise. Subscriptions live longer than a single trigger
 The timeline:
 
 1. Trigger fires for script A.
-2. Host wipes A's subscriptions from the bus (`src/script-runner/host-dispatcher.ts:5668-5685`).
+2. Host wipes A's subscriptions from the bus (`busClearByScriptId` in `src/script-runner/host-dispatcher.ts`, before the body runs).
 3. A's body executes. Any `api.broadcast.on(...)` call re-adds the subscription.
 4. A's body finishes. **Subscriptions stay in the bus untouched.**
 5. Script B emits an event A subscribes to. A's handler fires.
@@ -117,25 +117,25 @@ That window between step 4 and the next wipe is the whole point — A's handler 
 
 ## Decoupling co-triggered scripts
 
-The motivating case: a tracker `tracker.js` subscribes to `GENERATION_ENDED` and runs an async LLM extraction (multi-second network call) that writes to `api.db.*`. A companion `tracker-ui.js` also subscribes to `GENERATION_ENDED` to read state and re-render the visible panel. Lumiverse fires both concurrently; `tracker-ui.js`'s read completes in milliseconds while `tracker.js`'s write doesn't complete for seconds. Result: the UI renders pre-extraction state and never updates.
+The motivating case: an `extractor.js` script subscribes to `GENERATION_ENDED` and runs an async LLM extraction (multi-second network call) that writes to `api.db.*`. A companion `panel.js` also subscribes to `GENERATION_ENDED` to read that state and re-render a visible panel. Lumiverse fires both concurrently; `panel.js`'s read completes in milliseconds while `extractor.js`'s write doesn't complete for seconds. Result: the panel renders pre-extraction state and never updates.
 
 Fix — emit-after-write in the producer, subscribe in the consumer:
 
 ```js
-// tracker.js — emit after each state mutation
+// extractor.js — emit after each state mutation
 async function runExtraction(...) {
   const events = await llmExtract(...);
   await insertEvents(events);
-  api.broadcast.emit('tracker:state-changed', { source: 'llm-extraction' });
+  api.broadcast.emit('myapp:state-changed', { source: 'llm-extraction' });
 }
 ```
 
 ```js
-// tracker-ui.js — subscribe at top of body; no GENERATION_ENDED dependency
-api.broadcast.on('tracker:state-changed', () => {
+// panel.js — subscribe at top of body; no GENERATION_ENDED dependency
+api.broadcast.on('myapp:state-changed', () => {
   void (async () => {
     try { await rerender(); }
-    catch (err) { console.warn(`[tracker-ui] ${err.message}`); }
+    catch (err) { console.warn(`[panel] ${err.message}`); }
   })();
 });
 
@@ -161,7 +161,7 @@ Scripts CAN subscribe to `ls:*` events — the restriction is emit-only.
 
 ### Observing engine state via `ls:*`
 
-The engine emits several `ls:*` events you can subscribe to for observability and cross-script reactions. The tool-lifecycle events (`ls:tool:registered`, `ls:tool:unregistered`, `ls:tool:invoked`) are documented in [Registering tools](tools.md); other engine events include `ls:startup` (fired after a script's body completes first-run setup) and database / theme events. For the full current list with payload shapes, see the in-app Reference's "Broadcast Events" section.
+The engine emits several `ls:*` events you can subscribe to for observability and cross-script reactions. The tool-lifecycle events (`ls:tool:registered`, `ls:tool:unregistered`, `ls:tool:invoked`) are documented in [Registering tools](tools.md); other engine events include `ls:startup` (fired when a script enters the active state — on boot or enable) and database / theme events. For the full current list with payload shapes, see the in-app Reference's "Broadcast Events" section.
 
 Typical use cases for subscribing to `ls:*`:
 

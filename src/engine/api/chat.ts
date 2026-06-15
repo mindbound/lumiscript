@@ -230,7 +230,12 @@ export function buildChatAPI(deps: APIBuildDeps): LumiScriptAPI['chat'] {
       // the same chat cannot interleave at the two awaits and lose each other's
       // writes (read-modify-write TOCTOU race).
       const queued = metadataQueues.get(id) ?? Promise.resolve();
-      const next: Promise<void> = queued.then(async () => {
+      // Insulate this write from the PRIOR queued write's outcome — chaining off
+      // a rejected `queued` with a bare `.then()` would propagate that rejection
+      // and skip this write's body entirely, silently dropping it. `.catch()`
+      // first so every queued write runs regardless of its predecessor; each
+      // write's own rejection still surfaces to its own caller via `next`.
+      const next: Promise<void> = queued.catch(() => {}).then(async () => {
         const dto = await spindle.chats.get(id, uid);
         if (!dto) throw new Error(`api.chat.setMetadata: chat "${id}" not found`);
         await spindle.chats.update(id, { metadata: { ...dto.metadata, [key]: value } }, uid);

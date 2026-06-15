@@ -958,7 +958,7 @@ async function sendRunHandlerRequest(
  * `script.allowDangerous` (gates http etc.) and `script.id` / `script.name`
  * (used for diagnostics + permission-error messages).
  *
- * Cleared per-script when needed (Phase 9d.3.x cleanup TODO).
+ * Cleared per-script when needed.
  */
 interface ScriptDispatchSnapshot {
   script:             Script;

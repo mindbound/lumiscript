@@ -233,6 +233,7 @@ export function buildLLMAPI(deps: APIBuildDeps): LumiScriptAPI['llm'] {
             ...providerFields,
             ...(conn?.id ? { connection_id: conn.id } : {}),
             parameters: buildLLMParams(opts),
+            ...(opts?.reasoning ? { reasoning: opts.reasoning } : {}),
             userId: userId ?? undefined,
             ...(opts?.signal ? { signal: opts.signal } : {}),
           }).then(result => (result as { content: string }).content);
@@ -283,6 +284,7 @@ export function buildLLMAPI(deps: APIBuildDeps): LumiScriptAPI['llm'] {
           ...providerFields,
           ...(conn?.id ? { connection_id: conn.id } : {}),
           parameters: buildLLMParams(opts),
+          ...(opts?.reasoning ? { reasoning: opts.reasoning } : {}),
           userId: userId ?? undefined,
           ...(opts?.signal ? { signal: opts.signal } : {}),
         };
@@ -358,6 +360,7 @@ export function buildLLMAPI(deps: APIBuildDeps): LumiScriptAPI['llm'] {
             ...providerFields,
             ...(conn?.id ? { connection_id: conn.id } : {}),
             parameters: { ...buildLLMParams(opts), ...extraParams },
+            ...(opts?.reasoning ? { reasoning: opts.reasoning } : {}),
             userId: userId ?? undefined,
             ...(opts?.signal ? { signal: opts.signal } : {}),
           }).then(result => {
@@ -443,6 +446,7 @@ export function buildLLMAPI(deps: APIBuildDeps): LumiScriptAPI['llm'] {
             ...providerFields,
             ...(conn?.id ? { connection_id: conn.id } : {}),
             parameters: { ...buildLLMParams(opts), ...extraParams },
+            ...(opts?.reasoning ? { reasoning: opts.reasoning } : {}),
             userId: userId ?? undefined,
             ...(opts?.signal ? { signal: opts.signal } : {}),
           } as any) as Promise<{ content?: string; reasoning?: string; tool_calls?: Array<{ name: string; args: Record<string, unknown>; call_id: string }> }>).then(raw => {

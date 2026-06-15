@@ -27,12 +27,14 @@ A `Connection` mirrors the host profile in **snake_case**:
   is_default,           // boolean
   has_api_key,          // boolean — whether a key is stored
   metadata,             // provider-specific bag
-  reasoning_bindings,   // parsed reasoning bindings, or null
+  reasoning_bindings,   // ConnectionReasoningBindings | null — { settings, promptBias? }
   created_at, updated_at,
 }
 ```
 
 The one field you might reach for and **won't find is the API key**. A connection carries `has_api_key: boolean` so you can tell whether a key is configured — never the key itself. This is deliberate and matches every credential-bearing surface in LumiScript.
+
+`reasoning_bindings` is the connection's saved reasoning configuration — a `settings` snapshot (effort, thinking display, plus delimited-parsing rules) and an optional `promptBias` "Start Reply With" prefill, or `null` when the connection has none bound. It's read-only here; to change reasoning for a *single* generation without touching the profile, pass the `reasoning` option to `api.llm` instead (see the **Reasoning** section of [the LLM guide](llm.md)).
 
 ## Why read-only
 

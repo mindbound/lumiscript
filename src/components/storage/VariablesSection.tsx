@@ -12,6 +12,7 @@
 import { useState, type FC } from 'react';
 import { ChevronDown, ChevronUp, Database, RefreshCw } from 'lucide-react';
 import type { FrontendToBackend, VariablesSnapshot } from '../../types/messages.js';
+import { formatValue } from './utils.js';
 
 const SCOPE_LABELS: Array<{ key: keyof VariablesSnapshot; label: string; hint?: string }> = [
   { key: 'local',     label: 'local',     hint: 'Per-chat ({{getvar}})' },
@@ -19,16 +20,6 @@ const SCOPE_LABELS: Array<{ key: keyof VariablesSnapshot; label: string; hint?: 
   { key: 'chat',      label: 'chat',      hint: 'Chat metadata ({{@key}})' },
   { key: 'character', label: 'character', hint: 'Per-character card' },
 ];
-
-function formatValue(v: unknown): string {
-  if (v === undefined) return 'undefined';
-  if (v === null) return 'null';
-  if (typeof v === 'string') return v.length > 80 ? v.slice(0, 77) + '…' : v;
-  try {
-    const s = JSON.stringify(v);
-    return s.length > 80 ? s.slice(0, 77) + '…' : s;
-  } catch { return String(v); }
-}
 
 export interface VariablesSectionProps {
   variables: VariablesSnapshot | null;

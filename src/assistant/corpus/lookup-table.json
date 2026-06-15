@@ -6625,6 +6625,62 @@
       "api.chat.getMessages"
     ]
   },
+  "Message": {
+    "kind": "type",
+    "type": "Message",
+    "note": "The RAW host message record delivered as `data.message` by chat events (MESSAGE_SENT, MESSAGE_EDITED, MESSAGE_SWIPED, SWIPE_EDITED). Snake_case — distinct from the camelCase `ChatMessage` DTO returned by api.chat.getMessages(). Most importantly it uses `is_user` (boolean), NOT `role`.",
+    "fields": [
+      {
+        "field": "id",
+        "type": "string",
+        "optional": false,
+        "desc": "Message identifier."
+      },
+      {
+        "field": "content",
+        "type": "string",
+        "optional": false,
+        "desc": "Plain-text message content."
+      },
+      {
+        "field": "is_user",
+        "type": "boolean",
+        "optional": false,
+        "desc": "True for a user message, false for an assistant message. There is NO `role` field — use this."
+      },
+      {
+        "field": "name",
+        "type": "string",
+        "optional": false,
+        "desc": "Sender display name."
+      },
+      {
+        "field": "swipe_id",
+        "type": "number",
+        "optional": false,
+        "desc": "Index of the active swipe variant."
+      },
+      {
+        "field": "swipes",
+        "type": "string[]",
+        "optional": false,
+        "desc": "All swipe variants."
+      },
+      {
+        "field": "swipe_dates",
+        "type": "number[]",
+        "optional": false,
+        "desc": "Per-swipe creation timestamps (unix epoch seconds), aligned with swipes."
+      },
+      {
+        "field": "extra",
+        "type": "Record<string, unknown>",
+        "optional": false,
+        "desc": "Host-maintained bag (reasoning, attachments, hidden flag, etc.). Treat as opaque."
+      }
+    ],
+    "usedBy": []
+  },
   "GetMessagesOptions": {
     "kind": "type",
     "type": "GetMessagesOptions",
@@ -9347,6 +9403,12 @@
         "type": "AbortSignal",
         "optional": true,
         "desc": "Cancel an in-flight generation. On abort the promise rejects with an AbortError. The worker auto-aborts on extension teardown — use this for script-level cancellation (timeouts, user cancel, races)."
+      },
+      {
+        "field": "reasoning?",
+        "type": "GenerationReasoningOverride",
+        "optional": true,
+        "desc": "Per-request reasoning/thinking control (host 0.5.x+). source: 'inherit' (default — use the connection's bindings) | 'off' (force no reasoning) | 'custom' (use the effort/thinkingDisplay fields). Rides beside parameters on the request, not inside the sampler bag."
       }
     ],
     "usedBy": [
@@ -9417,9 +9479,9 @@
       },
       {
         "field": "reasoning_bindings",
-        "type": "Record<string, unknown> | null",
+        "type": "ConnectionReasoningBindings | null",
         "optional": false,
-        "desc": "Parsed reasoning bindings, or null when the connection has none."
+        "desc": "Typed reasoning bindings (a settings snapshot + optional promptBias), or null when the connection has none."
       },
       {
         "field": "created_at",
@@ -9440,6 +9502,58 @@
       "api.connections.getDefault",
       "api.connections.findByName"
     ]
+  },
+  "GenerationReasoningOverride": {
+    "kind": "type",
+    "type": "GenerationReasoningOverride",
+    "note": "Per-request reasoning control, passed as LLMOptions.reasoning (host 0.5.x+). Resolved by the 'source' discriminator; rides beside parameters on the request, not inside the sampler bag. Mirrors the host GenerationReasoningOverrideDTO.",
+    "fields": [
+      {
+        "field": "source?",
+        "type": "'inherit' | 'off' | 'custom'",
+        "optional": true,
+        "desc": "How the backend resolves reasoning. 'inherit' (default; same as omitting reasoning): use the connection's reasoning_bindings, else the user's global setting. 'off': force the provider's no-reasoning switch, even if parameters carry a thinking block. 'custom': use the fields below for this call only."
+      },
+      {
+        "field": "apiReasoning?",
+        "type": "boolean",
+        "optional": true,
+        "desc": "Master switch — whether the provider emits thinking. Meaningful with source: 'custom' (default true)."
+      },
+      {
+        "field": "effort?",
+        "type": "ReasoningEffort",
+        "optional": true,
+        "desc": "Effort tier: 'auto' | 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'max' | 'xhigh'. source: 'custom' only (default 'auto')."
+      },
+      {
+        "field": "thinkingDisplay?",
+        "type": "ThinkingDisplay",
+        "optional": true,
+        "desc": "How thinking is surfaced: 'auto' | 'summarized' | 'omitted'. Anthropic-only. source: 'custom' only (default 'auto')."
+      }
+    ],
+    "usedBy": []
+  },
+  "ConnectionReasoningBindings": {
+    "kind": "type",
+    "type": "ConnectionReasoningBindings",
+    "note": "Typed value of Connection.reasoning_bindings (api.connections.*). Read-only snapshot of the reasoning settings bound to a profile; these override the user's global reasoning settings on this connection. Mirrors the host ConnectionReasoningBindingsDTO.",
+    "fields": [
+      {
+        "field": "settings",
+        "type": "ReasoningSettings",
+        "optional": false,
+        "desc": "Reasoning settings snapshot: { apiReasoning, reasoningEffort, thinkingDisplay, prefix, suffix, autoParse, keepInHistory }. Only apiReasoning/reasoningEffort/thinkingDisplay affect the provider request; prefix/suffix/autoParse/keepInHistory drive the delimited-reasoning parser."
+      },
+      {
+        "field": "promptBias?",
+        "type": "string",
+        "optional": true,
+        "desc": "Optional \"Start Reply With\" assistant prefill captured with the snapshot; overrides the user's global promptBias for this connection."
+      }
+    ],
+    "usedBy": []
   },
   "WebSearchOptions": {
     "kind": "type",
@@ -12259,7 +12373,7 @@
   "ToolInvocationArgs": {
     "kind": "type",
     "type": "ToolInvocationArgs",
-    "note": "Parameter passed to tool handler callbacks registered via api.tools.register(). Contains well-known Lumiverse fields plus tool-specific parameters.",
+    "note": "Parameter passed to tool handler callbacks registered via api.tools.register(). Always carries the well-known Lumiverse fields (context / __userId / __deadlineMs) on a host invocation; your registration-schema parameters are filled only on the DIRECT paths (api.tools.invoke + api.llm.generateWithTools), NOT on the Council path — see the [key] field.",
     "fields": [
       {
         "field": "context?",
@@ -12283,7 +12397,7 @@
         "field": "[key]",
         "type": "unknown",
         "optional": true,
-        "desc": "Tool-specific parameters from the registration schema are available as additional fields."
+        "desc": "Tool-specific parameters from your registration schema — available as additional fields ONLY on the direct paths (api.tools.invoke + api.llm.generateWithTools), where the caller/model supplies them. On the Council path they are absent: the host invokes extension tools with just context + __deadlineMs (no sidecar LLM fills your schema), so read args.context and decide the values yourself."
       }
     ],
     "usedBy": []
@@ -12291,7 +12405,7 @@
   "ToolInvocationContext": {
     "kind": "type",
     "type": "ToolInvocationContext",
-    "note": "Optional third parameter passed to tool handlers. Populated when invoked via Lumiverse TOOL_INVOCATION; undefined when invoked via api.tools.invoke() (script-to-script). The Council-path fields (requestId, councilMember, contextMessages) are populated together; the script-to-script path leaves them all undefined.",
+    "note": "Optional third parameter passed to tool handlers. Populated when the host invokes the tool (Council / direct-LLM function-call); undefined when invoked via api.tools.invoke() (script-to-script). The Council-path fields (requestId, councilMember, contextMessages) are populated together; the script-to-script path leaves them all undefined.",
     "fields": [
       {
         "field": "requestId?",

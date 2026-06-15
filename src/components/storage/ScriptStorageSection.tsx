@@ -27,6 +27,14 @@ import type { FrontendToBackend } from '../../types/messages.js';
 import type { Script } from '../../types/script.js';
 import type { ScriptStorageSummary } from '../../engine/api/script-storage.js';
 import { formatBytes, formatTimeAgo } from './utils.js';
+import {
+  SIZE_CAP_BYTES,
+  sizeBudget,
+  filterAndSortEntries,
+  nextSort,
+  type SortKey,
+  type SortDir,
+} from './script-storage-section-logic.js';
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
@@ -42,60 +50,8 @@ export interface ScriptStorageSectionProps {
   onClear: (summary: ScriptStorageSummary) => void;
 }
 
-/** Sortable column keys — must match the header `<span>` in render order. */
-type SortKey = 'script' | 'keys' | 'size' | 'modified';
-type SortDir = 'asc' | 'desc';
-
-/**
- * Storage budget thresholds anchored to the 1 MB per-script cap defined
- * in `src/engine/api/script-storage.ts:SCRIPT_STORAGE_CAP_BYTES`. Pattern
- * matches the CollectionsSection sizeBudget: warn approaching the cap,
- * danger imminent at the cap.
- *
- *   - < 800 KB  — default (no concern)
- *   - 800–950 KB — warn tint (orange)
- *   - ≥ 950 KB  — danger tint (red) — cap is imminent
- */
-const SIZE_WARN_THRESHOLD_BYTES   = 800 * 1024;
-const SIZE_DANGER_THRESHOLD_BYTES = 950 * 1024;
-const SIZE_CAP_BYTES              = 1 * 1024 * 1024;
-
-function sizeBudget(bytes: number): { tier: 'normal' | 'warn' | 'danger'; color: string } {
-  if (bytes >= SIZE_DANGER_THRESHOLD_BYTES) {
-    return { tier: 'danger', color: 'var(--lumiverse-danger, rgb(246, 130, 130))' };
-  }
-  if (bytes >= SIZE_WARN_THRESHOLD_BYTES) {
-    return { tier: 'warn',   color: 'rgb(246, 175, 125)' };
-  }
-  return   { tier: 'normal', color: 'inherit' };
-}
-
-/**
- * Compare two summaries by the given sort key. `localeCompare` for
- * strings, plain subtraction for numbers. Owner sort falls back to
- * `scriptId` when the script isn't currently loaded so unknown-owner
- * rows still sort deterministically.
- */
-function compareEntries(
-  a: ScriptStorageSummary,
-  b: ScriptStorageSummary,
-  key: SortKey,
-  scriptNameById: Map<string, string>,
-): number {
-  switch (key) {
-    case 'script': {
-      const an = scriptNameById.get(a.scriptId) ?? a.scriptId;
-      const bn = scriptNameById.get(b.scriptId) ?? b.scriptId;
-      return an.localeCompare(bn, undefined, { sensitivity: 'base' });
-    }
-    case 'keys':
-      return a.keyCount - b.keyCount;
-    case 'size':
-      return a.sizeBytes - b.sizeBytes;
-    case 'modified':
-      return a.modifiedAtMs - b.modifiedAtMs;
-  }
-}
+// Pure logic — budget tiers, sort comparator, filter/sort pipeline, sort-cycle
+// reducer — lives in `./script-storage-section-logic.ts` (unit-tested).
 
 export const ScriptStorageSection: FC<ScriptStorageSectionProps> = ({
   entries,
@@ -116,38 +72,19 @@ export const ScriptStorageSection: FC<ScriptStorageSectionProps> = ({
     return m;
   }, [scripts]);
 
-  const visibleEntries = useMemo(() => {
-    if (!entries) return null;
-    let result: ScriptStorageSummary[] = entries;
-    const q = searchQuery.trim().toLowerCase();
-    if (q) {
-      result = result.filter(e => {
-        const name = scriptNameById.get(e.scriptId) ?? e.scriptId;
-        return name.toLowerCase().includes(q);
-      });
-    }
-    if (sortBy) {
-      const dir = sortDir === 'asc' ? 1 : -1;
-      result = result.slice().sort((a, b) => compareEntries(a, b, sortBy, scriptNameById) * dir);
-    }
-    return result;
-  }, [entries, searchQuery, sortBy, sortDir, scriptNameById]);
+  const visibleEntries = useMemo(
+    () => filterAndSortEntries(entries, { searchQuery, sortBy, sortDir, scriptNameById }),
+    [entries, searchQuery, sortBy, sortDir, scriptNameById],
+  );
 
   // ── Handlers ──────────────────────────────────────────────────────
   const handleRefresh = () => sendToBackend({ type: 'list_script_storage' });
 
   /** Three-state click cycle on a column header: null → asc → desc → null. */
   const handleSort = (key: SortKey) => {
-    if (sortBy !== key) {
-      setSortBy(key);
-      setSortDir('asc');
-      return;
-    }
-    if (sortDir === 'asc') {
-      setSortDir('desc');
-      return;
-    }
-    setSortBy(null);
+    const ns = nextSort(sortBy, sortDir, key);
+    setSortBy(ns.sortBy);
+    setSortDir(ns.sortDir);
   };
 
   const totalCount   = entries?.length ?? 0;

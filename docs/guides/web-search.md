@@ -85,9 +85,10 @@ Web search pairs naturally with `api.tools.register` — give the Council a "loo
 
 ```js
 api.tools.register(
-  { name: 'web_lookup', description: 'Search the web for current information', council_eligible: true },
-  async ({ query }) => {
-    const { context } = await api.webSearch.query({ query, count: 4 });
+  'web_lookup',
+  { display_name: 'Web lookup', description: 'Search the web for current information', council_eligible: true },
+  async (args) => {
+    const { context } = await api.webSearch.query({ query: args.query, count: 4 });
     return context ?? 'No results.';
   },
 );

@@ -75,7 +75,7 @@ await api.worldInfo.entries.create(book.id, {
   content: 'The Drunken Owl is a dimly-lit roadside tavern, popular with mercenaries and traveling bards.',
   comment: 'Tavern setting',
   // Activate whenever any of the keys appears in recent messages.
-  // (Default selective: true, AND-mode — see "Activation rules" below.)
+  // (Default `selective: false` — any single primary `key` hit activates; see "Entries" below.)
 });
 
 // Later — see which entries actually fired in this chat:
@@ -125,7 +125,7 @@ if (data.__event === 'ls:teardown') {
   return;
 }
 
-if (data.__event === 'MESSAGE_SENT' && data.message.role === 'user') {
+if (data.__event === 'MESSAGE_SENT' && data.message.is_user) {
   // Detected a new character mention; promote it to a lore entry.
   const name = extractCharacterName(data.message.content);
   if (!name) return;

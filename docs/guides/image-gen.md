@@ -27,7 +27,7 @@ The smallest useful generation script: prompt the LLM for a scene description ti
 // @triggers MESSAGE_SENT
 // @description Visualize the user's last message — generate an image and inject it as an assistant note.
 
-if (data.message.role !== 'user') return;
+if (!data.message.is_user) return;
 
 // Use the user's default image-gen connection — no connectionId needed.
 const result = await api.imageGen.generate({
@@ -204,10 +204,13 @@ const info = await api.images.get(result.imageId);
 const palette = await api.theme.extractColors(result.imageId);
 await api.theme.applyPalette({ accent: palette.dominantHsl });
 
-// 3. Set a character's avatar to the generated image.
-const chat = await api.chats.getActive();
-if (chat?.characterId) {
-  await spindle.characters.setAvatar({ id: chat.characterId, imageId: result.imageId });
+// 3. Set a character's avatar to the generated image. setAvatar takes raw
+//    bytes, not an imageId — decode the data URL the generation already returned
+//    (dataUrlToBytes yields the { data, mimeType } shape setAvatar wants).
+const chat   = await api.chats.getActive();
+const avatar = api.utils.image.dataUrlToBytes(result.imageDataUrl);
+if (chat?.characterId && avatar) {
+  await api.characters.setAvatar(chat.characterId, avatar);
 }
 
 // 4. Send it via push notification (uses the auth-free URL, not the imageId).

@@ -15,7 +15,7 @@ The decision tree below maps "what I'm trying to store" to "which tier". The per
 
 ## Decision tree
 
-![Storage-tier decision tree: starts at "survive past current fire?", branches through "survive backend restart?" and "what shape?", terminates at one of seven storage options (local let/const, globalThis, api.scriptStorage, api.variables, api.db, api.enclave, api.files)](../diagrams/storage-model.svg)
+![Storage-tier decision tree: starts at "survive past current fire?", branches through "survive backend restart?" and "what shape?", terminates at one of the storage options (local let/const, globalThis, api.scriptStorage, api.variables, api.db, api.enclave, api.files)](../diagrams/storage-model.svg)
 
 Most non-trivial scripts use two or three of these together. A typical pattern: globalThis for a per-process cache, `api.variables.character` for per-character persistent state, `api.db.*` for an append-only event log.
 
@@ -96,9 +96,9 @@ const recent = await events.find({ ts: { $gte: Date.now() - 60 * 60 * 1000 } });
 **OAuth refresh token** — encrypted-at-rest because it's a secret:
 
 ```js
-await api.enclave.put('spotify:refresh_token', refreshToken);
+await api.enclave.put('spotify.refresh_token', refreshToken);
 // ...later, in another fire:
-const stored = await api.enclave.get('spotify:refresh_token');
+const stored = await api.enclave.get('spotify.refresh_token');
 ```
 
 **Downloaded binary processed across two fires** — write to temp, read from temp, let the host auto-expire it:

@@ -31,9 +31,9 @@ Handler-registration APIs grouped by lifetime semantics. Each group's lifetime a
 
 - **`api.macros.register(name, def, fn)`** (pull-mode) — many handlers per script, keyed by macro name. The handler fires when the host resolves a `{{name}}` macro. Re-registering with the same name replaces the prior handler for that name.
 - **`api.tools.register(name, def, fn)`** — many handlers per script, keyed by tool name. Fires when an LLM invokes the tool (either Council or inline function-calling).
-- **`api.chat.registerContentProcessor(opts, fn)`** — many handlers per script. Fires per processed message during chat-message rendering.
-- **`api.worldInfo.registerInterceptor(opts, fn)`** — many handlers per script. Fires during world-info activation.
-- **`api.macros.registerInterceptor(opts, fn)`** — many handlers per script. Fires during macro resolution.
+- **`api.chat.registerContentProcessor(fn, opts?)`** — many handlers per script. Fires per processed message during chat-message rendering.
+- **`api.worldInfo.registerInterceptor(fn, opts?)`** — many handlers per script. Fires during world-info activation.
+- **`api.macros.registerInterceptor(fn, opts?)`** — many handlers per script. Fires during macro resolution.
 
 ### Many handlers, persist until script unregister OR explicit cleanup
 
@@ -52,7 +52,7 @@ Throughout this doc, "until script unregister" means **any of**:
 
 The first two paths fire `ls:teardown` before wiping. The Reload-button and autosave-reload paths do NOT fire `ls:teardown` — they wipe state silently before re-running the body. From the handler's perspective the result is the same: the closure is gone, and any state needed for the next body run must be re-established.
 
-The wipe covers all 13 pinning registries (tools, macros, injections, drawerTabs, inputBarActions, worldInfoInterceptors, messageProcessors, macroInterceptors, rpcEndpoints, floatWidgets, advancedModals, handlerClosures, userBroadcastSubs) AND broadcast subscriptions + command handlers. Preserved across the Reload wipe (NOT across disable/delete): `api.scriptStorage`, `api.theme.*` contributions, and the worker's `script.require()` cache. The full list lives in `src/backend.ts:wipeScriptStateForReload`.
+The wipe covers all of LumiScript's pinning registries (tools, macros, injections, drawerTabs, inputBarActions, worldInfoInterceptors, messageProcessors, macroInterceptors, rpcEndpoints, floatWidgets, advancedModals, handlerClosures, userBroadcastSubs) AND broadcast subscriptions + command handlers. Preserved across the Reload wipe (NOT across disable/delete): `api.scriptStorage`, `api.theme.*` contributions, and the worker's `script.require()` cache. The full list lives in `src/backend.ts:wipeScriptStateForReload`.
 
 Practical implication: scripts that combine interactive UI surfaces with background state MUST be re-fire-safe. The bottom-of-body re-registration idiom (next section) is the canonical pattern.
 
@@ -161,7 +161,7 @@ Same try/catch shape as in [Permissions](permissions.md), but the stakes are hig
 ```js
 api.broadcast.on('something:happened', async (payload) => {
   try {
-    await api.images.upload(payload.bytes, { mimeType: 'image/png' });
+    await api.images.upload({ data: payload.bytes, mimeType: 'image/png' });
   } catch (err) {
     if (err.message.startsWith('PERMISSION_DENIED:images')) {
       console.warn('[my-script] images not granted; ignoring upload');
@@ -184,6 +184,6 @@ api.broadcast.on('something:happened', async (payload) => {
 
 You now have the full conceptual surface for writing non-trivial scripts: the [Trigger model](trigger-model.md), [Permissions](permissions.md), the [Storage model](storage-model.md), and handler lifetime. From here:
 
-1. **`guides/dom-injection.md`** *(coming next)* — building UI inside the host app shell. The single highest-leverage capability if you want LumiScript to feel like a first-class part of Lumiverse.
+1. **[DOM injection](../guides/dom-injection.md)** — building UI inside the host app shell. The single highest-leverage capability if you want LumiScript to feel like a first-class part of Lumiverse.
 2. **The in-app Reference's API Functions section** — for the method signatures of every handler-registration surface in this doc.
-3. **The cookbook** *(coming, by recipe)* — common script shapes worked through end-to-end.
+3. **[The cookbook](../cookbook/index.md)** — common script shapes worked through end-to-end.

@@ -11,8 +11,8 @@
  * `cortex.query` / `queryLinked` / `chatMemory.*` calls that carry a userId in
  * their options/payload, we OVERRIDE it with the active user.
  *
- * Phase 1 surface: `cortex` + `chatMemory` + `stats`. The entity/relation graph,
- * consolidations, salience, vaults, and links land in later phases.
+ * Full surface: `cortex` + `entities` + `relations` + `consolidations` + `salience`
+ * + `vaults` + `links` + `chatMemory` + `stats` — all `spindle.memories.*` sub-namespaces.
  */
 
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI;

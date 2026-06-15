@@ -149,6 +149,17 @@ function isDOMMessage(msg: unknown): msg is DOMMessage {
 const elementMap = new Map<string, Element>();
 
 /**
+ * Host DOM helper (`ctx.dom`), captured by `installDOMHandler` at setup so the
+ * delegation helpers below — which run inside long-lived event-listener
+ * closures outside the handler's scope — can resolve chat messages via the
+ * host's stable `getMessageId` / `findMessageElement` contract instead of
+ * reading the host-private `[data-message-id]` attribute directly. Stable for
+ * the FE lifetime (the same `ctx` is handed to the handler for the whole
+ * session); last-write-wins if `installDOMHandler` is ever re-run.
+ */
+let domHelper: SpindleFrontendContext['dom'] | undefined;
+
+/**
  * componentId → mounted host shared-component handle (v1.0.0-rc.9). The value
  * is the `SpindleMountedComponent` returned by `ctx.components.mountX`. Typed
  * minimally to the methods we drive over IPC (`update` always; `getValue` for
@@ -482,29 +493,26 @@ function buildDelegatedEventData(
   };
   if (event instanceof MouseEvent) modifiers.button = event.button;
 
-  // Optional message context — read from closest [data-message-id] ancestor.
-  // The host stamps both the outer VirtualRow AND inner .card with this
-  // attribute (per dom_inject_at_message comments above); `closest` returns
-  // the nearest one in tree order, which is the inner .card — fine for
-  // identifying the message id. Role comes from the [data-part] descendant
-  // ('user' / 'character' / 'streaming') under the row.
+  // Optional message context — resolved via the host's stable message API
+  // (dom.getMessageId / findMessageElement) rather than reading the
+  // host-private [data-message-id] attribute directly, so a host attribute
+  // rename can't break us. Role still comes from the [data-part] descendant
+  // ('user' / 'character' / 'streaming') under the message row.
   let message: DOMDelegatedEventData['message'] | undefined;
-  const msgRow = matched.closest('[data-message-id]');
-  if (msgRow) {
-    const id = msgRow.getAttribute('data-message-id') ?? '';
-    if (id) {
-      // 'character' / 'streaming' / falsy → 'assistant'; only 'user' is user.
-      const partEl = msgRow.querySelector('[data-part]') ?? msgRow;
-      const part   = partEl.getAttribute?.('data-part') ?? 'character';
-      const role: 'user' | 'assistant' = part === 'user' ? 'user' : 'assistant';
-      // swipeId — placeholder. Backend resolves the actual active swipe
-      // via `spindle.chat.getMessages(activeChatId)` in
-      // `resolveDelegateEventAndDispatch` (backend.ts) before invoking
-      // the wrapper. We can't resolve here on the FE without access to
-      // the chat store; backend has direct host-API access and a single
-      // resolution point keeps the per-event cost predictable.
-      message = { id, role, swipeId: 0 };
-    }
+  const msgId = domHelper?.getMessageId(matched);
+  if (msgId) {
+    // 'character' / 'streaming' / falsy → 'assistant'; only 'user' is user.
+    const msgRow = domHelper?.findMessageElement(msgId) ?? matched;
+    const partEl = msgRow.querySelector('[data-part]') ?? msgRow;
+    const part   = partEl.getAttribute?.('data-part') ?? 'character';
+    const role: 'user' | 'assistant' = part === 'user' ? 'user' : 'assistant';
+    // swipeId — placeholder. Backend resolves the actual active swipe
+    // via `spindle.chat.getMessages(activeChatId)` in
+    // `resolveDelegateEventAndDispatch` (backend.ts) before invoking
+    // the wrapper. We can't resolve here on the FE without access to
+    // the chat store; backend has direct host-API access and a single
+    // resolution point keeps the per-event cost predictable.
+    message = { id: msgId, role, swipeId: 0 };
   }
 
   const out: DOMDelegatedEventData = {
@@ -615,11 +623,13 @@ function installDelegationListenerIfNeeded(
     for (const reg of delegationsByDelegationId.values()) {
       if (reg.root !== root || reg.event !== event) continue;
 
-      // Chat-scope filter: target must be inside a tracked message.
+      // Chat-scope filter: target must be inside a tracked message. Resolve
+      // the message id via the host's stable contract, not the host-private
+      // [data-message-id] attribute.
       if (root === 'chat') {
-        const msgRow = target.closest('[data-message-id]');
-        if (!msgRow) continue;
-        if (reg.messageId && msgRow.getAttribute('data-message-id') !== reg.messageId) continue;
+        const msgId = domHelper?.getMessageId(target);
+        if (!msgId) continue;
+        if (reg.messageId && msgId !== reg.messageId) continue;
       }
 
       // Selector match. closest() walks from target upward, returning the
@@ -675,19 +685,24 @@ function scopeCSS(css: string, scriptId: string): string {
 // ─── Message-aware injection helpers ────────────────────────────────────────
 
 /**
- * Wait for an element matching `selector` to appear in the DOM.
- * Checks immediately; falls back to a MutationObserver that resolves when the
- * element appears or rejects after `timeoutMs`.
+ * Wait for an element to appear in the DOM, located by the `find` callback.
+ * Checks immediately; falls back to a MutationObserver that resolves when
+ * `find()` returns an element or rejects after `timeoutMs`. `label` is used
+ * only in the timeout error message.
+ *
+ * Takes a finder rather than a selector so callers can resolve via the host's
+ * stable DOM contract (e.g. `ctx.dom.findMessageElement`) instead of a
+ * host-private attribute selector.
  */
-function waitForElement(selector: string, timeoutMs = 5000): Promise<Element> {
-  const existing = document.querySelector(selector);
+function waitForElement(find: () => Element | null, label = 'element', timeoutMs = 5000): Promise<Element> {
+  const existing = find();
   if (existing) return Promise.resolve(existing);
 
   return new Promise((resolve, reject) => {
     let settled = false;
 
     const observer = new MutationObserver(() => {
-      const el = document.querySelector(selector);
+      const el = find();
       if (el && !settled) {
         settled = true;
         observer.disconnect();
@@ -701,7 +716,7 @@ function waitForElement(selector: string, timeoutMs = 5000): Promise<Element> {
       if (!settled) {
         settled = true;
         observer.disconnect();
-        reject(new Error(`waitForElement: timeout for "${selector}"`));
+        reject(new Error(`waitForElement: timeout for "${label}"`));
       }
     }, timeoutMs);
   });
@@ -757,6 +772,8 @@ export function installDOMHandler(
   onBackendMessage: (handler: (msg: unknown) => void) => () => void,
   sendToBackend: (msg: FrontendToBackend) => void,
 ): () => void {
+  // Capture the host DOM helper for the delegation helpers (see `domHelper`).
+  domHelper = ctx.dom;
 
   const unsubMessages = onBackendMessage((raw) => {
     if (!isDOMMessage(raw)) return;
@@ -925,20 +942,23 @@ export function installDOMHandler(
           }
         };
 
-        const selector = `[data-message-id="${messageId}"]`;
-        const messageEl = document.querySelector(selector);
+        // Resolve the target message bubble via the host's stable contract
+        // (findMessageElement) rather than a [data-message-id] selector.
+        const findMessageEl = () => ctx.dom.findMessageElement(messageId);
+        const messageEl = findMessageEl();
 
         if (messageEl) {
           doInject(messageEl);
           break;
         }
 
-        // Message element not in DOM yet — wait for it
+        // Message element not mounted yet — the chat list is virtualized, so
+        // poll until the bubble scrolls into the rendered window.
         let cancelled = false;
         const cancel = () => { cancelled = true; };
         trackPending(elementId, scriptId, cancel);
 
-        waitForElement(selector)
+        waitForElement(findMessageEl, `message ${messageId}`)
           .then((msgEl) => {
             pendingInjections.delete(elementId);
             if (cancelled) return;

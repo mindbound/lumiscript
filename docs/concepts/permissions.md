@@ -107,7 +107,7 @@ For long-lived handlers — broadcast subscribers, tool callbacks, registered ma
 ```js
 api.broadcast.on('something:happened', async (payload) => {
   try {
-    await api.images.upload(payload.bytes, { mimeType: 'image/png' });
+    await api.images.upload({ data: payload.bytes, mimeType: 'image/png' });
   } catch (err) {
     if (err.message.startsWith('PERMISSION_DENIED:images')) {
       console.warn('[my-script] images not granted; ignoring upload request');
@@ -132,7 +132,7 @@ The in-app Reference's **Permission Matrix** is the authoritative method-to-perm
 - **`world_books`** — CRUD on world books and entries via `api.worldInfo.*`.
 - **`regex_scripts`** — CRUD on regex find/replace scripts.
 - **`generation`** — call LLM providers via `api.llm.*`. Also required to register world-info interceptors.
-- **`interceptor`** — register prompt injections, content processors, world-info interceptors — anything that mutates host data mid-flight.
+- **`interceptor`** — register prompt injections via `api.chat.inject` that modify the assembled prompt mid-flight. (Content processors and world-info interceptors have their own gates — see `macro_interceptor` / `generation`.)
 - **`context_handler`** — host-side plumbing for the context-handler stage that `api.chat.inject(..., { mode: 'context' })` injections flow through. LumiScript declares this in `spindle.json` alongside `interceptor`, but it isn't checked at the LumiScript level — only `interceptor` is enforced in LumiScript's `api.chat.inject` code path. Listed here for completeness because users see both on the extension grant prompt.
 - **`macro_interceptor`** — register macro-resolution interceptors. Gated separately from `interceptor` because it's performance-sensitive.
 - **`cors_proxy`** — outbound HTTP via `api.utils.http.*`. Paired with `allowDangerous` (both required).
@@ -146,6 +146,8 @@ The in-app Reference's **Permission Matrix** is the authoritative method-to-perm
 - **`images`** — persist + retrieve images in Lumiverse's image store via `api.images.*`.
 - **`image_gen`** — generate images via `api.imageGen.*` against the user's configured connection profiles.
 - **`oauth`** — register an OAuth callback handler via `api.oauth.*`. The only inbound-HTTP hook Spindle exposes.
+- **`web_search`** — run web searches via `api.webSearch.*`.
+- **`memories`** — Memory Cortex + chat-memory access via `api.memories.*`.
 
 ## What's next
 

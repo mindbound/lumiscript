@@ -173,17 +173,21 @@ export function buildWorldInfoAPI(deps: APIBuildDeps): LumiScriptAPI['worldInfo'
     if (UUID_RE.test(ref)) return ref;
     if (nameCache.has(ref)) return nameCache.get(ref)!;
 
-    // Cold resolution: fetch book list and populate cache.
-    const { data } = await spindle.world_books.list({ userId: uid, limit: 200 });
-    for (const book of data) {
-      nameCache.set(book.name, book.id);
+    // Cold resolution: scan ALL pages, populating the cache, until the name
+    // matches or the list is exhausted. (A single fixed 200-item page silently
+    // failed to resolve names for users with more than 200 world books.)
+    const PAGE_SIZE = 200;
+    let offset = 0;
+    while (true) {
+      const { data, total } = await spindle.world_books.list({ userId: uid, limit: PAGE_SIZE, offset });
+      for (const book of data) nameCache.set(book.name, book.id);
+      const hit = nameCache.get(ref);
+      if (hit) return hit;
+      offset += PAGE_SIZE;
+      if (offset >= total || data.length === 0) break;
     }
 
-    const resolved = nameCache.get(ref);
-    if (!resolved) {
-      throw new Error(`api.worldInfo: world book "${ref}" not found`);
-    }
-    return resolved;
+    throw new Error(`api.worldInfo: world book "${ref}" not found`);
   }
 
   return {

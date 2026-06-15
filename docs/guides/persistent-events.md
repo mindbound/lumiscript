@@ -78,7 +78,7 @@ Track a few events from a chat-driven trigger, then query them back:
 // @triggers MESSAGE_SENT
 // @description Track every user message length for an analytics dashboard.
 
-if (data.message.role !== 'user') return;
+if (!data.message.is_user) return;
 
 await api.events.track('user-message', {
   length:    data.message.content.length,
@@ -201,7 +201,7 @@ if (data.__event === 'ls:startup') {
   console.log(`Resumed at count=${globalThis.sessionCount}`);
 }
 
-if (data.__event === 'MESSAGE_SENT' && data.message.role === 'user') {
+if (data.__event === 'MESSAGE_SENT' && data.message.is_user) {
   globalThis.sessionCount = (globalThis.sessionCount ?? 0) + 1;
   await api.events.track(KEY, { value: globalThis.sessionCount });
 }

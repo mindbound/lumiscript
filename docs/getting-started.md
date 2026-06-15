@@ -84,9 +84,9 @@ Save, then send a message. A small toast pops up in the corner of the app with t
 
 A handful of other `api.ui.*` primitives that need no permission:
 
-- `api.ui.prompt({title, fields})` — modal input form. Returns `{values, cancelled}`.
-- `api.ui.confirm({title, message})` — yes/no modal. Returns `{confirmed: boolean}`.
-- `api.ui.showModal(items, options?)` — multi-section modal for displaying content.
+- `api.ui.prompt(message, defaultValue?, options?)` — themed text input. Returns `Promise<string | null>` (the entered text, or `null` on cancel).
+- `api.ui.confirm(message, title?, options?)` — yes/no dialog. Returns `Promise<boolean>`.
+- `api.ui.showModal(items, options)` — multi-section modal (`options` is required and must carry a `title`); returns a `ModalHandle` (await `handle.result`).
 
 For DOM injection, theming, drawer tabs, float widgets, and other host-shell-modifying surfaces, your script needs the `app_manipulation` permission (covered in `concepts/permissions.md`).
 

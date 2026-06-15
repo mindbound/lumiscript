@@ -30,23 +30,7 @@ import { X, Save, Pencil, AlertTriangle } from 'lucide-react';
 import type { FrontendToBackend } from '../../types/messages.js';
 import type { DbRecord } from '../../types/script.js';
 import { highlightJson } from './utils.js';
-
-/**
- * Pretty-print only the user-data portion of a record — strip reserved
- * fields the backend re-injects on save. Identical strategy to the
- * InspectModal's `prettyPrint` helper; duplicated locally rather than
- * imported because it's a 5-line function and the modal is otherwise
- * self-contained.
- */
-function prettyPrintUserData(record: DbRecord): string {
-  const { id: _id, createdAt: _createdAt, updatedAt: _updatedAt, ...user } = record;
-  void _id; void _createdAt; void _updatedAt;
-  try {
-    return JSON.stringify(user, null, 2);
-  } catch {
-    return '{}';
-  }
-}
+import { prettyPrintUserData, parseRecordDraft } from './record-logic.js';
 
 export interface EditRecordModalProps {
   /** Path of the collection that owns the record. */
@@ -132,16 +116,9 @@ export const EditRecordModal: FC<EditRecordModalProps> = ({
   }, []);
 
   const handleSave = () => {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(draft);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setParseError(`JSON parse error: ${msg}`);
-      return;
-    }
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      setParseError('Record must be a JSON object — not an array, null, or primitive.');
+    const result = parseRecordDraft(draft);
+    if (!result.ok) {
+      setParseError(result.error);
       return;
     }
     setParseError(null);
@@ -149,7 +126,7 @@ export const EditRecordModal: FC<EditRecordModalProps> = ({
       type:     'update_record',
       path,
       recordId: String(record.id),
-      patch:    parsed as Record<string, unknown>,
+      patch:    result.patch,
     });
     onClose();
   };

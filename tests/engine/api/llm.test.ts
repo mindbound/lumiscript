@@ -43,6 +43,28 @@ describe('generate', () => {
     expect(call[0].connection_id).toBe('conn-1');
   });
 
+  test('forwards reasoning override beside parameters', async () => {
+    mockSpindle.generate.raw.mockReturnValueOnce(Promise.resolve({ content: 'ok' }));
+    mockSpindle.connections.list.mockReturnValueOnce(Promise.resolve([]));
+    const api = buildApi();
+    await api.generate([{ role: 'user', content: 'hi' }], {
+      reasoning: { source: 'custom', effort: 'high', thinkingDisplay: 'summarized' },
+    });
+    const call = mockSpindle.generate.raw.mock.calls[0] as any;
+    expect(call[0].reasoning).toEqual({ source: 'custom', effort: 'high', thinkingDisplay: 'summarized' });
+    // reasoning sits beside parameters, not inside the sampler bag
+    expect(call[0].parameters.reasoning).toBeUndefined();
+  });
+
+  test('omits reasoning entirely when no override is given', async () => {
+    mockSpindle.generate.raw.mockReturnValueOnce(Promise.resolve({ content: 'ok' }));
+    mockSpindle.connections.list.mockReturnValueOnce(Promise.resolve([]));
+    const api = buildApi();
+    await api.generate([{ role: 'user', content: 'hi' }]);
+    const call = mockSpindle.generate.raw.mock.calls[0] as any;
+    expect('reasoning' in call[0]).toBe(false);
+  });
+
   test('resolves connection by name (case-insensitive)', async () => {
     mockSpindle.connections.list.mockReturnValueOnce(
       Promise.resolve([

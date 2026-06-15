@@ -299,7 +299,7 @@ api.ui.dom.inject('body', `
 
 Why this works: CSS rules inside a `<style>` element are document-global regardless of where the tag sits in the DOM. The host's `@scope` wrap is only applied to `addStyle` payloads — inline `<style>` blocks reaching the DOM via `inject()` bypass it entirely. The wrapper (`<div data-ls-script="<id>">`) still carries cleanup attribution, so on script disable the wrapper goes away, the inline `<style>` goes with it, and host UI returns to baseline. Same lifecycle as `addStyle`; different reach.
 
-**Don't pair this pattern with `opts.id`-based dedup.** This combination has a non-obvious failure mode — see the caveat in [Idempotent re-injection](#idempotent-re-injection) below.
+**Don't pair this pattern with `opts.id`-based dedup.** This combination has a non-obvious failure mode — see the caveat in [Idempotent re-injection](#idempotent-re-injection) above.
 
 ## Drag
 

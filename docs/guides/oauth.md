@@ -28,7 +28,7 @@ The host's responsibilities are narrow: provide the inbound-HTTP hook, verify CS
 A GitHub OAuth flow, using `api.utils.http.post` for the token exchange and `api.enclave.put` for persistence:
 
 ```js
-// @triggers SCRIPT_ENABLED, CHAT_SWITCHED
+// @triggers ls:startup, CHAT_SWITCHED
 // @description GitHub OAuth example.
 
 const CLIENT_ID     = 'YOUR_CLIENT_ID';
@@ -63,12 +63,12 @@ api.oauth.onCallback(async (params) => {
   const { access_token, refresh_token, expires_in } = JSON.parse(resp.body);
 
   // 3. Persist encrypted.
-  await api.enclave.put('github:access_token',  access_token);
+  await api.enclave.put('github.access_token',  access_token);
   if (refresh_token) {
-    await api.enclave.put('github:refresh_token', refresh_token);
+    await api.enclave.put('github.refresh_token', refresh_token);
   }
   if (expires_in) {
-    await api.enclave.put('github:expires_at', String(Date.now() + expires_in * 1000));
+    await api.enclave.put('github.expires_at', String(Date.now() + expires_in * 1000));
   }
 
   // 4. Notify the rest of the extension.
@@ -219,23 +219,23 @@ Two things to watch:
 Tokens belong in the enclave. AES-256-GCM encrypted at rest; requires `allowDangerous`. Keys match `[A-Za-z0-9_\-.]{1,128}`; values must be printable ASCII ≤ 64 KB. Standard JWT-style tokens fit easily.
 
 ```js
-await api.enclave.put('github:access_token',  access_token);
-await api.enclave.put('github:refresh_token', refresh_token);
-await api.enclave.put('github:expires_at',    String(Date.now() + expires_in * 1000));
+await api.enclave.put('github.access_token',  access_token);
+await api.enclave.put('github.refresh_token', refresh_token);
+await api.enclave.put('github.expires_at',    String(Date.now() + expires_in * 1000));
 ```
 
 Reading the token back, with a refresh-on-expiry pattern:
 
 ```js
 async function getValidAccessToken() {
-  const token  = await api.enclave.get('github:access_token');
-  const expiry = parseInt(await api.enclave.get('github:expires_at') ?? '0', 10);
+  const token  = await api.enclave.get('github.access_token');
+  const expiry = parseInt(await api.enclave.get('github.expires_at') ?? '0', 10);
   if (token && Date.now() < expiry - 60_000) return token;          // 60s safety margin
   return await refreshAccessToken();
 }
 
 async function refreshAccessToken() {
-  const refresh_token = await api.enclave.get('github:refresh_token');
+  const refresh_token = await api.enclave.get('github.refresh_token');
   if (!refresh_token) throw new Error('no refresh token — user must re-authorize');
 
   const body = new URLSearchParams({
@@ -251,16 +251,16 @@ async function refreshAccessToken() {
   );
   const next = JSON.parse(resp.body);
 
-  await api.enclave.put('github:access_token', next.access_token);
-  await api.enclave.put('github:expires_at',   String(Date.now() + next.expires_in * 1000));
+  await api.enclave.put('github.access_token', next.access_token);
+  await api.enclave.put('github.expires_at',   String(Date.now() + next.expires_in * 1000));
   if (next.refresh_token) {                                          // some providers rotate refresh tokens
-    await api.enclave.put('github:refresh_token', next.refresh_token);
+    await api.enclave.put('github.refresh_token', next.refresh_token);
   }
   return next.access_token;
 }
 ```
 
-Some providers issue rotating refresh tokens (the refresh response includes a *new* `refresh_token` that supersedes the old one). The conditional `await api.enclave.put('github:refresh_token', ...)` handles both rotating and non-rotating providers.
+Some providers issue rotating refresh tokens (the refresh response includes a *new* `refresh_token` that supersedes the old one). The conditional `await api.enclave.put('github.refresh_token', ...)` handles both rotating and non-rotating providers.
 
 ## Public clients + PKCE
 

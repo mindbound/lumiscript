@@ -174,8 +174,8 @@ Function-reference handlers can be sync or async — the type is `(ctx) => strin
 
 ```js
 api.macros.register('lastReview', { description: '...' }, async (ctx) => {
-  const events = await api.events.query('character_review', { limit: 1 });
-  return events[0]?.summary ?? 'No reviews yet';
+  const events = await api.events.query({ eventName: 'character_review', limit: 1 });
+  return events[0]?.payload?.summary ?? 'No reviews yet';
 });
 ```
 
@@ -389,8 +389,9 @@ api.macros.register(
     if (ctx.commit === false) return '';
     const topic = (ctx.args[0] ?? '').trim();
     if (!topic) return '';
-    const docs = await api.databanks.documents.search('proj-databank-id', { query: topic, limit: 1 });
-    return docs[0]?.snippet ?? `(no fact for "${topic}")`;
+    const doc  = await api.databanks.documents.findByName('proj-databank-id', topic);
+    const fact = doc ? (await api.databanks.documents.getContent(doc.id))?.content : null;
+    return fact?.slice(0, 200) ?? `(no fact for "${topic}")`;
   },
 );
 ```
