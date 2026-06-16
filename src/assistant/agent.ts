@@ -271,6 +271,33 @@ function buildAttachedFilesBlock(files: AttachedFile[]): string {
 
 const MAX_ITERATIONS_DEFAULT = 8;
 
+/**
+ * Upper bound on prior-history messages folded into each generation request.
+ * The full thread is still PERSISTED and displayed — this only caps what's sent
+ * to the model, so a long conversation doesn't grow the prompt (and the per-turn
+ * serialization / token-estimation cost) without bound or eventually overflow
+ * the model's context window. Generous: ordinary sessions never reach it.
+ */
+const MAX_HISTORY_MESSAGES = 48;
+
+/**
+ * Trim `history` to at most `MAX_HISTORY_MESSAGES`, cutting ONLY at a real
+ * user-turn boundary (role 'user' with string content) so tool_use/tool_result
+ * pairs are never split — an orphaned tool_result is a hard provider error.
+ * Returns the original array when already within budget, or when no safe cut
+ * point exists within budget (better an over-long prompt than a malformed one).
+ */
+function windowHistory(history: AssistantHistoryMessage[]): AssistantHistoryMessage[] {
+  if (history.length <= MAX_HISTORY_MESSAGES) return history;
+  let cut = -1;
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history.length - i > MAX_HISTORY_MESSAGES) break;
+    const m = history[i];
+    if (m && m.role === 'user' && typeof m.content === 'string') cut = i;
+  }
+  return cut === -1 ? history : history.slice(cut);
+}
+
 interface DoneShape {
   content: string;
   reasoning?: string;
@@ -339,7 +366,7 @@ export async function runAssistantTurn(
 
   const messages: AssistantHistoryMessage[] = [
     { role: 'system', content: systemContent },
-    ...opts.history,
+    ...windowHistory(opts.history),
     { role: 'user', content: opts.userInput },
   ];
 

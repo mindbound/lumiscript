@@ -208,6 +208,13 @@
   padding: 8px 12px;
   border-radius: var(--lumiverse-radius-sm, 6px);
   max-width: 80%;
+  /* Skip layout/paint for bubbles scrolled out of view in long threads. The
+     browser caches each bubble's real height after its first render (the
+     `auto` keyword) and uses 160px only as the pre-render estimate, so per-frame
+     layout/paint cost stays bounded to roughly the visible window instead of
+     the whole transcript. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 160px;
 }
 .ls-asst-bubble-user {
   align-self: flex-end;
@@ -255,6 +262,90 @@
   background: var(--lumiverse-fill-3, rgba(255, 255, 255, 0.12));
 }
 
+/* Hover-revealed "edit & resend" pencil in the user bubble's role row. */
+.ls-asst-bubble-edit {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 4px;
+  background: transparent;
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.55));
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms, color 120ms, background 120ms;
+}
+.ls-asst-bubble:hover .ls-asst-bubble-edit,
+.ls-asst-bubble-edit:focus-visible {
+  opacity: 1;
+}
+.ls-asst-bubble-edit:hover {
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.92));
+  background: var(--lumiverse-fill-3, rgba(255, 255, 255, 0.12));
+}
+
+/* Inline editor shown in place of the last user bubble while editing it. */
+.ls-asst-edit-box {
+  align-self: flex-end;
+  width: 100%;
+  max-width: 80%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ls-asst-edit-input {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  padding: 8px 12px;
+  border-radius: var(--lumiverse-radius-sm, 6px);
+  background: rgba(147, 112, 219, 0.16);
+  border: 1px solid rgba(147, 112, 219, 0.45);
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.92));
+  font: inherit;
+  line-height: 1.45;
+  outline: none;
+}
+.ls-asst-edit-input:focus {
+  border-color: rgba(147, 112, 219, 0.7);
+}
+.ls-asst-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.ls-asst-edit-cancel,
+.ls-asst-edit-save {
+  padding: 4px 10px;
+  border-radius: 5px;
+  font-size: 12px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background 120ms, color 120ms, border-color 120ms, opacity 120ms;
+}
+.ls-asst-edit-cancel {
+  background: transparent;
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.55));
+  border-color: var(--lumiverse-border, rgba(255, 255, 255, 0.14));
+}
+.ls-asst-edit-cancel:hover {
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.92));
+  background: var(--lumiverse-fill-3, rgba(255, 255, 255, 0.10));
+}
+.ls-asst-edit-save {
+  background: rgba(147, 112, 219, 0.9);
+  color: #fff;
+}
+.ls-asst-edit-save:hover:not(:disabled) {
+  background: rgb(147, 112, 219);
+}
+.ls-asst-edit-save:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* User-stopped bubble. */
 .ls-asst-bubble-aborted .ls-asst-bubble-content {
   opacity: 0.78;
@@ -267,6 +358,17 @@
 .ls-asst-bubble-content {
   white-space: pre-wrap;
   word-break: break-word;
+}
+/* Raw-text placeholder for an off-screen bubble whose markdown render is
+   deferred until it scrolls near the viewport (load perf — see MessageBubble).
+   Shows the source text so the height + content are roughly right before the
+   upgrade to the rendered markdown. */
+.ls-asst-bubble-deferred {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 13px;
+  line-height: 1.5;
+  opacity: 0.8;
 }
 
 /* ── Reasoning disclosure ──────────────────────────────────────────────── */

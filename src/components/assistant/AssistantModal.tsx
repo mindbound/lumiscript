@@ -23,7 +23,7 @@
  * portal-modal CSS-token gotcha.
  */
 
-import { FC, useState, useEffect, useRef, useMemo, KeyboardEvent, ChangeEvent } from 'react';
+import { FC, useState, useEffect, useRef, useMemo, useCallback, memo, KeyboardEvent, ChangeEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { Send, X, Loader2, Coffee, Square, Brain, ChevronRight, MessageSquarePlus, Pencil, Trash2, Check, Download, RotateCcw, Code2, BookMarked, RefreshCw, AlertTriangle, NotebookPen, Paperclip, FileText } from 'lucide-react';
 import type { BackendToFrontend, FrontendToBackend } from '../../types/messages.js';
@@ -46,6 +46,13 @@ import { userFileDisplayName } from '../../assistant/user-files.js';
  * THROTTLE_MS, capping the parser cost to ~20 invocations/second.
  */
 const STREAM_RENDER_THROTTLE_MS = 50;
+
+/**
+ * Distance (px) from the bottom of the transcript within which the view is
+ * still treated as "pinned" — new content auto-scrolls. Past it (the user
+ * scrolled up to read history) their scroll position is left alone.
+ */
+const SCROLL_PIN_THRESHOLD_PX = 64;
 
 /**
  * Display name shown on assistant bubbles' role header. Hard-coded to
@@ -110,6 +117,14 @@ export const AssistantModal: FC<AssistantModalProps> = ({
   const reasoningRef = useRef('');
   const [isGenerating, setIsGenerating] = useState(false);
   const [input, setInput] = useState('');
+  // Inline edit of the last user message (null = not editing). When set, the
+  // last user bubble renders as an editable textarea; saving resends the edited
+  // content as a fresh turn (see handleEditResend).
+  const [editDraft, setEditDraft] = useState<string | null>(null);
+  // Bumped each time a thread's messages are (re)loaded. Drives the
+  // jump-to-bottom-on-load effect — keyed on this rather than messages.length so
+  // switching to an equal-length thread still scrolls to the tail.
+  const [loadNonce, setLoadNonce] = useState(0);
   // @-mention / attached-script context. `attachedScriptIds` are the chips above
   // the composer — CONVERSATION-SCOPED: they persist with the thread (restored on
   // reload/switch from assistant_thread_loaded, synced to the backend on
@@ -207,13 +222,24 @@ export const AssistantModal: FC<AssistantModalProps> = ({
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  // Whether the transcript is scrolled near the bottom (updated on real user
+  // scroll, not during streaming — see handleTranscriptScroll). Gates
+  // auto-scroll so a stream doesn't yank the user back down while they read.
+  const isPinnedToBottomRef = useRef(true);
 
-  // Schedule throttled flush of the streaming ref into React state.
+  // Schedule a throttled flush of the streaming refs into React state. A single
+  // timer drives BOTH the content and the reasoning bubble: tokens accumulate
+  // into refs at full IPC speed, but the React state that re-runs the markdown
+  // + Prism render only updates every STREAM_RENDER_THROTTLE_MS. Flushing
+  // reasoning here (rather than calling setStreamingReasoning per token) caps
+  // reasoning-driven re-renders to the same ~20Hz — thinking models otherwise
+  // emit a reasoning token stream that forced a full-modal re-render per token.
   const scheduleStreamFlush = () => {
     if (streamThrottleRef.current !== null) return;
     streamThrottleRef.current = setTimeout(() => {
       streamThrottleRef.current = null;
       setStreaming(streamingRef.current);
+      setStreamingReasoning(reasoningRef.current);
     }, STREAM_RENDER_THROTTLE_MS);
   };
 
@@ -235,6 +261,20 @@ export const AssistantModal: FC<AssistantModalProps> = ({
       }
     };
   }, []);
+
+  // Abort an in-flight turn if the modal closes mid-stream. Otherwise the
+  // backend keeps generating (and streaming) to an unmounted frontend — wasted
+  // model spend + WebSocket traffic with nothing rendering it. A ref mirrors
+  // isGenerating so the unmount cleanup reads the live value, not a stale one.
+  const isGeneratingRef = useRef(false);
+  isGeneratingRef.current = isGenerating;
+  useEffect(() => {
+    return () => {
+      if (isGeneratingRef.current) {
+        sendToBackend({ type: 'assistant_abort' });
+      }
+    };
+  }, [sendToBackend]);
 
   // Subscribe to backend messages for the lifetime of the modal.
   useEffect(() => {
@@ -266,7 +306,7 @@ export const AssistantModal: FC<AssistantModalProps> = ({
           break;
         case 'assistant_reasoning':
           reasoningRef.current += msg.token;
-          setStreamingReasoning(reasoningRef.current);
+          scheduleStreamFlush();
           break;
         case 'assistant_tool_call':
           setMessages((prev) => [
@@ -352,6 +392,7 @@ export const AssistantModal: FC<AssistantModalProps> = ({
         case 'assistant_thread_loaded':
           setActiveThreadId(msg.threadId);
           setMessages(historyToDisplay(msg.messages, msg.appliedEvents));
+          setLoadNonce((n) => n + 1);
           clearStreamingState();
           setStreamingReasoning('');
           reasoningRef.current = '';
@@ -448,12 +489,55 @@ export const AssistantModal: FC<AssistantModalProps> = ({
     sendToBackend({ type: 'request_assistant_threads' });
   }, [sendToBackend]);
 
-  // Auto-scroll to the latest content.
-  useEffect(() => {
+  // Recompute the "pinned to bottom" flag on real user scroll. Cheap — fires
+  // only on actual scroll events, never on the ~20Hz streaming flush.
+  const handleTranscriptScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
-    el.scrollTop = el.scrollHeight;
+    isPinnedToBottomRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_PIN_THRESHOLD_PX;
+  };
+
+  // Auto-scroll to the latest content — but only while pinned near the bottom,
+  // and deferred to an animation frame so the scrollHeight read happens at
+  // paint time instead of forcing a synchronous reflow on every streaming flush.
+  useEffect(() => {
+    if (!isPinnedToBottomRef.current) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    const raf = requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+    });
+    return () => cancelAnimationFrame(raf);
   }, [messages.length, streaming]);
+
+  // Jump to the bottom when a thread (re)loads. Separate from the streaming
+  // auto-scroll above, and keyed on loadNonce (NOT messages.length) so it (a)
+  // also fires when switching to an equal-length thread and (b) never runs on a
+  // per-streaming-flush render — so it adds no streaming-perf cost. A single
+  // scrollTop=scrollHeight lands SHORT because content-visibility reports
+  // off-screen bubbles at their 160px estimate until they enter the viewport;
+  // re-pinning across a few frames lets scrollHeight settle to the true tail.
+  // Stops once the height is stable for two frames (or a small frame cap), so it
+  // costs nothing once the thread has landed.
+  useEffect(() => {
+    if (loadNonce === 0) return;
+    isPinnedToBottomRef.current = true;
+    const el = scrollRef.current;
+    if (!el) return;
+    let raf = 0;
+    let frames = 0;
+    let stableFor = 0;
+    let prevHeight = -1;
+    const settle = () => {
+      el.scrollTop = el.scrollHeight;
+      if (el.scrollHeight === prevHeight) stableFor += 1;
+      else { stableFor = 0; prevHeight = el.scrollHeight; }
+      if (stableFor < 2 && frames++ < 20) raf = requestAnimationFrame(settle);
+    };
+    raf = requestAnimationFrame(settle);
+    return () => cancelAnimationFrame(raf);
+  }, [loadNonce]);
 
   // Apply-toast auto-dismiss — success fades after 4s, errors stick longer
   // (8s) since the user may need to read the error message.
@@ -481,6 +565,8 @@ export const AssistantModal: FC<AssistantModalProps> = ({
       return;
     }
     setError(null);
+    // A fresh send always re-pins to the bottom even if the user had scrolled up.
+    isPinnedToBottomRef.current = true;
     sendToBackend({
       type: 'assistant_send',
       content,
@@ -605,6 +691,46 @@ export const AssistantModal: FC<AssistantModalProps> = ({
     setIsGenerating(true);
   };
 
+  // ── Edit & resend the last user message ─────────────────────────────────────
+  // Offered only when the last user turn already has an assistant reply (a
+  // completed, persisted exchange); the failed-turn case is covered by Retry.
+  const canEditLast =
+    !isGenerating && editDraft === null && lastUserIdx !== -1 && lastUserIdx < lastAssistantIdx;
+
+  const startEditLast = useCallback(() => {
+    setEditDraft(messages[lastUserIdx]?.content ?? '');
+  }, [messages, lastUserIdx]);
+
+  const handleEditResend = () => {
+    if (editDraft === null || isGenerating) return;
+    const content = editDraft.trim();
+    if (!content) return;
+    if (!connectionId) {
+      setError('Pick a connection before resending — see the dropdown at the top of the modal.');
+      return;
+    }
+    // Optimistically replace the last user bubble's content and drop everything
+    // after it (its assistant reply / tool rows); the backend trims the matching
+    // history and regenerates a fresh reply.
+    setMessages((prev) => {
+      const next = prev.slice(0, lastUserIdx + 1);
+      next[lastUserIdx] = { ...next[lastUserIdx]!, content };
+      return next;
+    });
+    setEditDraft(null);
+    setError(null);
+    isPinnedToBottomRef.current = true;
+    sendToBackend({
+      type: 'assistant_send',
+      content,
+      connectionId,
+      editLast: true,
+      ...(attachedScriptIds.length > 0 ? { contextScriptIds: attachedScriptIds } : {}),
+      ...(attachedFilePaths.length > 0 ? { contextFilePaths: attachedFilePaths } : {}),
+    });
+    setIsGenerating(true);
+  };
+
   const handleNewThread = () => {
     if (isGenerating) return;
     sendToBackend({ type: 'assistant_new_thread' });
@@ -661,12 +787,24 @@ export const AssistantModal: FC<AssistantModalProps> = ({
    *  backend classifies trigger vs library, generates a name, prepends a
    *  provenance header, and creates the script. Result surfaces via
    *  `assistant_apply_success` / `assistant_apply_error`. */
-  const applyContextValue = {
-    attachedScripts: attachedScripts.map((s) => ({ id: s.id, name: s.name, type: s.type })),
-    onApply: (code: string, languageHint: string | undefined, targetScriptId?: string) => {
+  // Stable {id,name,type} projection of the attached scripts, KEYED ON THE VALUE
+  // SIGNATURE rather than the `attachedScripts` array identity. `attachedScripts`
+  // gets a fresh identity whenever the `scripts` prop does — e.g. an unrelated
+  // script autosave/edit pushes a new list while Lisa is open — which would
+  // otherwise churn `applyContextValue` below and re-highlight every code block
+  // in the transcript (the same Prism storm the streaming memo fixed, just
+  // triggered by script edits). The signature only changes when an attached
+  // script's id/name/type actually changes, so the context value stays stable.
+  const applyScriptsSig = JSON.stringify(attachedScripts.map((s) => [s.id, s.name, s.type]));
+  const applyScripts = useMemo(
+    () => attachedScripts.map((s) => ({ id: s.id, name: s.name, type: s.type })),
+    [applyScriptsSig],
+  );
+  const onApply = useCallback(
+    (code: string, languageHint: string | undefined, targetScriptId?: string) => {
       if (targetScriptId) {
         // Updating an existing script overwrites its code — gate on a confirm.
-        const target = attachedScripts.find((s) => s.id === targetScriptId);
+        const target = applyScripts.find((s) => s.id === targetScriptId);
         setPendingApply({
           code,
           languageHint,
@@ -681,7 +819,17 @@ export const AssistantModal: FC<AssistantModalProps> = ({
         });
       }
     },
-  };
+    [applyScripts, sendToBackend],
+  );
+  // Memoized so the Provider value identity is STABLE across re-renders — both
+  // streaming-tick re-renders AND unrelated `scripts`-prop churns (see above). A
+  // fresh value forces every AssistantApplyContext consumer (every fenced code
+  // block's apply button) to re-render, piercing MarkdownContent's `memo` and
+  // re-running Prism highlighting over every code block in the whole transcript.
+  const applyContextValue = useMemo(
+    () => ({ attachedScripts: applyScripts, onApply }),
+    [applyScripts, onApply],
+  );
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     // When the @-mention menu has candidates, it owns the nav keys.
@@ -813,7 +961,7 @@ export const AssistantModal: FC<AssistantModalProps> = ({
             </div>
 
             <AssistantApplyContext.Provider value={applyContextValue}>
-              <main className="ls-asst-body" ref={scrollRef}>
+              <main className="ls-asst-body" ref={scrollRef} onScroll={handleTranscriptScroll}>
                 {messages.length === 0 && !streaming && !isGenerating && (
                   <div className="ls-asst-empty">
                     <p>Ask about LumiScript or Spindle APIs. Try one of these:</p>
@@ -833,9 +981,44 @@ export const AssistantModal: FC<AssistantModalProps> = ({
                   </div>
                 )}
 
-                {messages.map((m, i) => (
-                  <MessageBubble key={i} message={m} />
-                ))}
+                {messages.map((m, i) =>
+                  i === lastUserIdx && editDraft !== null ? (
+                    <div key={i} className="ls-asst-edit-box">
+                      <textarea
+                        className="ls-asst-edit-input"
+                        value={editDraft}
+                        onChange={(e) => setEditDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleEditResend(); }
+                          else if (e.key === 'Escape') { e.preventDefault(); setEditDraft(null); }
+                        }}
+                        rows={Math.min(8, Math.max(2, editDraft.split('\n').length))}
+                        autoFocus
+                      />
+                      <div className="ls-asst-edit-actions">
+                        <button type="button" className="ls-asst-edit-cancel" onClick={() => setEditDraft(null)}>
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          className="ls-asst-edit-save"
+                          onClick={handleEditResend}
+                          disabled={!editDraft.trim()}
+                        >
+                          Save &amp; resend
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <MessageBubble
+                      key={i}
+                      message={m}
+                      scrollRoot={scrollRef}
+                      eager={i >= messages.length - 1}
+                      {...(i === lastUserIdx && canEditLast ? { onEdit: startEditLast } : {})}
+                    />
+                  )
+                )}
 
                 {(streaming || streamingReasoning) && (
                   <MessageBubble
@@ -1205,13 +1388,44 @@ const ThreadSidebar: FC<ThreadSidebarProps> = ({
 
 // ─── Message bubble ──────────────────────────────────────────────────────────
 
-const MessageBubble: FC<{ message: DisplayMessage; streaming?: boolean }> = ({
+const MessageBubble = memo(({
   message,
   streaming,
+  onEdit,
+  scrollRoot,
+  eager,
+}: {
+  message: DisplayMessage;
+  streaming?: boolean;
+  onEdit?: () => void;
+  scrollRoot?: { current: HTMLElement | null } | null;
+  eager?: boolean;
 }) => {
   // Reasoning disclosure: expanded during streaming, collapsed for finalised
   // bubbles (history density). Each bubble instance owns its own toggle.
   const [reasoningExpanded, setReasoningExpanded] = useState(!!streaming);
+  // Lazy content: defer the expensive markdown + Prism render of off-screen
+  // historical bubbles until they scroll near the viewport. Opening a long /
+  // code-heavy thread otherwise markdown-parses + syntax-highlights EVERY bubble
+  // in one synchronous commit — seconds of main-thread freeze plus a starved WS
+  // heartbeat (the "connection lost"). The streaming bubble and the eager (last)
+  // bubble render rich immediately, so the part of the thread you actually look
+  // at on open never flashes. Once rich, a bubble stays rich (state never resets).
+  const bubbleRef = useRef<HTMLDivElement>(null);
+  const [rich, setRich] = useState(!!streaming || !!eager);
+  useEffect(() => {
+    if (rich) return;
+    const el = bubbleRef.current;
+    if (!el || typeof IntersectionObserver === 'undefined') { setRich(true); return; }
+    const obs = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) { setRich(true); obs.disconnect(); }
+      },
+      { root: scrollRoot?.current ?? null, rootMargin: '600px 0px' },
+    );
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [rich, scrollRoot]);
 
   if (message.role === 'tool') {
     return (
@@ -1237,7 +1451,7 @@ const MessageBubble: FC<{ message: DisplayMessage; streaming?: boolean }> = ({
   // unchanged.
   const roleLabel = message.role === 'assistant' ? ASSISTANT_DISPLAY_NAME : message.role;
   return (
-    <div className={`ls-asst-bubble ls-asst-bubble-${message.role}${message.aborted ? ' ls-asst-bubble-aborted' : ''}`}>
+    <div ref={bubbleRef} className={`ls-asst-bubble ls-asst-bubble-${message.role}${message.aborted ? ' ls-asst-bubble-aborted' : ''}`}>
       <div className="ls-asst-bubble-role">
         <span>
           {roleLabel}
@@ -1245,6 +1459,17 @@ const MessageBubble: FC<{ message: DisplayMessage; streaming?: boolean }> = ({
         </span>
         {message.role === 'assistant' && message.content && (
           <CopyButton text={message.content} className="ls-asst-bubble-copy" title="Copy reply" />
+        )}
+        {message.role === 'user' && onEdit && (
+          <button
+            type="button"
+            className="ls-asst-bubble-edit"
+            onClick={onEdit}
+            title="Edit & resend"
+            aria-label="Edit and resend this message"
+          >
+            <Pencil size={12} />
+          </button>
         )}
       </div>
       {message.reasoning && (
@@ -1266,9 +1491,12 @@ const MessageBubble: FC<{ message: DisplayMessage; streaming?: boolean }> = ({
         </div>
       )}
       <div className="ls-asst-bubble-content">
-        <MarkdownContent text={message.content} />
+        {rich
+          ? <MarkdownContent text={message.content} />
+          : <div className="ls-asst-bubble-deferred">{message.content}</div>}
         {streaming && <span className="ls-asst-cursor">▍</span>}
       </div>
     </div>
   );
-};
+});
+MessageBubble.displayName = 'MessageBubble';

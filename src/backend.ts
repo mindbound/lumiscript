@@ -195,6 +195,16 @@ let assistantAbortController: AbortController | null = null;
 let assistantStreamedContent = '';
 let assistantInitialized = false;
 
+/**
+ * Streamed-token coalescing window (ms). The agent fires onToken/onReasoning
+ * once per provider token — a fast model emits hundreds per second. Sending one
+ * `sendToFrontend` frame for each floods the host WebSocket (every frame is
+ * JSON-parsed on the browser main thread) and, on a multi-user server, fans
+ * every token out to all sessions. Instead we buffer tokens and flush at ~30Hz;
+ * the frontend concatenates batches exactly as it did single tokens.
+ */
+const ASSISTANT_TOKEN_COALESCE_MS = 33;
+
 async function refreshPermissions(): Promise<void> {
   try {
     const granted = await spindle.permissions.getGranted();
@@ -320,6 +330,23 @@ registerLumiScriptMacros(() => settingsStore.get().enabled);
 
 function send(msg: import('./types/messages.js').BackendToFrontend): void {
   spindle.sendToFrontend(msg);
+}
+
+/**
+ * Send a Lisa-assistant message to ONLY the target user. `spindle.sendToFrontend`
+ * broadcasts to EVERY connected session when the userId is omitted (see its host
+ * docs) — which both wastes WebSocket bandwidth fanning out to unrelated sessions
+ * and, on a multi-user server, surfaces one user's Lisa conversation, threads,
+ * memory, connections, etc. in another's open modal. Defaults to `activeUserId`
+ * (set at the top of every `onFrontendMessage` handler); pass an explicit
+ * `userId` from any helper that carries its own (e.g. pushAssistantMemory) so it
+ * doesn't depend on the module-level value happening to match.
+ */
+function sendAssistant(
+  payload: import('./types/messages.js').BackendToFrontend,
+  userId: string | null = activeUserId,
+): void {
+  spindle.sendToFrontend(payload, userId ?? undefined);
 }
 
 // Wire host-dispatcher's frontend-send hook so async broadcast handler
@@ -1142,7 +1169,7 @@ async function bootstrapAssistant(userId: string): Promise<void> {
 }
 
 function pushAssistantThreads(): void {
-  spindle.sendToFrontend({
+  sendAssistant({
     type: 'assistant_threads',
     threads: assistantThreadIndex,
     activeThreadId: activeAssistantThread?.id ?? null,
@@ -1185,7 +1212,7 @@ async function listAttachableUserFiles(
 
 function pushActiveThreadLoaded(): void {
   if (!activeAssistantThread) return;
-  spindle.sendToFrontend({
+  sendAssistant({
     type: 'assistant_thread_loaded',
     threadId: activeAssistantThread.id,
     title:    activeAssistantThread.title,
@@ -1200,10 +1227,10 @@ function pushActiveThreadLoaded(): void {
  *  sends an empty list on a read failure rather than breaking the panel. */
 async function pushAssistantMemory(userId: string): Promise<void> {
   try {
-    spindle.sendToFrontend({ type: 'assistant_memory', notes: await loadMemoryNotes(userId) });
+    sendAssistant({ type: 'assistant_memory', notes: await loadMemoryNotes(userId) }, userId);
   } catch (err) {
     spindle.log.warn(`[LumiScript] pushAssistantMemory failed: ${err instanceof Error ? err.message : String(err)}`);
-    spindle.sendToFrontend({ type: 'assistant_memory', notes: [] });
+    sendAssistant({ type: 'assistant_memory', notes: [] }, userId);
   }
 }
 
@@ -1601,13 +1628,14 @@ spindle.onFrontendMessage(async (raw, userId) => {
 
       // ── In-app assistant ────────────────────────────────────────────────
       case 'assistant_send': {
-        // Skip the user-turn echo on retry: the failed attempt's bubble is
-        // still shown (it was never persisted), so re-echoing would duplicate it.
-        if (!msg.isRetry) {
-          spindle.sendToFrontend({ type: 'assistant_user_turn', content: msg.content });
+        // Skip the user-turn echo on retry / edit-resend: the bubble is already
+        // shown on the FE (retry kept it in place; edit-resend updated it), so
+        // re-echoing would duplicate it.
+        if (!msg.isRetry && !msg.editLast) {
+          sendAssistant({ type: 'assistant_user_turn', content: msg.content });
         }
         if (!activeUserId) {
-          spindle.sendToFrontend({
+          sendAssistant({
             type: 'assistant_error',
             error: 'Assistant unavailable: no active user. Make sure Lumiverse has finished loading before opening Lisa.',
           });
@@ -1615,11 +1643,26 @@ spindle.onFrontendMessage(async (raw, userId) => {
         }
         if (!assistantInitialized) await bootstrapAssistant(activeUserId);
         if (!activeAssistantThread) {
-          spindle.sendToFrontend({
+          sendAssistant({
             type: 'assistant_error',
             error: 'Assistant unavailable: failed to initialise thread state.',
           });
           break;
+        }
+        // Edit-and-resend: the prior turn succeeded and is persisted, so drop the
+        // last user turn + everything after it (its assistant reply + any tool
+        // turns) before regenerating with the edited `content`. Cut only at a real
+        // user-turn boundary (role 'user' + string content) so tool_use/tool_result
+        // pairs are never split. (The FE only sends editLast when the last user
+        // turn already has an assistant reply, so a match always exists.)
+        if (msg.editLast) {
+          const hist = activeAssistantThread.messages;
+          let cut = -1;
+          for (let i = hist.length - 1; i >= 0; i--) {
+            const h = hist[i];
+            if (h && h.role === 'user' && typeof h.content === 'string') { cut = i; break; }
+          }
+          if (cut !== -1) activeAssistantThread.messages = hist.slice(0, cut);
         }
         // Title derivation on first user message in a brand-new thread.
         const isFirstUserMessage =
@@ -1630,6 +1673,31 @@ spindle.onFrontendMessage(async (raw, userId) => {
         assistantAbortController = new AbortController();
         assistantStreamedContent = '';
         let aborted = false;
+        // Coalesce streamed tokens/reasoning into ~30Hz batches instead of one
+        // WS frame per token (see ASSISTANT_TOKEN_COALESCE_MS). Buffers are
+        // flushed on the timer, before each tool chip, and before any terminal
+        // message; the timer is cleared in `finally` so no stray frame escapes.
+        let tokenBatch = '';
+        let reasoningBatch = '';
+        let assistantBatchTimer: ReturnType<typeof setTimeout> | null = null;
+        const flushAssistantBatches = () => {
+          if (assistantBatchTimer !== null) {
+            clearTimeout(assistantBatchTimer);
+            assistantBatchTimer = null;
+          }
+          if (tokenBatch) {
+            sendAssistant({ type: 'assistant_token', token: tokenBatch });
+            tokenBatch = '';
+          }
+          if (reasoningBatch) {
+            sendAssistant({ type: 'assistant_reasoning', token: reasoningBatch });
+            reasoningBatch = '';
+          }
+        };
+        const scheduleAssistantBatchFlush = () => {
+          if (assistantBatchTimer !== null) return;
+          assistantBatchTimer = setTimeout(flushAssistantBatches, ASSISTANT_TOKEN_COALESCE_MS);
+        };
         try {
           // Generation parameter defaults from settings. Optional numeric
           // fields pass through only when explicitly set ("blank = use
@@ -1718,39 +1786,60 @@ spindle.onFrontendMessage(async (raw, userId) => {
             {
               onToken: (token) => {
                 assistantStreamedContent += token;
-                spindle.sendToFrontend({ type: 'assistant_token', token });
+                tokenBatch += token;
+                scheduleAssistantBatchFlush();
               },
-              onReasoning: (token) => spindle.sendToFrontend({ type: 'assistant_reasoning', token }),
-              onToolCall: (ev) => spindle.sendToFrontend({
-                type:    'assistant_tool_call',
-                callId:  ev.callId,
-                name:    ev.name,
-                args:    ev.args,
-                result:  ev.result,
-                isError: ev.isError,
-              }),
+              onReasoning: (token) => {
+                reasoningBatch += token;
+                scheduleAssistantBatchFlush();
+              },
+              onToolCall: (ev) => {
+                // Deliver any buffered tokens before the tool chip so the
+                // transcript's text→tool-call order is preserved.
+                flushAssistantBatches();
+                sendAssistant({
+                  type:    'assistant_tool_call',
+                  callId:  ev.callId,
+                  name:    ev.name,
+                  args:    ev.args,
+                  result:  ev.result,
+                  isError: ev.isError,
+                });
+              },
               onAborted: () => { aborted = true; },
             },
           );
+          // Flush any tokens/reasoning still buffered so the frontend's
+          // streaming preview + reasoning are complete before assistant_completed
+          // (which reads the accumulated reasoning) replaces the live bubble.
+          flushAssistantBatches();
           activeAssistantThread.messages = result.messages.filter((m) => m.role !== 'system');
-          spindle.sendToFrontend({
+          sendAssistant({
             type:    'assistant_completed',
             content: result.content,
             ...(result.usage ? { usage: result.usage } : {}),
           });
           void persistActiveThread(activeUserId);
         } catch (err) {
+          // Flush buffered tokens/reasoning before the terminal message —
+          // assistant_aborted reconstructs from the streamed reasoning the FE
+          // accumulated, so it must arrive first.
+          flushAssistantBatches();
           if (aborted) {
-            spindle.sendToFrontend({
+            sendAssistant({
               type:    'assistant_aborted',
               content: assistantStreamedContent,
             });
           } else {
             const errMsg = err instanceof Error ? err.message : String(err);
             spindle.log.warn(`[LumiScript] assistant_send failed: ${errMsg}`);
-            spindle.sendToFrontend({ type: 'assistant_error', error: errMsg });
+            sendAssistant({ type: 'assistant_error', error: errMsg });
           }
         } finally {
+          if (assistantBatchTimer !== null) {
+            clearTimeout(assistantBatchTimer);
+            assistantBatchTimer = null;
+          }
           assistantAbortController = null;
           assistantStreamedContent = '';
         }
@@ -1796,7 +1885,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
       case 'request_user_files': {
         if (activeUserId) {
           const files = await listAttachableUserFiles(activeUserId);
-          spindle.sendToFrontend({ type: 'user_files', files });
+          sendAssistant({ type: 'user_files', files });
         }
         break;
       }
@@ -1816,7 +1905,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
             }
           }
           const files = await listAttachableUserFiles(activeUserId);
-          spindle.sendToFrontend({ type: 'user_files', files, ...(errs.length ? { error: errs.join(' ') } : {}) });
+          sendAssistant({ type: 'user_files', files, ...(errs.length ? { error: errs.join(' ') } : {}) });
         }
         break;
       }
@@ -1831,7 +1920,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
             }
           }
           const files = await listAttachableUserFiles(activeUserId);
-          spindle.sendToFrontend({ type: 'user_files', files });
+          sendAssistant({ type: 'user_files', files });
         }
         break;
       }
@@ -1873,9 +1962,9 @@ spindle.onFrontendMessage(async (raw, userId) => {
         const res = await consolidateMemory(activeUserId, msg.connectionId);
         if (res.ok) {
           await pushAssistantMemory(activeUserId);
-          spindle.sendToFrontend({ type: 'assistant_memory_consolidated', before: res.before, after: res.after });
+          sendAssistant({ type: 'assistant_memory_consolidated', before: res.before, after: res.after });
         } else {
-          spindle.sendToFrontend({ type: 'assistant_memory_consolidated', before: 0, after: 0, error: res.error });
+          sendAssistant({ type: 'assistant_memory_consolidated', before: 0, after: 0, error: res.error });
         }
         break;
       }
@@ -1888,7 +1977,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
       case 'request_assistant_connections': {
         try {
           const list = await spindle.connections.list(activeUserId ?? undefined);
-          spindle.sendToFrontend({
+          sendAssistant({
             type: 'assistant_connections',
             connections: list.map((c) => ({
               id:        c.id,
@@ -1903,14 +1992,14 @@ spindle.onFrontendMessage(async (raw, userId) => {
             `[LumiScript] request_assistant_connections failed: ` +
             (err instanceof Error ? err.message : String(err)),
           );
-          spindle.sendToFrontend({ type: 'assistant_connections', connections: [] });
+          sendAssistant({ type: 'assistant_connections', connections: [] });
         }
         break;
       }
 
       case 'request_assistant_threads': {
         if (!activeUserId) {
-          spindle.sendToFrontend({ type: 'assistant_threads', threads: [], activeThreadId: null });
+          sendAssistant({ type: 'assistant_threads', threads: [], activeThreadId: null });
           break;
         }
         if (!assistantInitialized) await bootstrapAssistant(activeUserId);
@@ -2025,7 +2114,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
           if (msg.targetScriptId) {
             const target = scriptStorage.getScript(msg.targetScriptId);
             if (!target) {
-              spindle.sendToFrontend({
+              sendAssistant({
                 type:  'assistant_apply_error',
                 error: 'That script no longer exists — it may have been deleted since you attached it.',
               });
@@ -2036,7 +2125,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
             void syncTriggers();
             pushTools();
             recordAppliedEvent(target.name, target.type, true);
-            spindle.sendToFrontend({
+            sendAssistant({
               type:       'assistant_apply_success',
               scriptName: target.name,
               scriptType: target.type,
@@ -2087,7 +2176,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
           void syncTriggers();
           pushTools();
           recordAppliedEvent(derivedName, scriptType, false);
-          spindle.sendToFrontend({
+          sendAssistant({
             type:       'assistant_apply_success',
             scriptName: derivedName,
             scriptType,
@@ -2096,7 +2185,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : String(err);
           spindle.log.warn(`[LumiScript] assistant_apply_to_script failed: ${errMsg}`);
-          spindle.sendToFrontend({ type: 'assistant_apply_error', error: errMsg });
+          sendAssistant({ type: 'assistant_apply_error', error: errMsg });
         }
         break;
       }
@@ -2263,7 +2352,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
         const datePart = new Date().toISOString().slice(0, 10);
         const filename = `lisa-${safeTitle}-${datePart}.md`;
 
-        spindle.sendToFrontend({
+        sendAssistant({
           type:     'assistant_thread_exported',
           threadId: thread.id,
           filename,

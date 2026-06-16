@@ -574,6 +574,15 @@ export type FrontendToBackend =
        * history. Ineligible / missing / oversized paths are skipped.
        */
       contextFilePaths?: string[];
+      /**
+       * Edit-and-resend of the last user turn. The previous turn SUCCEEDED and
+       * is persisted, so the backend trims the last user message + its assistant
+       * reply (and any tool turns between) from the thread before regenerating
+       * with this (edited) `content`. Like `isRetry`, the FE already shows the
+       * edited bubble, so the `assistant_user_turn` echo is skipped. Only sent
+       * when the last user turn already has a subsequent assistant reply.
+       */
+      editLast?: boolean;
     }
   // "New chat" — creates a new thread and switches the active thread to it.
   | { type: 'assistant_reset' }
