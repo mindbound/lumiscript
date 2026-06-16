@@ -277,6 +277,10 @@ describe('child-entry: shutdown', () => {
     expect(ipc.completedResult()).toBeNull();
 
     ipc.childHandle.send({ type: 'shutdown' });
+    // Mock IPC delivers parent→child messages on a microtask (mirroring real
+    // subprocess IPC — never synchronously re-entrant). Yield one turn so the
+    // child's shutdown handler runs before we assert.
+    await Promise.resolve();
 
     // proc.complete was called — payload may be undefined (the production
     // child passes no result through to complete).
