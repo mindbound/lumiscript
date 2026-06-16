@@ -163,9 +163,10 @@ export interface TurnUsage {
 export interface TurnResult {
   /** Final assistant message content (text). */
   content: string;
-  /** Full message history including the new user message, all tool turns,
-   *  and the final assistant turn. Suitable for persisting as the thread's
-   *  new state. */
+  /** The FULL conversation record — prior history + the new user message + all
+   *  tool turns + the final assistant turn. NOT windowed (windowHistory only
+   *  bounds what's SENT to the model) and contains NO system turn, so it's
+   *  suitable for persisting verbatim as the thread's new state. */
   messages: AssistantHistoryMessage[];
   /** Aggregated token usage across all iterations of the loop. Undefined
    *  when the upstream host/provider didn't surface usage on any iteration
@@ -364,9 +365,15 @@ export async function runAssistantTurn(
     systemContent += `\n\n${buildAttachedFilesBlock(opts.attachedFiles)}`;
   }
 
-  const messages: AssistantHistoryMessage[] = [
-    { role: 'system', content: systemContent },
-    ...windowHistory(opts.history),
+  // The FULL conversation record — what gets persisted + displayed. It is NEVER
+  // windowed: windowHistory bounds only the prompt SENT to the model (built per
+  // iteration below as `sent`), never the saved thread. Returning a windowed
+  // array as result.messages was the v1.1 data-loss bug: backend.ts reassigns
+  // activeAssistantThread.messages from result.messages, so a thread past
+  // MAX_HISTORY_MESSAGES lost its oldest turns from storage on every new turn.
+  const systemTurn: AssistantHistoryMessage = { role: 'system', content: systemContent };
+  const record: AssistantHistoryMessage[] = [
+    ...opts.history,
     { role: 'user', content: opts.userInput },
   ];
 
@@ -394,9 +401,12 @@ export async function runAssistantTurn(
       const providerFields: Record<string, string> = {};
       if (resolvedProvider) providerFields.provider = resolvedProvider;
       if (resolvedModel)    providerFields.model    = resolvedModel;
+      // The model sees only the windowed view (system + the most recent
+      // MAX_HISTORY_MESSAGES turns of the record); the full `record` is persisted.
+      const sent: AssistantHistoryMessage[] = [systemTurn, ...windowHistory(record)];
       const request = {
         type: 'raw' as const,
-        messages,
+        messages: sent,
         tools: ASSISTANT_TOOLS as unknown as Array<{ name: string; description: string; parameters?: Record<string, unknown> }>,
         userId: opts.userId,
         ...providerFields,
@@ -453,7 +463,7 @@ export async function runAssistantTurn(
           content: finalContent,
           ...(done.reasoning ? { reasoning_content: done.reasoning } : {}),
         };
-        messages.push(finalTurn);
+        record.push(finalTurn);
 
         let usage: TurnUsage | undefined;
         if (hasRealUsage) {
@@ -463,14 +473,14 @@ export async function runAssistantTurn(
             totalTokens: totalPromptTokens + totalCompletionTokens,
           };
         } else {
-          // Upstream didn't report usage. Fall back to client-side counting
-          // via `spindle.tokens.countText` against the resolved model. Returns
-          // undefined on counting failure — modal then hides the strip
-          // rather than mislead with bad numbers.
-          usage = await estimateUsageLocally(messages, finalContent, resolvedModel, opts.userId);
+          // Upstream didn't report usage. Fall back to client-side counting via
+          // `spindle.tokens.countText`. Count the WINDOWED `sent` array (what
+          // actually went to the model), not the full record. Returns undefined
+          // on counting failure — modal then hides the strip rather than mislead.
+          usage = await estimateUsageLocally(sent, finalContent, resolvedModel, opts.userId);
         }
         events.onTurnCompleted?.({ content: finalContent, usage });
-        return { content: finalContent, messages, usage };
+        return { content: finalContent, messages: record, usage };
       }
 
       // Tool-call iteration. Build the assistant turn with tool_use parts,
@@ -513,8 +523,8 @@ export async function runAssistantTurn(
         content: toolResultParts,
       };
 
-      messages.push(assistantTurn, userToolTurn);
-      // Loop continues — next iteration sends the augmented history.
+      record.push(assistantTurn, userToolTurn);
+      // Loop continues — next iteration windows the augmented record for the send.
     }
 
     // Iteration ceiling hit without a final text answer.
