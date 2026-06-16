@@ -40,6 +40,19 @@ import { __resetForTests as resetThemeStore }           from '../../src/engine/t
 // init-time side effects (only function bodies touch spindle.*).
 import { __resetForTests as resetHostDispatcher } from '../../src/script-runner/host-dispatcher.js';
 import { __resetForTests as resetApiProxy }       from '../../src/script-runner/api-proxy.js';
+// child-entry holds module-level `activeProxies` (and the unhandledRejection
+// rate-limit state). These persist across test FILES in the shared bun
+// process; without a per-test reset, a seam-seeded entry (the
+// unhandledRejection-guard test's `_setActiveProxyForTests` stub) survives
+// into whatever file bun runs next. The broadcast routers iterate every
+// `activeProxies` entry, so a leaked stub there used to crash an e2e file's
+// `routeApiResponse` on CI (filesystem-order-dependent — only reproduced when
+// the guard file sorted before the e2e file). Reset both here so child-entry
+// state is isolated per test, mirroring host-dispatcher / api-proxy.
+import {
+  _clearActiveProxiesForTests,
+  _resetUnhandledRejectionRateStateForTests,
+} from '../../src/script-runner/child-entry.js';
 
 // `dom-handler.ts` imports DOMPurify at module load — before any per-file DOM env
 // (`useDOM()`) registers a window — so its DOMPurify has no DOM and `.sanitize` is
@@ -83,4 +96,8 @@ beforeEach(() => {
   // Script-runner subsystem — Phase 11.A
   resetHostDispatcher();
   resetApiProxy();
+  // child-entry module-level state (activeProxies + rejection rate-limit).
+  // Prevents cross-file leakage of seam-seeded proxy stubs (see import note).
+  _clearActiveProxiesForTests();
+  _resetUnhandledRejectionRateStateForTests();
 });

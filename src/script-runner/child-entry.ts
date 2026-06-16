@@ -1336,11 +1336,24 @@ export function _resetUnhandledRejectionRateStateForTests(): void {
 
 /** @internal Test seam — seed an activeProxies entry. */
 export function _setActiveProxyForTests(runId: string, scriptId: string): void {
-  // The `proxy` field of `ActiveProxyEntry` isn't read by the
-  // unhandledRejection guard (only `scriptId` is) — use an empty
-  // object cast through `unknown` so the test seam doesn't have to
-  // construct a real ProxyHandle.
-  activeProxies.set(runId, { scriptId, proxy: {} as unknown as ProxyHandle });
+  // The unhandledRejection guard only reads `scriptId`, but the broadcast
+  // routers (`routeApiResponse` / `routeStreamChunk` / `routeStreamEnd`) and
+  // `handleScriptUnregister` call methods on EVERY entry's `proxy`. Seed a
+  // stub with no-op implementations of exactly those methods so a leaked
+  // entry can never crash routing — `activeProxies` is module-level state
+  // shared across test files, and bun's test-file order is filesystem-
+  // readdir-dependent (ext4 on CI vs NTFS locally), so this seam can outlive
+  // its own file and land in an e2e file's `routeApiResponse` sweep. A bare
+  // `{}` here is what produced the CI-only `entry.proxy.handleResponse is not
+  // a function` TypeError (which manifested as the F-L9 e2e timeout when the
+  // throw aborted the response sweep before the real proxy was reached).
+  const stubProxy = {
+    handleResponse:    () => {},
+    handleStreamChunk: () => {},
+    handleStreamEnd:   () => {},
+    cleanup:           () => {},
+  } as unknown as ProxyHandle;
+  activeProxies.set(runId, { scriptId, proxy: stubProxy });
 }
 
 /** @internal Test seam — clear all activeProxies entries. */

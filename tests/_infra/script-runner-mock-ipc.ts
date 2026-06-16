@@ -166,21 +166,9 @@ export function installScriptRunnerMockIpc(
     info,
     send(payload) {
       childInbox.push(payload);
-      // Deliver to the child's handlers on a fresh microtask rather than
-      // synchronously re-entrant. Real subprocess IPC NEVER delivers a
-      // message inside the sender's `send()` call — the receiver processes
-      // it on a later event-loop turn. Mirroring that here breaks the deep
-      // nested synchronous stack (parent api-response continuation → send →
-      // child resolves openAck → schedules the gated `.then` dispatch, all
-      // in one re-entrant frame) that bun-canary mis-schedules on the
-      // GitHub Actions runner — the gated follow-up dispatch's microtask was
-      // being dropped, hanging `flush()` to the 5s test timeout (CI-only
-      // F-L9 e2e flakiness). The `childInbox.push` stays synchronous so
-      // snapshot-based assertions are unaffected.
+      // Snapshot so handlers added during dispatch don't fire for this round.
       const snapshot = [...childMessageHandlers];
-      queueMicrotask(() => {
-        for (const h of snapshot) h(payload);
-      });
+      for (const h of snapshot) h(payload);
     },
     stop: mock(() => Promise.resolve()),
     refresh: mock(() => Promise.resolve(info)),
