@@ -26,6 +26,10 @@ import {
   notifyFloatWidgetCreated,
   notifyInputBarActionRegistered,
   notifyDrawerTabRegistered,
+  __getPendingAdvancedModalOpenIdsForTests,
+  __getPendingInputBarActionRegisterKeysForTests,
+  __getPendingFloatWidgetCreateIdsForTests,
+  __getPendingDrawerTabRegisterKeysForTests,
 } from '../../src/script-runner/host-dispatcher.js';
 import { setupE2E } from '../_infra/script-runner-fixture.js';
 import type { Script } from '../../src/types/script.js';
@@ -91,15 +95,19 @@ function getSpindle(): MockSpindle {
 }
 
 /**
- * Simulate the frontend's open / register echo on a LATER macrotask, the way
- * production delivers it (always-async WS echo) — AFTER the parent registers
- * its open-await. Firing `notify*` synchronously from the watcher races that
- * registration: `notify*` no-ops when the awaiter isn't in the table yet, so
- * under some schedulers (a newer bun canary than the dev runs locally) the echo
- * lands first and the open-ack never settles. Deferring is scheduler-robust.
+ * Robustly simulate the frontend's open / register echo. The parent registers
+ * its open-await ASYNCHRONOUSLY, and how many event-loop turns that takes varies
+ * by platform + bun build — a fixed-tick deferral is enough on Windows but NOT
+ * on Linux CI (echo fires before the awaiter is registered, `notify*` no-ops,
+ * the 3s open-await times out, run hangs). So POLL the pending-awaiter table
+ * until the awaiter is actually registered, THEN echo. Zero timing/platform
+ * assumptions; the iteration cap is a safety net well under OPEN_AWAIT_TIMEOUT_MS.
  */
-function deferEcho(notify: () => void): void {
-  setTimeout(notify, 0);
+async function echoWhenAwaiterReady(isRegistered: () => boolean, echo: () => void): Promise<void> {
+  for (let i = 0; i < 2000 && !isRegistered(); i++) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  }
+  echo();
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -114,7 +122,7 @@ describe('e2e: Option B handle-returning special-case routes', () => {
       const opts = req.args[0] as { _modalId: string };
       observedModalId = opts._modalId;
       // Simulate the FE echo arriving — resolves the parent's awaiter.
-      deferEcho(() => notifyAdvancedModalOpened(opts._modalId));
+      void echoWhenAwaiterReady(() => __getPendingAdvancedModalOpenIdsForTests().includes(opts._modalId), () => notifyAdvancedModalOpened(opts._modalId));
     });
 
     const result = await dispatchRunScript(
@@ -141,7 +149,7 @@ describe('e2e: Option B handle-returning special-case routes', () => {
     const unsub = watchApiRequest(spindle, 'ui.createFloatWidget', (req) => {
       const opts = req.args[0] as { _widgetId: string };
       observedWidgetId = opts._widgetId;
-      deferEcho(() => notifyFloatWidgetCreated(opts._widgetId));
+      void echoWhenAwaiterReady(() => __getPendingFloatWidgetCreateIdsForTests().includes(opts._widgetId), () => notifyFloatWidgetCreated(opts._widgetId));
     });
 
     const result = await dispatchRunScript(
@@ -168,7 +176,7 @@ describe('e2e: Option B handle-returning special-case routes', () => {
       // The proxy ships them through directly.
       const opts = req.args[0] as { id: string };
       expect(opts.id).toBe(userActionId);
-      deferEcho(() => notifyInputBarActionRegistered(scriptId, opts.id));
+      void echoWhenAwaiterReady(() => __getPendingInputBarActionRegisterKeysForTests().includes(`${scriptId}:${opts.id}`), () => notifyInputBarActionRegistered(scriptId, opts.id));
     });
 
     const result = await dispatchRunScript(
@@ -193,7 +201,7 @@ describe('e2e: Option B handle-returning special-case routes', () => {
     const unsub = watchApiRequest(spindle, 'ui.registerDrawerTab', (req) => {
       const opts = req.args[0] as { id: string };
       expect(opts.id).toBe(userTabId);
-      deferEcho(() => notifyDrawerTabRegistered(scriptId, opts.id));
+      void echoWhenAwaiterReady(() => __getPendingDrawerTabRegisterKeysForTests().includes(`${scriptId}:${opts.id}`), () => notifyDrawerTabRegistered(scriptId, opts.id));
     });
 
     const result = await dispatchRunScript(
