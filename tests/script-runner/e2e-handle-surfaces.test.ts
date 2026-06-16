@@ -90,6 +90,18 @@ function getSpindle(): MockSpindle {
   return (globalThis as unknown as { spindle: MockSpindle }).spindle;
 }
 
+/**
+ * Simulate the frontend's open / register echo on a LATER macrotask, the way
+ * production delivers it (always-async WS echo) — AFTER the parent registers
+ * its open-await. Firing `notify*` synchronously from the watcher races that
+ * registration: `notify*` no-ops when the awaiter isn't in the table yet, so
+ * under some schedulers (a newer bun canary than the dev runs locally) the echo
+ * lands first and the open-ack never settles. Deferring is scheduler-robust.
+ */
+function deferEcho(notify: () => void): void {
+  setTimeout(notify, 0);
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 describe('e2e: Option B handle-returning special-case routes', () => {
@@ -102,7 +114,7 @@ describe('e2e: Option B handle-returning special-case routes', () => {
       const opts = req.args[0] as { _modalId: string };
       observedModalId = opts._modalId;
       // Simulate the FE echo arriving — resolves the parent's awaiter.
-      notifyAdvancedModalOpened(observedModalId);
+      deferEcho(() => notifyAdvancedModalOpened(opts._modalId));
     });
 
     const result = await dispatchRunScript(
@@ -129,7 +141,7 @@ describe('e2e: Option B handle-returning special-case routes', () => {
     const unsub = watchApiRequest(spindle, 'ui.createFloatWidget', (req) => {
       const opts = req.args[0] as { _widgetId: string };
       observedWidgetId = opts._widgetId;
-      notifyFloatWidgetCreated(observedWidgetId);
+      deferEcho(() => notifyFloatWidgetCreated(opts._widgetId));
     });
 
     const result = await dispatchRunScript(
@@ -156,7 +168,7 @@ describe('e2e: Option B handle-returning special-case routes', () => {
       // The proxy ships them through directly.
       const opts = req.args[0] as { id: string };
       expect(opts.id).toBe(userActionId);
-      notifyInputBarActionRegistered(scriptId, opts.id);
+      deferEcho(() => notifyInputBarActionRegistered(scriptId, opts.id));
     });
 
     const result = await dispatchRunScript(
@@ -181,7 +193,7 @@ describe('e2e: Option B handle-returning special-case routes', () => {
     const unsub = watchApiRequest(spindle, 'ui.registerDrawerTab', (req) => {
       const opts = req.args[0] as { id: string };
       expect(opts.id).toBe(userTabId);
-      notifyDrawerTabRegistered(scriptId, opts.id);
+      deferEcho(() => notifyDrawerTabRegistered(scriptId, opts.id));
     });
 
     const result = await dispatchRunScript(

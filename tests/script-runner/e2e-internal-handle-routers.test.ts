@@ -85,6 +85,20 @@ function getSpindle(): MockSpindle {
   return (globalThis as unknown as { spindle: MockSpindle }).spindle;
 }
 
+/**
+ * Simulate the frontend's open / register echo the way production actually
+ * delivers it: on a LATER macrotask, after the parent has registered its
+ * open-await. Firing the `notify*` synchronously (the instant the register
+ * IPC is observed) races that registration — `notify*` no-ops when the awaiter
+ * isn't in the table yet (host-dispatcher.ts), so under some async schedulers
+ * (e.g. a newer bun canary than the dev runs locally) the echo lands first, the
+ * open-ack never settles, and the run hangs to its timeout. Deferring to a
+ * macrotask mirrors the genuinely-async WS echo and is scheduler-robust.
+ */
+function deferEcho(notify: () => void): void {
+  setTimeout(notify, 0);
+}
+
 // ─── handleInternalAdvancedModalRequest ─────────────────────────────────────
 
 describe('e2e: handleInternalAdvancedModalRequest', () => {
@@ -94,7 +108,7 @@ describe('e2e: handleInternalAdvancedModalRequest', () => {
 
     const unsubOpen = watchApiRequest(spindle, 'ui.showAdvancedModal', (req) => {
       const opts = req.args[0] as { _modalId: string };
-      notifyAdvancedModalOpened(opts._modalId);
+      deferEcho(() => notifyAdvancedModalOpened(opts._modalId));
     });
     let setTitleArgs: unknown[] | null = null;
     const unsubSet = watchApiRequest(spindle, 'ui._advModal.setTitle', (req) => {
@@ -123,7 +137,7 @@ describe('e2e: handleInternalAdvancedModalRequest', () => {
 
     const unsubOpen = watchApiRequest(spindle, 'ui.showAdvancedModal', (req) => {
       const opts = req.args[0] as { _modalId: string };
-      notifyAdvancedModalOpened(opts._modalId);
+      deferEcho(() => notifyAdvancedModalOpened(opts._modalId));
     });
     let dismissArgs: unknown[] | null = null;
     const unsubDismiss = watchApiRequest(spindle, 'ui._advModal.dismiss', (req) => {
@@ -157,7 +171,7 @@ describe('e2e: handleInternalInputBarActionRequest', () => {
     const actionId = 'my-action';
 
     const unsubReg = watchApiRequest(spindle, 'ui.registerInputBarAction', () => {
-      notifyInputBarActionRegistered(scriptId, actionId);
+      deferEcho(() => notifyInputBarActionRegistered(scriptId, actionId));
     });
     // Wrap captures in an object so TS doesn't narrow the bare variable
     // to its `null` initializer post-closure-declaration (control-flow
@@ -188,7 +202,7 @@ describe('e2e: handleInternalInputBarActionRequest', () => {
     const actionId = 'my-action';
 
     const unsubReg = watchApiRequest(spindle, 'ui.registerInputBarAction', () => {
-      notifyInputBarActionRegistered(scriptId, actionId);
+      deferEcho(() => notifyInputBarActionRegistered(scriptId, actionId));
     });
     const captured: Record<string, unknown[]> = {};
     const unsubs = [
@@ -226,8 +240,9 @@ describe('e2e: handleInternalFloatWidgetRequest', () => {
 
     let observedWidgetId: string | null = null;
     const unsubReg = watchApiRequest(spindle, 'ui.createFloatWidget', (req) => {
-      observedWidgetId = (req.args[0] as { _widgetId: string })._widgetId;
-      notifyFloatWidgetCreated(observedWidgetId);
+      const widgetId = (req.args[0] as { _widgetId: string })._widgetId;
+      observedWidgetId = widgetId;
+      deferEcho(() => notifyFloatWidgetCreated(widgetId));
     });
     const captured: Record<string, unknown[]> = {};
     const unsubs = [
@@ -267,7 +282,7 @@ describe('e2e: handleInternalDrawerTabRequest', () => {
     const tabId = 'my-tab';
 
     const unsubReg = watchApiRequest(spindle, 'ui.registerDrawerTab', () => {
-      notifyDrawerTabRegistered(scriptId, tabId);
+      deferEcho(() => notifyDrawerTabRegistered(scriptId, tabId));
     });
     const captured: Record<string, unknown[]> = {};
     const unsubs = [
@@ -308,7 +323,7 @@ describe('e2e: handleInternalDrawerTabRequest', () => {
     const tabId = 'my-tab';
 
     const unsubReg = watchApiRequest(spindle, 'ui.registerDrawerTab', () => {
-      notifyDrawerTabRegistered(scriptId, tabId);
+      deferEcho(() => notifyDrawerTabRegistered(scriptId, tabId));
     });
     const captured: { args?: unknown[] } = {};
     const unsubSet = watchApiRequest(spindle, 'ui._drawerTab.setBadge', (req) => {
