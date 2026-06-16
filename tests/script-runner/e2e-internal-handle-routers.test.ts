@@ -110,18 +110,40 @@ async function echoWhenAwaiterReady(isRegistered: () => boolean, echo: () => voi
 
 describe('e2e: handleInternalAdvancedModalRequest', () => {
   test('setTitle routes to canonical with [modalId, title]', async () => {
+    // ───── TEMPORARY DIAGNOSTIC (CI-only failure, F-L9) — remove after triage ─────
+    const t0 = Date.now();
+    const log = (m: string) => process.stderr.write(`[DIAG +${Date.now() - t0}ms] ${m}\n`);
+    const pend = () => `modalPending=[${__getPendingAdvancedModalOpenIdsForTests().join(',')}]`;
     await setupE2E();
     const spindle = getSpindle();
+    log(`setup done; ${pend()}`);
 
+    let watcherFired = false;
+    let pollIters = -1;
+    let awaiterSeen = false;
     const unsubOpen = watchApiRequest(spindle, 'ui.showAdvancedModal', (req) => {
+      watcherFired = true;
       const opts = req.args[0] as { _modalId: string };
-      void echoWhenAwaiterReady(() => __getPendingAdvancedModalOpenIdsForTests().includes(opts._modalId), () => notifyAdvancedModalOpened(opts._modalId));
+      log(`watcher: showAdvancedModal observed modalId=${opts._modalId}; ${pend()}`);
+      void (async () => {
+        let i = 0;
+        for (; i < 2000 && !__getPendingAdvancedModalOpenIdsForTests().includes(opts._modalId); i++) {
+          await new Promise<void>((r) => setTimeout(r, 0));
+        }
+        pollIters = i;
+        awaiterSeen = __getPendingAdvancedModalOpenIdsForTests().includes(opts._modalId);
+        log(`poll done after ${i} iters; awaiterSeen=${awaiterSeen}; ${pend()}; calling notify`);
+        notifyAdvancedModalOpened(opts._modalId);
+        log(`notify returned; ${pend()}`);
+      })();
     });
     let setTitleArgs: unknown[] | null = null;
     const unsubSet = watchApiRequest(spindle, 'ui._advModal.setTitle', (req) => {
+      log(`watcher: setTitle observed args=${JSON.stringify(req.args)}`);
       setTitleArgs = req.args;
     });
 
+    log('calling dispatchRunScript');
     const result = await dispatchRunScript(
       makeScript('script-A', `
         const m = api.ui.showAdvancedModal({ title: 'Initial' });
@@ -130,6 +152,8 @@ describe('e2e: handleInternalAdvancedModalRequest', () => {
       `),
       makeRequest(),
     );
+    log(`dispatchRunScript resolved ok=${result.ok}; watcherFired=${watcherFired}; pollIters=${pollIters}; awaiterSeen=${awaiterSeen}; ${pend()}`);
+    // ───── END DIAGNOSTIC ─────
 
     unsubOpen(); unsubSet();
     expect(result.ok).toBe(true);
