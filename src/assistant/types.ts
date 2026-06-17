@@ -209,6 +209,39 @@ export interface AssistantThread {
    *  Parallel to `messages` — never sent to the LLM. Optional; older threads
    *  load without it. */
   appliedEvents?: AppliedEvent[];
+  /** Prompt-token count of this thread's most recent turn — drives the chat's
+   *  context-fullness gauge (tokens ÷ budget) and is replayed on thread load so
+   *  the gauge is populated the moment a thread opens, not blank until the next
+   *  turn. Provider-reported when available, else the local countText estimate.
+   *  Optional; brand-new + pre-gauge threads load as undefined (gauge hidden
+   *  until a turn produces a count). */
+  lastPromptTokens?: number;
+  /** True when `lastPromptTokens` came from the local `spindle.tokens.countText`
+   *  estimate rather than provider usage — the gauge renders a `~` then. */
+  lastPromptEstimated?: boolean;
+  /** The most recent turn's token usage (in / out / total) — replayed on load so
+   *  the "this turn" segment of the usage strip survives thread switches / modal
+   *  reopen, like the gauge. Optional; older / brand-new threads load as undefined. */
+  lastTurnUsage?: { promptTokens: number; completionTokens: number; totalTokens: number; estimated?: boolean };
+  /** Lifetime token usage across ALL turns in this thread — replayed on load so
+   *  "total · this thread" is a true running total, not a per-session one. Optional;
+   *  older threads start accumulating from their next turn. */
+  totalUsage?: { promptTokens: number; completionTokens: number; totalTokens: number; estimated?: boolean };
+  /** ── Tier-2 compaction marker (context-window management) ────────────────
+   *  Index into `messages` marking the compaction boundary: messages
+   *  `[0..compactedThrough)` are collapsed into the single `handoff` summary
+   *  for the MODEL's view only (see `buildModelHistory`), so the LLM sees
+   *  `[handoff, ...messages.slice(compactedThrough)]`. `messages` itself — the
+   *  full record shown to the user and persisted — is NEVER touched, so
+   *  compaction is non-destructive and cannot lose data. Dormant until
+   *  compaction ships; undefined = the thread has never been compacted (the
+   *  model sees the full history). */
+  compactedThrough?: number;
+  /** The compaction summary prepended to the model-facing history when
+   *  `compactedThrough` is set — transient in-thread task state only (durable
+   *  cross-session facts are harvested into the memory system instead).
+   *  Undefined when uncompacted. */
+  handoff?: string;
 }
 
 /**

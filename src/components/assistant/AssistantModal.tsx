@@ -25,8 +25,9 @@
 
 import { FC, useState, useEffect, useRef, useMemo, useCallback, memo, KeyboardEvent, ChangeEvent } from 'react';
 import { createPortal } from 'react-dom';
-import { Send, X, Loader2, Coffee, Square, Brain, ChevronRight, MessageSquarePlus, Pencil, Trash2, Check, Download, RotateCcw, Code2, BookMarked, RefreshCw, AlertTriangle, NotebookPen, Paperclip, FileText } from 'lucide-react';
+import { Send, X, Loader2, Coffee, Square, Brain, ChevronRight, MessageSquarePlus, Pencil, Trash2, Check, Download, RotateCcw, Code2, BookMarked, RefreshCw, AlertTriangle, NotebookPen, Paperclip, FileText, FoldVertical } from 'lucide-react';
 import type { BackendToFrontend, FrontendToBackend } from '../../types/messages.js';
+import { ContextBreakdownPopover, type ContextBreakdown } from './ContextBreakdownPopover.js';
 import type { Script } from '../../types/script.js';
 import type { AssistantThreadIndexEntry } from '../../assistant/types.js';
 import { historyToDisplay, formatTokens, formatRelativeTime, type DisplayMessage } from './assistant-logic.js';
@@ -84,6 +85,12 @@ interface AssistantModalProps {
    * can still switch connections per-session inside the modal.
    */
   defaultConnectionId: string;
+  /**
+   * Token budget for the context-fullness gauge denominator (from
+   * `LumiScriptSettings.assistantContextTokens`). The gauge shows the last
+   * turn's prompt tokens as a fraction of this.
+   */
+  contextTokens: number;
   onClose: () => void;
   onBackendMessage: (handler: (msg: unknown) => void) => () => void;
   sendToBackend: (msg: FrontendToBackend) => void;
@@ -101,6 +108,7 @@ interface ConnectionOption {
 export const AssistantModal: FC<AssistantModalProps> = ({
   scripts,
   defaultConnectionId,
+  contextTokens,
   onClose,
   onBackendMessage,
   sendToBackend,
@@ -200,6 +208,20 @@ export const AssistantModal: FC<AssistantModalProps> = ({
     completionTokens: 0,
     totalTokens: 0,
   });
+  // Context-fullness gauge: the last turn's prompt-token count (provider or
+  // estimate), shown as a fraction of the configured `contextTokens` budget.
+  // Set on turn completion/abort AND restored from the persisted thread on load
+  // (so the gauge shows immediately, not blank until the next turn). null hides it.
+  const [contextFill, setContextFill] = useState<{ promptTokens: number; estimated: boolean } | null>(null);
+  // Manual "Compact now" in flight — disables the button + composer until the
+  // backend returns assistant_compacted.
+  const [compacting, setCompacting] = useState(false);
+  // Context-breakdown popover (click the gauge): open state + the fetched
+  // per-segment estimates (null until the on-demand request resolves).
+  const [breakdownOpen, setBreakdownOpen] = useState(false);
+  const [contextBreakdown, setContextBreakdown] = useState<ContextBreakdown | null>(null);
+  const [breakdownFailed, setBreakdownFailed] = useState(false);
+  const gaugeWrapRef = useRef<HTMLSpanElement>(null);
   // Threads (multi-thread management).
   const [threads, setThreads] = useState<AssistantThreadIndexEntry[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
@@ -336,6 +358,7 @@ export const AssistantModal: FC<AssistantModalProps> = ({
           if (msg.usage) {
             const u = msg.usage;
             setLastTurnUsage(u);
+            setContextFill({ promptTokens: u.occupancyTokens ?? u.promptTokens, estimated: u.estimated ?? false });
             setTotalUsage((prev) => ({
               promptTokens:     prev.promptTokens     + u.promptTokens,
               completionTokens: prev.completionTokens + u.completionTokens,
@@ -365,6 +388,7 @@ export const AssistantModal: FC<AssistantModalProps> = ({
           if (msg.usage) {
             const u = msg.usage;
             setLastTurnUsage(u);
+            setContextFill({ promptTokens: u.occupancyTokens ?? u.promptTokens, estimated: u.estimated ?? false });
             setTotalUsage((prev) => ({
               promptTokens:     prev.promptTokens     + u.promptTokens,
               completionTokens: prev.completionTokens + u.completionTokens,
@@ -391,19 +415,52 @@ export const AssistantModal: FC<AssistantModalProps> = ({
           break;
         case 'assistant_thread_loaded':
           setActiveThreadId(msg.threadId);
-          setMessages(historyToDisplay(msg.messages, msg.appliedEvents));
+          setMessages(historyToDisplay(msg.messages, msg.appliedEvents, msg.compactedThrough));
           setLoadNonce((n) => n + 1);
           clearStreamingState();
           setStreamingReasoning('');
           reasoningRef.current = '';
           setIsGenerating(false);
-          setLastTurnUsage(null);
-          setTotalUsage({ promptTokens: 0, completionTokens: 0, totalTokens: 0 });
+          // Restore the persisted usage strip (last turn + lifetime total) so it
+          // survives thread switches, like the gauge — not a per-session reset.
+          setLastTurnUsage(msg.lastTurnUsage ?? null);
+          setTotalUsage(msg.totalUsage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 });
+          // Restore the persisted context-fullness gauge (undefined → hidden).
+          setContextFill(
+            msg.lastPromptTokens !== undefined
+              ? { promptTokens: msg.lastPromptTokens, estimated: msg.lastPromptEstimated ?? false }
+              : null,
+          );
+          // The breakdown is thread-specific + on-demand — close it on a switch
+          // so a stale breakdown can't linger against the new thread.
+          setBreakdownOpen(false);
+          setContextBreakdown(null);
           setError(null);
           // Restore this thread's attached-script + file chips (empty for new threads).
           setAttachedScriptIds(msg.contextScriptIds);
           setAttachedFilePaths(msg.contextFilePaths);
           setMention(null);
+          break;
+        case 'assistant_compacted': {
+          const wasManual = compacting;
+          setCompacting(false);
+          if (msg.ok && msg.occupancyTokens !== undefined) {
+            // Gauge drops to the new (estimated) occupancy. For auto-compaction,
+            // this turn's assistant_completed then refines it to the real number.
+            setContextFill({ promptTokens: msg.occupancyTokens, estimated: msg.estimated ?? false });
+            // Manual compaction has no streaming turn to signal "done" — a
+            // transient toast confirms it (the "compacted here" divider appears on
+            // the next reload). Auto-compaction's signal is the gauge drop itself.
+            if (wasManual) setApplyToast({ kind: 'success', text: 'Context compacted — older messages summarized.' });
+          } else if (!msg.ok && msg.error) {
+            // Transient toast, not the sticky error banner — these are benign
+            // ("nothing to compact", "busy", "conversation changed").
+            setApplyToast({ kind: 'error', text: msg.error });
+          }
+          break;
+        }
+        case 'assistant_context_breakdown':
+          setContextBreakdown({ corpus: msg.corpus, memory: msg.memory, chat: msg.chat, attachments: msg.attachments });
           break;
         case 'user_files':
           setUserFiles(msg.files);
@@ -782,6 +839,43 @@ export const AssistantModal: FC<AssistantModalProps> = ({
     sendToBackend({ type: 'assistant_abort' });
   };
 
+  const handleCompact = () => {
+    if (isGenerating || compacting) return;
+    if (!connectionId) {
+      setError('Pick a connection before compacting — see the dropdown at the top of the modal.');
+      return;
+    }
+    setCompacting(true);
+    sendToBackend({ type: 'assistant_compact', connectionId });
+  };
+
+  // Toggle the context-breakdown popover; fetch fresh estimates on open.
+  const toggleBreakdown = () => {
+    setBreakdownOpen((open) => {
+      if (open) return false;
+      setContextBreakdown(null);
+      setBreakdownFailed(false);
+      sendToBackend({ type: 'request_context_breakdown' });
+      return true;
+    });
+  };
+  // Close the breakdown popover on a click outside it.
+  useEffect(() => {
+    if (!breakdownOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (gaugeWrapRef.current && !gaugeWrapRef.current.contains(e.target as Node)) setBreakdownOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [breakdownOpen]);
+  // Don't spin forever — surface a fallback if the estimate doesn't arrive
+  // (covers the rare case where the backend has no active thread/user to reply).
+  useEffect(() => {
+    if (!breakdownOpen || contextBreakdown) return;
+    const t = setTimeout(() => setBreakdownFailed(true), 6000);
+    return () => clearTimeout(t);
+  }, [breakdownOpen, contextBreakdown]);
+
   /** "Apply to script" — invoked from the code-block apply button via the
    *  AssistantApplyContext. Sends the raw code + fence-language hint;
    *  backend classifies trigger vs library, generates a name, prepends a
@@ -1046,7 +1140,7 @@ export const AssistantModal: FC<AssistantModalProps> = ({
                         type="button"
                         className="ls-asst-retry-btn"
                         onClick={handleRetry}
-                        disabled={isGenerating}
+                        disabled={isGenerating || compacting}
                         title="Re-send the last message"
                       >
                         <RotateCcw size={12} />
@@ -1065,6 +1159,53 @@ export const AssistantModal: FC<AssistantModalProps> = ({
             </AssistantApplyContext.Provider>
 
             <div className="ls-asst-usage-bar" aria-live="polite">
+              {contextFill && contextTokens > 0 && (() => {
+                const pct = contextFill.promptTokens / contextTokens;
+                // Label/title show the TRUE percent (can exceed 100% — the
+                // "over budget, older turns dropping" signal); only the fill-bar
+                // width below is clamped to 100%.
+                const pctDisplay = Math.round(pct * 100);
+                const level = pct >= 0.9 ? 'crit' : pct >= 0.75 ? 'warn' : 'ok';
+                return (
+                  <span className="ls-asst-gauge-wrap" ref={gaugeWrapRef}>
+                    <button
+                      type="button"
+                      className={`ls-asst-usage-gauge ls-asst-usage-gauge-${level}`}
+                      title={`Context window: ${contextFill.estimated ? '~' : ''}${formatTokens(contextFill.promptTokens)} of ${formatTokens(contextTokens)} tokens (${pctDisplay}%). Click for a breakdown of what's filling it.`}
+                      onClick={toggleBreakdown}
+                      aria-label="Context usage — click for a breakdown"
+                    >
+                      <span className="ls-asst-usage-gauge-track">
+                        <span
+                          className="ls-asst-usage-gauge-fill"
+                          style={{ width: `${Math.min(100, pctDisplay)}%` }}
+                        />
+                      </span>
+                      <span className="ls-asst-usage-label">{contextFill.estimated ? '~' : ''}{pctDisplay}% ctx</span>
+                    </button>
+                    {breakdownOpen && (
+                      contextBreakdown
+                        ? <ContextBreakdownPopover breakdown={contextBreakdown} budget={contextTokens} onClose={() => setBreakdownOpen(false)} />
+                        : <div className="ls-asst-bd-popover ls-asst-bd-loading">{breakdownFailed ? "Couldn't compute the breakdown — try reopening." : 'Calculating breakdown…'}</div>
+                    )}
+                  </span>
+                );
+              })()}
+              {contextFill && contextTokens > 0 && (
+                <button
+                  type="button"
+                  className="ls-asst-compact-btn"
+                  onClick={handleCompact}
+                  disabled={isGenerating || compacting}
+                  title="Compact now — summarize the older messages to free up context, keeping the recent ones verbatim. Most useful once the conversation is long; it also runs automatically as the context nears full."
+                  aria-label="Compact conversation context"
+                >
+                  {compacting ? <Loader2 size={11} className="ls-asst-spin" /> : <FoldVertical size={11} />}
+                </button>
+              )}
+              {contextFill && contextTokens > 0 && lastTurnUsage && (
+                <span className="ls-asst-usage-dot">·</span>
+              )}
               {lastTurnUsage && (
                 <>
                   <span
@@ -1167,7 +1308,7 @@ export const AssistantModal: FC<AssistantModalProps> = ({
                   onBlur={() => setMention(null)}
                   placeholder="Ask Lisa…  (Enter to send · Shift+Enter for newline · @ to attach a script)"
                   rows={2}
-                  disabled={isGenerating}
+                  disabled={isGenerating || compacting}
                 />
                 {isGenerating ? (
                   <button
@@ -1183,7 +1324,7 @@ export const AssistantModal: FC<AssistantModalProps> = ({
                     type="button"
                     className="ls-asst-send"
                     onClick={handleSend}
-                    disabled={!input.trim()}
+                    disabled={!input.trim() || compacting}
                     title="Send (Enter)"
                   >
                     <Send size={14} />
@@ -1443,6 +1584,14 @@ const MessageBubble = memo(({
       <div className="ls-asst-applied">
         <Check size={11} />
         <span>{message.appliedUpdated ? 'Updated' : 'Created'} <strong>{message.scriptName}</strong> from this conversation</span>
+      </div>
+    );
+  }
+  if (message.role === 'compacted') {
+    return (
+      <div className="ls-asst-compacted">
+        <FoldVertical size={11} />
+        <span>Earlier messages compacted — Lisa sees a summary of everything above this point</span>
       </div>
     );
   }

@@ -195,6 +195,16 @@ export interface LumiScriptSettings {
    */
   assistantMaxIterations: number;
   /**
+   * Token budget for Lisa's model-facing context window. Her per-turn prompt
+   * (system turn + windowed history) is trimmed to fit this, and the chat's
+   * fullness gauge reads against it. The host doesn't expose a model's real
+   * context length, so this is a manual setting; the default (200K) sits under
+   * the common ~256K floor of modern models and well under 1M-context ones.
+   * Lower it for small/local models; raise it for big windows. UI range:
+   * 8K – 1,000K.
+   */
+  assistantContextTokens: number;
+  /**
    * Generation defaults passed through `RunTurnOptions.parameters` to the
    * underlying `spindle.generate.rawStream` call. The three numeric fields
    * are OPTIONAL — blank / undefined means "no override; use the
@@ -208,6 +218,22 @@ export interface LumiScriptSettings {
   assistantTopP?: number;
   assistantMaxTokens?: number;
   assistantParallelToolCalls: boolean;
+  /**
+   * Whether Lisa auto-compacts a conversation once its context fills past the
+   * threshold — folding older turns into a summary so the chat can continue
+   * without overflowing. Fires an LLM summary call in the background after a
+   * turn, so it's opt-out for the cost/latency-averse (manual "Compact now"
+   * still works regardless). Default: true.
+   */
+  assistantAutoCompact: boolean;
+  /**
+   * Whether Lisa marks the stable part of her system prompt (persona + the
+   * ~44K-token API cheat-sheet) with a prompt-cache breakpoint, so caching
+   * providers (Anthropic et al.) read it from cache instead of re-billing it on
+   * every turn. Harmless no-op on providers that don't cache. Default: true;
+   * turn off only if a provider misbehaves with cache markers.
+   */
+  assistantPromptCaching: boolean;
 }
 
 export const DEFAULT_TRIGGER_TEMPLATE =
@@ -246,10 +272,13 @@ export const DEFAULT_SETTINGS: LumiScriptSettings = {
   defaultTriggerTemplate: DEFAULT_TRIGGER_TEMPLATE,
   defaultLibraryTemplate: DEFAULT_LIBRARY_TEMPLATE,
   assistantMaxIterations: 8,
+  assistantContextTokens: 200_000,
   // Generation defaults — temperature / topP / maxTokens are intentionally
   // omitted (undefined). The "no override; use connection preset" semantic
   // is meaningful state — only set them if the user explicitly tweaks.
   assistantParallelToolCalls: true,
+  assistantAutoCompact: true,
+  assistantPromptCaching: true,
 };
 
 // ─── Execution ────────────────────────────────────────────────────────────────

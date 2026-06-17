@@ -149,7 +149,10 @@ import {
   type ScriptRunnerProbeResult,
   type AssistantProbeResult,
 } from './engine/diagnostics.js';
-import { runAssistantTurn } from './assistant/agent.js';
+import { runAssistantTurn, estimateMessageTokens, estimateSystemFloorTokens, ATTACHED_SCRIPT_CODE_CAP, ATTACHED_FILE_TEXT_CAP } from './assistant/agent.js';
+import { buildModelHistory } from './assistant/model-history.js';
+import { compactThread, AUTO_COMPACT_THRESHOLD } from './assistant/compaction.js';
+import { buildSessionNotesSection } from './assistant/system-prompt.js';
 import { isEligibleUserFile, normalizeUserPath, MAX_USER_FILE_BYTES, USER_FILES_ROOT, userFileDisplayName, toUserFilePath } from './assistant/user-files.js';
 import {
   memoryIndex as loadMemoryIndex,
@@ -1212,6 +1215,21 @@ async function listAttachableUserFiles(
 
 function pushActiveThreadLoaded(): void {
   if (!activeAssistantThread) return;
+  // Gauge occupancy: the persisted last-turn value if present; else (threads
+  // created before occupancy was persisted) a local estimate over the current
+  // model-history + the fixed system floor, so the gauge + "Compact now" button
+  // still appear on an older chat. Flagged estimated; the next turn refines it.
+  let gauge: { lastPromptTokens?: number; lastPromptEstimated?: boolean } = {};
+  if (activeAssistantThread.lastPromptTokens !== undefined) {
+    gauge = {
+      lastPromptTokens: activeAssistantThread.lastPromptTokens,
+      lastPromptEstimated: activeAssistantThread.lastPromptEstimated ?? false,
+    };
+  } else if (activeAssistantThread.messages.some((m) => m.role !== 'system')) {
+    const historyTokens = buildModelHistory(activeAssistantThread)
+      .reduce((n, m) => n + estimateMessageTokens(m), 0);
+    gauge = { lastPromptTokens: estimateSystemFloorTokens() + historyTokens, lastPromptEstimated: true };
+  }
   sendAssistant({
     type: 'assistant_thread_loaded',
     threadId: activeAssistantThread.id,
@@ -1220,7 +1238,67 @@ function pushActiveThreadLoaded(): void {
     contextScriptIds: activeAssistantThread.contextScriptIds ?? [],
     contextFilePaths: activeAssistantThread.contextFilePaths ?? [],
     appliedEvents: activeAssistantThread.appliedEvents ?? [],
+    ...gauge,
+    ...(activeAssistantThread.lastTurnUsage ? { lastTurnUsage: activeAssistantThread.lastTurnUsage } : {}),
+    ...(activeAssistantThread.totalUsage ? { totalUsage: activeAssistantThread.totalUsage } : {}),
+    ...(activeAssistantThread.compactedThrough !== undefined
+      ? { compactedThrough: activeAssistantThread.compactedThrough }
+      : {}),
   });
+}
+
+/**
+ * Compute + push a per-segment token-estimate breakdown of the active thread's
+ * context occupancy (corpus / memory / chat / attachments) for the gauge's
+ * breakdown popover. ON-DEMAND — the FE requests it when the popover opens. All
+ * LOCAL estimates via estimateMessageTokens (the same yardstick as the gauge);
+ * informational + best-effort, never throws into the caller.
+ */
+async function pushContextBreakdown(userId: string): Promise<void> {
+  try {
+    // Snapshot the thread up front so an await mid-compute can't mix one thread's
+    // chat/attachments with another's if the user switches threads meanwhile.
+    const thread = activeAssistantThread;
+    const corpus = estimateSystemFloorTokens();
+    if (!thread) {
+      // No active thread — still reply (corpus only) so the FE popover never
+      // hangs on its "Calculating…" placeholder.
+      sendAssistant({ type: 'assistant_context_breakdown', corpus, memory: 0, chat: 0, attachments: 0 }, userId);
+      return;
+    }
+    let memIndex = '';
+    try { memIndex = await loadMemoryIndex(userId); } catch { /* leave empty */ }
+    const memory = estimateMessageTokens({ role: 'system', content: buildSessionNotesSection(memIndex) });
+    const chat = buildModelHistory(thread).reduce((n, m) => n + estimateMessageTokens(m), 0);
+    const attachments = await estimateAttachmentTokens(userId, thread);
+    sendAssistant({ type: 'assistant_context_breakdown', corpus, memory, chat, attachments }, userId);
+  } catch (err) {
+    spindle.log.warn(`[LumiScript] pushContextBreakdown failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/** Token estimate for the thread's @-attached scripts (sync) + reserved-folder
+ *  files (read fresh). Mirrors how runAssistantTurn folds them into the system
+ *  prompt; best-effort per item so one unreadable file doesn't drop the rest. */
+async function estimateAttachmentTokens(userId: string, thread: AssistantThread): Promise<number> {
+  let total = 0;
+  const scriptIds = new Set(thread.contextScriptIds ?? []);
+  if (scriptIds.size > 0) {
+    for (const sc of scriptStorage.getScripts()) {
+      if (scriptIds.has(sc.id)) total += estimateMessageTokens({ role: 'user', content: sc.code.slice(0, ATTACHED_SCRIPT_CODE_CAP) });
+    }
+  }
+  for (const rawPath of thread.contextFilePaths ?? []) {
+    try {
+      const path = normalizeUserPath(rawPath);
+      if (!isEligibleUserFile(path)) continue;
+      const st = await spindle.userStorage.stat(path, userId);
+      if (!st.exists || !st.isFile || st.sizeBytes > MAX_USER_FILE_BYTES) continue;
+      const content = await spindle.userStorage.read(path, userId);
+      total += estimateMessageTokens({ role: 'user', content: content.slice(0, ATTACHED_FILE_TEXT_CAP) });
+    } catch { /* skip unreadable / vanished file */ }
+  }
+  return total;
 }
 
 /** Push the user's current memory notes to the Memory panel. Best-effort —
@@ -1662,7 +1740,21 @@ spindle.onFrontendMessage(async (raw, userId) => {
             const h = hist[i];
             if (h && h.role === 'user' && typeof h.content === 'string') { cut = i; break; }
           }
-          if (cut !== -1) activeAssistantThread.messages = hist.slice(0, cut);
+          if (cut !== -1) {
+            activeAssistantThread.messages = hist.slice(0, cut);
+            // If the trim reached into or before the compaction boundary, the
+            // handoff + compactedThrough no longer describe messages[0..K) — drop
+            // the compaction state so the boundary can't go stale (the next
+            // auto-compact rebuilds it). When `cut` is safely after the boundary,
+            // the compacted prefix is untouched, so the state is kept.
+            if (
+              activeAssistantThread.compactedThrough !== undefined &&
+              cut <= activeAssistantThread.compactedThrough
+            ) {
+              activeAssistantThread.compactedThrough = undefined;
+              activeAssistantThread.handoff = undefined;
+            }
+          }
         }
         // Title derivation on first user message in a brand-new thread.
         const isFirstUserMessage =
@@ -1770,12 +1862,56 @@ spindle.onFrontendMessage(async (raw, userId) => {
           let memIndexStr = '';
           try { memIndexStr = await loadMemoryIndex(activeUserId); } catch { /* leave empty */ }
 
+          // Auto-compaction (pre-turn): if the PREVIOUS turn left the context over
+          // the threshold, fold the older prefix into a handoff summary BEFORE this
+          // turn so it starts lean. Runs while the composer is disabled (the FE
+          // blocks concurrent sends during generation) — so there's no re-entrancy
+          // window — and shares this turn's abort signal. Opt-out via setting;
+          // preserve-on-failure (compactThread returns null on any error) so it can
+          // never lose data or block the turn. The gauge refreshes naturally from
+          // THIS turn's assistant_completed (no separate event needed for auto).
+          if (
+            s.assistantAutoCompact &&
+            (activeAssistantThread.lastPromptTokens ?? 0) >=
+              s.assistantContextTokens * AUTO_COMPACT_THRESHOLD
+          ) {
+            const compacted = await compactThread(activeAssistantThread, {
+              userId: activeUserId,
+              budget: s.assistantContextTokens,
+              signal: assistantAbortController.signal,
+              ...(msg.connectionId ? { connectionId: msg.connectionId } : {}),
+            });
+            if (compacted) {
+              activeAssistantThread.compactedThrough = compacted.compactedThrough;
+              activeAssistantThread.handoff = compacted.handoff;
+              // Tell the FE so the gauge drops now (the "compacted here" divider
+              // appears on the next thread reload). This turn's assistant_completed
+              // then refines the gauge to the real post-compaction occupancy.
+              sendAssistant({
+                type: 'assistant_compacted',
+                ok: true,
+                occupancyTokens: compacted.occupancyTokens,
+                estimated: true,
+                compactedThrough: compacted.compactedThrough,
+              });
+            }
+          }
+
+          // Model-facing prior history — derived from the thread (reflecting any
+          // compaction just applied) so the LLM's view is shrunk without touching
+          // the full persisted/displayed `messages`. Hoisted so its length lets us
+          // recover this turn's NEW messages (the delta) below, instead of writing
+          // the derived view back — which would round-trip a synthetic handoff into
+          // the canonical record (the v1.1 data-loss class).
+          const modelHistory = buildModelHistory(activeAssistantThread);
           const result = await runAssistantTurn(
             {
-              history: activeAssistantThread.messages,
+              history: modelHistory,
               userInput: msg.content,
               userId: activeUserId,
               maxIterations: s.assistantMaxIterations,
+              contextTokens: s.assistantContextTokens,
+              promptCaching: s.assistantPromptCaching,
               signal: assistantAbortController.signal,
               parameters,
               ...(msg.connectionId ? { connectionId: msg.connectionId } : {}),
@@ -1813,7 +1949,39 @@ spindle.onFrontendMessage(async (raw, userId) => {
           // streaming preview + reasoning are complete before assistant_completed
           // (which reads the accumulated reasoning) replaces the live bubble.
           flushAssistantBatches();
-          activeAssistantThread.messages = result.messages.filter((m) => m.role !== 'system');
+          // Append only this turn's NEW messages (everything past the model-facing
+          // history we sent) to the CANONICAL full thread — never replace it with
+          // result.messages, which is the derived/compacted view. Replacing would
+          // round-trip the synthetic handoff into storage AND drop the folded
+          // prefix (the v1.1 data-loss class). The system turn never enters the
+          // record, so the role!=='system' filter is just defensive.
+          activeAssistantThread.messages = [
+            ...activeAssistantThread.messages,
+            ...result.messages.slice(modelHistory.length).filter((m) => m.role !== 'system'),
+          ];
+          // Persist this turn's prompt-token count for the context-fullness gauge
+          // (replayed on thread load). Only update when usage was resolved — an
+          // unreported turn leaves the prior value rather than blanking the gauge.
+          if (result.usage) {
+            activeAssistantThread.lastPromptTokens = result.usage.occupancyTokens ?? result.usage.promptTokens;
+            activeAssistantThread.lastPromptEstimated = result.usage.estimated ?? false;
+            // Persist the strip's in/out + a lifetime running total so they survive
+            // thread switches / modal reopen (like the gauge), not just the session.
+            const u = result.usage;
+            activeAssistantThread.lastTurnUsage = {
+              promptTokens: u.promptTokens,
+              completionTokens: u.completionTokens,
+              totalTokens: u.totalTokens,
+              ...(u.estimated ? { estimated: true } : {}),
+            };
+            const prev = activeAssistantThread.totalUsage;
+            activeAssistantThread.totalUsage = {
+              promptTokens: (prev?.promptTokens ?? 0) + u.promptTokens,
+              completionTokens: (prev?.completionTokens ?? 0) + u.completionTokens,
+              totalTokens: (prev?.totalTokens ?? 0) + u.totalTokens,
+              ...((prev?.estimated || u.estimated) ? { estimated: true } : {}),
+            };
+          }
           sendAssistant({
             type:    'assistant_completed',
             content: result.content,
@@ -1842,6 +2010,57 @@ spindle.onFrontendMessage(async (raw, userId) => {
           }
           assistantAbortController = null;
           assistantStreamedContent = '';
+        }
+        break;
+      }
+
+      case 'request_context_breakdown': {
+        if (activeUserId) void pushContextBreakdown(activeUserId);
+        break;
+      }
+
+      case 'assistant_compact': {
+        if (!activeUserId || !activeAssistantThread) {
+          // No active thread (e.g. not-yet / failed bootstrap after a reconnect).
+          // Reply anyway so the FE clears its "compacting" spinner.
+          sendAssistant({ type: 'assistant_compacted', ok: false, error: 'Assistant not ready yet — try again in a moment.' });
+          break;
+        }
+        // Refuse mid-generation — a concurrent turn would race the thread state.
+        // (The FE also disables the button while a turn is streaming.)
+        if (assistantAbortController) {
+          sendAssistant({ type: 'assistant_compacted', ok: false, error: 'Busy generating — try again in a moment.' });
+          break;
+        }
+        const cs = settingsStore.get();
+        // Capture the target thread: compactThread awaits a ~1-3s LLM call, during
+        // which the user could switch threads. If the active thread changed by the
+        // time we resolve, discard rather than write thread A's handoff onto B.
+        const target = activeAssistantThread;
+        const compacted = await compactThread(target, {
+          userId: activeUserId,
+          budget: cs.assistantContextTokens,
+          ...(msg.connectionId ? { connectionId: msg.connectionId } : {}),
+        });
+        if (activeAssistantThread !== target) {
+          sendAssistant({ type: 'assistant_compacted', ok: false, error: 'Conversation changed — compaction cancelled.' });
+          break;
+        }
+        if (compacted) {
+          target.compactedThrough = compacted.compactedThrough;
+          target.handoff = compacted.handoff;
+          target.lastPromptTokens = compacted.occupancyTokens;
+          target.lastPromptEstimated = true;
+          await persistActiveThread(activeUserId);
+          sendAssistant({
+            type: 'assistant_compacted',
+            ok: true,
+            occupancyTokens: compacted.occupancyTokens,
+            estimated: true,
+            compactedThrough: compacted.compactedThrough,
+          });
+        } else {
+          sendAssistant({ type: 'assistant_compacted', ok: false, error: 'Nothing old enough to compact yet — Lisa folds older messages to free space once a conversation grows (and auto-runs near full). Keep chatting and it\'ll become available.' });
         }
         break;
       }

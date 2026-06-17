@@ -669,6 +669,14 @@ export type FrontendToBackend =
   // field" intent. Backend follows up with the standard `settings_updated`
   // broadcast so the inputs re-render empty.
   | { type: 'assistant_reset_generation_defaults' }
+  // Manual context compaction ("Compact now") — fold the older part of the
+  // active thread into a handoff summary now. `connectionId` runs the summary on
+  // the user's chosen connection (mirrors assistant_memory_consolidate).
+  | { type: 'assistant_compact'; connectionId?: string }
+  // Request a breakdown of what's filling the context window (corpus / memory /
+  // chat / attachments token estimates) — sent when the user opens the gauge's
+  // breakdown popover, answered with assistant_context_breakdown.
+  | { type: 'request_context_breakdown' }
 ;
 
 // ─── Backend → Frontend ───────────────────────────────────────────────────────
@@ -1230,6 +1238,9 @@ export type BackendToFrontend =
         promptTokens: number;
         completionTokens: number;
         totalTokens: number;
+        /** Context occupancy — size of the latest single prompt (for the
+         *  fullness gauge), vs `promptTokens` which sums iterations for billing. */
+        occupancyTokens?: number;
         estimated?: boolean;
       };
     }
@@ -1243,6 +1254,9 @@ export type BackendToFrontend =
         promptTokens: number;
         completionTokens: number;
         totalTokens: number;
+        /** Context occupancy — size of the latest single prompt (for the
+         *  fullness gauge), vs `promptTokens` which sums iterations for billing. */
+        occupancyTokens?: number;
         estimated?: boolean;
       };
     }
@@ -1279,6 +1293,18 @@ export type BackendToFrontend =
       /** Apply markers to interleave into the reconstructed transcript. Empty
        *  for threads with no applies (or persisted before this shipped). */
       appliedEvents: import('../assistant/types.js').AppliedEvent[];
+      /** Persisted prompt-token count of the thread's last turn, for the
+       *  context-fullness gauge. Undefined for new / pre-gauge threads. */
+      lastPromptTokens?: number;
+      /** Whether `lastPromptTokens` was a local estimate (gauge shows `~`). */
+      lastPromptEstimated?: boolean;
+      /** Compaction boundary, if this thread has been compacted — anchors the
+       *  "compacted here" transcript divider on reload. Undefined = uncompacted. */
+      compactedThrough?: number;
+      /** Last turn's in/out/total usage + lifetime thread total — replayed so the
+       *  usage strip survives thread switches. Undefined for pre-this threads. */
+      lastTurnUsage?: { promptTokens: number; completionTokens: number; totalTokens: number; estimated?: boolean };
+      totalUsage?: { promptTokens: number; completionTokens: number; totalTokens: number; estimated?: boolean };
     }
   // Success confirmation for `assistant_apply_to_script` — carries the
   // generated script name + classified type so the modal can render a
@@ -1314,5 +1340,27 @@ export type BackendToFrontend =
       threadId: string;
       filename: string;
       content: string;
+    }
+  // Context compaction happened (auto pre-turn, or manual) — the older prefix was
+  // folded into a handoff. `ok:true` carries the new (lower) occupancy for the
+  // fullness gauge + the new boundary for the transcript divider; `ok:false`
+  // carries a reason (nothing old enough to fold, or the summary call failed —
+  // the thread is left uncompacted either way).
+  | {
+      type: 'assistant_compacted';
+      ok: boolean;
+      occupancyTokens?: number;
+      estimated?: boolean;
+      compactedThrough?: number;
+      error?: string;
+    }
+  // Per-segment token-estimate breakdown of the current context occupancy, for
+  // the gauge's breakdown popover. All LOCAL estimates (shown with ~), in tokens.
+  | {
+      type: 'assistant_context_breakdown';
+      corpus: number;       // persona + API cheat-sheet (the fixed prefix)
+      memory: number;       // saved-notes / session-notes section
+      chat: number;         // the conversation history
+      attachments: number;  // @-attached scripts + files (0 if none)
     }
 ;

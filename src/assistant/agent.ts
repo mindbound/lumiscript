@@ -27,7 +27,7 @@ declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
 
 import type { LlmMessageDTO, ToolCallDTO } from 'lumiverse-spindle-types';
 import type { LlmMessagePart } from '../types/script.js';
-import { buildAssistantSystemPrompt } from './system-prompt.js';
+import { buildAssistantSystemPrompt, buildSessionNotesSection } from './system-prompt.js';
 import { ASSISTANT_TOOLS, dispatchAssistantTool } from './tools.js';
 import type { AssistantPersona } from './types.js';
 import { userFileDisplayName, fenceLangForFile } from './user-files.js';
@@ -113,6 +113,23 @@ export interface RunTurnOptions {
    * runaway loops.
    */
   maxIterations?: number;
+  /**
+   * Token budget for the model-facing context window (the prompt sent each
+   * iteration). `windowHistory` trims prior history to fit this budget minus a
+   * fixed output reserve and the measured system-turn cost, using a fast local
+   * char-based estimate (no token-count IPC per turn). Defaults to
+   * `DEFAULT_CONTEXT_TOKENS`. The host exposes no per-model context length
+   * (ConnectionProfileDTO has `model` but no window field), so this is
+   * user-configured via `LumiScriptSettings.assistantContextTokens`.
+   */
+  contextTokens?: number;
+  /**
+   * Whether to mark the stable system prefix (persona + cheat-sheet) with a
+   * prompt-cache breakpoint so caching providers don't re-bill the ~44K-token
+   * cheat-sheet every turn. Default (undefined / true) caches; `false` sends the
+   * plain-string system turn. From `LumiScriptSettings.assistantPromptCaching`.
+   */
+  promptCaching?: boolean;
 }
 
 /** A single tool call event surfaced to the caller mid-turn. */
@@ -158,6 +175,17 @@ export interface TurnUsage {
    * display contract; revisit if strict billing parity ever matters.
    */
   estimated?: boolean;
+  /**
+   * Context OCCUPANCY — the prompt-token size of the most recent single
+   * generation (the final iteration's prompt), as opposed to `promptTokens`
+   * which SUMS every iteration's prompt for billing. The two diverge on
+   * multi-iteration tool turns: billing is the sum, but "how full is the
+   * context window" is the size of the latest prompt. Drives the chat's
+   * fullness gauge (and, later, the compaction trigger), so it must be the
+   * occupancy, not the sum. Provider last-iteration count when available, else
+   * the local estimate of the windowed prompt.
+   */
+  occupancyTokens?: number;
 }
 
 export interface TurnResult {
@@ -183,7 +211,7 @@ export interface TurnResult {
  * truncated with a marker so a single huge file can't blow the context window.
  * Generous — the vast majority of scripts fit well under this.
  */
-const ATTACHED_SCRIPT_CODE_CAP = 24_000;
+export const ATTACHED_SCRIPT_CODE_CAP = 24_000;
 
 /**
  * Build the `<attached-scripts>` block folded into the system prompt when the
@@ -228,7 +256,7 @@ function buildAttachedScriptsBlock(scripts: AttachedScript[]): string {
  * Max characters of file text inlined per attachment. Mirrors the script cap —
  * keeps one large file from blowing the context window.
  */
-const ATTACHED_FILE_TEXT_CAP = 24_000;
+export const ATTACHED_FILE_TEXT_CAP = 24_000;
 
 /**
  * Build the `<attached-files>` block folded into the system prompt when the user
@@ -268,35 +296,120 @@ function buildAttachedFilesBlock(files: AttachedFile[]): string {
   return parts.join('\n');
 }
 
+/**
+ * Upper bound on a single tool result's length folded into the conversation.
+ * One oversized result (a broad `lookup_api`, a large memory `recall`) would
+ * otherwise blow out the context window AND the transcript chip in one shot.
+ * Generous — normal results pass through untouched; only runaways are clipped,
+ * with a marker so the model and the user both know it happened. Char-based,
+ * mirroring the ATTACHED_*_CAP pattern (no async token count needed). The token
+ * window (windowHistory) bounds the CUMULATIVE history; this bounds a SINGLE
+ * result that could dominate a turn on its own.
+ */
+const TOOL_RESULT_CHAR_CAP = 40_000;
+
+/** Clip a tool result to TOOL_RESULT_CHAR_CAP, appending a truncation marker. */
+export function capToolResult(content: string): string {
+  if (content.length <= TOOL_RESULT_CHAR_CAP) return content;
+  return `${content.slice(0, TOOL_RESULT_CHAR_CAP)}\n\n… [truncated — tool result exceeded ${TOOL_RESULT_CHAR_CAP} characters; ask a more specific question to see the rest]`;
+}
+
 // ─── The loop ────────────────────────────────────────────────────────────────
 
 const MAX_ITERATIONS_DEFAULT = 8;
 
 /**
- * Upper bound on prior-history messages folded into each generation request.
- * The full thread is still PERSISTED and displayed — this only caps what's sent
- * to the model, so a long conversation doesn't grow the prompt (and the per-turn
- * serialization / token-estimation cost) without bound or eventually overflow
- * the model's context window. Generous: ordinary sessions never reach it.
+ * Default token budget for the model-facing context window when the caller
+ * doesn't supply one. The host exposes no per-model context length, so this is
+ * a deliberately conservative static default — it fits comfortably under the
+ * common ~256K lower bound of modern models and well under 1M-context ones.
+ * Overridable via `LumiScriptSettings.assistantContextTokens`.
  */
-const MAX_HISTORY_MESSAGES = 48;
+const DEFAULT_CONTEXT_TOKENS = 200_000;
 
 /**
- * Trim `history` to at most `MAX_HISTORY_MESSAGES`, cutting ONLY at a real
- * user-turn boundary (role 'user' with string content) so tool_use/tool_result
- * pairs are never split — an orphaned tool_result is a hard provider error.
- * Returns the original array when already within budget, or when no safe cut
- * point exists within budget (better an over-long prompt than a malformed one).
+ * Tokens held back from the budget for the model's RESPONSE — the configured
+ * context window covers input + output, so a full-budget prompt must still
+ * leave room to answer. A flat margin, generous for ordinary replies (reasoning
+ * models that emit more just get a slightly tighter history window).
  */
-function windowHistory(history: AssistantHistoryMessage[]): AssistantHistoryMessage[] {
-  if (history.length <= MAX_HISTORY_MESSAGES) return history;
-  let cut = -1;
-  for (let i = history.length - 1; i >= 0; i--) {
-    if (history.length - i > MAX_HISTORY_MESSAGES) break;
-    const m = history[i];
-    if (m && m.role === 'user' && typeof m.content === 'string') cut = i;
+const OUTPUT_RESERVE_TOKENS = 8_192;
+
+/**
+ * Fast, synchronous, dependency-free token ESTIMATE for one history message.
+ * Deliberately LOCAL (no `spindle.tokens.countText` IPC): windowHistory runs
+ * this for every message on every iteration of every turn, and the cut it
+ * drives is a SAFETY bound, not a billing figure, so an approximation is the
+ * right tool — paying a per-message host round-trip would reintroduce exactly
+ * the kind of per-turn latency the v1.1 perf pass removed. Biased slightly high
+ * (a structural constant on top of chars/4) so we trim a touch early rather
+ * than overflow the real window. The ACCURATE figure for the fullness gauge
+ * comes from provider usage / the end-of-turn countText fallback, never here.
+ */
+export function estimateMessageTokens(m: AssistantHistoryMessage): number {
+  const body = typeof m.content === 'string' ? m.content : JSON.stringify(m.content ?? '');
+  const reasoning = typeof m.reasoning_content === 'string' ? m.reasoning_content.length : 0;
+  // chars/4 ≈ tokens for English/code; +8 covers role + JSON framing per message.
+  return Math.ceil((body.length + reasoning) / 4) + 8;
+}
+
+let _systemFloorTokens: number | undefined;
+/**
+ * Cached local estimate of the FIXED system-turn cost (persona + cheat-sheet,
+ * excluding per-turn attachments / memory). Used to seed the context-fullness
+ * gauge on threads that predate occupancy persistence, so the gauge + "Compact
+ * now" button show on load instead of staying blank until the next turn.
+ * Approximate (flagged so the UI shows `~`); the next real turn replaces it with
+ * the provider-reported count.
+ */
+export function estimateSystemFloorTokens(): number {
+  if (_systemFloorTokens === undefined) {
+    _systemFloorTokens = estimateMessageTokens({ role: 'system', content: buildAssistantSystemPrompt() });
   }
-  return cut === -1 ? history : history.slice(cut);
+  return _systemFloorTokens;
+}
+
+/**
+ * Trim `history` to fit `budgetTokens`, cutting ONLY at a real user-turn
+ * boundary (role 'user' with string content) so tool_use/tool_result pairs are
+ * never split — an orphaned tool_result is a hard provider error. Returns the
+ * longest suffix that fits: walks newest→oldest accumulating estimated tokens
+ * and keeps the OLDEST user-boundary whose suffix is still within budget.
+ *
+ * Fail-safe: when even the most-recent user turn (plus any tool turns after it)
+ * already exceeds the budget, returns that minimal well-formed tail anyway — an
+ * over-budget but valid prompt beats a malformed one. (Tier-2 compaction will
+ * replace this lossy tail-drop with a graceful summary; the tool_result cap
+ * tackles oversized single turns that can blow past budget on their own.)
+ */
+export function windowHistory(
+  history: AssistantHistoryMessage[],
+  budgetTokens: number,
+): AssistantHistoryMessage[] {
+  // Fast path: whole history fits.
+  let total = 0;
+  for (const m of history) total += estimateMessageTokens(m);
+  if (total <= budgetTokens) return history;
+
+  // Trim needed. Walk newest→oldest; keep the OLDEST user-boundary whose suffix
+  // is still within budget.
+  let acc = 0;
+  let bestCut = -1;
+  for (let i = history.length - 1; i >= 0; i--) {
+    acc += estimateMessageTokens(history[i]!);
+    if (acc > budgetTokens) break; // including i overflows — can't extend further back
+    const m = history[i];
+    if (m && m.role === 'user' && typeof m.content === 'string') bestCut = i;
+  }
+  if (bestCut !== -1) return history.slice(bestCut);
+
+  // Fail-safe: even the newest user turn's suffix overflows. Send the minimal
+  // well-formed tail from the most-recent user boundary (over-budget but valid).
+  for (let i = history.length - 1; i >= 0; i--) {
+    const m = history[i];
+    if (m && m.role === 'user' && typeof m.content === 'string') return history.slice(i);
+  }
+  return history; // no user boundary at all (degenerate) — better over-long than malformed
 }
 
 interface DoneShape {
@@ -357,28 +470,68 @@ export async function runAssistantTurn(
   // is rebuilt every turn and stripped before persistence (`role !== 'system'`
   // filter backend-side) — so the code is always fresh and never bloats the
   // chat bubble or saved thread history.
-  let systemContent = buildAssistantSystemPrompt(opts.persona, opts.memoryIndex);
+  // System turn — split into a STABLE prefix (persona + cheat-sheet) and a
+  // VOLATILE tail (session notes + @-attached scripts/files). The stable prefix
+  // is byte-identical every turn, so #3 marks it with a prompt-cache breakpoint
+  // (cache_control): caching providers read the ~44K cheat-sheet from cache
+  // instead of re-billing it each turn AND each agentic iteration. The volatile
+  // tail (which changes when memory or attachments change) stays uncached so it
+  // never invalidates the cached prefix. Attached scripts/files fold into the
+  // tail — rebuilt every turn, stripped before persistence (role!=='system'), so
+  // the code is always fresh and never bloats the saved thread.
+  const stableSystem = buildAssistantSystemPrompt(opts.persona);
+  const volatileParts: string[] = [buildSessionNotesSection(opts.memoryIndex)];
   if (opts.attachedScripts && opts.attachedScripts.length > 0) {
-    systemContent += `\n\n${buildAttachedScriptsBlock(opts.attachedScripts)}`;
+    volatileParts.push(buildAttachedScriptsBlock(opts.attachedScripts));
   }
   if (opts.attachedFiles && opts.attachedFiles.length > 0) {
-    systemContent += `\n\n${buildAttachedFilesBlock(opts.attachedFiles)}`;
+    volatileParts.push(buildAttachedFilesBlock(opts.attachedFiles));
   }
+  const volatileSystem = volatileParts.join('\n\n');
 
   // The FULL conversation record — what gets persisted + displayed. It is NEVER
-  // windowed: windowHistory bounds only the prompt SENT to the model (built per
-  // iteration below as `sent`), never the saved thread. Returning a windowed
-  // array as result.messages was the v1.1 data-loss bug: backend.ts reassigns
-  // activeAssistantThread.messages from result.messages, so a thread past
-  // MAX_HISTORY_MESSAGES lost its oldest turns from storage on every new turn.
-  const systemTurn: AssistantHistoryMessage = { role: 'system', content: systemContent };
+  // windowed (windowHistory bounds only the prompt SENT to the model, built per
+  // iteration below as `sent`). Returning a windowed array as result.messages was
+  // the v1.1 data-loss bug: backend reassigns thread.messages from result.messages.
+  //
+  // The cache marker is emitted blind to the provider — the host translates/strips
+  // cache_control for backends that don't support it (a harmless no-op), so no
+  // provider gating is needed here (matches LumiAgent).
+  const systemParts: LlmMessagePart[] = [
+    { type: 'text', text: stableSystem, cache_control: { type: 'ephemeral', ttl: '1h' } },
+  ];
+  // Volatile tail as its own part — skipped if somehow empty, since caching
+  // providers reject empty text blocks (not reachable today, but keeps the
+  // invariant local against future refactors of buildSessionNotesSection).
+  if (volatileSystem.trim()) systemParts.push({ type: 'text', text: volatileSystem });
+  const systemTurn: AssistantHistoryMessage = opts.promptCaching === false
+    ? { role: 'system', content: `${stableSystem}\n\n${volatileSystem}` }
+    : { role: 'system', content: systemParts };
   const record: AssistantHistoryMessage[] = [
     ...opts.history,
     { role: 'user', content: opts.userInput },
   ];
 
+  // Token budget for the per-iteration prompt. The system turn (persona +
+  // cheat-sheet + attachments + session notes) is FIXED for the turn, so
+  // measure it once and subtract it — plus a response reserve — from the budget;
+  // windowHistory then trims the prior history to whatever's left. All estimates
+  // are local char-based (no per-turn token-count IPC) — see estimateMessageTokens.
+  const contextTokens = opts.contextTokens && opts.contextTokens > 0
+    ? opts.contextTokens
+    : DEFAULT_CONTEXT_TOKENS;
+  const historyBudget = Math.max(
+    0,
+    contextTokens - OUTPUT_RESERVE_TOKENS - estimateMessageTokens(systemTurn),
+  );
+
   let totalPromptTokens = 0;
   let totalCompletionTokens = 0;
+  // The most recent iteration's prompt size — the context OCCUPANCY (vs the
+  // billing SUM in totalPromptTokens). Overwritten each iteration, so after the
+  // loop it holds the final prompt's size, which is what the fullness gauge and
+  // (later) the compaction trigger need.
+  let lastPromptOccupancy = 0;
   // Track whether ANY iteration's done chunk carried real (non-zero) usage.
   // Some providers send `done.usage` with all-zero fields on streaming
   // responses, which we treat as "didn't report" — same as `usage` being
@@ -401,9 +554,10 @@ export async function runAssistantTurn(
       const providerFields: Record<string, string> = {};
       if (resolvedProvider) providerFields.provider = resolvedProvider;
       if (resolvedModel)    providerFields.model    = resolvedModel;
-      // The model sees only the windowed view (system + the most recent
-      // MAX_HISTORY_MESSAGES turns of the record); the full `record` is persisted.
-      const sent: AssistantHistoryMessage[] = [systemTurn, ...windowHistory(record)];
+      // The model sees only the windowed view (system turn + the most recent
+      // turns of the record that fit `historyBudget` tokens); the full `record`
+      // is persisted. Recomputed each iteration because tool turns grow `record`.
+      const sent: AssistantHistoryMessage[] = [systemTurn, ...windowHistory(record, historyBudget)];
       const request = {
         type: 'raw' as const,
         messages: sent,
@@ -451,6 +605,7 @@ export async function runAssistantTurn(
         if (pt > 0 || ct > 0) hasRealUsage = true;
         totalPromptTokens += pt;
         totalCompletionTokens += ct;
+        if (pt > 0) lastPromptOccupancy = pt; // occupancy = latest prompt, not the sum
       }
 
       const toolCalls = done.tool_calls ?? [];
@@ -471,6 +626,10 @@ export async function runAssistantTurn(
             promptTokens: totalPromptTokens,
             completionTokens: totalCompletionTokens,
             totalTokens: totalPromptTokens + totalCompletionTokens,
+            // Occupancy = the latest prompt's size (final iteration), not the
+            // per-iteration billing sum. Equals totalPromptTokens for the common
+            // single-iteration turn; falls back to it if no prompt count surfaced.
+            occupancyTokens: lastPromptOccupancy > 0 ? lastPromptOccupancy : totalPromptTokens,
           };
         } else {
           // Upstream didn't report usage. Fall back to client-side counting via
@@ -504,17 +663,21 @@ export async function runAssistantTurn(
       const toolResultParts: LlmMessagePart[] = [];
       for (const call of toolCalls) {
         const result = await dispatchAssistantTool(call.name, call.args ?? {}, { userId: opts.userId });
+        // Cap a single tool result so one runaway (broad lookup, big recall)
+        // can't blow the context window or the transcript chip. The same capped
+        // string feeds both the model context and the FE echo so they agree.
+        const cappedContent = capToolResult(result.content);
         events.onToolCall?.({
           callId: call.call_id,
           name: call.name,
           args: call.args ?? {},
-          result: result.content,
+          result: cappedContent,
           isError: result.isError,
         });
         toolResultParts.push({
           type: 'tool_result',
           tool_use_id: call.call_id,
-          content: result.content,
+          content: cappedContent,
           ...(result.isError ? { is_error: true } : {}),
         });
       }
@@ -594,6 +757,9 @@ async function estimateUsageLocally(
       promptTokens: promptResult.total_tokens,
       completionTokens: completionResult.total_tokens,
       totalTokens: promptResult.total_tokens + completionResult.total_tokens,
+      // The estimate counts the single windowed prompt (`sent`), so it already
+      // IS the occupancy — mirror it so the gauge reads consistently.
+      occupancyTokens: promptResult.total_tokens,
       estimated: true,
     };
   } catch {

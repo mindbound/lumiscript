@@ -391,6 +391,24 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
           />
         </div>
 
+        <div className="ls-settings-field">
+          <label className="ls-settings-field-label" title="Token budget for Lisa's context window. Her per-turn prompt is trimmed to fit this, and the fullness gauge in chat reads against it. The app can't detect a model's real context length, so set this to match your model: 200K suits most modern models; lower it for small/local models, raise it for 1M-context ones.">
+            Context budget (tokens)
+          </label>
+          <input
+            type="number"
+            className="ls-number-input"
+            min={8000}
+            max={1000000}
+            step={1000}
+            value={settings.assistantContextTokens}
+            onChange={e => {
+              const n = Math.max(8000, Math.min(1_000_000, Number(e.target.value) || 200_000));
+              sendToBackend({ type: 'update_settings', patch: { assistantContextTokens: n } });
+            }}
+          />
+        </div>
+
         {/* Generation defaults — passed to runAssistantTurn via parameters.
             Numeric fields use "blank = no override; use connection preset"
             semantic. Empty input value → undefined in settings → field
@@ -483,6 +501,30 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
           <span style={{ fontSize: 12 }}>Parallel tool calls</span>
         </div>
 
+        <div className="ls-toggle-row" title="When on, Lisa automatically summarizes the older part of a long conversation once its context fills past ~85%, so the chat can keep going without overflowing. The summary runs as a background LLM call on the turn that crosses the line. Turn off to compact only manually (the “Compact now” button in chat still works).">
+          <label className="ls-toggle">
+            <input
+              type="checkbox"
+              checked={settings.assistantAutoCompact}
+              onChange={e => sendToBackend({ type: 'update_settings', patch: { assistantAutoCompact: e.target.checked } })}
+            />
+            <span className="ls-toggle-slider" />
+          </label>
+          <span style={{ fontSize: 12 }}>Auto-compact context</span>
+        </div>
+
+        <div className="ls-toggle-row" title="When on, Lisa marks the stable part of her system prompt (her persona + the API cheat-sheet) for prompt caching, so caching providers (Anthropic and others) read it from cache instead of re-billing ~44K tokens every turn — a large cost/latency saving. Harmless on providers that don't cache. Turn off only if a provider misbehaves with cache markers.">
+          <label className="ls-toggle">
+            <input
+              type="checkbox"
+              checked={settings.assistantPromptCaching}
+              onChange={e => sendToBackend({ type: 'update_settings', patch: { assistantPromptCaching: e.target.checked } })}
+            />
+            <span className="ls-toggle-slider" />
+          </label>
+          <span style={{ fontSize: 12 }}>Cache system prompt</span>
+        </div>
+
         <div className="ls-settings-subheading">Conversation management</div>
 
         <button
@@ -517,6 +559,7 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
         <AssistantModal
           scripts={scripts}
           defaultConnectionId={settings.assistantConnectionId ?? ''}
+          contextTokens={settings.assistantContextTokens}
           onClose={() => setAssistantOpen(false)}
           onBackendMessage={onBackendMessage}
           sendToBackend={sendToBackend}
