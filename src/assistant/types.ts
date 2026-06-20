@@ -7,6 +7,16 @@
  */
 
 /**
+ * Max characters of code inlined per attached script — the most Lisa "sees" of a
+ * script she's been @-attached. Longer scripts are truncated with a marker so a
+ * single huge file can't blow the context window; the AssistantModal apply-diff
+ * also reads this to warn when a script is longer than Lisa could have seen.
+ * Lives here (not agent.ts) so the frontend can import it without pulling the
+ * backend assistant module into its bundle.
+ */
+export const ATTACHED_SCRIPT_CODE_CAP = 24_000;
+
+/**
  * Persona definition for the assistant's voice and behaviour.
  *
  * Mirrors the LumiScript Council member shape (`CouncilMemberContext.name` /

@@ -19,7 +19,8 @@
  */
 
 import { jsonquery } from '@jsonquerylang/jsonquery';
-import type { DbRecord, DbFilter, ZodLike } from '../types/script.js';
+import type { DbRecord, DbFilter, ZodLike, DbRetention } from '../types/script.js';
+import { dbCacheKey, getDbCache, setDbCache } from './db-cache.js';
 import { generateUUID } from '../utils/uuid.js';
 import type { UserStorageAdapter } from '../storage/collection-store.js';
 
@@ -308,7 +309,36 @@ export class DbStore<T extends DbRecord = DbRecord> {
     private readonly getUserId: () => string | undefined,
     private readonly onSizeWarn?: SizeWarnCallback,
     private readonly schema?: ZodLike<T>,
+    private readonly retention?: DbRetention,
   ) {}
+
+  // ─── Retention (lazy prune-on-insert) ──────────────────────────────────────
+
+  /**
+   * Drop records older than `retention.maxAgeMs` (measured from `createdAt`).
+   * No-op (returns the input array unchanged) when no age bound is configured.
+   * Applied to EXISTING records before an insert appends — so a freshly
+   * inserted record is never expired in the same call.
+   */
+  private pruneExpired(records: T[], now: number): T[] {
+    const maxAge = this.retention?.maxAgeMs;
+    if (maxAge === undefined) return records;
+    return records.filter((r) => {
+      const created = typeof r.createdAt === 'number' ? r.createdAt : now;
+      return now - created <= maxAge;
+    });
+  }
+
+  /**
+   * Cap to the newest `retention.maxRecords` by insertion order (drop from the
+   * front). No-op when no count bound is configured or the array already fits.
+   * Returns a slice (same record refs) so callers can identity-test survivors.
+   */
+  private capRecords(records: T[]): T[] {
+    const max = this.retention?.maxRecords;
+    if (max === undefined || records.length <= max) return records;
+    return records.slice(records.length - max);
+  }
 
   /**
    * Run the schema (if attached) against a candidate record. Throws a
@@ -336,14 +366,24 @@ export class DbStore<T extends DbRecord = DbRecord> {
 
   // ─── Load ────────────────────────────────────────────────────────────────
 
-  /** Read the entire collection from disk. Returns `[]` if missing. */
+  /**
+   * Read the entire collection. Serves a `structuredClone` of the process-global
+   * cache when warm (skipping the worker→host getJson round-trip); on a miss,
+   * reads from storage and caches the canonical array. Always returns a private
+   * copy so a caller mutating a returned record can't reach back into the cache.
+   */
   private async load(): Promise<T[]> {
     const userId = this.getUserId();
+    const key = dbCacheKey(userId, this.path);
+    const cached = getDbCache(key);
+    if (cached !== undefined) return structuredClone(cached) as T[];
     const data = await this.storage.getJson<T[]>(this.path, {
       fallback: [] as T[],
       userId,
     });
-    return Array.isArray(data) ? data : [];
+    const records = (Array.isArray(data) ? data : []) as DbRecord[];
+    setDbCache(key, records);
+    return structuredClone(records) as T[];
   }
 
   // ─── Persist with size-guard ─────────────────────────────────────────────
@@ -367,6 +407,17 @@ export class DbStore<T extends DbRecord = DbRecord> {
     // the UserStorageAdapter only exposes setJson, which re-stringifies,
     // but this is cheap (tens of ms at 10 MB).
     await this.storage.setJson(this.path, records, { indent: 2, userId });
+    // Refresh the cache to the just-written state. Cache `JSON.parse(serialized)`
+    // — NOT `structuredClone(records)` — so the cached array is byte-identical to
+    // what a fresh `getJson` would return. The storage round-trip is JSON, which
+    // coerces non-JSON values (Date→ISO string, undefined props dropped, NaN/
+    // Infinity→null); `structuredClone` would instead PRESERVE the in-memory
+    // types, making a warm-cache read diverge from a cold re-read (and from the
+    // Storage panel, which always cold-reads). Re-parsing the already-computed
+    // `serialized` string is one parse with no extra stringify, and yields a
+    // fresh tree isolated from both `records` and the caller. `bytes` keeps the
+    // byte-budget accounting exact.
+    setDbCache(dbCacheKey(userId, this.path), JSON.parse(serialized) as DbRecord[], bytes);
   }
 
   // ─── Mutations ───────────────────────────────────────────────────────────
@@ -396,8 +447,12 @@ export class DbStore<T extends DbRecord = DbRecord> {
       createdAt: injected.createdAt,
       updatedAt: injected.updatedAt,
     } as T;
-    records.push(persisted);
-    await this.persist(records);
+    // Retention: expire stale EXISTING records first (so the just-inserted one
+    // is never pruned in the same call), append, then cap to maxRecords. Both
+    // are no-ops when no retention policy is attached → identical to pre-1.4.0.
+    const retained = this.pruneExpired(records, now);
+    retained.push(persisted);
+    await this.persist(this.capRecords(retained));
     return persisted;
   }
 
@@ -436,9 +491,16 @@ export class DbStore<T extends DbRecord = DbRecord> {
         updatedAt: r.updatedAt,
       } as T;
     });
-    const combined = [...existing, ...validated];
-    await this.persist(combined);
-    return validated;
+    // Retention: expire stale existing records, append the batch, cap to
+    // maxRecords. When the batch itself exceeds maxRecords the front of the
+    // batch is dropped too — so return only the records that actually survived
+    // the cap (the caller's broadcast fan-out must stay honest).
+    const combined = [...this.pruneExpired(existing, now), ...validated];
+    const capped = this.capRecords(combined);
+    await this.persist(capped);
+    if (capped.length === combined.length) return validated;
+    const survivors = new Set<T>(capped);
+    return validated.filter((r) => survivors.has(r));
   }
 
   async update(filter: DbFilter<T>, patch: Partial<T>): Promise<number> {

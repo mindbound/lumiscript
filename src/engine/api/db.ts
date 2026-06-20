@@ -31,6 +31,7 @@ import type {
   DbAPI,
   DbFilter,
   DbRecord,
+  DbRetention,
   ZodLike,
   DbScope,
 } from '../../types/script.js';
@@ -43,6 +44,7 @@ import {
   assertValidName,
 } from '../db-paths.js';
 import { runExclusive } from '../db-queue.js';
+import { dbCacheKey, invalidateDbCache } from '../db-cache.js';
 import {
   DbStore,
   classifyFilter,
@@ -71,6 +73,21 @@ function makeStorageAdapter(): UserStorageAdapter {
       return spindle.userStorage.setJson(path, value, opts);
     },
   };
+}
+
+/**
+ * Validate a retention policy at `collection()` creation — fail loud at the
+ * call site rather than silently ignoring a malformed bound at prune time.
+ */
+function assertValidRetention(retention: DbRetention | undefined): void {
+  if (retention === undefined) return;
+  const { maxRecords, maxAgeMs } = retention;
+  if (maxRecords !== undefined && (!Number.isInteger(maxRecords) || maxRecords < 1)) {
+    throw new Error('api.db: retention.maxRecords must be a positive integer');
+  }
+  if (maxAgeMs !== undefined && (typeof maxAgeMs !== 'number' || !Number.isFinite(maxAgeMs) || maxAgeMs <= 0)) {
+    throw new Error('api.db: retention.maxAgeMs must be a positive number');
+  }
 }
 
 // ─── buildDbAPI ──────────────────────────────────────────────────────────────
@@ -110,6 +127,7 @@ export function buildDbAPI(deps: APIBuildDeps): DbAPI {
     scope: DbScope,
     path: string,
     schema?: ZodLike<T>,
+    retention?: DbRetention,
   ): Collection<T> {
     const store = new DbStore<T>(
       path,
@@ -117,6 +135,7 @@ export function buildDbAPI(deps: APIBuildDeps): DbAPI {
       getUserId,
       makeSizeWarn(name, scope),
       schema,
+      retention,
     );
 
     return {
@@ -220,7 +239,9 @@ export function buildDbAPI(deps: APIBuildDeps): DbAPI {
       const scope: DbScope = opts?.scope ?? 'script';
       // `resolvePath` validates name + throws on missing context — do this
       // eagerly at creation time so errors surface at the call site, not
-      // deep inside a later method.
+      // deep inside a later method. Validate the retention policy here too
+      // (before the handle cache) so a bad policy always throws, cached or not.
+      assertValidRetention(opts?.retention);
       const path = resolvePath(scope, scopeContext(), name);
 
       // v0.26.1 — dedup by (scope, path) per-script. Pre-fix, every call
@@ -245,7 +266,7 @@ export function buildDbAPI(deps: APIBuildDeps): DbAPI {
         path,
       });
 
-      const col = makeCollection<T>(name, scope, path, opts?.schema);
+      const col = makeCollection<T>(name, scope, path, opts?.schema, opts?.retention);
       setCachedCollection(script.id, scope, path, col);
       return col;
     },
@@ -276,6 +297,7 @@ export function buildDbAPI(deps: APIBuildDeps): DbAPI {
 
       await runExclusive(path, async () => {
         await spindle.userStorage.delete(path, userId ?? undefined);
+        invalidateDbCache(dbCacheKey(userId ?? undefined, path));
       });
 
       busEmit('ls:collection:dropped', {

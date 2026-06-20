@@ -38,6 +38,8 @@ import { ConfirmDialog } from '../common/ConfirmDialog.js';
 import { MemoryPanel } from './MemoryPanel.js';
 import type { MemoryNote } from '../../engine/assistant-memory.js';
 import { UserFilePicker, type PickerFile } from './UserFilePicker.js';
+import { computeCodeDiff } from './code-diff.js';
+import { ATTACHED_SCRIPT_CODE_CAP } from '../../assistant/types.js';
 import { userFileDisplayName } from '../../assistant/user-files.js';
 
 /**
@@ -924,6 +926,19 @@ export const AssistantModal: FC<AssistantModalProps> = ({
     () => ({ attachedScripts: applyScripts, onApply }),
     [applyScripts, onApply],
   );
+  // Diff the target script's CURRENT code against the code Lisa wants to apply,
+  // so the user reviews the exact overwrite instead of trusting a blind
+  // whole-file replace. `scripts` carries the full current code (NOT the 24K
+  // capped view Lisa sees), so a tail Lisa couldn't see surfaces here as deleted
+  // lines. Recomputed only while the confirm is open.
+  const applyDiff = useMemo(() => {
+    if (!pendingApply) return null;
+    const current = scripts.find((s) => s.id === pendingApply.targetScriptId)?.code ?? '';
+    return {
+      diff: computeCodeDiff(current, pendingApply.code),
+      wasTruncated: current.length > ATTACHED_SCRIPT_CODE_CAP,
+    };
+  }, [pendingApply, scripts]);
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     // When the @-mention menu has candidates, it owns the nav keys.
@@ -1348,6 +1363,7 @@ export const AssistantModal: FC<AssistantModalProps> = ({
             // Lisa's modal backdrop is z-index 10001; sit above it so the
             // confirm isn't occluded (default overlay z-index is 9999).
             overlayZIndex={10002}
+            wide
             onConfirm={() => {
               sendToBackend({
                 type: 'assistant_apply_to_script',
@@ -1360,12 +1376,52 @@ export const AssistantModal: FC<AssistantModalProps> = ({
             onCancel={() => setPendingApply(null)}
           >
             <p className="ls-confirm-message">
-              This replaces the entire code of <strong>{pendingApply.scriptName}</strong> with
-              the code from this block.
+              Review the changes to <strong>{pendingApply.scriptName}</strong> before overwriting
+              {applyDiff && !applyDiff.diff.identical && (
+                <>
+                  {' '}— <span className="ls-apply-diff-stat-add">+{applyDiff.diff.added}</span>
+                  {' / '}<span className="ls-apply-diff-stat-del">−{applyDiff.diff.removed}</span> lines
+                </>
+              )}.
             </p>
+            {applyDiff?.diff.identical ? (
+              <div className="ls-confirm-warning">
+                <AlertTriangle size={12} />
+                <span>Lisa's code is identical to the current script — applying changes nothing.</span>
+              </div>
+            ) : (
+              <div className="ls-apply-diff" role="group" aria-label={`Proposed changes to ${pendingApply.scriptName}`}>
+                {applyDiff?.diff.rows.map((r, idx) =>
+                  r.type === 'gap' ? (
+                    <div key={idx} className="ls-apply-diff-row ls-apply-diff-gap">
+                      ⋯ {r.count} unchanged line{r.count === 1 ? '' : 's'}
+                    </div>
+                  ) : (
+                    <div key={idx} className={`ls-apply-diff-row ls-apply-diff-${r.type}`}>
+                      <span className="ls-apply-diff-gutter">{r.type === 'add' ? '+' : r.type === 'del' ? '−' : ' '}</span>
+                      <span className="ls-apply-diff-text">{r.text === '' ? ' ' : r.text}</span>
+                    </div>
+                  ),
+                )}
+                {applyDiff?.diff.truncatedRows && (
+                  <div className="ls-apply-diff-row ls-apply-diff-gap">
+                    … diff truncated — review the rest in the editor after applying.
+                  </div>
+                )}
+              </div>
+            )}
+            {applyDiff?.wasTruncated && (
+              <div className="ls-confirm-warning">
+                <AlertTriangle size={12} />
+                <span>
+                  This script is longer than Lisa can see ({ATTACHED_SCRIPT_CODE_CAP.toLocaleString()} chars),
+                  so she may not have had the full file — check the diff for code being removed.
+                </span>
+              </div>
+            )}
             <div className="ls-confirm-warning">
               <AlertTriangle size={12} />
-              <span>The current code is overwritten — this can't be undone.</span>
+              <span>Overwrites the current code — this can't be undone.</span>
             </div>
           </ConfirmDialog>
         )}

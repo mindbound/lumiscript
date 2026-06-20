@@ -6916,6 +6916,39 @@ export type DbFilter<T = DbRecord> =
   | ((record: T) => boolean);
 
 /**
+ * Per-collection retention policy (opt-in). Enforced lazily ON INSERT
+ * (`insert` / `insertMany`) — there is no background timer, so a collection
+ * that stops receiving inserts keeps its records until the next insert.
+ * Reads, `update`, and `delete` never prune.
+ *
+ * Both bounds may be combined. Per insert: expiry (`maxAgeMs`) is applied to
+ * the EXISTING records first, then the newly-inserted record(s) are appended,
+ * then `maxRecords` caps the total by dropping the oldest (by insertion order).
+ * Applying expiry before the append means a freshly-inserted record is never
+ * pruned by `maxAgeMs` in the same call (even if given an explicitly old
+ * `createdAt`), so `insert()` never returns a record it didn't persist. When an
+ * `insertMany` batch is larger than `maxRecords`, only the records that survive
+ * the cap are returned (and broadcast). Pruning is silent — no
+ * `ls:collection:deleted` event fires for auto-pruned records.
+ *
+ * Available from LumiScript 1.4.0+.
+ */
+export interface DbRetention {
+  /**
+   * Keep at most this many records. On insert, once the collection would
+   * exceed this count the oldest records (by insertion order) are dropped
+   * until it fits. Must be a positive integer.
+   */
+  maxRecords?: number;
+  /**
+   * Drop records older than this many milliseconds (measured from each
+   * record's `createdAt`) when an insert touches the collection. Must be a
+   * positive number.
+   */
+  maxAgeMs?: number;
+}
+
+/**
  * Options for `api.db.collection(name, opts)`.
  */
 export interface CollectionOpts<T extends DbRecord = DbRecord> {
@@ -6940,6 +6973,14 @@ export interface CollectionOpts<T extends DbRecord = DbRecord> {
    * surface the issue.
    */
   schema?: ZodLike<T>;
+  /**
+   * Optional retention policy — auto-prune old records on insert. See
+   * {@link DbRetention}. Omit for unbounded retention (the default). Like
+   * `schema`, the policy from the FIRST `collection()` call for a given
+   * (scope, name) wins; later calls with a different policy reuse the cached
+   * handle.
+   */
+  retention?: DbRetention;
 }
 
 /**

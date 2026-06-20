@@ -29,7 +29,7 @@ import type { LlmMessageDTO, ToolCallDTO } from 'lumiverse-spindle-types';
 import type { LlmMessagePart } from '../types/script.js';
 import { buildAssistantSystemPrompt, buildSessionNotesSection } from './system-prompt.js';
 import { ASSISTANT_TOOLS, dispatchAssistantTool } from './tools.js';
-import type { AssistantPersona } from './types.js';
+import { type AssistantPersona, ATTACHED_SCRIPT_CODE_CAP } from './types.js';
 import { userFileDisplayName, fenceLangForFile } from './user-files.js';
 
 // ─── Public types ────────────────────────────────────────────────────────────
@@ -206,12 +206,10 @@ export interface TurnResult {
 
 // ─── Attached-script context ──────────────────────────────────────────────────
 
-/**
- * Max characters of code inlined per attached script. Longer scripts are
- * truncated with a marker so a single huge file can't blow the context window.
- * Generous — the vast majority of scripts fit well under this.
- */
-export const ATTACHED_SCRIPT_CODE_CAP = 24_000;
+// ATTACHED_SCRIPT_CODE_CAP lives in ./types.js (FE-safe — the AssistantModal
+// diff-preview reads it for its "longer than Lisa can see" warning); re-exported
+// here so existing backend importers keep their `./agent.js` import path.
+export { ATTACHED_SCRIPT_CODE_CAP } from './types.js';
 
 /**
  * Build the `<attached-scripts>` block folded into the system prompt when the

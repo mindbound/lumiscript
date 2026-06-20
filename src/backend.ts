@@ -119,6 +119,7 @@ import {
   deleteRecord,
   isValidCollectionPath,
 } from './engine/db-admin.js';
+import { dbCacheKey, invalidateDbCache } from './engine/db-cache.js';
 import { on as busOn, clearByScriptId as clearBroadcastByScriptId } from './engine/broadcast-bus.js';
 import { clearCommandHandlerByScriptId } from './engine/api/commands.js';
 import { buildReplayMessages } from './engine/replay.js';
@@ -2758,6 +2759,12 @@ spindle.onFrontendMessage(async (raw, userId) => {
             (err instanceof Error ? err.message : String(err)),
           );
         }
+        // Out-of-band delete (bypasses DbStore) — drop the cached array for this
+        // collection so a script's next api.db read doesn't serve phantom records.
+        // Mirrors api.db.collection().drop() (engine/api/db.ts). Invalidate even
+        // if the delete threw (e.g. file already gone): the cache must not outlive
+        // the on-disk collection.
+        invalidateDbCache(dbCacheKey(userId ?? undefined, msg.path));
         // Refresh immediately rather than waiting for the debounced hint.
         await pushCollections(userId);
         break;

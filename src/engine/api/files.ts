@@ -13,6 +13,8 @@ declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
 
 import type { LumiScriptAPI } from '../../types/script.js';
 import { type APIBuildDeps, assertDangerous, assertPerm } from './shared.js';
+import { isValidCollectionPath } from '../db-admin.js';
+import { dbCacheKey, invalidateDbCache } from '../db-cache.js';
 
 export function buildFilesAPI(deps: APIBuildDeps): LumiScriptAPI['files'] {
   const { script, hasPerm, userId: uid } = deps;
@@ -24,11 +26,21 @@ export function buildFilesAPI(deps: APIBuildDeps): LumiScriptAPI['files'] {
     assertPerm('ephemeral_storage', hasPerm, script.name);
   };
 
+  // The flat files.* escape hatch can target a raw `db/` collection path,
+  // bypassing DbStore and its cache refresh. Keep the api.db cache honest: after
+  // a write/delete that landed on a collection file, drop its cached array so a
+  // subsequent api.db read re-reads from disk instead of serving a stale entry.
+  // (Out-of-contract — mixing raw files.* with api.db on the same path — but the
+  // cache must not introduce a staleness the pre-cache code didn't have.)
+  const invalidateIfCollection = (path: string): void => {
+    if (isValidCollectionPath(path)) invalidateDbCache(dbCacheKey(uid ?? undefined, path));
+  };
+
   return {
     // ── User storage (per-user, persistent) ────────────────────────────────
     userRead:   (path) => { danger(); return spindle.userStorage.read(path, uid ?? undefined); },
-    userWrite:  (path, data) => { danger(); return spindle.userStorage.write(path, data, uid ?? undefined); },
-    userDelete: (path) => { danger(); return spindle.userStorage.delete(path, uid ?? undefined); },
+    userWrite:  (path, data) => { danger(); return spindle.userStorage.write(path, data, uid ?? undefined).then((r) => { invalidateIfCollection(path); return r; }); },
+    userDelete: (path) => { danger(); return spindle.userStorage.delete(path, uid ?? undefined).then((r) => { invalidateIfCollection(path); return r; }); },
     userExists: (path) => { danger(); return spindle.userStorage.exists(path, uid ?? undefined); },
     userList:   (prefix) => { danger(); return spindle.userStorage.list(prefix, uid ?? undefined); },
     userMkdir:  (path) => { danger(); return spindle.userStorage.mkdir(path, uid ?? undefined); },

@@ -27,6 +27,7 @@
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
 
 import { filterRecords } from './record-filter.js';
+import { dbCacheKey, invalidateDbCache } from './db-cache.js';
 import type { DbScope, DbRecord } from '../types/script.js';
 import { runExclusive } from './db-queue.js';
 import { emit as busEmit } from './broadcast-bus.js';
@@ -663,6 +664,8 @@ export async function updateRecord(
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : String(err) };
     }
+    // Out-of-band write (bypasses DbStore) — drop its cache for this collection.
+    invalidateDbCache(dbCacheKey(userId, path));
 
     if (desc) {
       busEmit('ls:collection:updated', {
@@ -711,6 +714,8 @@ export async function deleteRecord(
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : String(err) };
     }
+    // Out-of-band write (bypasses DbStore) — drop its cache for this collection.
+    invalidateDbCache(dbCacheKey(userId, path));
     const desc = broadcastDescriptorFor(path);
     if (desc) {
       busEmit('ls:collection:deleted', {

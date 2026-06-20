@@ -14,6 +14,7 @@ import { clearAll as clearTools } from '../../src/engine/tool-store.js';
 import { clearAll as clearMacros } from '../../src/engine/macro-store.js';
 import { clearAll as clearRpc } from '../../src/engine/rpc-store.js';
 import { clearAll as clearBroadcast } from '../../src/engine/broadcast-bus.js';
+import { _clearDbCache } from '../../src/engine/db-cache.js';
 import { resetContext } from '../../src/engine/binding.js';
 import { executionStatusStore } from '../../src/engine/execution-status.js';
 import { clearAllCommandHandlers } from '../../src/engine/api/commands.js';
@@ -100,4 +101,7 @@ beforeEach(() => {
   // Prevents cross-file leakage of seam-seeded proxy stubs (see import note).
   _clearActiveProxiesForTests();
   _resetUnhandledRejectionRateStateForTests();
+  // api.db collection cache (module-global) — clear so a cached collection from
+  // one test can't leak into the next.
+  _clearDbCache();
 });
