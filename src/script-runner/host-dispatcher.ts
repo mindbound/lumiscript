@@ -777,6 +777,28 @@ function getOrCreateObjReverseMap(scriptId: string): WeakMap<object, string> {
   return map;
 }
 
+/**
+ * Release a single persistent handle by its canonical JS object (audit C13-01).
+ * Used by the collection-handle-cache's LRU eviction to keep `persistentHandles`
+ * in lockstep with the cache: when the cache drops a Collection wrapper, drop its
+ * handle too — otherwise the handle table grows unbounded even as the cache is
+ * capped, and a re-request would mint a SECOND handle for the same name.
+ *
+ * No-op if the object was never registered as a persistent handle for this
+ * script. Parent-side only: the child's proxy for an evicted handle (if the
+ * script still holds a reference) will get a clean RunCompletedError on next
+ * use — acceptable for the pathological case the cap exists to bound.
+ */
+export function releasePersistentHandleByObj(scriptId: string, obj: unknown): void {
+  if (obj === null || typeof obj !== 'object') return;
+  const revMap = persistentObjToHandleId.get(scriptId);
+  if (revMap === undefined) return;
+  const handleId = revMap.get(obj);
+  if (handleId === undefined) return;
+  persistentHandles.get(scriptId)?.delete(handleId);
+  revMap.delete(obj);
+}
+
 // ─── Per-script broadcast forwarders (Phase 6) ──────────────────────────────
 //
 // When a child script registers `api.broadcast.on(event, handler)`, the
@@ -6524,6 +6546,20 @@ export function unregisterScriptFromChild(scriptId: string): void {
   // signal past the script's lifetime.
   broadcastHandlerInFlight.delete(scriptId);
 
+  // audit C5-03 — sweep any in-flight LLM streams owned by this script. The
+  // `script-unregister` IPC above tears down the CHILD consumer, but the
+  // PARENT's for-await pump + the upstream HTTP request keep running until the
+  // iterator is cancelled. Mirror the dead-worker sweep (cleanupRunsForDeadWorker)
+  // filtered by scriptId: `.return()` the upstream iterator (the pump's finally
+  // removes the entry) and drop the routing + abort maps.
+  for (const [requestId, entry] of pendingStreams) {
+    if (entry.scriptId === scriptId) {
+      void entry.iterator.return(undefined).catch(() => { /* defensive */ });
+      pendingStreams.delete(requestId);
+      abortControllers.delete(requestId);
+    }
+  }
+
   // Phase 9d.4.x — drop activeRuns owned by this script. With the script-body
   // activeRun lifecycle now extending past `run-result`, full teardown happens
   // here. Walk the map (rather than just dropping
@@ -6690,6 +6726,12 @@ export async function rebalanceWorkerPool(): Promise<void> {
   for (const [scriptId, assigned] of scriptWorkerAssignments) {
     if (overCap.includes(assigned)) {
       releaseScriptFromWorker(scriptId);
+      // audit C5-02 — the over-cap worker is shut down just below, so any
+      // broadcast handlers it had in flight for this script are dead and will
+      // never fire `broadcast-handler-finished`. Clear the counter so it can't
+      // strand a phantom in-flight signal (which would permanently exempt the
+      // script's NEXT worker from eviction + block hot-reload for it).
+      broadcastHandlerInFlight.delete(scriptId);
       releasedCount.set(assigned, (releasedCount.get(assigned) ?? 0) + 1);
     }
   }

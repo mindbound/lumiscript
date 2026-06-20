@@ -502,6 +502,16 @@ function unregisterHandlerClosure(scriptId: string, handlerId: string): void {
   if (scriptHandlers.size === 0) handlerClosures.delete(scriptId);
 }
 
+/**
+ * Max time an async broadcast (`api.broadcast.on`) handler may run before the
+ * child releases the parent's in-flight counter (audit C5-01). It does NOT
+ * cancel the user's promise (the child can't) — it only fires the `-finished`
+ * notice so a never-resolving handler can't pin its worker against eviction +
+ * block hot-reload forever. Generous, because legitimate broadcast handlers
+ * react to pub/sub events and should be quick.
+ */
+const BROADCAST_HANDLER_TIMEOUT_MS = 30_000;
+
 function handleBroadcastFire(
   proc: SpindleBackendProcessContext,
   msg: BroadcastFireMessage,
@@ -536,32 +546,38 @@ function handleBroadcastFire(
       });
     } catch { /* channel down — best-effort */ }
 
+    // Fire `broadcast-handler-finished` EXACTLY ONCE — on resolve, reject, OR
+    // timeout (audit C5-01). The timeout is the fix: without it a never-
+    // resolving handler never fires -finished, so the parent's
+    // broadcastHandlerInFlight counter stays pinned forever (worker exempt from
+    // eviction, hot-reload blocked). `settled` prevents a late resolve/reject
+    // from double-decrementing the counter after a timeout already released it.
+    let settled = false;
+    const finish = (ok: boolean, error?: string): void => {
+      if (settled) return;
+      settled = true;
+      const base = {
+        type:       'broadcast-handler-finished' as const,
+        scriptId:   msg.scriptId,
+        subId:      msg.subId,
+        event:      msg.event,
+        durationMs: Date.now() - startedAt,
+      };
+      try {
+        send(proc, ok
+          ? { ...base, ok: true }
+          : { ...base, ok: false, error: error ?? 'broadcast handler failed' });
+      } catch { /* channel down — best-effort */ }
+    };
+
+    const timer = setTimeout(
+      () => finish(false, `broadcast handler exceeded ${BROADCAST_HANDLER_TIMEOUT_MS / 1000}s timeout`),
+      BROADCAST_HANDLER_TIMEOUT_MS,
+    );
+
     void (result as Promise<unknown>).then(
-      () => {
-        try {
-          send(proc, {
-            type:       'broadcast-handler-finished',
-            scriptId:   msg.scriptId,
-            subId:      msg.subId,
-            event:      msg.event,
-            durationMs: Date.now() - startedAt,
-            ok:         true,
-          });
-        } catch { /* channel down — best-effort */ }
-      },
-      (err: unknown) => {
-        try {
-          send(proc, {
-            type:       'broadcast-handler-finished',
-            scriptId:   msg.scriptId,
-            subId:      msg.subId,
-            event:      msg.event,
-            durationMs: Date.now() - startedAt,
-            ok:         false,
-            error:      err instanceof Error ? err.message : String(err),
-          });
-        } catch { /* channel down — best-effort */ }
-      },
+      () => { clearTimeout(timer); finish(true); },
+      (err: unknown) => { clearTimeout(timer); finish(false, err instanceof Error ? err.message : String(err)); },
     );
   }
 }
@@ -596,6 +612,29 @@ function handleAdvancedModalDismissed(msg: AdvancedModalDismissedNotice): void {
  */
 function handleFloatWidgetPosition(msg: FloatWidgetPositionNotice): void {
   notifyFloatWidgetPosition(msg.widgetId, msg.x, msg.y);
+}
+
+/**
+ * Race a promise against a timeout, clearing the timeout timer once the promise
+ * settles (win OR loss) so the timer + its closure don't linger until the
+ * deadline (audit C7-02 / C8-01 / C8-02). `Promise.race` does NOT cancel the
+ * loser, so a bare `setTimeout(reject)` kept firing at `timeoutMs` on every
+ * successful run / handler-fire — a per-fire timer + closure leak.
+ */
+async function raceWithTimeout<T>(
+  op: Promise<T>,
+  timeoutMs: number,
+  makeTimeoutError: () => Error,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(makeTimeoutError()), timeoutMs);
+  });
+  try {
+    return await Promise.race([op, timeoutPromise]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 /**
@@ -645,14 +684,6 @@ async function handleRunHandlerRequest(
   let error: SerializedError | undefined;
   try {
     // Race against handler timeout (mirror script-run timeout race).
-    const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(
-        () => reject(new Error(
-          `Handler ${req.kind}/${req.handlerId} exceeded ${req.timeoutMs / 1000}s timeout`,
-        )),
-        req.timeoutMs,
-      ),
-    );
     // Two nested AsyncLocalStorage scopes:
     //   1. liveContextStore — fresh per-fire chatId / characterId from
     //      the parent's binding.ts. Sync getters (api.chat.getChatId)
@@ -661,13 +692,14 @@ async function handleRunHandlerRequest(
     //   2. runIdContext — fresh per-fire runId so the proxy's dispatch
     //      routes api.* calls through the ephemeral activeRun the parent
     //      registered for this fire.
-    value = await Promise.race([
+    value = await raceWithTimeout(
       liveContextStore.run(
         { chatId: req.chatIdAtFire, characterId: req.characterIdAtFire },
         () => runIdContext.run(req.runId, () => Promise.resolve(handler(...req.args))),
       ),
-      timeoutPromise,
-    ]);
+      req.timeoutMs,
+      () => new Error(`Handler ${req.kind}/${req.handlerId} exceeded ${req.timeoutMs / 1000}s timeout`),
+    );
   } catch (err) {
     ok = false;
     error = serializeError(err);
@@ -697,6 +729,10 @@ async function handleRunHandlerRequest(
 function handleScriptUnregister(msg: ScriptUnregisterMessage): void {
   handlerClosures.delete(msg.scriptId);
   broadcastHandlers.delete(msg.scriptId);
+  // audit C8-03 + C8-04 — prune the per-script rate-limit buckets so they don't
+  // accumulate one entry per ever-seen scriptId across the child's lifetime.
+  consoleRateState.delete(msg.scriptId);
+  unhandledRejectionRateState.delete(msg.scriptId);
   // Drop only the proxies that belong to THIS script. Other scripts'
   // proxies (which may still be servicing in-flight runs or holding
   // post-run handler closures) stay intact.
@@ -772,6 +808,21 @@ function buildChildCapturedConsole(
 ): Record<string, (...args: unknown[]) => void> {
   const makeHandler = (type: ConsoleEntryType) =>
     (...args: unknown[]) => {
+      // Rate-gate FIRST (audit C8-03) so a tight `while(true) console.log()`
+      // loop can't flood the console-entry IPC + parent dispatch + backend log.
+      // Dropping before serialization also skips the per-entry arg-serialize cost.
+      const { emit, summary } = consoleRateGate(scriptId, Date.now());
+      if (summary !== null) {
+        try {
+          proc.send({
+            type:     'console-entry',
+            runId,
+            scriptId,
+            entry: { timestamp: new Date().toLocaleTimeString(), type: 'warn', message: `[lumiscript] ${summary}.` },
+          });
+        } catch { /* channel down — drop */ }
+      }
+      if (!emit) return;
       const message = args.map(serializeConsoleArg).join(' ');
       const entry: ConsoleEntry = {
         timestamp: new Date().toLocaleTimeString(),
@@ -793,6 +844,44 @@ function buildChildCapturedConsole(
     error: makeHandler('error'),
     info:  makeHandler('info'),
   };
+}
+
+// ── Console-entry rate limit (audit C8-03) ──────────────────────────────────
+// Cap console-entry IPC per scriptId per window — generous for legitimate
+// logging, bounded against a runaway loop. Mirrors the unhandled-rejection
+// token bucket below. The state map is pruned in handleScriptUnregister.
+const CONSOLE_ENTRY_THRESHOLD = 500;
+const CONSOLE_ENTRY_WINDOW_MS = 5_000;
+interface ConsoleRateState { windowStartMs: number; count: number; suppressed: number; }
+const consoleRateState = new Map<string, ConsoleRateState>();
+
+/**
+ * Per-script console-entry gate. Returns whether to emit this entry, plus a
+ * one-time `N suppressed` summary string when a window that dropped entries
+ * rolls over (so the user learns their logging was throttled).
+ */
+function consoleRateGate(scriptId: string, now: number): { emit: boolean; summary: string | null } {
+  const state = consoleRateState.get(scriptId);
+  if (state === undefined) {
+    consoleRateState.set(scriptId, { windowStartMs: now, count: 1, suppressed: 0 });
+    return { emit: true, summary: null };
+  }
+  if (now - state.windowStartMs > CONSOLE_ENTRY_WINDOW_MS) {
+    const summary = state.suppressed > 0
+      ? `${state.suppressed} console ${state.suppressed === 1 ? 'entry was' : 'entries were'} suppressed ` +
+        `(rate limit: ${CONSOLE_ENTRY_THRESHOLD} per ${CONSOLE_ENTRY_WINDOW_MS / 1000}s)`
+      : null;
+    state.windowStartMs = now;
+    state.count = 1;
+    state.suppressed = 0;
+    return { emit: true, summary };
+  }
+  if (state.count < CONSOLE_ENTRY_THRESHOLD) {
+    state.count += 1;
+    return { emit: true, summary: null };
+  }
+  state.suppressed += 1;
+  return { emit: false, summary: null };
 }
 
 /**
@@ -1008,19 +1097,6 @@ ${req.code}
     // post-result `proc.fail()` call below (gated on this specific
     // error class) terminates the child cleanly so Phase 10's restart
     // logic respawns a fresh one.
-    const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(
-        () =>
-          reject(
-            new ScriptTimeoutError(
-              `Script "${req.scriptName}" exceeded the ${req.timeoutMs / 1000}s execution timeout. ` +
-              `(Looking for await on a stalled Promise? Tighten error handling around your async calls.)`,
-            ),
-          ),
-        req.timeoutMs,
-      ),
-    );
-
     // Wrap the body invocation in `runIdContext.run(req.runId, …)` so
     // AsyncLocalStorage carries the runId through every async hop the
     // body initiates — including detached promises like un-awaited
@@ -1040,12 +1116,16 @@ ${req.code}
     // matches the fallback value. Handler-fire paths still override
     // via their own `runIdContext.run(handlerRunId, …)` to swap in
     // the per-fire runId.
-    value = await Promise.race([
+    value = await raceWithTimeout(
       runIdContext.run(req.runId, () =>
         fn(proxy.api, req.data, proxy.script, capturedConsole, z, safeFetch, undefined, undefined),
       ),
-      timeoutPromise,
-    ]);
+      req.timeoutMs,
+      () => new ScriptTimeoutError(
+        `Script "${req.scriptName}" exceeded the ${req.timeoutMs / 1000}s execution timeout. ` +
+        `(Looking for await on a stalled Promise? Tighten error handling around your async calls.)`,
+      ),
+    );
   } catch (err) {
     ok = false;
     error = serializeError(err);
@@ -1324,6 +1404,7 @@ export function handleUnhandledRejection(
 /** @internal Test seam — reset the rate-limit map between tests. */
 export function _resetUnhandledRejectionRateStateForTests(): void {
   unhandledRejectionRateState.clear();
+  consoleRateState.clear();
 }
 
 // ─── Test-only helpers ──────────────────────────────────────────────────────
@@ -1359,6 +1440,11 @@ export function _setActiveProxyForTests(runId: string, scriptId: string): void {
 /** @internal Test seam — clear all activeProxies entries. */
 export function _clearActiveProxiesForTests(): void {
   activeProxies.clear();
+}
+
+/** @internal Test seam — current activeProxies cardinality (leak measurement). */
+export function _activeProxyCountForTests(): number {
+  return activeProxies.size;
 }
 
 // ─── Entry ──────────────────────────────────────────────────────────────────

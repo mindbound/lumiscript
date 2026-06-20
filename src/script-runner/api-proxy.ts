@@ -990,7 +990,19 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
         }
         reject(err);
       };
-      pending.set(requestId, { resolve, reject: taggedReject });
+      // C7-01 — the abort listener registered below is `{ once: true }`, so it
+      // self-removes ONLY if the signal actually fires. On the normal path the
+      // request settles without an abort, leaving `sendAbort` attached to the
+      // caller's signal — typically one long-lived controller shared across
+      // many generate calls, so the listeners (each retaining `requestId` +
+      // `ctx`) pile up. Route resolve/reject through a shim that detaches the
+      // listener on EVERY settle (normal response, channel-down cleanup, and
+      // send-throw all land here). Mirrors the streaming path's `finally`
+      // cleanup (`abortListenerCleanup`), which already did this correctly.
+      let detachAbort: (() => void) | undefined;
+      const settleResolve = (value: unknown): void => { detachAbort?.(); resolve(value); };
+      const settleReject  = (err:   unknown): void => { detachAbort?.(); taggedReject(err); };
+      pending.set(requestId, { resolve: settleResolve, reject: settleReject });
       const msg: ApiProxyRequest = {
         type:     'api-request',
         requestId,
@@ -1005,7 +1017,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
         ctx.send(msg);
       } catch (err) {
         pending.delete(requestId);
-        taggedReject(err instanceof Error ? err : new Error(String(err)));
+        settleReject(err instanceof Error ? err : new Error(String(err)));
         return;
       }
 
@@ -1023,6 +1035,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
         sendAbort();
       } else {
         signal.addEventListener('abort', sendAbort, { once: true });
+        detachAbort = (): void => signal.removeEventListener('abort', sendAbort);
       }
     });
     return trackChain(p);

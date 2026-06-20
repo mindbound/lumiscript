@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client';
 import { PANEL_CSS } from './components/styles/index.js';
 import { LumiScriptPanel } from './components/LumiScriptPanel.js';
 import { SettingsPanel } from './components/settings/SettingsPanel.js';
+import { ErrorBoundary } from './components/common/ErrorBoundary.js';
 import type { FrontendToBackend } from './types/messages.js';
 import { installDOMHandler } from './dom-handler.js';
 import { installModalHandler } from './modal-handler.js';
@@ -185,10 +186,12 @@ export function setup(ctx: SpindleFrontendContext) {
   const dockRoot = createRoot(dockPanel.root);
   dockRoot.render(
     <StrictMode>
-      <LumiScriptPanel
-        onBackendMessage={virtualOnBackendMessage}
-        sendToBackend={sendToBackend}
-      />
+      <ErrorBoundary label="LumiScript panel">
+        <LumiScriptPanel
+          onBackendMessage={virtualOnBackendMessage}
+          sendToBackend={sendToBackend}
+        />
+      </ErrorBoundary>
     </StrictMode>,
   );
   cleanups.push(() => {
@@ -201,10 +204,12 @@ export function setup(ctx: SpindleFrontendContext) {
   const settingsRoot = createRoot(settingsMount);
   settingsRoot.render(
     <StrictMode>
-      <SettingsPanel
-        onBackendMessage={virtualOnBackendMessage}
-        sendToBackend={sendToBackend}
-      />
+      <ErrorBoundary label="LumiScript settings">
+        <SettingsPanel
+          onBackendMessage={virtualOnBackendMessage}
+          sendToBackend={sendToBackend}
+        />
+      </ErrorBoundary>
     </StrictMode>,
   );
   cleanups.push(() => settingsRoot.unmount());

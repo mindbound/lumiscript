@@ -36,6 +36,7 @@ import {
 } from './engine/message-content-processor-registry.js';
 import {
   dispatch as dispatchWorldInfoInterceptor,
+  hasAnyEntry as hasAnyWorldInfoInterceptor,
   clearByScriptId as clearWorldInfoInterceptorsByScriptId,
   listIdsByScriptId as worldInfoInterceptorIdsByScript,
   diffAndCleanStale as diffAndCleanStaleWorldInfoInterceptors,
@@ -59,6 +60,7 @@ import {
 } from './engine/rpc-store.js';
 import {
   clearByScriptId as clearCollectionHandleCacheByScriptId,
+  setCollectionEvictHook,
 } from './engine/collection-handle-cache.js';
 import { flushThemeOnTeardown } from './engine/api/theme.js';
 import {
@@ -142,6 +144,7 @@ import {
   getWorkerPoolDiagnostics,
   queryRunnerStats,
   queryWorkerMemoryBytes,
+  releasePersistentHandleByObj,
   // shutdownScriptRunner — Phase 10 will wire this into teardown
 } from './script-runner/host-dispatcher.js';
 import {
@@ -197,6 +200,10 @@ let activeAssistantThread: AssistantThread | null = null;
 let assistantAbortController: AbortController | null = null;
 let assistantStreamedContent = '';
 let assistantInitialized = false;
+// C2-02 — in-flight bootstrap promise, so concurrent cold-start callers dedupe
+// onto one init instead of each passing the `assistantInitialized` check (set
+// only at the very end of bootstrap) and running the full load twice.
+let bootstrapInFlight: Promise<void> | null = null;
 
 /**
  * Streamed-token coalescing window (ms). The agent fires onToken/onReasoning
@@ -331,8 +338,18 @@ registerLumiScriptMacros(() => settingsStore.get().enabled);
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function send(msg: import('./types/messages.js').BackendToFrontend): void {
-  spindle.sendToFrontend(msg);
+function send(
+  msg: import('./types/messages.js').BackendToFrontend,
+  userId: string | null = activeUserId,
+): void {
+  // Route to the active user's session by default instead of broadcasting to
+  // EVERY connected session (audit C1-02). `spindle.sendToFrontend` with no
+  // userId fans out to all sessions — wasted bandwidth and, on a multi-user
+  // server, one user's scripts / status / storage leaking into another's panel
+  // (incl. the full script code that backs `scripts_updated`). Mirrors
+  // `sendAssistant`. A genuinely all-sessions broadcast would pass an explicit
+  // `userId: null` — there are none today.
+  spindle.sendToFrontend(msg, userId ?? undefined);
 }
 
 /**
@@ -379,6 +396,11 @@ setEvictionConfigReader(() => {
 // workers are spawned, so starting it before the first user-script fire
 // has zero cost.
 startEvictionSweep();
+
+// audit C13-01 — wire the collection-handle-cache's LRU-eviction hook to the
+// dispatcher's persistent-handle release, so a script minting many distinct
+// collection names in one long run can't grow persistentHandles unbounded.
+setCollectionEvictHook(releasePersistentHandleByObj);
 
 function pushScripts(): void {
   send({ type: 'scripts_updated', scripts: scriptStorage.getScripts() });
@@ -690,6 +712,12 @@ if (typeof spindle.registerMessageContentProcessor === 'function') {
 // Forward-compat: same guard pattern as the other interceptor hooks.
 if (typeof spindle.registerWorldInfoInterceptor === 'function') {
   spindle.registerWorldInfoInterceptor(async (dtoCtx) => {
+    // Fast path (audit C1-01): if no script has registered a world-info
+    // interceptor, skip the per-generation deep-copy of the full message +
+    // entry arrays below — dispatch would early-return on the empty registry
+    // anyway, so the copy was pure waste on every generation. The three
+    // sibling interceptor wrappers already check-then-build; this one didn't.
+    if (!hasAnyWorldInfoInterceptor()) return undefined;
     // DTO → LS-type translation. The entries' snake_case fields need
     // camelCase mapping; everything else is structurally identical.
     const lsCtx: import('./types/script.js').WorldInfoInterceptorCtx = {
@@ -1146,6 +1174,17 @@ async function syncTriggers(): Promise<void> {
  */
 async function bootstrapAssistant(userId: string): Promise<void> {
   if (assistantInitialized) return;
+  // Dedupe concurrent callers (the fire-and-forget `void bootstrapAssistant`
+  // cold-start vs a near-simultaneous assistant_send / request_assistant_threads)
+  // onto a single shared init. Cleared once settled so a retry after a failed
+  // boot can run again. (audit C2-02)
+  bootstrapInFlight ??= runAssistantBootstrap(userId).finally(() => {
+    bootstrapInFlight = null;
+  });
+  return bootstrapInFlight;
+}
+
+async function runAssistantBootstrap(userId: string): Promise<void> {
   try {
     assistantThreadIndex = await loadThreadIndex(userId);
   } catch (err) {
@@ -1706,6 +1745,20 @@ spindle.onFrontendMessage(async (raw, userId) => {
 
       // ── In-app assistant ────────────────────────────────────────────────
       case 'assistant_send': {
+        // Single-flight guard (audit C2-01): if a turn is already streaming
+        // (assistantAbortController set), refuse rather than overwrite it.
+        // Overwriting orphans turn-1's abort, lets turn-1's finally null the
+        // controller mid-turn-2, and races two saveThread writes onto one
+        // thread file. The FE also blocks concurrent sends; this enforces the
+        // invariant backend-side, mirroring assistant_compact (2031) /
+        // assistant_switch_thread (2232).
+        if (assistantAbortController) {
+          sendAssistant({
+            type: 'assistant_error',
+            error: 'Busy generating — wait for the current reply to finish.',
+          });
+          break;
+        }
         // Skip the user-turn echo on retry / edit-resend: the bubble is already
         // shown on the FE (retry kept it in place; edit-resend updated it), so
         // re-echoing would duplicate it.
@@ -1720,6 +1773,22 @@ spindle.onFrontendMessage(async (raw, userId) => {
           break;
         }
         if (!assistantInitialized) await bootstrapAssistant(activeUserId);
+        // C2-01 cold-start completion: the busy-guard above ran BEFORE the
+        // bootstrap `await`, so on cold start two near-simultaneous sends can
+        // both pass it (controller still null) and both await the SAME bootstrap
+        // promise (shared via the C2-02 memoization). Re-check here: the first
+        // send to resume runs synchronously from this point through the
+        // controller-set below (no await in between), so the second resumes to a
+        // non-null controller and is refused — closing the same double-controller
+        // / racing-saveThread race the guard targets. In steady state the await
+        // above is skipped, so this re-check is a cheap no-op.
+        if (assistantAbortController) {
+          sendAssistant({
+            type: 'assistant_error',
+            error: 'Busy generating — wait for the current reply to finish.',
+          });
+          break;
+        }
         if (!activeAssistantThread) {
           sendAssistant({
             type: 'assistant_error',
@@ -2033,34 +2102,48 @@ spindle.onFrontendMessage(async (raw, userId) => {
           break;
         }
         const cs = settingsStore.get();
-        // Capture the target thread: compactThread awaits a ~1-3s LLM call, during
-        // which the user could switch threads. If the active thread changed by the
-        // time we resolve, discard rather than write thread A's handoff onto B.
-        const target = activeAssistantThread;
-        const compacted = await compactThread(target, {
-          userId: activeUserId,
-          budget: cs.assistantContextTokens,
-          ...(msg.connectionId ? { connectionId: msg.connectionId } : {}),
-        });
-        if (activeAssistantThread !== target) {
-          sendAssistant({ type: 'assistant_compacted', ok: false, error: 'Conversation changed — compaction cancelled.' });
-          break;
-        }
-        if (compacted) {
-          target.compactedThrough = compacted.compactedThrough;
-          target.handoff = compacted.handoff;
-          target.lastPromptTokens = compacted.occupancyTokens;
-          target.lastPromptEstimated = true;
-          await persistActiveThread(activeUserId);
-          sendAssistant({
-            type: 'assistant_compacted',
-            ok: true,
-            occupancyTokens: compacted.occupancyTokens,
-            estimated: true,
-            compactedThrough: compacted.compactedThrough,
+        // C2-03 — advertise compaction as in-flight so the C2-01 assistant_send
+        // busy-guard (which checks `assistantAbortController`) refuses a send
+        // arriving during the ~1-3s compact LLM call. Without this, compact sets
+        // no controller, the send isn't refused, and the two race a saveThread
+        // write onto one thread file. We reuse assistantAbortController purely as
+        // the in-flight marker the send guard already reads; compactThread isn't
+        // wired to the signal, so an abort during compaction stays a no-op
+        // (unchanged behaviour). MUST clear in `finally` — a thrown compact that
+        // left it set would wedge every future send.
+        assistantAbortController = new AbortController();
+        try {
+          // Capture the target thread: compactThread awaits a ~1-3s LLM call, during
+          // which the user could switch threads. If the active thread changed by the
+          // time we resolve, discard rather than write thread A's handoff onto B.
+          const target = activeAssistantThread;
+          const compacted = await compactThread(target, {
+            userId: activeUserId,
+            budget: cs.assistantContextTokens,
+            ...(msg.connectionId ? { connectionId: msg.connectionId } : {}),
           });
-        } else {
-          sendAssistant({ type: 'assistant_compacted', ok: false, error: 'Nothing old enough to compact yet — Lisa folds older messages to free space once a conversation grows (and auto-runs near full). Keep chatting and it\'ll become available.' });
+          if (activeAssistantThread !== target) {
+            sendAssistant({ type: 'assistant_compacted', ok: false, error: 'Conversation changed — compaction cancelled.' });
+            break;
+          }
+          if (compacted) {
+            target.compactedThrough = compacted.compactedThrough;
+            target.handoff = compacted.handoff;
+            target.lastPromptTokens = compacted.occupancyTokens;
+            target.lastPromptEstimated = true;
+            await persistActiveThread(activeUserId);
+            sendAssistant({
+              type: 'assistant_compacted',
+              ok: true,
+              occupancyTokens: compacted.occupancyTokens,
+              estimated: true,
+              compactedThrough: compacted.compactedThrough,
+            });
+          } else {
+            sendAssistant({ type: 'assistant_compacted', ok: false, error: 'Nothing old enough to compact yet — Lisa folds older messages to free space once a conversation grows (and auto-runs near full). Keep chatting and it\'ll become available.' });
+          }
+        } finally {
+          assistantAbortController = null;
         }
         break;
       }

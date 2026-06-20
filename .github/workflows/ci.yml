@@ -29,16 +29,6 @@ jobs:
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
-          # Intentionally tracks the rolling `canary` tag to match the dev's
-          # local bun (installed via `bun upgrade --canary`, currently 1.4.x).
-          # CAVEAT: `canary` is a SINGLE rolling GitHub release that Bun
-          # overwrites on every commit to main — a moving target. A newer canary
-          # can change async scheduling, so timing-sensitive tests MUST stay
-          # scheduler-robust (e.g. the script-runner e2e ack handshake defers the
-          # simulated frontend echo to a macrotask — see e2e-*-handle*.test.ts).
-          # A SPECIFIC canary build cannot be pinned here (Bun publishes no
-          # per-nightly tags); if determinism is ever needed over channel-
-          # matching, switch to an exact stable, e.g. `bun-version: 1.3.14`.
           bun-version: canary
 
       - name: Install dependencies

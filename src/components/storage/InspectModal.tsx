@@ -21,18 +21,26 @@
  * requests via `sendToBackend` whenever those change.
  */
 
-import { useState, useEffect, useMemo, type FC } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef, memo, type FC, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import { X, Database, Search, ChevronLeft, ChevronRight, RefreshCw, Copy, Braces, Layers, Code2, AlertTriangle, Pencil, Trash2, ListOrdered, BarChart3 } from 'lucide-react';
 import type { FrontendToBackend } from '../../types/messages.js';
 import type { DbRecord } from '../../types/script.js';
 import type { CollectionSummary, CollectionStats, FieldStats, StatsTypeTag } from '../../engine/db-admin.js';
-import { formatTimeAgo, copyToClipboard, highlightJson } from './utils.js';
+import { formatTimeAgo, copyToClipboard, cachedRecordHtml, highlightBodyCapped } from './utils.js';
 import { EditRecordModal } from './EditRecordModal.js';
 import { buildInspectRequest, prettyPrintUserData, formatTopValue, formatNum, type FilterMode } from './record-logic.js';
+import { filterRecords, type RecordFilterOptions } from '../../engine/record-filter.js';
 
 /** Page size used in the panel UI. Backend caps record counts anyway. */
 const PAGE_SIZE = 50;
+/**
+ * Collections with at most this many records are loaded ONCE in full and then
+ * filtered + paginated entirely in the browser — no per-keystroke round trip
+ * (which was the inspect-filter freeze). Larger collections fall back to the
+ * server-side paginated path.
+ */
+const CLIENT_FILTER_MAX = 1000;
 /** Filter input debounce — 150ms feels responsive without thrashing. */
 const FILTER_DEBOUNCE_MS = 150;
 /** How long the "Copied" tick stays visible after a successful copy. */
@@ -84,6 +92,214 @@ export interface InspectModalProps {
 
 /** View mode — Records (default) vs Stats (per-field aggregate). */
 type ViewMode = 'records' | 'stats';
+
+/**
+ * Base style for the per-record action buttons (Copy ID / JSON / Edit / Delete).
+ * Hoisted to a module constant so it isn't reallocated per button per row per
+ * render; the dynamic bits (color / opacity / the armed-delete pill) are merged
+ * in per button at the call site.
+ */
+const RECORD_ACTION_BTN: CSSProperties = {
+  background:    'transparent',
+  border:        'none',
+  padding:       4,
+  cursor:        'pointer',
+  display:       'inline-flex',
+  alignItems:    'center',
+  gap:           3,
+  font:          'inherit',
+  fontSize:      10,
+};
+
+interface RecordRowProps {
+  record:          DbRecord;
+  idCopied:        boolean;
+  jsonCopied:      boolean;
+  isPendingDelete: boolean;
+  onCopyId:        (r: DbRecord) => void;
+  onCopyJson:      (r: DbRecord) => void;
+  onEdit:          (r: DbRecord) => void;
+  onDelete:        (r: DbRecord) => void;
+}
+
+/**
+ * Build the highlighted body HTML for a record, content-keyed (`id:updatedAt`)
+ * in a module cache so an unchanged record returns a reference-stable string
+ * (see {@link cachedRecordHtml}). A record missing `updatedAt` bypasses the
+ * cache (build fresh, don't store under an unstable key).
+ */
+function recordBodyHtml(record: DbRecord): string {
+  const build = (): string => highlightBodyCapped(prettyPrintUserData(record));
+  return record.updatedAt == null
+    ? build()
+    : cachedRecordHtml(`${String(record.id)}:${String(record.updatedAt)}`, build);
+}
+
+/**
+ * One record row — extracted and `React.memo`'d so a parent re-render that does
+ * NOT change this row (a filter keystroke before the debounce, a copy/delete on
+ * another row, pagination hover, etc.) skips it entirely. Two more guards keep
+ * the body cheap: the highlighted HTML is content-keyed + cached (so an
+ * unchanged record never re-highlights across filter responses), and the body
+ * is LAZY — its `<pre>` DOM is built only once the row reaches the viewport (via
+ * an IntersectionObserver), so a filter that surfaces many never-rendered rows
+ * doesn't build every row's DOM in one synchronous commit (the first-narrow
+ * hitch). This is the render half of the collection-search perf fix.
+ */
+const RecordRow: FC<RecordRowProps> = memo(function RecordRow({
+  record, idCopied, jsonCopied, isPendingDelete, onCopyId, onCopyJson, onEdit, onDelete,
+}) {
+  const idStr = String(record.id);
+  const rowRef = useRef<HTMLDivElement>(null);
+  // Lazy body: build the highlighted <pre> DOM only once the row is at/near the
+  // viewport. A filter that surfaces many never-rendered rows then builds only
+  // the visible rows' DOM per commit, not all of them — bounding the first-narrow
+  // render hitch. One-shot: once shown we stop observing and keep it rendered (no
+  // rebuild churn on scroll). Eager fallback where IntersectionObserver is absent.
+  const [bodyShown, setBodyShown] = useState(false);
+  useEffect(() => {
+    if (bodyShown) return;
+    const el = rowRef.current;
+    if (!el) return;
+    if (typeof IntersectionObserver === 'undefined') { setBodyShown(true); return; }
+    const root = el.closest('.ls-inspect-body');
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          setBodyShown(true);
+          io.disconnect();
+        }
+      },
+      { root: root instanceof Element ? root : null, rootMargin: '400px' },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [bodyShown]);
+  // Highlighted body, content-keyed + cached (reference-stable for an unchanged
+  // record, so React skips the re-highlight AND the innerHTML re-parse). Built
+  // only once the row is shown.
+  const html = useMemo(
+    () => (bodyShown ? recordBodyHtml(record) : ''),
+    [bodyShown, record.id, record.updatedAt],
+  );
+  return (
+    <div ref={rowRef} className="ls-inspect-record">
+      <div className="ls-inspect-record-id" title={`id: ${idStr}`}>
+        <code>{idStr.slice(0, 12)}…</code>
+        <span className="ls-inspect-record-timestamps">
+          created <time title={new Date(record.createdAt as number).toISOString()}>
+            {formatTimeAgo(record.createdAt as number)}
+          </time>
+          {record.updatedAt !== record.createdAt && (
+            <>
+              {' · '}updated <time title={new Date(record.updatedAt as number).toISOString()}>
+                {formatTimeAgo(record.updatedAt as number)}
+              </time>
+            </>
+          )}
+        </span>
+        <span style={{ flex: 1 }} />
+        <button
+          className="ls-inspect-record-action"
+          title={idCopied ? 'Copied!' : 'Copy ID'}
+          onClick={() => onCopyId(record)}
+          style={{ ...RECORD_ACTION_BTN, marginLeft: 4, color: idCopied ? 'var(--lumiverse-accent)' : 'inherit', opacity: idCopied ? 1 : 0.6 }}
+        >
+          <Copy size={11} />
+          ID
+        </button>
+        <button
+          className="ls-inspect-record-action"
+          title={jsonCopied ? 'Copied!' : 'Copy full JSON'}
+          onClick={() => onCopyJson(record)}
+          style={{ ...RECORD_ACTION_BTN, marginLeft: 2, color: jsonCopied ? 'var(--lumiverse-accent)' : 'inherit', opacity: jsonCopied ? 1 : 0.6 }}
+        >
+          <Braces size={11} />
+          JSON
+        </button>
+        <button
+          className="ls-inspect-record-action"
+          title="Edit record"
+          onClick={() => onEdit(record)}
+          style={{ ...RECORD_ACTION_BTN, marginLeft: 2, color: 'inherit', opacity: 0.6 }}
+        >
+          <Pencil size={11} />
+          Edit
+        </button>
+        <button
+          className={'ls-inspect-record-action' + (isPendingDelete ? ' ls-inspect-record-action-confirm' : '')}
+          title={isPendingDelete ? 'Click again to confirm — auto-cancels in a few seconds' : 'Delete record'}
+          onClick={() => onDelete(record)}
+          style={{
+            ...RECORD_ACTION_BTN,
+            marginLeft:  2,
+            borderRadius: 3,
+            background:  isPendingDelete ? 'rgba(246, 130, 130, 0.18)' : 'transparent',
+            border:      isPendingDelete ? '1px solid rgba(246, 130, 130, 0.4)' : 'none',
+            padding:     isPendingDelete ? '3px 6px' : 4,
+            color:       isPendingDelete ? 'var(--lumiverse-danger, rgb(246, 130, 130))' : 'inherit',
+            opacity:     isPendingDelete ? 1 : 0.6,
+            fontWeight:  isPendingDelete ? 600 : 400,
+          }}
+        >
+          <Trash2 size={11} />
+          {isPendingDelete ? 'Confirm?' : 'Delete'}
+        </button>
+      </div>
+      <pre
+        className="ls-inspect-record-json"
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
+    </div>
+  );
+});
+
+// ── Filter-match highlighting (CSS Custom Highlight API) ──────────────────────
+// Marks the active text needle across the rendered record bodies as a PAINT-only
+// overlay: `Highlight` ranges sit on top of the existing text without mutating
+// the (cached, lazily-built) <pre> DOM, so marking the match never re-parses
+// innerHTML or invalidates the body cache. Degrades to a no-op where the API is
+// absent — the filter itself still works.
+const MATCH_HIGHLIGHT_NAME = 'ls-inspect-match';
+let matchHighlight: Highlight | null = null;
+let matchHighlightResolved = false;
+function getMatchHighlight(): Highlight | null {
+  if (matchHighlightResolved) return matchHighlight;
+  matchHighlightResolved = true;
+  if (typeof CSS !== 'undefined' && CSS.highlights && typeof Highlight !== 'undefined') {
+    matchHighlight = new Highlight();
+    CSS.highlights.set(MATCH_HIGHLIGHT_NAME, matchHighlight);
+  }
+  return matchHighlight;
+}
+
+/**
+ * Rebuild the match-highlight ranges for `needle` across the record bodies in
+ * `container`. Walks only the text nodes of already-built `<pre>` bodies (lazy
+ * placeholders have none), so the cost scales with the rendered rows, not the
+ * whole collection. Case-insensitive substring match — mirrors the shallow/deep
+ * text filter.
+ */
+function updateMatchRanges(container: HTMLElement, needle: string): void {
+  const hl = getMatchHighlight();
+  if (!hl) return;
+  hl.clear();
+  const lc = needle.trim().toLowerCase();
+  if (!lc) return;
+  const bodies = container.querySelectorAll('.ls-inspect-record-json');
+  for (const body of bodies) {
+    const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const text = (node.textContent ?? '').toLowerCase();
+      for (let idx = text.indexOf(lc); idx !== -1; idx = text.indexOf(lc, idx + lc.length)) {
+        const range = new Range();
+        range.setStart(node, idx);
+        range.setEnd(node, idx + lc.length);
+        hl.add(range);
+      }
+    }
+  }
+}
 
 export const InspectModal: FC<InspectModalProps> = ({
   path,
@@ -161,6 +377,15 @@ export const InspectModal: FC<InspectModalProps> = ({
    * mode the user last selected within a single collection's session.
    */
   const [viewMode, setViewMode] = useState<ViewMode>('records');
+  /**
+   * Filter execution mode for the open collection:
+   *   - 'probe'  — fetched a cheap unfiltered page; awaiting `total` to decide.
+   *   - 'client' — whole collection (≤ CLIENT_FILTER_MAX) held in `records`;
+   *                filter + paginate happen in-memory (no per-keystroke fetch).
+   *   - 'server' — collection too large; keep the server-side paginated path.
+   * Reset to 'probe' whenever the open collection (`path`) changes or refreshes.
+   */
+  const [mode, setMode] = useState<'probe' | 'client' | 'server'>('probe');
 
   // Debounce the filter input so we don't re-dispatch on every keystroke.
   useEffect(() => {
@@ -174,17 +399,51 @@ export const InspectModal: FC<InspectModalProps> = ({
     setPage(0);
   }, [debouncedFilter, filterMode]);
 
-  // Dispatch `inspect_collection` whenever path / filter / mode / page /
-  // refresh token changes. Mode determines which fields populate:
-  //   - jsonquery: `jsonqueryFilter` carries the expression; `textFilter`
-  //     and `deepFilter` are omitted (backend ignores them anyway).
-  //   - deep / shallow: `textFilter` carries the needle; `deepFilter`
-  //     is true only in deep mode.
-  // Empty inputs collapse to `undefined` so the backend's "no filter"
-  // path (return everything) takes precedence over filter-with-empty-string.
+  // ── Filter dispatch — client-side for small collections, server-side for big.
+  // Small collections (≤ CLIENT_FILTER_MAX records) are loaded ONCE in full and
+  // filtered + paginated in the browser on each keystroke; that removes the
+  // per-keystroke inspect_collection round trip (the filter-freeze cause). Large
+  // collections keep the server-side paginated path. `mode` is decided per
+  // collection from the first response's `total`.
+
+  // Latest `path`, for effects that must read it WITHOUT re-firing on a change.
+  const pathRef = useRef(path);
+  pathRef.current = path;
+
+  // Probe on open: fetch a cheap unfiltered page to learn `total`, and reset to
+  // 'probe' so the decision below re-runs for the new collection. Keyed on
+  // `path` ONLY — the parent nulls `records` on a path change, so the decision
+  // can't act on the previous collection's data. (Refreshes reload in-place via
+  // the mode effects below and must NOT re-probe: the parent does NOT null
+  // `records` on a refresh, so a re-probe could let the decision fire on the
+  // stale in-memory set before the new probe response lands.)
   useEffect(() => {
+    setMode('probe');
+    sendToBackend(buildInspectRequest(path, 'shallow', '', 0, PAGE_SIZE));
+  }, [path, sendToBackend]);
+
+  // Decide the mode from the probe response's `total` (no fetch here — the client
+  // load below reacts to the mode flip).
+  useEffect(() => {
+    if (mode !== 'probe' || records === null) return;
+    setMode(total <= CLIENT_FILTER_MAX ? 'client' : 'server');
+  }, [mode, records, total]);
+
+  // Client load: pull the WHOLE (small) collection into `records` for in-memory
+  // filtering — on entering client mode and on every refresh. Reads `path` via
+  // the ref so a path change (owned by the probe effect) can't trigger a stale
+  // full-load of a not-yet-probed collection.
+  useEffect(() => {
+    if (mode !== 'client') return;
+    sendToBackend(buildInspectRequest(pathRef.current, 'shallow', '', 0, CLIENT_FILTER_MAX));
+  }, [mode, refreshToken, localRefreshTick, sendToBackend]);
+
+  // Server-side query (large collections only): one debounced request per
+  // filter / mode / page / refresh change. Inert in client mode.
+  useEffect(() => {
+    if (mode !== 'server') return;
     sendToBackend(buildInspectRequest(path, filterMode, debouncedFilter, page, PAGE_SIZE));
-  }, [path, debouncedFilter, filterMode, page, refreshToken, localRefreshTick, sendToBackend]);
+  }, [path, debouncedFilter, filterMode, page, refreshToken, localRefreshTick, mode, sendToBackend]);
 
   // Close on Escape
   useEffect(() => {
@@ -195,9 +454,52 @@ export const InspectModal: FC<InspectModalProps> = ({
     return () => document.removeEventListener('keydown', handler);
   }, [onClose]);
 
-  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const pageFirst = total === 0 ? 0 : page * PAGE_SIZE + 1;
-  const pageLast  = Math.min(total, (page + 1) * PAGE_SIZE);
+  // Client-side filter result for small collections (null in server mode or
+  // before the collection has loaded). filterRecords is the SAME logic the
+  // backend uses, so client and server results match exactly.
+  const clientResult = useMemo(() => {
+    if (mode !== 'client' || records === null) return null;
+    const opts: RecordFilterOptions = filterMode === 'jsonquery'
+      ? { jsonqueryFilter: debouncedFilter }
+      : { textFilter: debouncedFilter, deepFilter: filterMode === 'deep' };
+    return filterRecords(records, opts);
+  }, [mode, records, filterMode, debouncedFilter]);
+
+  // The records / total / error actually shown: derived locally in client mode,
+  // straight from the (server-paginated) props in server mode. Never null after
+  // the `records === null` loading guard below.
+  const viewRecords: DbRecord[] = mode === 'client'
+    ? (clientResult ? clientResult.records.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE) : [])
+    : (records ?? []);
+  const viewTotal = mode === 'client' ? (clientResult?.records.length ?? 0) : total;
+  const viewError = mode === 'client' ? (clientResult?.error ?? null) : error;
+
+  // Filter-match highlighting: paint the active needle over the rendered bodies
+  // (paint-only — see updateMatchRanges, no DOM mutation / no cache hit). Re-runs
+  // on filter / mode / page / view change; a MutationObserver (rAF-coalesced)
+  // catches lazy bodies building + rows re-rendering. jsonquery has no text
+  // needle → no highlight.
+  const bodyContainerRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const container = bodyContainerRef.current;
+    if (!container) return;
+    const needle = filterMode === 'jsonquery' ? '' : debouncedFilter;
+    let raf = 0;
+    const run = (): void => { raf = 0; updateMatchRanges(container, needle); };
+    const schedule = (): void => { if (raf === 0) raf = requestAnimationFrame(run); };
+    schedule();
+    const mo = new MutationObserver(schedule);
+    mo.observe(container, { childList: true, subtree: true, characterData: true });
+    return () => {
+      mo.disconnect();
+      if (raf !== 0) cancelAnimationFrame(raf);
+      getMatchHighlight()?.clear();
+    };
+  }, [debouncedFilter, filterMode, mode, page, viewMode]);
+
+  const pageCount = Math.max(1, Math.ceil(viewTotal / PAGE_SIZE));
+  const pageFirst = viewTotal === 0 ? 0 : page * PAGE_SIZE + 1;
+  const pageLast  = Math.min(viewTotal, (page + 1) * PAGE_SIZE);
 
   // Pull a display-friendly collection name from the path. Examples:
   //   db/scripts/s-1/rolls.json          → rolls (script)
@@ -229,7 +531,7 @@ export const InspectModal: FC<InspectModalProps> = ({
   // a per-record indicator on success. On failure (insecure context,
   // permission denied, etc.) the indicator simply doesn't show — the
   // user re-runs or copies manually from the rendered JSON.
-  const flashCopied = (key: string) => {
+  const flashCopied = useCallback((key: string) => {
     setCopiedKeys((prev) => {
       const next = new Set(prev);
       next.add(key);
@@ -243,17 +545,17 @@ export const InspectModal: FC<InspectModalProps> = ({
         return next;
       });
     }, COPY_FEEDBACK_MS);
-  };
+  }, []);
 
-  const handleCopyId = async (record: DbRecord) => {
+  const handleCopyId = useCallback(async (record: DbRecord) => {
     const ok = await copyToClipboard(String(record.id));
     if (ok) flashCopied(`${record.id}:id`);
-  };
+  }, [flashCopied]);
 
-  const handleCopyJson = async (record: DbRecord) => {
+  const handleCopyJson = useCallback(async (record: DbRecord) => {
     const ok = await copyToClipboard(JSON.stringify(record, null, 2));
     if (ok) flashCopied(`${record.id}:json`);
-  };
+  }, [flashCopied]);
 
   // ── Per-record delete (two-step inline confirm) ────────────────────
   // First click arms `pendingDeleteId` and visually swaps the button
@@ -266,9 +568,16 @@ export const InspectModal: FC<InspectModalProps> = ({
     return () => clearTimeout(id);
   }, [pendingDeleteId]);
 
-  const handleDelete = (record: DbRecord) => {
+  // Keep a ref of the armed-delete id so `handleDelete` can read the latest
+  // value while staying referentially stable (a `pendingDeleteId` dependency
+  // would re-create it on every arm/disarm, breaking the RecordRow memo for
+  // every row).
+  const pendingDeleteIdRef = useRef<string | null>(pendingDeleteId);
+  useEffect(() => { pendingDeleteIdRef.current = pendingDeleteId; }, [pendingDeleteId]);
+
+  const handleDelete = useCallback((record: DbRecord) => {
     const idStr = String(record.id);
-    if (pendingDeleteId === idStr) {
+    if (pendingDeleteIdRef.current === idStr) {
       // Second click — commit the deletion. The backend's broadcast
       // forwarder bumps refreshToken on success and the records grid
       // re-fetches; failures surface via toast.
@@ -281,7 +590,7 @@ export const InspectModal: FC<InspectModalProps> = ({
     } else {
       setPendingDeleteId(idStr);
     }
-  };
+  }, [path, sendToBackend]);
 
   // Cancel any armed delete + close any open edit modal whenever the
   // page changes — armed state for an off-page record is meaningless,
@@ -434,9 +743,9 @@ export const InspectModal: FC<InspectModalProps> = ({
           </div>
           <div className="ls-inspect-pager">
             <span className="ls-inspect-pager-status">
-              {total === 0
+              {viewTotal === 0
                 ? 'No matching records'
-                : <>Showing <strong>{pageFirst}</strong>&ndash;<strong>{pageLast}</strong> of <strong>{total}</strong></>}
+                : <>Showing <strong>{pageFirst}</strong>&ndash;<strong>{pageLast}</strong> of <strong>{viewTotal}</strong></>}
             </span>
             <button
               className="ls-inspect-pager-btn"
@@ -460,20 +769,20 @@ export const InspectModal: FC<InspectModalProps> = ({
         {/* jsonquery error banner — slots between the toolbar and the
             records body, only when an error came back from the backend.
             Disappears as soon as the next non-erroring response arrives. */}
-        {error && (
+        {viewError && (
           <div className="ls-inspect-error" role="alert">
             <AlertTriangle size={12} />
-            <span>{error}</span>
+            <span>{viewError}</span>
           </div>
         )}
 
         {/* Records body */}
-        <div className="ls-inspect-body">
+        <div ref={bodyContainerRef} className="ls-inspect-body">
           {records === null ? (
             <div className="ls-inspect-empty">Loading records…</div>
-          ) : records.length === 0 ? (
+          ) : viewRecords.length === 0 ? (
             <div className="ls-inspect-empty">
-              {total === 0 && debouncedFilter ? (
+              {viewTotal === 0 && debouncedFilter ? (
                 <>
                   <div>No records match &ldquo;{debouncedFilter}&rdquo;</div>
                   <button
@@ -492,7 +801,7 @@ export const InspectModal: FC<InspectModalProps> = ({
                     Clear filter
                   </button>
                 </>
-              ) : total === 0 ? (
+              ) : viewTotal === 0 ? (
                 'Collection is empty'
               ) : (
                 'No records on this page'
@@ -500,138 +809,19 @@ export const InspectModal: FC<InspectModalProps> = ({
             </div>
           ) : (
             <div className="ls-inspect-records">
-              {records.map((r) => {
-                const idStr = String(r.id);
-                const idCopied   = copiedKeys.has(`${r.id}:id`);
-                const jsonCopied = copiedKeys.has(`${r.id}:json`);
-                return (
-                  <div key={idStr} className="ls-inspect-record">
-                    <div className="ls-inspect-record-id" title={`id: ${idStr}`}>
-                      <code>{idStr.slice(0, 12)}…</code>
-                      <span className="ls-inspect-record-timestamps">
-                        created <time title={new Date(r.createdAt as number).toISOString()}>
-                          {formatTimeAgo(r.createdAt as number)}
-                        </time>
-                        {r.updatedAt !== r.createdAt && (
-                          <>
-                            {' · '}updated <time title={new Date(r.updatedAt as number).toISOString()}>
-                              {formatTimeAgo(r.updatedAt as number)}
-                            </time>
-                          </>
-                        )}
-                      </span>
-                      <span style={{ flex: 1 }} />
-                      <button
-                        className="ls-inspect-record-action"
-                        title={idCopied ? 'Copied!' : 'Copy ID'}
-                        onClick={() => handleCopyId(r)}
-                        style={{
-                          background: 'transparent',
-                          border: 'none',
-                          padding: 4,
-                          marginLeft: 4,
-                          cursor: 'pointer',
-                          color: idCopied ? 'var(--lumiverse-accent)' : 'inherit',
-                          opacity: idCopied ? 1 : 0.6,
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: 3,
-                          font: 'inherit',
-                          fontSize: 10,
-                        }}
-                      >
-                        <Copy size={11} />
-                        ID
-                      </button>
-                      <button
-                        className="ls-inspect-record-action"
-                        title={jsonCopied ? 'Copied!' : 'Copy full JSON'}
-                        onClick={() => handleCopyJson(r)}
-                        style={{
-                          background: 'transparent',
-                          border: 'none',
-                          padding: 4,
-                          marginLeft: 2,
-                          cursor: 'pointer',
-                          color: jsonCopied ? 'var(--lumiverse-accent)' : 'inherit',
-                          opacity: jsonCopied ? 1 : 0.6,
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: 3,
-                          font: 'inherit',
-                          fontSize: 10,
-                        }}
-                      >
-                        <Braces size={11} />
-                        JSON
-                      </button>
-                      <button
-                        className="ls-inspect-record-action"
-                        title="Edit record"
-                        onClick={() => setEditingRecord(r)}
-                        style={{
-                          background: 'transparent',
-                          border: 'none',
-                          padding: 4,
-                          marginLeft: 2,
-                          cursor: 'pointer',
-                          color: 'inherit',
-                          opacity: 0.6,
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: 3,
-                          font: 'inherit',
-                          fontSize: 10,
-                        }}
-                      >
-                        <Pencil size={11} />
-                        Edit
-                      </button>
-                      <button
-                        className={
-                          'ls-inspect-record-action' +
-                          (pendingDeleteId === idStr ? ' ls-inspect-record-action-confirm' : '')
-                        }
-                        title={
-                          pendingDeleteId === idStr
-                            ? 'Click again to confirm — auto-cancels in a few seconds'
-                            : 'Delete record'
-                        }
-                        onClick={() => handleDelete(r)}
-                        style={{
-                          background: pendingDeleteId === idStr
-                            ? 'rgba(246, 130, 130, 0.18)'
-                            : 'transparent',
-                          border: pendingDeleteId === idStr
-                            ? '1px solid rgba(246, 130, 130, 0.4)'
-                            : 'none',
-                          padding: pendingDeleteId === idStr ? '3px 6px' : 4,
-                          marginLeft: 2,
-                          cursor: 'pointer',
-                          color: pendingDeleteId === idStr
-                            ? 'var(--lumiverse-danger, rgb(246, 130, 130))'
-                            : 'inherit',
-                          opacity: pendingDeleteId === idStr ? 1 : 0.6,
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: 3,
-                          font: 'inherit',
-                          fontSize: 10,
-                          fontWeight: pendingDeleteId === idStr ? 600 : 400,
-                          borderRadius: 3,
-                        }}
-                      >
-                        <Trash2 size={11} />
-                        {pendingDeleteId === idStr ? 'Confirm?' : 'Delete'}
-                      </button>
-                    </div>
-                    <pre
-                      className="ls-inspect-record-json"
-                      dangerouslySetInnerHTML={{ __html: highlightJson(prettyPrintUserData(r)) }}
-                    />
-                  </div>
-                );
-              })}
+              {viewRecords.map((r) => (
+                <RecordRow
+                  key={String(r.id)}
+                  record={r}
+                  idCopied={copiedKeys.has(`${r.id}:id`)}
+                  jsonCopied={copiedKeys.has(`${r.id}:json`)}
+                  isPendingDelete={pendingDeleteId === String(r.id)}
+                  onCopyId={handleCopyId}
+                  onCopyJson={handleCopyJson}
+                  onEdit={setEditingRecord}
+                  onDelete={handleDelete}
+                />
+              ))}
             </div>
           )}
         </div>

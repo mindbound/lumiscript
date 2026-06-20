@@ -374,6 +374,15 @@
   font-style: italic;
 }
 
+/* Filter-match highlight (CSS Custom Highlight API) — painted over the record
+   bodies as a range overlay, WITHOUT touching their cached/lazily-built DOM, so
+   marking the active needle never re-parses innerHTML or invalidates the body
+   cache. Inert (no visual change) where the browser lacks the API. */
+::highlight(ls-inspect-match) {
+  background-color: rgba(250, 204, 21, 0.85);
+  color: #1a1a1a;
+}
+
 /* ── Stats view (Inspect modal → Stats tab) ───────────────────────────────
  *
  * Per-field aggregate cards. Grid layout that wraps responsively as the

@@ -195,6 +195,40 @@ function withMemoryLock<T>(userId: string, fn: () => Promise<T>): Promise<T> {
 }
 
 /**
+ * Fingerprint a note list by its MUTABLE content (id + hook + detail +
+ * category). `createdAt`/`source` are immutable post-create, so this flips iff
+ * a note was added, removed, or edited — exactly the mutations the write lock
+ * serializes. Order-sensitive, which is fine: no mutator reorders existing
+ * notes (remember appends, forget filters in place, editNote maps in place).
+ */
+function notesFingerprint(notes: MemoryNote[]): string {
+  return JSON.stringify(notes.map((n) => [n.id, n.hook, n.detail ?? '', n.category ?? '']));
+}
+
+/**
+ * Wholesale-replace the store with `next`, but ONLY if it still matches
+ * `expected` — i.e. nothing was written since the caller read `expected`. The
+ * re-load + compare + save run inside the per-user write lock, so a concurrent
+ * remember/forget/appendNotes that committed while the caller was busy (e.g. a
+ * multi-second LLM round-trip) is never clobbered by a stale snapshot. Returns
+ * true if written, false if a concurrent change was detected (the caller should
+ * leave its result unapplied). Backs P4 consolidation, whose load → LLM →
+ * rebuild straddles the round-trip OUTSIDE the lock. (audit G-04)
+ */
+export async function commitNotesIfUnchanged(
+  userId: string,
+  expected: MemoryNote[],
+  next: MemoryNote[],
+): Promise<boolean> {
+  return withMemoryLock(userId, async () => {
+    const current = await loadNotes(userId);
+    if (notesFingerprint(current) !== notesFingerprint(expected)) return false;
+    await saveNotes(userId, next);
+    return true;
+  });
+}
+
+/**
  * Add MANY notes in one serialized load → append → save. Skips inputs whose
  * normalized hook already exists (cheap dedup — against the current store AND
  * within the batch) and stops at the byte ceiling. Returns how many were added.

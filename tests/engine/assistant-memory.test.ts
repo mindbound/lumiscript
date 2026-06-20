@@ -10,7 +10,7 @@
 import { describe, test, expect, mock, beforeEach } from 'bun:test';
 import {
   appendNote, dropNote, updateNote, searchNotes, renderIndex,
-  remember, recall, forget, loadNotes,
+  remember, recall, forget, loadNotes, saveNotes, commitNotesIfUnchanged,
   MEMORY_BYTE_CEILING, MEMORY_HOOK_CAP,
   type MemoryNote,
 } from '../../src/engine/assistant-memory.js';
@@ -184,5 +184,41 @@ describe('remember / recall / forget round-trip', () => {
     expect(await forget('u1', res.id)).toBe(true);
     expect(await loadNotes('u1')).toHaveLength(0);
     expect(await forget('u1', res.id)).toBe(false);
+  });
+});
+
+// ─── commitNotesIfUnchanged — G-04 lock-guarded consolidation commit ──────────
+describe('commitNotesIfUnchanged', () => {
+  test('writes `next` when the store still matches `expected`', async () => {
+    const expected = [note({ id: 'a1', hook: 'one' }), note({ id: 'b2', hook: 'two' })];
+    await saveNotes('u1', expected);
+    const next = [note({ id: 'c3', hook: 'consolidated' })];
+    const ok = await commitNotesIfUnchanged('u1', expected, next);
+    expect(ok).toBe(true);
+    expect(await loadNotes('u1')).toEqual(next);
+  });
+
+  test('aborts (leaves store unchanged) when a concurrent write changed it', async () => {
+    const expected = [note({ id: 'a1', hook: 'one' })];
+    // Simulate a remember/forget that landed during the LLM round-trip: the
+    // on-disk store now differs from the snapshot the caller consolidated from.
+    const concurrent = [note({ id: 'a1', hook: 'one' }), note({ id: 'b2', hook: 'added mid-flight' })];
+    await saveNotes('u1', concurrent);
+    const stale = [note({ id: 'c3', hook: 'rebuilt from the old snapshot' })];
+    const ok = await commitNotesIfUnchanged('u1', expected, stale);
+    expect(ok).toBe(false);
+    // The concurrent write survives; our stale rebuild is NOT applied.
+    expect(await loadNotes('u1')).toEqual(concurrent);
+  });
+
+  test('fingerprint ignores createdAt — same content commits', async () => {
+    const expected = [note({ id: 'a1', hook: 'one', detail: 'd' })];
+    await saveNotes('u1', expected);
+    // Same id/hook/detail/category, different createdAt (immutable field) must
+    // NOT count as a concurrent change.
+    const sameContent = [note({ id: 'a1', hook: 'one', detail: 'd', createdAt: 999 })];
+    const next = [note({ id: 'z9', hook: 'folded' })];
+    expect(await commitNotesIfUnchanged('u1', sameContent, next)).toBe(true);
+    expect(await loadNotes('u1')).toEqual(next);
   });
 });
