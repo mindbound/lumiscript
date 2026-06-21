@@ -70,6 +70,7 @@ const HandlerKindSchema = z.enum([
   'contentProcessor',
   'macroInterceptor',
   'worldInfoInterceptor',
+  'messageTagHandler',
   'domEventListener',
   'domDelegate',
   'inputBarActionClick',
@@ -304,6 +305,17 @@ const RegisterHandlerWorldInfoInterceptorSchema = z.object({
   hasHandler: z.literal(true),
 }).strict();
 
+const RegisterHandlerMessageTagHandlerSchema = z.object({
+  type:       z.literal('register-handler'),
+  kind:       z.literal('messageTagHandler'),
+  runId:      z.string(),
+  scriptId:   z.string(),
+  handlerId:  z.string(),
+  tagName:    z.string(),
+  options:    z.unknown().optional(),  // MessageTagOptions
+  hasHandler: z.literal(true),
+}).strict();
+
 const RegisterHandlerDomEventListenerSchema = z.object({
   type:       z.literal('register-handler'),
   kind:       z.literal('domEventListener'),
@@ -404,6 +416,7 @@ const RegisterHandlerSchema = z.discriminatedUnion('kind', [
   RegisterHandlerMacroInterceptorSchema,
   RegisterHandlerContentProcessorSchema,
   RegisterHandlerWorldInfoInterceptorSchema,
+  RegisterHandlerMessageTagHandlerSchema,
   RegisterHandlerDomEventListenerSchema,
   RegisterHandlerDomDelegateSchema,
   RegisterHandlerInputBarActionClickSchema,
@@ -541,7 +554,6 @@ type UnionDeclaredMessageTypes = ChildToParentMessage['type'];
 // The bidirectional form is exact set-equality.
 type ExactlyEqual<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never;
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 const _childToParentSchemaExhaustive: ExactlyEqual<
   SchemaCoveredMessageTypes,
   UnionDeclaredMessageTypes

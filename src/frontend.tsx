@@ -11,6 +11,7 @@ import { installModalHandler } from './modal-handler.js';
 import { installContextMenuHandler } from './context-menu-handler.js';
 import { installPickFileHandler } from './pick-file-handler.js';
 import { installInputBarActionHandler } from './input-bar-action-handler.js';
+import { installTagInterceptorHandler } from './tag-interceptor-handler.js';
 import { installFloatWidgetHandler } from './float-widget-handler.js';
 import { installAppMountHandler } from './app-mount-handler.js';
 import { installDrawerTabHandler } from './drawer-tab-handler.js';
@@ -122,6 +123,13 @@ export function setup(ctx: SpindleFrontendContext) {
   // `ls_input_bar_action_click` for the backend registry to fan out.
   const cleanupInputBarActions = installInputBarActionHandler(ctx, virtualOnBackendMessage, sendToBackend);
   cleanups.push(cleanupInputBarActions);
+
+  // ─── Message-tag interceptor handler ────────────────────────────────────
+  // Lifecycle proxy for `api.chat.onMessageTag`. Registers host
+  // `ctx.messages.registerTagInterceptor`s and echoes matched COMPLETED tags
+  // back via `ls_tag_interceptor_fired` (streaming filtered + deduped).
+  const cleanupTagInterceptors = installTagInterceptorHandler(ctx, virtualOnBackendMessage, sendToBackend);
+  cleanups.push(cleanupTagInterceptors);
 
   // ─── Float widget handler ───────────────────────────────────────────────
   // Lifecycle proxy for `api.ui.createFloatWidget`. Binds each widget's

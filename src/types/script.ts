@@ -881,6 +881,78 @@ export interface ChatAPI {
    * scripts). Use for diagnostics. Excludes the live handler reference.
    */
   listContentProcessors(): RegisteredMessageContentProcessorInfo[];
+
+  /**
+   * Subscribe to a message tag — react when the model (or user) emits an inline
+   * tag like `<dice>20</dice>` in a chat message. Returns an unsubscribe
+   * function; call it to stop receiving the tag. Subscriptions are also cleaned
+   * up automatically when the owning script is disabled, deleted, or finishes a
+   * one-shot run. Requires `chat_mutation` permission.
+   *
+   * **Delivery (v1):** the handler fires **once per completed message** that
+   * contains a match. Streaming partials are NOT delivered, and an edit re-fires
+   * with the new content. Delivery is render-coupled and best-effort: a message
+   * that completes while scrolled far off-screen may not deliver until it is
+   * viewed again — so **handlers should be idempotent**. The handler's return
+   * value is ignored (an async handler is awaited only for status tracking).
+   *
+   * `options.attrs` narrows to tags whose attributes include the given pairs
+   * (subset match — `{ type: 'd20' }` matches `<roll type="d20">`).
+   * `options.removeFromMessage` (default `true`) strips the matched tag from the
+   * RENDERED message; the stored message is unchanged.
+   *
+   * @example
+   * const off = api.chat.onMessageTag('dice', (ev) => {
+   *   console.log('rolled', ev.content, 'in message', ev.messageId);
+   * }, { removeFromMessage: true });
+   * // later: off();
+   */
+  onMessageTag(
+    tagName: string,
+    handler: (event: MessageTagEvent) => void | Promise<void>,
+    options?: MessageTagOptions,
+  ): () => void;
+}
+
+/**
+ * Payload delivered to an `api.chat.onMessageTag` handler when a matching tag is
+ * found in a completed chat message. Mirrors the host's tag-intercept shape.
+ */
+export interface MessageTagEvent {
+  /** The matched tag name (no brackets), e.g. `'dice'` for `<dice>…</dice>`. */
+  tagName: string;
+  /** Parsed tag attributes, e.g. `<roll type="d20">` → `{ type: 'd20' }`. */
+  attrs: Record<string, string>;
+  /** The inner text between the open/close tags. */
+  content: string;
+  /** The full matched substring, including the tags. */
+  fullMatch: string;
+  /** Id of the message the tag was found in (when available). */
+  messageId?: string;
+  /** Id of the chat the message belongs to (when available). */
+  chatId?: string;
+  /** True if the matched message is a user message (vs assistant). */
+  isUser?: boolean;
+  /**
+   * True if the match came from a still-streaming render. v1 only delivers
+   * completed (`isStreaming: false`) matches, so this is always `false` for now —
+   * reserved for the streaming opt-in (see notes/message-tag-delivery-roadmap.md).
+   */
+  isStreaming?: boolean;
+}
+
+/** Options for `api.chat.onMessageTag`. */
+export interface MessageTagOptions {
+  /**
+   * Only fire for tags whose attributes include these key/value pairs (subset
+   * match). Omit to match the tag regardless of attributes.
+   */
+  attrs?: Record<string, string>;
+  /**
+   * Strip the matched tag from the RENDERED message (the stored message is
+   * untouched). Defaults to `true`; set `false` to leave the tag visible.
+   */
+  removeFromMessage?: boolean;
 }
 
 // ─── LLM API ─────────────────────────────────────────────────────────────────

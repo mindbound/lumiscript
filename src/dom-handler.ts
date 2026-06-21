@@ -103,7 +103,6 @@ function sanitizeUserHtml(html: string, scriptId: string): string {
       // Defensive — failure to dispatch shouldn't block the sanitised
       // injection. Browser console still gets the warn below.
     }
-    // eslint-disable-next-line no-console
     console.warn(
       `[LumiScript] DOM sanitiser stripped ${detail.removedCount} item(s) from script "${scriptId}" injection: ${detail.summary}. ` +
       `Use DOMHandle.on(event, handler) instead of inline event-handler attributes.`,

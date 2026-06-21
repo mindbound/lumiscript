@@ -42,6 +42,7 @@ import type {
   MacroInterceptorOptions,
   MessageContentProcessorOptions,
   WorldInfoInterceptorOptions,
+  MessageTagOptions,
   DOMListenOptions,
   DOMDelegateOptions,
   AdvancedModalDismissReason,
@@ -255,6 +256,7 @@ export type HandlerKind =
   | 'contentProcessor'       // 9d.3.d
   | 'macroInterceptor'       // 9d.3.d
   | 'worldInfoInterceptor'   // v0.27.0 — api.worldInfo.registerInterceptor() handler
+  | 'messageTagHandler'      // v1.4 — api.chat.onMessageTag() message-tag interceptor
   | 'domEventListener'       // 9d.4.c-2 — DOMHandle.on() event handler
   | 'domDelegate'            // v0.27.1 — api.ui.dom.delegate() event-delegated handler
   | 'inputBarActionClick'    // 9d.4.e-1-b — InputBarActionHandle.onClick() click handler
@@ -808,6 +810,19 @@ export type RegisterHandler =
       scriptId:  string;
       handlerId: string;
       options?:  WorldInfoInterceptorOptions;
+      hasHandler: true;
+    }
+  | {
+      // v1.4 — api.chat.onMessageTag() message-tag interceptor. `tagName` is the
+      // tag to intercept; `options` carries attrs + removeFromMessage. Same
+      // child-generates-handlerId pattern as worldInfoInterceptor.
+      type:      'register-handler';
+      kind:      'messageTagHandler';
+      runId:     string;
+      scriptId:  string;
+      handlerId: string;
+      tagName:   string;
+      options?:  MessageTagOptions;
       hasHandler: true;
     }
   | {

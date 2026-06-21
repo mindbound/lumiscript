@@ -65,6 +65,7 @@
 
 import type { BackendToFrontend } from '../types/messages.js';
 import { listReplayMessages as listInputBarActionReplayMessages } from './input-bar-action-registry.js';
+import { listReplayMessages as listTagInterceptorReplayMessages } from './message-tag-handler-registry.js';
 import { listReplayMessages as listDrawerTabReplayMessages }      from './drawer-tab-registry.js';
 import { listReplayMessages as listFloatWidgetReplayMessages }    from './float-widget-registry.js';
 import {
@@ -90,6 +91,7 @@ export function buildReplayMessages(): BackendToFrontend[] {
   return [
     ...listStyleReplayMessages(),            // 1. CSS first (avoids FOUC)
     ...listInputBarActionReplayMessages(),   // 2. Host-UI: popover rows
+    ...listTagInterceptorReplayMessages(),   //    Message-tag interceptors (order-independent)
     ...listDrawerTabReplayMessages(),        // 3. Host-UI: sidebar tabs (+ shells registered)
     ...listFloatWidgetReplayMessages(),      // 4. Host-UI: overlay widgets (+ shells registered)
     ...listShellUpdateMessages(),            // 5. Fill tab / widget body HTML (so children below resolve)

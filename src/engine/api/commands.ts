@@ -69,11 +69,22 @@ export function buildCommandsAPI(deps: APIBuildDeps): LumiScriptAPI['commands'] 
       clearCommandHandlerByScriptId(script.id);
 
       const unsub = spindle.commands.onInvoked((commandId, ctx) => {
-        handler(commandId, {
-          route:        ctx.route,
-          chatId:       ctx.chatId,
-          characterId:  ctx.characterId,
-          isGroupChat:  ctx.isGroupChat,
+        // The dispatcher wrapper rejects when the child handler run fails
+        // (host-dispatcher `commandsOnInvoked` throws on `!result.ok`), so catch
+        // here — otherwise a throwing command handler leaks an unhandled
+        // rejection. `Promise.resolve` normalises the `void | Promise<void>`
+        // canonical return.
+        Promise.resolve(
+          handler(commandId, {
+            route:        ctx.route,
+            chatId:       ctx.chatId,
+            characterId:  ctx.characterId,
+            isGroupChat:  ctx.isGroupChat,
+          }),
+        ).catch((err) => {
+          spindle.log.warn(
+            `[LumiScript] commands.onInvoked handler threw (script ${script.id}): ${String(err)}`,
+          );
         });
       });
 

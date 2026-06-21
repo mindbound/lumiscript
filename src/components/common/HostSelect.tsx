@@ -83,7 +83,6 @@ const HostSelectMounted: FC<HostSelectProps> = ({
       try { handleRef.current?.destroy(); } catch { /* ignore */ }
       handleRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Push prop changes into the live handle.

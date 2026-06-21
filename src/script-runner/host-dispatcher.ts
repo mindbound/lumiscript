@@ -2826,6 +2826,55 @@ function handleRegisterHandler(msg: RegisterHandler): void {
       break;
     }
 
+    case 'messageTagHandler': {
+      // v1.4 — handler signature: (event: MessageTagEvent) => void | Promise<void>.
+      // Fire-and-forget: the fire is delivered UP from the FE; we forward it into
+      // the child and discard the result. Persistent (like commandsOnInvoked) —
+      // the canonical returns a sync unsub stored under handlerId for unregister +
+      // teardown. The `activeOrLatestForScript` fallback lets a fire that arrives
+      // after the registering run completes route to the script's current run.
+      const wrapper = (
+        event: import('../types/script.js').MessageTagEvent,
+      ): void | Promise<void> =>
+        sendRunHandlerRequest(
+          msg.scriptId,
+          msg.handlerId,
+          'messageTagHandler',
+          [event],
+          5_000,
+        ).then((result) => {
+          if (!result.ok) {
+            spindle.log.warn(
+              `[script-runner] onMessageTag handler threw for ${msg.scriptId}: ${result.error?.message ?? 'unknown'}`,
+            );
+          }
+          // void return — discard result.value.
+        });
+
+      const active = activeOrLatestForScript(msg.scriptId, msg.runId);
+      if (active) {
+        try {
+          // Pass the child's handlerId via options.id so the backend registry
+          // key, FE id, and fired-event routing all share ONE id.
+          const canonicalUnsub = active.api.chat.onMessageTag(
+            msg.tagName,
+            wrapper,
+            // `id` is read defensively by the canonical to align the registry /
+            // FE / fired-event ids; cast past the excess-property check.
+            { ...(msg.options ?? {}), id: msg.handlerId } as import('../types/script.js').MessageTagOptions,
+          );
+          recordHandlerCleanup(msg.scriptId, msg.handlerId, canonicalUnsub);
+        } catch (err) {
+          spindle.log.warn(
+            `[script-runner] chat.onMessageTag failed (script ${msg.scriptId}): ${String(err)}`,
+          );
+        }
+      } else {
+        logLateRegisterSkip(msg);
+      }
+      break;
+    }
+
     case 'domDelegate': {
       // v0.27.1 — handler signature: (data: DOMDelegatedEventData) => void.
       // Fires when the frontend's capture listener matches a delegated
@@ -3237,6 +3286,7 @@ function handleUnregisterHandler(msg: UnregisterHandler): void {
     case 'macroInterceptor':
     case 'contentProcessor':
     case 'worldInfoInterceptor':
+    case 'messageTagHandler':
     case 'domEventListener':
     case 'domDelegate':
     case 'inputBarActionClick':

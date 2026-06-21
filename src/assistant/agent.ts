@@ -29,7 +29,8 @@ import type { LlmMessageDTO, ToolCallDTO } from 'lumiverse-spindle-types';
 import type { LlmMessagePart } from '../types/script.js';
 import { buildAssistantSystemPrompt, buildSessionNotesSection } from './system-prompt.js';
 import { ASSISTANT_TOOLS, dispatchAssistantTool } from './tools.js';
-import { type AssistantPersona, ATTACHED_SCRIPT_CODE_CAP } from './types.js';
+import { type AssistantPersona, type AssistantScriptLibrary, ATTACHED_SCRIPT_CODE_CAP } from './types.js';
+import type { CompactDiagnostics } from '../engine/diagnostics.js';
 import { userFileDisplayName, fenceLangForFile } from './user-files.js';
 
 // ─── Public types ────────────────────────────────────────────────────────────
@@ -107,6 +108,20 @@ export interface RunTurnOptions {
    * NOTES section. Empty/undefined → no index shown (the guidance still is).
    */
   memoryIndex?: string;
+  /**
+   * Provider for the `read_diagnostics` tool — returns a compact snapshot of
+   * backend runtime state (script-runner health, registrations, permissions,
+   * active context). Supplied by the backend, which owns the probe assembly.
+   * Omit to make the tool report "diagnostics unavailable" for this turn.
+   */
+  collectDiagnostics?: () => Promise<CompactDiagnostics>;
+  /**
+   * Read-only view of the active user's script library for the `list_scripts` /
+   * `read_script` tools — lets the assistant reason across scripts the user
+   * didn't `@`-attach. Supplied by the backend (reads per-user `scriptStorage`).
+   * Omit to make those tools report "unavailable" for this turn.
+   */
+  scriptLibrary?: AssistantScriptLibrary;
   /**
    * Safety limit on agentic-loop iterations. Each tool-call response counts
    * as one iteration. Default 8 — generous for normal Q&A, hard ceiling for
@@ -660,7 +675,11 @@ export async function runAssistantTurn(
 
       const toolResultParts: LlmMessagePart[] = [];
       for (const call of toolCalls) {
-        const result = await dispatchAssistantTool(call.name, call.args ?? {}, { userId: opts.userId });
+        const result = await dispatchAssistantTool(call.name, call.args ?? {}, {
+          userId: opts.userId,
+          ...(opts.collectDiagnostics ? { collectDiagnostics: opts.collectDiagnostics } : {}),
+          ...(opts.scriptLibrary ? { scriptLibrary: opts.scriptLibrary } : {}),
+        });
         // Cap a single tool result so one runaway (broad lookup, big recall)
         // can't blow the context window or the transcript chip. The same capped
         // string feeds both the model context and the FE echo so they agree.

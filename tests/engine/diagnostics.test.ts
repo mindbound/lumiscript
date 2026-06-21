@@ -18,7 +18,9 @@
 import { describe, test, expect, beforeEach } from 'bun:test';
 import {
   collectBackendDiagnostics,
+  compactDiagnostics,
   type DiagnosticsCollectorDeps,
+  type DiagnosticsReport,
   type AssistantProbeResult,
 } from '../../src/engine/diagnostics.js';
 import { setActiveContext, resetContext } from '../../src/engine/binding.js';
@@ -132,6 +134,10 @@ describe('collectBackendDiagnostics — Section A (LumiScript)', () => {
       .checks.find(c => c.label === 'Granted permissions')!;
     expect(withCheck.status).toBe('pass');
     expect(withCheck.message).toContain('3 permission');
+    // Names are listed inline in the message (not just the count) so they survive
+    // compaction into the Lisa read_diagnostics tool.
+    expect(withCheck.message).toContain('chat_mutation');
+    expect(withCheck.message).toContain('generation');
     expect(withCheck.details?.granted).toEqual(['chat_mutation', 'generation', 'interceptor']);
     expect(withoutCheck.status).toBe('warn');
   });
@@ -925,5 +931,56 @@ describe('collectBackendDiagnostics — Assistant section', () => {
     ).sections.find(s => s.id === 'assistant')!;
     const init = section.checks.find(c => c.label === 'Initialised')!;
     expect(init.status).toBe('info');
+  });
+});
+
+// ─── compactDiagnostics (Lisa read_diagnostics tool) ─────────────────────────
+
+describe('compactDiagnostics', () => {
+  const full: DiagnosticsReport = {
+    generatedAt: 123,
+    summary: { failures: 1, warnings: 2, passes: 3, info: 0 },
+    sections: [
+      {
+        id: 'a',
+        name: 'Section A',
+        checks: [
+          {
+            label: 'Permissions',
+            status: 'pass',
+            message: 'all granted',
+            // The bulky bits that must be dropped:
+            table: { headers: ['h'], rows: [['r1'], ['r2']] },
+            details: { blob: 'x'.repeat(5000) },
+          },
+          { label: 'Triggers', status: 'fail', message: '0 trigger subscriptions' },
+        ],
+      },
+    ],
+  };
+
+  test('keeps section name + each check label/status/message', () => {
+    const c = compactDiagnostics(full);
+    expect(c.generatedAt).toBe(123);
+    expect(c.summary).toEqual({ failures: 1, warnings: 2, passes: 3, info: 0 });
+    expect(c.sections).toEqual([
+      {
+        name: 'Section A',
+        checks: [
+          { label: 'Permissions', status: 'pass', message: 'all granted' },
+          { label: 'Triggers', status: 'fail', message: '0 trigger subscriptions' },
+        ],
+      },
+    ]);
+  });
+
+  test('drops the bulky table / details payloads (and the section id)', () => {
+    const json = JSON.stringify(compactDiagnostics(full));
+    expect(json).not.toContain('table');
+    expect(json).not.toContain('details');
+    expect(json).not.toContain('x'.repeat(5000)); // the big blob is gone
+    expect(json).not.toContain('"id"');           // section id not carried
+    // A compact report stays far smaller than a full one with tables/details.
+    expect(json.length).toBeLessThan(400);
   });
 });

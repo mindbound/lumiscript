@@ -49,6 +49,7 @@ import { countLiveWidgetsByScript } from './float-widget-registry.js';
 import { countLiveAppMountsByScript } from './app-mount-registry.js';
 import { countLiveModalsByScript } from './advanced-modal-registry.js';
 import { countByScript as countInputBarActionsByScript } from './input-bar-action-registry.js';
+import { countByScriptId as countMessageTagInterceptors } from './message-tag-handler-registry.js';
 import {
   listElementInjectMessages,
   listStyleReplayMessages,
@@ -128,6 +129,35 @@ export interface DiagnosticsReport {
   };
   /** Sections in stable order. Future sections appended, not reordered. */
   sections: DiagnosticSection[];
+}
+
+/**
+ * Slimmed report for LLM consumption (the Lisa `read_diagnostics` tool).
+ * Keeps the high-signal prose — section names + each check's label / status /
+ * message — and drops the bulky `table` / `details` payloads (the modal's
+ * drill-down) that would balloon the token cost. The check `message` fields are
+ * already written for human display, so they read well to the model; a typical
+ * compact report is ~3–6 KB vs the full ~8–15 KB.
+ */
+export interface CompactDiagnostics {
+  generatedAt: number;
+  summary: DiagnosticsReport['summary'];
+  sections: Array<{
+    name: string;
+    checks: Array<{ label: string; status: DiagnosticStatus; message: string }>;
+  }>;
+}
+
+/** Project a full {@link DiagnosticsReport} down to its {@link CompactDiagnostics} form. */
+export function compactDiagnostics(report: DiagnosticsReport): CompactDiagnostics {
+  return {
+    generatedAt: report.generatedAt,
+    summary: report.summary,
+    sections: report.sections.map((s) => ({
+      name: s.name,
+      checks: s.checks.map((c) => ({ label: c.label, status: c.status, message: c.message })),
+    })),
+  };
 }
 
 /** Optional async-probe result threaded in by the caller. */
@@ -461,7 +491,11 @@ function buildLumiScriptSection(deps: DiagnosticsCollectorDeps): DiagnosticSecti
     label:   'Granted permissions',
     status:  deps.grantedPermissions.length > 0 ? 'pass' : 'warn',
     message: deps.grantedPermissions.length > 0
-      ? `${deps.grantedPermissions.length} permission(s) granted`
+      // Name the permissions inline (not just a count): the compact form fed to
+      // the Lisa `read_diagnostics` tool drops `details`, and "which permission
+      // is missing" is a top cause of "why does api.* silently fail". Enriches
+      // the markdown export for free; stays well under the tool-result cap.
+      ? `${deps.grantedPermissions.length} permission(s) granted: ${[...deps.grantedPermissions].sort().join(', ')}`
       : 'No permissions granted — extension features will be degraded',
     details: { granted: [...deps.grantedPermissions].sort() },
   });
@@ -509,8 +543,8 @@ function buildScriptRunnerSection(deps: DiagnosticsCollectorDeps): DiagnosticSec
     status:  probe.childAlive ? 'pass' : 'fail',
     message: probe.childAlive
       ? aliveWorkerCount === 1
-        ? 'Running — 1 worker alive (see Workers table below for per-worker details)'
-        : `Running — ${aliveWorkerCount} workers alive (see Workers table below for per-worker details)`
+        ? 'Running — 1 worker alive (see the Workers check below for per-worker details)'
+        : `Running — ${aliveWorkerCount} workers alive (see the Workers check below for per-worker details)`
       : 'Not running — no workers alive (post-crash or pre-spawn state)',
   });
 
@@ -888,11 +922,13 @@ function buildRegistrationsSection(deps: DiagnosticsCollectorDeps): DiagnosticSe
   let appMounts       = 0;
   let advancedModals  = 0;
   let inputBarActions = 0;
+  let messageTagInterceptors = 0;
   for (const s of scripts) {
     floatWidgets    += countLiveWidgetsByScript(s.id);
     appMounts       += countLiveAppMountsByScript(s.id);
     advancedModals  += countLiveModalsByScript(s.id);
     inputBarActions += countInputBarActionsByScript(s.id);
+    messageTagInterceptors += countMessageTagInterceptors(s.id);
   }
 
   const checks: DiagnosticCheck[] = [
@@ -984,6 +1020,11 @@ function buildRegistrationsSection(deps: DiagnosticsCollectorDeps): DiagnosticSe
         label:   'Input-bar actions',
         status:  'info',
         message: `${inputBarActions} registered`,
+      },
+      {
+        label:   'Message-tag interceptors',
+        status:  'info',
+        message: `${messageTagInterceptors} registered`,
       },
   ];
 

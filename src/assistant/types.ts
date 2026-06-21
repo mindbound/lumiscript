@@ -16,6 +16,37 @@
  */
 export const ATTACHED_SCRIPT_CODE_CAP = 24_000;
 
+// ─── Script-library tools (read_diagnostics' siblings) ───────────────────────
+
+/** One entry in the `list_scripts` tool result — metadata only, no code. */
+export interface AssistantScriptSummary {
+  id: string;
+  name: string;
+  type: string;
+  enabled: boolean;
+}
+
+/** The `read_script` tool result — a single script's metadata + full code. */
+export interface AssistantScriptDetail extends AssistantScriptSummary {
+  code: string;
+}
+
+/**
+ * Read-only view of the backend's loaded script library, supplied to the
+ * assistant turn so the `list_scripts` / `read_script` tools can reason across
+ * scripts the user didn't `@`-attach. An id outside the library resolves to
+ * `null`. Backed by the process-global `scriptStorage` — the SAME store that
+ * `@`-attach resolution and the script-list push already read. NOTE: that store
+ * is a single-active-user cache (loaded once for the active operator, not
+ * re-scoped per call), so these tools inherit exactly that scope; on a
+ * hypothetical multi-operator-per-worker deployment it would reflect the
+ * first-loaded operator rather than the turn's user.
+ */
+export interface AssistantScriptLibrary {
+  list: () => AssistantScriptSummary[];
+  read: (id: string) => AssistantScriptDetail | null;
+}
+
 /**
  * Persona definition for the assistant's voice and behaviour.
  *

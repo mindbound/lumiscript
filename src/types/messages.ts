@@ -25,6 +25,8 @@ import type {
   UIKeyboardState,
   UIDrawerState,
   UISettingsState,
+  MessageTagEvent,
+  MessageTagOptions,
 } from './script.js';
 import type { CollectionSummary, CollectionStats } from '../engine/db-admin.js';
 
@@ -311,6 +313,18 @@ export type FrontendToBackend =
       type: 'ls_input_bar_action_click';
       scriptId: string;
       actionId: string;
+    }
+  | {
+      /**
+       * Fired by the frontend when a registered message-tag interceptor matches
+       * a COMPLETED message (the FE bridge filters out streaming partials and
+       * dedupes per `messageId:tagName:fullMatch`). Backend routes to the
+       * script's handler by `handlerId`. Fire-and-forget — no response.
+       */
+      type: 'ls_tag_interceptor_fired';
+      scriptId: string;
+      handlerId: string;
+      event: MessageTagEvent;
     }
   | {
       /**
@@ -965,6 +979,33 @@ export type BackendToFrontend =
         iconUrl?: string;
         enabled?: boolean;
       };
+    }
+  // ─── Message-tag interceptor lifecycle (backend → frontend) ─────────
+  | {
+      /**
+       * Register a message-tag interceptor. The frontend calls
+       * `ctx.messages.registerTagInterceptor({ tagName, attrs, removeFromMessage })`
+       * and stores the host unsubscribe keyed by `handlerId`. When the host
+       * fires for a COMPLETED message the FE echoes `ls_tag_interceptor_fired`.
+       * One host interceptor per registration (host fires all per-tag).
+       */
+      type: 'ls_tag_interceptor_register';
+      scriptId: string;
+      handlerId: string;
+      tagName: string;
+      options?: MessageTagOptions;
+    }
+  | {
+      /**
+       * Unregister a message-tag interceptor — the frontend calls the stored
+       * host unsubscribe for `handlerId` and drops it. Sent on the script's
+       * `onMessageTag` unsubscribe AND in the disable/delete/reload teardown
+       * sweep (before the backend registry is cleared) so no host interceptor
+       * is left zombied.
+       */
+      type: 'ls_tag_interceptor_unregister';
+      scriptId: string;
+      handlerId: string;
     }
   | {
       /** Update the label of a registered input-bar action. */

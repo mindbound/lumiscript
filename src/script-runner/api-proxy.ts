@@ -608,7 +608,7 @@ function mkSyncVoidFireForget<T extends (...args: any[]) => void>(
 ): T {
   return ((...args: unknown[]) => {
     const p = dispatch(method, args).catch(() => { /* canonical: sync void doesn't throw to caller */ });
-    if (trackChain !== undefined) trackChain(p);
+    if (trackChain !== undefined) void trackChain(p);
   }) as unknown as T;
 }
 
@@ -1223,7 +1223,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
       state.tokens -= 1;
       broadcastEmitRateState.set(ctx.scriptId, state);
 
-      trackChain(dispatch('broadcast.emit', [event, payload]).catch(() => {
+      void trackChain(dispatch('broadcast.emit', [event, payload]).catch(() => {
         // Silent — the host will have logged any real issue.
       }));
     },
@@ -1597,7 +1597,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
         ...options,
         _elementId: elementId,
       };
-      trackChain(dispatch('ui.dom.inject', [target, html, fullOptions]).catch((err) => {
+      void trackChain(dispatch('ui.dom.inject', [target, html, fullOptions]).catch((err) => {
         try {
           console.warn(
             `api.ui.dom.inject: dispatch failed (${err instanceof Error ? err.message : String(err)}); ` +
@@ -1615,7 +1615,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
         ...options,
         _elementId: elementId,
       };
-      trackChain(dispatch('ui.dom.injectAtMessage', [messageId, html, fullOptions]).catch((err) => {
+      void trackChain(dispatch('ui.dom.injectAtMessage', [messageId, html, fullOptions]).catch((err) => {
         try {
           console.warn(
             `api.ui.dom.injectAtMessage: dispatch failed (${err instanceof Error ? err.message : String(err)}); ` +
@@ -1766,17 +1766,17 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
       get id(): string { return elementId; },
 
       update: (html: string): void => {
-        trackChain(gateOrFire(() => dispatchOnHandle(targetHandle, 'ui._dom.update', [elementId, html]))
+        void trackChain(gateOrFire(() => dispatchOnHandle(targetHandle, 'ui._dom.update', [elementId, html]))
           .catch(() => { /* canonical: sync void — drop errors */ }));
       },
 
       remove: (): void => {
-        trackChain(gateOrFire(() => dispatchOnHandle(targetHandle, 'ui._dom.remove', [elementId]))
+        void trackChain(gateOrFire(() => dispatchOnHandle(targetHandle, 'ui._dom.remove', [elementId]))
           .catch(() => { /* canonical: sync void */ }));
       },
 
       makeDraggable: (handleSelector?: string): void => {
-        trackChain(gateOrFire(() => dispatchOnHandle(
+        void trackChain(gateOrFire(() => dispatchOnHandle(
           targetHandle,
           'ui._dom.makeDraggable',
           handleSelector !== undefined ? [elementId, handleSelector] : [elementId],
@@ -1801,7 +1801,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
           ...options,
           _elementId: childElementId,
         };
-        trackChain(gateOrFire(() => dispatchOnHandle(
+        void trackChain(gateOrFire(() => dispatchOnHandle(
           targetHandle,
           'ui._dom.injectChild',
           [elementId, target, html, fullOptions],
@@ -1881,7 +1881,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
             throw err instanceof Error ? err : new Error(String(err));
           }
         } else {
-          trackChain(gateAck
+          void trackChain(gateAck
             .then(buildAndSend)
             .catch(() => {
               // gate rejected (e.g. modal open timed out) — drop the
@@ -2010,11 +2010,11 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
     return {
       get id(): string { return componentId; },
       update: (patch: Partial<TOptions>): void => {
-        trackChain(dispatchOnHandle(targetHandle, 'ui._components.update', [componentId, patch ?? {}])
+        void trackChain(dispatchOnHandle(targetHandle, 'ui._components.update', [componentId, patch ?? {}])
           .catch(() => { /* canonical: sync void — drop errors */ }));
       },
       destroy: (): void => {
-        trackChain(dispatchOnHandle(targetHandle, 'ui._components.destroy', [componentId])
+        void trackChain(dispatchOnHandle(targetHandle, 'ui._components.destroy', [componentId])
           .catch(() => { /* canonical: sync void */ }));
         // Drop the callback closures we registered for this component so they
         // don't pin the script past the component's lifecycle.
@@ -2050,7 +2050,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
   ): MountedCollapsibleSectionHandle {
     const targetHandle: HandleRef = { __handleRef: true, id: componentId, kind: 'MountedComponent' };
     const voidMethod = (method: string) => (): void => {
-      trackChain(dispatchOnHandle(targetHandle, `ui._components.${method}`, [componentId])
+      void trackChain(dispatchOnHandle(targetHandle, `ui._components.${method}`, [componentId])
         .catch(() => { /* canonical: sync void */ }));
     };
     return {
@@ -2094,7 +2094,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
         props[key] = val;
       }
     }
-    trackChain(
+    void trackChain(
       dispatch(method, [target.id, { ...props, _componentId: componentId, _callbacks: callbacks }]).catch((err) => {
         try {
           console.warn(
@@ -2417,13 +2417,13 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
         },
         setTitle: (title: string): void => {
           if (dismissedRef.current) return; // canonical no-op on dismissed
-          trackChain(openAck
+          void trackChain(openAck
             .then(() => dispatch('ui._advModal.setTitle', [modalId, title]))
             .catch(() => { /* canonical: sync void; rejection skips the dispatch */ }));
         },
         dismiss: (): void => {
           if (dismissedRef.current) return; // canonical no-op on dismissed
-          trackChain(openAck
+          void trackChain(openAck
             .then(() => dispatch('ui._advModal.dismiss', [modalId]))
             .catch(() => { /* canonical: sync void */ }));
         },
@@ -2511,19 +2511,19 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
         actionId,
         setLabel: (nextLabel: string): void => {
           if (destroyedRef.current) return;
-          trackChain(openAck
+          void trackChain(openAck
             .then(() => dispatch('ui._inputBar.setLabel', [actionId, nextLabel]))
             .catch(() => { /* canonical: sync void */ }));
         },
         setSubtitle: (nextSubtitle?: string): void => {
           if (destroyedRef.current) return;
-          trackChain(openAck
+          void trackChain(openAck
             .then(() => dispatch('ui._inputBar.setSubtitle', [actionId, nextSubtitle]))
             .catch(() => { /* canonical: sync void */ }));
         },
         setEnabled: (nextEnabled: boolean): void => {
           if (destroyedRef.current) return;
-          trackChain(openAck
+          void trackChain(openAck
             .then(() => dispatch('ui._inputBar.setEnabled', [actionId, nextEnabled]))
             .catch(() => { /* canonical: sync void */ }));
         },
@@ -2587,7 +2587,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
           // consistent: every method on the handle waits for "register
           // confirmed" before firing IPC, which is the simplest mental
           // model for users + makes debugging predictable.
-          trackChain(openAck
+          void trackChain(openAck
             .then(buildAndSend)
             .catch(() => {
               // openAck rejected (e.g. FE timeout) — drop the closure
@@ -2613,7 +2613,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
         destroy: (): void => {
           if (destroyedRef.current) return;
           destroyedRef.current = true;
-          trackChain(openAck
+          void trackChain(openAck
             .then(() => dispatch('ui._inputBar.destroy', [actionId]))
             .catch(() => { /* canonical: sync void */ }));
         },
@@ -2697,7 +2697,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
           // updateWidgetPosition + entry.x/y mutation is sync).
           positionCache.x = x;
           positionCache.y = y;
-          trackChain(openAck
+          void trackChain(openAck
             .then(() => dispatch('ui._floatWidget.moveTo', [widgetId, x, y]))
             .catch(() => { /* canonical: sync void */ }));
         },
@@ -2711,7 +2711,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
         setVisible: (visible: boolean): void => {
           if (destroyedRef.current) return;
           visibleCache.current = visible;
-          trackChain(openAck
+          void trackChain(openAck
             .then(() => dispatch('ui._floatWidget.setVisible', [widgetId, visible]))
             .catch(() => { /* canonical: sync void */ }));
         },
@@ -2776,7 +2776,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
           // Always gate via openAck so the parent's pendingFloatWidgets
           // entry exists before the lookup runs. Same reasoning as the
           // `inputBarActionClick` register path.
-          trackChain(openAck
+          void trackChain(openAck
             .then(buildAndSend)
             .catch(() => {
               // openAck rejected (e.g. FE timeout) — drop the closure
@@ -2804,7 +2804,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
           // map doesn't grow indefinitely. Late notices arriving after
           // destroy hit the no-op branch in `notifyFloatWidgetPosition`.
           floatWidgetState.delete(widgetId);
-          trackChain(openAck
+          void trackChain(openAck
             .then(() => dispatch('ui._floatWidget.destroy', [widgetId]))
             .catch(() => { /* canonical: sync void */ }));
         },
@@ -2843,14 +2843,14 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
         root,
         setVisible: (visible: boolean): void => {
           if (destroyedRef.current) return;
-          trackChain(openAck
+          void trackChain(openAck
             .then(() => dispatch('ui._appMount.setVisible', [mountId, visible]))
             .catch(() => { /* canonical: sync void */ }));
         },
         destroy: (): void => {
           if (destroyedRef.current) return;
           destroyedRef.current = true;
-          trackChain(openAck
+          void trackChain(openAck
             .then(() => dispatch('ui._appMount.destroy', [mountId]))
             .catch(() => { /* canonical: sync void */ }));
         },
@@ -2914,25 +2914,25 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
         root,
         setTitle: (title: string): void => {
           if (destroyedRef.current) return;
-          trackChain(openAck
+          void trackChain(openAck
             .then(() => dispatch('ui._drawerTab.setTitle', [tabId, title]))
             .catch(() => { /* canonical: sync void */ }));
         },
         setShortName: (shortName: string): void => {
           if (destroyedRef.current) return;
-          trackChain(openAck
+          void trackChain(openAck
             .then(() => dispatch('ui._drawerTab.setShortName', [tabId, shortName]))
             .catch(() => { /* canonical: sync void */ }));
         },
         setBadge: (text: string | null): void => {
           if (destroyedRef.current) return;
-          trackChain(openAck
+          void trackChain(openAck
             .then(() => dispatch('ui._drawerTab.setBadge', [tabId, text]))
             .catch(() => { /* canonical: sync void */ }));
         },
         activate: (): void => {
           if (destroyedRef.current) return;
-          trackChain(openAck
+          void trackChain(openAck
             .then(() => dispatch('ui._drawerTab.activate', [tabId]))
             .catch(() => { /* canonical: sync void */ }));
         },
@@ -2990,7 +2990,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
           // Always gate via openAck so the parent's pendingDrawerTabs
           // entry exists before the lookup runs. Same reasoning as
           // floatWidget.onDragEnd / inputBarAction.onClick.
-          trackChain(openAck
+          void trackChain(openAck
             .then(buildAndSend)
             .catch(() => {
               // openAck rejected (e.g. FE timeout) — drop the closure
@@ -3012,7 +3012,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
         destroy: (): void => {
           if (destroyedRef.current) return;
           destroyedRef.current = true;
-          trackChain(openAck
+          void trackChain(openAck
             .then(() => dispatch('ui._drawerTab.destroy', [tabId]))
             .catch(() => { /* canonical: sync void */ }));
         },
@@ -3358,7 +3358,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
     // Sync void fire-and-forget — parent state mutation, no return value.
     // Phase 9d.X — also update local snapshot for list() consistency.
     inject: (id, content, options) => {
-      trackChain(dispatch('chat.inject', [id, content, options]).catch(() => { /* canonical: sync void */ }));
+      void trackChain(dispatch('chat.inject', [id, content, options]).catch(() => { /* canonical: sync void */ }));
       // Update local snapshot. Canonical: `addInjection` REPLACES on
       // duplicate id (within the same store). Mirror that.
       const existingIdx = localChatInjections.findIndex((i) => i.id === id);
@@ -3376,13 +3376,13 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
     },
 
     removeInjection: (id) => {
-      trackChain(dispatch('chat.removeInjection', [id]).catch(() => { /* canonical: sync void */ }));
+      void trackChain(dispatch('chat.removeInjection', [id]).catch(() => { /* canonical: sync void */ }));
       const idx = localChatInjections.findIndex((i) => i.id === id);
       if (idx >= 0) localChatInjections.splice(idx, 1);
     },
 
     clearInjections: () => {
-      trackChain(dispatch('chat.clearInjections', []).catch(() => { /* canonical: sync void */ }));
+      void trackChain(dispatch('chat.clearInjections', []).catch(() => { /* canonical: sync void */ }));
       // Filter out injections owned by this script.
       for (let i = localChatInjections.length - 1; i >= 0; i--) {
         if (localChatInjections[i]?.scriptId === ctx.scriptId) {
@@ -3392,7 +3392,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
     },
 
     clearAllInjections: () => {
-      trackChain(dispatch('chat.clearAllInjections', []).catch(() => { /* canonical: sync void */ }));
+      void trackChain(dispatch('chat.clearAllInjections', []).catch(() => { /* canonical: sync void */ }));
       // Wipe the whole local snapshot — the canonical clears all injections
       // across all scripts. (We can't see other-script entries beyond
       // dispatch-time snapshot, but those are all that's in our local
@@ -3406,6 +3406,45 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
      */
     getInjections:         () => localChatInjections.map((i) => ({ ...i })),
     listContentProcessors: () => localChatContentProcessors.map((p) => ({ ...p })),
+
+    // v1.4 — message-tag interceptor. Persistent register-handler subscription
+    // (like ui.events.on*Change) that returns a sync `() => void` unsubscribe.
+    // The fire is delivered up from the FE (one event per completed message).
+    onMessageTag: (tagName, handler, options) => {
+      const handlerId = generateHandlerId('messageTagHandler');
+      ctx.registerHandlerClosure(handlerId, async (...handlerArgs: unknown[]) => {
+        // IPC args shape: [event: MessageTagEvent]. Fire-and-forget — `await` so
+        // an async handler's full body runs before the per-fire run settles
+        // (rc.8 lesson); the return value is discarded.
+        await handler(handlerArgs[0] as Parameters<typeof handler>[0]);
+      });
+      const msg: RegisterHandler = {
+        type:       'register-handler',
+        kind:       'messageTagHandler',
+        runId:      runIdContext.getStore() ?? ctx.runId,
+        scriptId:   ctx.scriptId,
+        handlerId,
+        tagName,
+        options,
+        hasHandler: true,
+      };
+      try {
+        ctx.send(msg);
+      } catch (err) {
+        ctx.unregisterHandlerClosure(handlerId);
+        throw err instanceof Error ? err : new Error(String(err));
+      }
+      return () => {
+        ctx.unregisterHandlerClosure(handlerId);
+        const unsubMsg: UnregisterHandler = {
+          type:      'unregister-handler',
+          kind:      'messageTagHandler',
+          scriptId:  ctx.scriptId,
+          handlerId,
+        };
+        try { ctx.send(unsubMsg); } catch { /* sync void: no throw */ }
+      };
+    },
 
     /**
      * Phase 9d.3.d — Same shape as `macros.registerInterceptor`: returns
@@ -4207,7 +4246,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
         // Push-mode: no closure to register. Send through the regular
         // dispatch passthrough — the parent's macros.register handles
         // this case (handler param defaults to empty-string for push).
-        trackChain(dispatch('macros.register', [name, def]).catch(() => { /* canonical: sync void */ }));
+        void trackChain(dispatch('macros.register', [name, def]).catch(() => { /* canonical: sync void */ }));
       } else {
         // Pull-mode: stash handler closure + send register-handler IPC.
         const handlerId = generateHandlerId('macro');
@@ -4257,7 +4296,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
     },
 
     updateValue: (name, value) => {
-      trackChain(dispatch('macros.updateValue', [name, value]).catch(() => { /* canonical: sync void */ }));
+      void trackChain(dispatch('macros.updateValue', [name, value]).catch(() => { /* canonical: sync void */ }));
       // Phase 9d.X — update local snapshot's lastValue for this push-mode
       // macro. Canonical: only meaningful for push-mode, but we update
       // the cell regardless — list() returns it on inspection.

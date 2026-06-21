@@ -85,6 +85,11 @@ import {
   dispatchClick as dispatchActionClick,
 } from './engine/input-bar-action-registry.js';
 import {
+  listByScript as listTagHandlersByScript,
+  clearByScriptId as clearTagHandlersByScriptId,
+  dispatchTagEvent,
+} from './engine/message-tag-handler-registry.js';
+import {
   liveWidgetsByScript,
   destroyWidget as destroyWidgetInRegistry,
   dropEntry as dropWidgetEntry,
@@ -150,6 +155,8 @@ import {
 } from './script-runner/host-dispatcher.js';
 import {
   collectBackendDiagnostics,
+  compactDiagnostics,
+  type DiagnosticsReport,
   type ScriptRunnerProbeResult,
   type AssistantProbeResult,
 } from './engine/diagnostics.js';
@@ -964,6 +971,14 @@ async function teardownDisabledScript(scriptId: string, disabledScript: Script |
     send({ type: 'ls_input_bar_action_destroy', scriptId, actionId });
   }
   clearActionsByScript(scriptId);
+  // Message-tag interceptors — tell the FE to drop each host interceptor, THEN
+  // clear the registry (symmetric teardown; otherwise the host interceptor zombies
+  // and keeps stripping tags). Handler closures are dropped by the unregister-IPC
+  // / script-unregister cleanup separately.
+  for (const tag of listTagHandlersByScript(scriptId)) {
+    send({ type: 'ls_tag_interceptor_unregister', scriptId, handlerId: tag.id });
+  }
+  clearTagHandlersByScriptId(scriptId);
   // Destroy any float widgets this script still has open. Same
   // lifecycle shape as input-bar actions — fire-and-forget
   // destroy messages, then drop registry entries via the
@@ -1097,6 +1112,11 @@ async function wipeScriptStateForReload(scriptId: string): Promise<void> {
     send({ type: 'ls_input_bar_action_destroy', scriptId, actionId });
   }
   clearActionsByScript(scriptId);
+  // Message-tag interceptors — FE-unregister each, then clear (symmetric teardown).
+  for (const tag of listTagHandlersByScript(scriptId)) {
+    send({ type: 'ls_tag_interceptor_unregister', scriptId, handlerId: tag.id });
+  }
+  clearTagHandlersByScriptId(scriptId);
   for (const widgetId of liveWidgetsByScript(scriptId)) {
     destroyWidgetInRegistry(widgetId);
     send({ type: 'ls_float_widget_destroy', widgetId });
@@ -1390,6 +1410,204 @@ async function persistActiveThread(userId: string): Promise<void> {
   }
 }
 
+// ─── Diagnostics collection ─────────────────────────────────────────────────
+
+/**
+ * Collect a full backend diagnostics report — runs the async probes (storage
+ * round-trip, script-runner stats IPC, per-worker memory, assistant subsystem,
+ * host versions) and folds them into the synchronous `collectBackendDiagnostics`.
+ * Shared by the `request_diagnostics` FE handler and the Lisa `read_diagnostics`
+ * tool so both observe identical runtime state.
+ *
+ * `userId` scopes the per-user probes (storage + assistant); when undefined those
+ * sections render their "Not probed" rows. In the FE handler the message `userId`
+ * equals `activeUserId`, so this is behaviour-identical to the prior inline code.
+ */
+async function runDiagnostics(userId: string | undefined): Promise<DiagnosticsReport> {
+  // Storage probe — small round-trip read on scripts.json to time userStorage.
+  // Already loaded by the time this fires, so this is just a "can we still read?".
+  const storageStart = Date.now();
+  const storageProbe = await spindle.userStorage.getJson('scripts.json', { userId })
+    .then(() => ({ ok: true as const, latencyMs: Date.now() - storageStart }))
+    .catch((err: unknown) => ({
+      ok: false as const,
+      error: err instanceof Error ? err.message : String(err),
+    }));
+
+  // Script-runner: sync health snapshot + async resource-stats IPC.
+  // queryRunnerStats has its own internal 2s timeout; null means the child
+  // either timed out or wasn't alive. Worker-pool diagnostics: sync state plus
+  // async parallel per-worker memory queries (each bounded by a 2s timeout).
+  const runnerHealth = getRunnerHealth();
+  const runnerStats  = await queryRunnerStats();
+  const poolSnapshot = getWorkerPoolDiagnostics();
+  const perWorkerRss = await Promise.all(
+    poolSnapshot.workers.map(async (w) => ({
+      workerKey: w.workerKey,
+      rss:       await queryWorkerMemoryBytes(w.workerKey),
+    })),
+  );
+  const rssByWorker = new Map<string, number | null>(
+    perWorkerRss.map((r) => [r.workerKey, r.rss]),
+  );
+  const scriptRunner: ScriptRunnerProbeResult = {
+    ...runnerHealth,
+    stats: runnerStats === null
+      ? null
+      : {
+          rss:         runnerStats.rss,
+          heapTotal:   runnerStats.heapTotal,
+          heapUsed:    runnerStats.heapUsed,
+          external:    runnerStats.external,
+          cpuUserUs:   runnerStats.cpuUserUs,
+          cpuSystemUs: runnerStats.cpuSystemUs,
+          uptimeSec:   runnerStats.uptimeSec,
+        },
+    pool: {
+      configuredWorkerCount: poolSnapshot.configuredWorkerCount,
+      workers: poolSnapshot.workers.map((w) => ({
+        workerKey:             w.workerKey,
+        processId:             w.processId,
+        lastActivityMs:        w.lastActivityMs,
+        assignedScriptCount:   w.assignedScriptCount,
+        assignedScripts:       w.assignedScripts,
+        restartAttempts:       w.restartAttempts,
+        rss:                   rssByWorker.get(w.workerKey) ?? null,
+        pinnedByRegistrations: w.pinnedByRegistrations,
+        pinningScripts:        w.pinningScripts,
+      })),
+      totalAssignedScripts: poolSnapshot.totalAssignedScripts,
+      evictionTelemetry:    poolSnapshot.evictionTelemetry,
+      settings:             poolSnapshot.settings,
+    },
+  };
+
+  // Assistant probe — bundles the four "Assistant (Lisa)" checks. Skipped when
+  // there's no active user (userStorage rejects without an id; the collector
+  // renders the "Not probed" info row instead).
+  let assistantProbe: AssistantProbeResult | undefined;
+  if (userId) {
+    const userIdForProbe = userId;
+    const corpusEntries = Object.keys(LOOKUP_TABLE).length;
+
+    // Thread-storage probe. Index load is the gate; per-thread reads are
+    // best-effort (allSettled) — a single corrupted thread shouldn't disqualify
+    // the others. Sum bytes + tally readable from the fulfilled subset, surface
+    // the first per-thread error for context.
+    let indexLoaded     = false;
+    let threadsIndexed  = 0;
+    let threadsReadable = 0;
+    let totalBytes      = 0;
+    let storageError: string | undefined;
+    try {
+      const index = await loadThreadIndex(userIdForProbe);
+      indexLoaded    = true;
+      threadsIndexed = index.length;
+      const reads = await Promise.allSettled(
+        index.map((entry) =>
+          spindle.userStorage.getJson<unknown>(
+            `assistant/threads/${entry.id}.json`,
+            { fallback: null, userId: userIdForProbe },
+          ).then((body) => {
+            if (body === null) throw new Error('thread file missing');
+            // Re-serialise to estimate on-disk byte cost (host parsed for us).
+            totalBytes += JSON.stringify(body).length;
+            threadsReadable += 1;
+          }),
+        ),
+      );
+      const firstFailure = reads.find((r) => r.status === 'rejected');
+      if (firstFailure && firstFailure.status === 'rejected') {
+        const reasonMsg = firstFailure.reason instanceof Error
+          ? firstFailure.reason.message
+          : String(firstFailure.reason);
+        storageError =
+          `${threadsIndexed - threadsReadable} thread file(s) unreadable; first error: ${reasonMsg}`;
+      }
+    } catch (err) {
+      storageError = err instanceof Error ? err.message : String(err);
+    }
+
+    // Connections probe — same spindle.connections.list the modal picker uses.
+    let connectionsCount = 0;
+    let defaultName:     string | undefined;
+    let defaultModel:    string | undefined;
+    let defaultProvider: string | undefined;
+    try {
+      const list = await spindle.connections.list(userIdForProbe);
+      connectionsCount = list.length;
+      const dflt = list.find((conn) => conn.is_default);
+      if (dflt) {
+        defaultName     = dflt.name;
+        defaultModel    = dflt.model;
+        defaultProvider = dflt.provider;
+      }
+    } catch (err) {
+      spindle.log.warn(
+        `[LumiScript] diagnostics: connections probe failed: ` +
+        (err instanceof Error ? err.message : String(err)),
+      );
+    }
+
+    const s = settingsStore.get();
+    assistantProbe = {
+      initialised: assistantInitialized,
+      corpusEntries,
+      storage: {
+        indexLoaded,
+        threadsIndexed,
+        threadsReadable,
+        totalBytes,
+        ...(storageError ? { error: storageError } : {}),
+      },
+      connections: {
+        count: connectionsCount,
+        ...(defaultName     ? { defaultName     } : {}),
+        ...(defaultModel    ? { defaultModel    } : {}),
+        ...(defaultProvider ? { defaultProvider } : {}),
+      },
+      settings: {
+        maxIterations: s.assistantMaxIterations,
+        ...(s.assistantTemperature !== undefined ? { temperature: s.assistantTemperature } : {}),
+        ...(s.assistantTopP        !== undefined ? { topP:        s.assistantTopP        } : {}),
+        ...(s.assistantMaxTokens   !== undefined ? { maxTokens:   s.assistantMaxTokens   } : {}),
+        parallelToolCalls: s.assistantParallelToolCalls,
+      },
+    };
+  }
+
+  // Host versions via the free-tier spindle.version.* surface (host bf974cfb+).
+  // Wrapped in try/catch — older hosts predating this surface throw; diagnostics
+  // still work, just without the explicit version rows.
+  let lumiverseVersions: { backend: string; frontend: string } | undefined;
+  try {
+    const [backendVersion, frontendVersion] = await Promise.all([
+      spindle.version.getBackend(),
+      spindle.version.getFrontend(),
+    ]);
+    lumiverseVersions = { backend: backendVersion, frontend: frontendVersion };
+  } catch (err) {
+    spindle.log.warn(
+      `[LumiScript] diagnostics: spindle.version probe failed ` +
+      `(host probably predates the API) — ` +
+      `${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  return collectBackendDiagnostics({
+    scriptStorage,
+    triggerRegistry,
+    lumiScriptVersion:   spindle.manifest.version,
+    minLumiverseVersion: spindle.manifest.minimum_lumiverse_version ?? '0.0.0',
+    ...(lumiverseVersions !== undefined ? { lumiverseVersions } : {}),
+    grantedPermissions:  [...grantedPermissions],
+    activeUserId:        userId ?? null,
+    storageProbe,
+    scriptRunner,
+    assistantProbe,
+  });
+}
+
 // ─── Frontend message handler ─────────────────────────────────────────────────
 
 let triggersInitialized = false;
@@ -1406,7 +1624,13 @@ spindle.onFrontendMessage(async (raw, userId) => {
   if (!settingsStore.isLoaded) loadPromises.push(settingsStore.load());
   if (!scriptStorage.store.isLoaded) loadPromises.push(scriptStorage.load());
   if (loadPromises.length > 0) {
-    await Promise.all(loadPromises);
+    // Host userStorage I/O can reject at cold start; catch so this async
+    // onFrontendMessage handler can't leak an unhandled rejection — the cold-
+    // start block runs BEFORE the switch's try/catch, and the backend has no
+    // global unhandledRejection guard.
+    await Promise.all(loadPromises).catch((err) => {
+      spindle.log.warn(`[LumiScript] cold-start storage load failed: ${err instanceof Error ? err.message : String(err)}`);
+    });
     // Reconcile the {{lumiScriptActive}} macro with the just-loaded settings.
     // The macro was registered at module scope with the default (enabled=true);
     // if the user had persisted `enabled: false`, push it through now.
@@ -1432,7 +1656,9 @@ spindle.onFrontendMessage(async (raw, userId) => {
     // of triggers, can run in parallel. Fire-and-forget; on failure we'll
     // lazily retry on the next assistant interaction.
     void bootstrapAssistant(activeUserId);
-    await contextPromise;
+    await contextPromise.catch((err) => {
+      spindle.log.warn(`[LumiScript] cold-start active-context load failed: ${err instanceof Error ? err.message : String(err)}`);
+    });
     publishActiveCharId();
     // Verify the host meets our minimum Lumiverse version (declared in
     // spindle.json). Fire-and-forget: warns via toast + log if the host
@@ -1524,222 +1750,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
 
       // ── Diagnostics panel (v0.28.0+) ────────────────────────────────────
       case 'request_diagnostics': {
-        // Run async probes in parallel: userStorage round-trip + script-
-        // runner stats IPC. Both have their own bounded timeouts/error
-        // handling — we never await indefinitely. After both settle (or
-        // timeout) we build the synchronous collector report and send
-        // it back to the FE.
-        //
-        // Wrapping each probe in its own try/catch (with `.catch(...)`-
-        // style mappers) so a failure in one doesn't drop the whole
-        // report — the section just renders with an `info` / `fail`
-        // marker pointing at the specific subsystem.
-
-        // Storage probe — small round-trip read on scripts.json to time
-        // userStorage. Already loaded by the time this fires, so this
-        // is just a "can we still read?" liveness check.
-        const storageStart = Date.now();
-        const storageProbe = await spindle.userStorage.getJson('scripts.json', { userId })
-          .then(() => ({ ok: true as const, latencyMs: Date.now() - storageStart }))
-          .catch((err: unknown) => ({
-            ok: false as const,
-            error: err instanceof Error ? err.message : String(err),
-          }));
-
-        // Script-runner: sync health snapshot + async resource-stats IPC.
-        // queryRunnerStats has its own internal 2s timeout; null means
-        // the child either timed out or wasn't alive.
-        const runnerHealth = getRunnerHealth();
-        const runnerStats  = await queryRunnerStats();
-        // Phase F (v1.0 runtime-isolation) — worker-pool diagnostics.
-        // Sync state from `getWorkerPoolDiagnostics()` plus async parallel
-        // per-worker memory queries. Total read time bounded by the per-
-        // worker 2 s timeout (parallel — so total ≤ 2 s even with 16 workers).
-        const poolSnapshot = getWorkerPoolDiagnostics();
-        const perWorkerRss = await Promise.all(
-          poolSnapshot.workers.map(async (w) => ({
-            workerKey: w.workerKey,
-            rss:       await queryWorkerMemoryBytes(w.workerKey),
-          })),
-        );
-        const rssByWorker = new Map<string, number | null>(
-          perWorkerRss.map((r) => [r.workerKey, r.rss]),
-        );
-        const scriptRunner: ScriptRunnerProbeResult = {
-          ...runnerHealth,
-          stats: runnerStats === null
-            ? null
-            : {
-                rss:         runnerStats.rss,
-                heapTotal:   runnerStats.heapTotal,
-                heapUsed:    runnerStats.heapUsed,
-                external:    runnerStats.external,
-                cpuUserUs:   runnerStats.cpuUserUs,
-                cpuSystemUs: runnerStats.cpuSystemUs,
-                uptimeSec:   runnerStats.uptimeSec,
-              },
-          pool: {
-            configuredWorkerCount: poolSnapshot.configuredWorkerCount,
-            workers: poolSnapshot.workers.map((w) => ({
-              workerKey:             w.workerKey,
-              processId:             w.processId,
-              lastActivityMs:        w.lastActivityMs,
-              assignedScriptCount:   w.assignedScriptCount,
-              assignedScripts:       w.assignedScripts,
-              restartAttempts:       w.restartAttempts,
-              rss:                   rssByWorker.get(w.workerKey) ?? null,
-              pinnedByRegistrations: w.pinnedByRegistrations,
-              pinningScripts:        w.pinningScripts,
-            })),
-            totalAssignedScripts: poolSnapshot.totalAssignedScripts,
-            evictionTelemetry:    poolSnapshot.evictionTelemetry,
-            settings:             poolSnapshot.settings,
-          },
-        };
-
-        // Assistant probe — bundles the four checks that drive the
-        // "Assistant (Lisa)" section of the report. Corpus count is
-        // constant-time (Object.keys on a bundled record); thread-storage
-        // and connections probes are async with per-step try/catch so a
-        // failure in one doesn't sink the whole section. Skipped when
-        // there's no active user (no userId means userStorage rejects;
-        // surfaced as the "Not probed" info row from the collector).
-        let assistantProbe: AssistantProbeResult | undefined;
-        if (activeUserId) {
-          // Capture as a non-null local so closures inside `index.map`
-          // below don't lose the type narrowing (TS treats the outer
-          // `activeUserId` as `string | null` again inside the callback).
-          const userIdForProbe = activeUserId;
-          const corpusEntries = Object.keys(LOOKUP_TABLE).length;
-
-          // Thread-storage probe. Index load is the gate — if it fails the
-          // rest is moot, just record the error. Per-thread reads are
-          // best-effort: a single corrupted thread file shouldn't disqualify
-          // the others. `Promise.allSettled` collects every outcome; we
-          // sum bytes + tally readable count from the fulfilled subset and
-          // surface the FIRST per-thread error in the details for context.
-          let indexLoaded     = false;
-          let threadsIndexed  = 0;
-          let threadsReadable = 0;
-          let totalBytes      = 0;
-          let storageError: string | undefined;
-          try {
-            const index = await loadThreadIndex(userIdForProbe);
-            indexLoaded    = true;
-            threadsIndexed = index.length;
-            const reads = await Promise.allSettled(
-              index.map((entry) =>
-                spindle.userStorage.getJson<unknown>(
-                  `assistant/threads/${entry.id}.json`,
-                  { fallback: null, userId: userIdForProbe },
-                ).then((body) => {
-                  if (body === null) throw new Error('thread file missing');
-                  // Re-serialise to estimate the on-disk byte cost. The
-                  // host's `getJson` parses for us, so we don't have the
-                  // raw bytes — `JSON.stringify(...).length` is a close
-                  // approximation (modulo whitespace differences). Good
-                  // enough for capacity reporting; we're not bill-grade.
-                  totalBytes += JSON.stringify(body).length;
-                  threadsReadable += 1;
-                }),
-              ),
-            );
-            const firstFailure = reads.find((r) => r.status === 'rejected');
-            if (firstFailure && firstFailure.status === 'rejected') {
-              const reasonMsg = firstFailure.reason instanceof Error
-                ? firstFailure.reason.message
-                : String(firstFailure.reason);
-              storageError =
-                `${threadsIndexed - threadsReadable} thread file(s) unreadable; first error: ${reasonMsg}`;
-            }
-          } catch (err) {
-            storageError = err instanceof Error ? err.message : String(err);
-          }
-
-          // Connections probe — same `spindle.connections.list` call the
-          // modal's picker uses on open. List failure leaves the counts
-          // at zero (no swallowed details — the section's pass/warn logic
-          // already surfaces "zero connections" as a warn row).
-          let connectionsCount = 0;
-          let defaultName:     string | undefined;
-          let defaultModel:    string | undefined;
-          let defaultProvider: string | undefined;
-          try {
-            const list = await spindle.connections.list(userIdForProbe);
-            connectionsCount = list.length;
-            const dflt = list.find((conn) => conn.is_default);
-            if (dflt) {
-              defaultName     = dflt.name;
-              defaultModel    = dflt.model;
-              defaultProvider = dflt.provider;
-            }
-          } catch (err) {
-            spindle.log.warn(
-              `[LumiScript] diagnostics: connections probe failed: ` +
-              (err instanceof Error ? err.message : String(err)),
-            );
-          }
-
-          const s = settingsStore.get();
-          assistantProbe = {
-            initialised: assistantInitialized,
-            corpusEntries,
-            storage: {
-              indexLoaded,
-              threadsIndexed,
-              threadsReadable,
-              totalBytes,
-              ...(storageError ? { error: storageError } : {}),
-            },
-            connections: {
-              count: connectionsCount,
-              ...(defaultName     ? { defaultName     } : {}),
-              ...(defaultModel    ? { defaultModel    } : {}),
-              ...(defaultProvider ? { defaultProvider } : {}),
-            },
-            settings: {
-              maxIterations: s.assistantMaxIterations,
-              ...(s.assistantTemperature !== undefined ? { temperature: s.assistantTemperature } : {}),
-              ...(s.assistantTopP        !== undefined ? { topP:        s.assistantTopP        } : {}),
-              ...(s.assistantMaxTokens   !== undefined ? { maxTokens:   s.assistantMaxTokens   } : {}),
-              parallelToolCalls: s.assistantParallelToolCalls,
-            },
-          };
-        }
-
-        // v1.0.0-rc.2+ — probe the running Lumiverse host versions via
-        // the free-tier `spindle.version.*` surface (added in host
-        // bf974cfb). Wrapped in try/catch because older hosts that
-        // predate this surface would throw — diagnostics still work
-        // on those, just without the explicit version rows.
-        let lumiverseVersions: { backend: string; frontend: string } | undefined;
-        try {
-          const [backendVersion, frontendVersion] = await Promise.all([
-            spindle.version.getBackend(),
-            spindle.version.getFrontend(),
-          ]);
-          lumiverseVersions = { backend: backendVersion, frontend: frontendVersion };
-        } catch (err) {
-          spindle.log.warn(
-            `[LumiScript] diagnostics: spindle.version probe failed ` +
-            `(host probably predates the API) — ` +
-            `${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-
-        const report = collectBackendDiagnostics({
-          scriptStorage,
-          triggerRegistry,
-          lumiScriptVersion:   spindle.manifest.version,
-          minLumiverseVersion: spindle.manifest.minimum_lumiverse_version ?? '0.0.0',
-          ...(lumiverseVersions !== undefined ? { lumiverseVersions } : {}),
-          grantedPermissions:  [...grantedPermissions],
-          activeUserId,
-          storageProbe,
-          scriptRunner,
-          assistantProbe,
-        });
-
+        const report = await runDiagnostics(userId);
         spindle.sendToFrontend({ type: 'diagnostics_report', report });
         break;
       }
@@ -1979,6 +1990,22 @@ spindle.onFrontendMessage(async (raw, userId) => {
               history: modelHistory,
               userInput: msg.content,
               userId: activeUserId,
+              // Lets the `read_diagnostics` tool pull live runtime state through
+              // the same collection path the Settings "View Diagnostics" panel uses.
+              collectDiagnostics: () => runDiagnostics(userId).then(compactDiagnostics),
+              // Read-only view of the active user's library for list_scripts /
+              // read_script — reads the per-user scriptStorage live each call.
+              scriptLibrary: {
+                list: () => scriptStorage.getScripts().map((sc) => ({
+                  id: sc.id, name: sc.name, type: sc.type, enabled: sc.enabled,
+                })),
+                read: (id: string) => {
+                  const sc = scriptStorage.getScript(id);
+                  return sc
+                    ? { id: sc.id, name: sc.name, type: sc.type, enabled: sc.enabled, code: sc.code }
+                    : null;
+                },
+              },
               maxIterations: s.assistantMaxIterations,
               contextTokens: s.assistantContextTokens,
               promptCaching: s.assistantPromptCaching,
@@ -3034,6 +3061,11 @@ spindle.onFrontendMessage(async (raw, userId) => {
           send({ type: 'ls_input_bar_action_destroy', scriptId: msg.id, actionId });
         }
         clearActionsByScript(msg.id);
+        // Message-tag interceptors — FE-unregister each, then clear (symmetric teardown).
+        for (const tag of listTagHandlersByScript(msg.id)) {
+          send({ type: 'ls_tag_interceptor_unregister', scriptId: msg.id, handlerId: tag.id });
+        }
+        clearTagHandlersByScriptId(msg.id);
         // Destroy float widgets — see the matching block in `update_script`.
         for (const widgetId of liveWidgetsByScript(msg.id)) {
           destroyWidgetInRegistry(widgetId);
@@ -3269,6 +3301,16 @@ spindle.onFrontendMessage(async (raw, userId) => {
       // dispatchClick — one bad handler can't stop the rest.
       case 'ls_input_bar_action_click': {
         dispatchActionClick(msg.scriptId, msg.actionId);
+        break;
+      }
+
+      // ── Message-tag interceptor fired ──────────────────────────────────
+      // Frontend sends this when a registered interceptor matches a COMPLETED
+      // message (the FE bridge filters streaming partials + dedupes). Route to
+      // the script's handler by handlerId; the registry forwards it into the
+      // child and swallows per-handler errors (the child reports them).
+      case 'ls_tag_interceptor_fired': {
+        dispatchTagEvent(msg.scriptId, msg.handlerId, msg.event);
         break;
       }
 
@@ -3785,7 +3827,7 @@ spindle.permissions.onDenied(({ permission, operation }) => {
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
-;(async () => {
+void (async () => {
   await refreshPermissions();
   // Active context is populated lazily:
   // - On the first `get_active_context` frontend message (calls spindle.chats.getActive with userId)

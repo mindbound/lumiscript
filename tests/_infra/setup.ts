@@ -30,6 +30,7 @@ import { __reset as resetMessageContentProcessorRegistry } from '../../src/engin
 import { __reset as resetDrawerTabRegistry }            from '../../src/engine/drawer-tab-registry.js';
 import { __reset as resetInputBarActionRegistry }      from '../../src/engine/input-bar-action-registry.js';
 import { __reset as resetWorldInfoInterceptorRegistry } from '../../src/engine/world-info-interceptor-registry.js';
+import { __reset as resetMessageTagHandlerRegistry }    from '../../src/engine/message-tag-handler-registry.js';
 import { __reset as resetFloatWidgetRegistry }         from '../../src/engine/float-widget-registry.js';
 import { __reset as resetAppMountRegistry }            from '../../src/engine/app-mount-registry.js';
 import { __reset as resetAdvancedModalRegistry }       from '../../src/engine/advanced-modal-registry.js';
@@ -90,6 +91,7 @@ beforeEach(() => {
   resetDrawerTabRegistry();
   resetInputBarActionRegistry();
   resetWorldInfoInterceptorRegistry();
+  resetMessageTagHandlerRegistry();
   resetFloatWidgetRegistry();
   resetAppMountRegistry();
   resetAdvancedModalRegistry();
