@@ -121,7 +121,7 @@ The `call_id` is the thread that ties a result back to its request — copy it a
 
 - **Real tools.** The stubs above are pure functions so the recipe runs with nothing set up. Swap them for real capability: `api.databanks.*` lookups, an `api.utils.http.get` fetch (needs `allowDangerous`), `api.worldInfo.*` queries, `api.chat.getMessages` for scene context. The loop body doesn't change — only the `TOOLS` map and `toolDefs`.
 - **Publish the tools instead of inlining them.** If you register the tools with [`api.tools.register`](../guides/tools.md), dispatch each call with `await api.tools.invoke(tc.name, tc.args)` instead of a local map — now the Council can use the same tools too. See [Register a tool the Council can use](council-tool.md).
-- **Drive it from chat.** Replace the `ls:startup` trigger + hard-coded `question` with `// @triggers MESSAGE_SENT` and `const question = data.message.content`, then `await api.chat.sendMessage(answer, { role: 'assistant' })` to reply in-thread (needs `chat_mutation`).
+- **Drive it from chat.** Replace the `ls:startup` trigger + hard-coded `question` with `// @triggers MESSAGE_SENT`, then `if (!data.message.is_user) return;` (MESSAGE_SENT also fires for the assistant placeholder) and `const question = data.message.content`, then `await api.chat.sendMessage(answer, { role: 'assistant' })` to reply in-thread (needs `chat_mutation`).
 - **Stop early.** Inspect tool outputs mid-loop and `break` when you have enough, or short-circuit a round by injecting your own `user` message between calls.
 
 ## Gotchas

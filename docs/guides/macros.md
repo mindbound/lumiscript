@@ -43,7 +43,7 @@ if (data.__event === 'ls:startup') {
 }
 
 // Trigger: MESSAGE_SENT
-if (data.__event === 'MESSAGE_SENT') {
+if (data.__event === 'MESSAGE_SENT' && data.message.is_user) {
   const current = parseInt(await api.variables.global.get('messagesSent', '0'), 10);
   const next    = current + 1;
   await api.variables.global.set('messagesSent', String(next));

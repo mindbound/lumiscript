@@ -42,7 +42,9 @@ switch (data.__event) {
     if (data.chatId) await initialiseForChat(data.chatId);
     break;
   case 'MESSAGE_SENT':
-    await reactToUserMessage(data.message);
+    // Fires for every message creation (incl. the assistant's empty
+    // placeholder) — guard on is_user to react to the user's send only.
+    if (data.message.is_user) await reactToUserMessage(data.message);
     break;
   case 'GENERATION_ENDED':
     await reactToAssistantMessage(data.messageId, data.content);

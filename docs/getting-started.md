@@ -26,7 +26,13 @@ In the script editor body, paste this:
 
 ```js
 // First LumiScript script.
-// Triggered: MESSAGE_SENT — fires once when you send a message.
+// Triggered: MESSAGE_SENT — fires whenever a message is created in the chat.
+
+// MESSAGE_SENT fires for EVERY message the chat creates — including the
+// assistant's empty placeholder. Skip non-user messages so we react only to
+// what *you* send (without this guard the script logs twice, the second time
+// with empty content).
+if (!data.message.is_user) return;
 
 console.log('Hello from LumiScript!');
 console.log('You just sent:', data.message.content);
@@ -46,7 +52,7 @@ If it didn't fire:
 - The script needs to be **enabled** (toggle in the row).
 - The events selector needs to include `MESSAGE_SENT`.
 - The script needs to be **saved** (the editor shows an unsaved-changes indicator if not).
-- You need to actually send a message in a chat (the `MESSAGE_SENT` event fires on user-sent messages, not on the assistant's reply — for that one, use `GENERATION_ENDED`).
+- You need to actually send a message in a chat. (`MESSAGE_SENT` fires whenever *any* message is created — the `is_user` guard above keeps us to your sends; the assistant's finished reply arrives on `GENERATION_ENDED`.)
 
 ## What just happened
 
@@ -60,7 +66,7 @@ Three things to internalise from this:
 {
   __event:  'MESSAGE_SENT',
   chatId:   '<chat UUID>',
-  message:  { id, content, name, send_date, ... },
+  message:  { id, content, is_user, name, send_date, ... },
   // a couple more fields per event type
 }
 ```

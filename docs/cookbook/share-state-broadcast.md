@@ -18,8 +18,11 @@ Two separate scripts. The producer computes a metric per message and announces i
 
 ```js
 // @triggers MESSAGE_SENT
-// Producer: derive a metric from each message, store it, announce the change.
+// Producer: derive a metric from each USER message, store it, announce the change.
 // No permission required.
+
+// MESSAGE_SENT also fires for the assistant's empty placeholder — skip it.
+if (!data.message?.is_user) return;
 
 const text  = data.message?.content ?? '';
 const words = text.trim() ? text.trim().split(/\s+/).length : 0;
