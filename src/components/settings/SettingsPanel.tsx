@@ -284,6 +284,19 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
             }}
           />
         </div>
+
+        {/* IntelliSense toggle */}
+        <div className="ls-toggle-row" title="Show the editor's IntelliSense — autocomplete suggestions, api.* signature help, and hover docs. Turn off to suppress the popups (syntax-error squiggles stay). Takes effect immediately.">
+          <label className="ls-toggle">
+            <input
+              type="checkbox"
+              checked={settings.editorIntellisense}
+              onChange={e => sendToBackend({ type: 'update_settings', patch: { editorIntellisense: e.target.checked } })}
+            />
+            <span className="ls-toggle-slider" />
+          </label>
+          <span style={{ fontSize: 12 }}>IntelliSense</span>
+        </div>
       </div>
 
       {/* Templates — pre-seeded starter code for new scripts */}

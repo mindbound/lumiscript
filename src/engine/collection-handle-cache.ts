@@ -118,6 +118,25 @@ export function setCachedCollection(
 }
 
 /**
+ * Evict a SINGLE cached Collection wrapper for `(scriptId, scope, path)` and
+ * release its persistent handle (same handle-release as LRU eviction). Called
+ * from `api.db.collection().drop()` so a dropped collection doesn't strand its
+ * wrapper + a leaked dispatcher persistent handle: the NEXT `collection()` call
+ * for that name then rebuilds a fresh wrapper (picking up any new `opts.schema`
+ * instead of the pre-drop "first wins" one). No-op on miss.
+ */
+export function evictCollection(scriptId: string, scope: string, path: string): void {
+  const scriptCache = cache.get(scriptId);
+  if (scriptCache === undefined) return;
+  const key = makeKey(scope, path);
+  const evicted = scriptCache.get(key);
+  if (evicted === undefined) return;
+  scriptCache.delete(key);
+  if (scriptCache.size === 0) cache.delete(scriptId);
+  onEvictCollection?.(scriptId, evicted);
+}
+
+/**
  * Drop every cached Collection wrapper for the given script. Called from
  * the canonical script-unregister teardown sweep.
  */

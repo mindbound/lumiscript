@@ -155,6 +155,13 @@ export interface LumiScriptSettings {
    */
   editorFontSize: number;
   /**
+   * Show the Monaco editor's IntelliSense — autocomplete suggestions, `api.*`
+   * signature help, and hover docs. When off, those popups are suppressed
+   * (syntax-error squiggles are unaffected).
+   * Default: true.
+   */
+  editorIntellisense: boolean;
+  /**
    * Debounce (in milliseconds) between the last keystroke and autosave.
    * Larger values reduce backend round-trips while typing, at the cost of
    * waiting longer before unsaved edits are persisted.
@@ -268,6 +275,7 @@ export const DEFAULT_SETTINGS: LumiScriptSettings = {
   workerMemoryCeilingMb: 512,
   consoleHistoryLimit: 500,
   editorFontSize: 12,
+  editorIntellisense: true,
   autosaveDebounceMs: 1_200,
   defaultTriggerTemplate: DEFAULT_TRIGGER_TEMPLATE,
   defaultLibraryTemplate: DEFAULT_LIBRARY_TEMPLATE,

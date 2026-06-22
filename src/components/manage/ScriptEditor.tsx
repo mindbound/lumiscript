@@ -22,6 +22,7 @@ interface ScriptEditorProps {
   isRunning: boolean;
   consoleEntries: ConsoleEntry[];
   editorFontSize: number;
+  editorIntellisense: boolean;
   autosaveDebounceMs: number;
   onClearConsole: () => void;
   sendToBackend: (msg: FrontendToBackend) => void;
@@ -34,6 +35,7 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
   isRunning,
   consoleEntries,
   editorFontSize,
+  editorIntellisense,
   autosaveDebounceMs,
   onClearConsole,
   sendToBackend,
@@ -420,6 +422,18 @@ export const ScriptEditor: FC<ScriptEditorProps> = ({
               tabSize: 2,
               insertSpaces: true,
               fontFamily: "'Fira Code', 'Cascadia Code', Consolas, monospace",
+              // IntelliSense toggle (editorIntellisense setting): when off,
+              // suppress the autocomplete popup, trigger-char suggestions,
+              // signature help, and hover docs. Left at Monaco defaults when on;
+              // syntax-error squiggles are separate and unaffected. The options
+              // object is reactive — @monaco-editor/react applies the change via
+              // updateOptions, so toggling takes effect without a remount.
+              ...(editorIntellisense ? {} : {
+                quickSuggestions: false,
+                suggestOnTriggerCharacters: false,
+                parameterHints: { enabled: false },
+                hover: { enabled: false },
+              }),
             }}
           />
           {/* v0.27.5 — Init-failure overlay. Renders over the Monaco area

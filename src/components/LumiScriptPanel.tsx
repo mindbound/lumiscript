@@ -9,6 +9,7 @@ import type { ScriptStorageSummary } from '../engine/api/script-storage.js';
 import { DEFAULT_SETTINGS } from '../types/script.js';
 import { ManagePanel } from './manage/ManagePanel.js';
 import { StorageTab } from './storage/StorageTab.js';
+import { ErrorBoundary } from './common/ErrorBoundary.js';
 
 interface ScriptExecInfo {
   dot: ExecutionDot;
@@ -540,8 +541,12 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
         </button>
       </div>
 
-      {/* Tab content */}
+      {/* Tab content — keyed ErrorBoundary so a render crash in one tab degrades
+          to a localized fallback (and switching tabs remounts a fresh boundary
+          that clears the error) instead of blanking the whole panel. (audit
+          tail: per-major-tab error boundaries) */}
       <div style={{ flex: 1, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+        <ErrorBoundary key={activeTab} label={`${activeTab} tab`}>
         {activeTab === 'manage' && (
           <ManagePanel
             scripts={scripts}
@@ -551,6 +556,7 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
             isRunning={execState.isRunning}
             consoleHistory={execState.consoleHistory}
             editorFontSize={settings.editorFontSize}
+            editorIntellisense={settings.editorIntellisense}
             autosaveDebounceMs={settings.autosaveDebounceMs}
             onClearConsole={clearConsole}
             onScriptOpened={handleScriptOpened}
@@ -636,6 +642,7 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
             }}
           />
         )}
+        </ErrorBoundary>
       </div>
     </div>
   );

@@ -54,6 +54,7 @@ import { emit as busEmit } from '../broadcast-bus.js';
 import {
   getCachedCollection,
   setCachedCollection,
+  evictCollection,
 } from '../collection-handle-cache.js';
 
 // ─── Storage adapter ─────────────────────────────────────────────────────────
@@ -299,6 +300,12 @@ export function buildDbAPI(deps: APIBuildDeps): DbAPI {
         await spindle.userStorage.delete(path, userId ?? undefined);
         invalidateDbCache(dbCacheKey(userId ?? undefined, path));
       });
+
+      // Drop the cached Collection wrapper for this (scope, path) too, releasing
+      // its dispatcher persistent handle — otherwise a dropped collection leaves
+      // a stale wrapper (and a leaked handle) that a later `collection()` call
+      // would reuse, ignoring any new schema. (audit tail: drop()-evict)
+      evictCollection(script.id, actualScope, path);
 
       busEmit('ls:collection:dropped', {
         name,

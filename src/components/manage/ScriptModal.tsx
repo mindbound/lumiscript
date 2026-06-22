@@ -22,6 +22,7 @@ interface ScriptModalProps {
   isRunning: boolean;
   consoleHistory: Record<string, ConsoleEntry[]>;
   editorFontSize: number;
+  editorIntellisense: boolean;
   autosaveDebounceMs: number;
   onClearConsole: (scriptId: string) => void;
   onClose: () => void;
@@ -37,6 +38,7 @@ export const ScriptModal: FC<ScriptModalProps> = ({
   isRunning,
   consoleHistory,
   editorFontSize,
+  editorIntellisense,
   autosaveDebounceMs,
   onClearConsole,
   onClose,
@@ -110,6 +112,7 @@ export const ScriptModal: FC<ScriptModalProps> = ({
                 isRunning={scriptIsRunning}
                 consoleEntries={visibleEntries}
                 editorFontSize={editorFontSize}
+                editorIntellisense={editorIntellisense}
                 autosaveDebounceMs={autosaveDebounceMs}
                 onClearConsole={handleClearConsole}
                 sendToBackend={sendToBackend}
