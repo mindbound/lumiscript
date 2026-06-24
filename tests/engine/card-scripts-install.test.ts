@@ -52,6 +52,26 @@ describe('prepareCardScriptDetection', () => {
     expect(prepared!.items[0]!.permissions).toEqual([{ namespace: 'llm', permission: 'generation', granted: false }]);
   });
 
+  test('update items are enriched with the on-disk name + enabled state', async () => {
+    const s = await freshStorage([installedScript({ id: 'old-1', name: 'My Dice', code: 'OLD', bundleCardId: 'bc1', bundleId: 'b1', version: '1.0.0', enabled: true })]);
+    const prepared = prepareCardScriptDetection({
+      character: card([embed({ name: 'Dice Roller', code: 'NEW', metadata: { version: '1.1.0' } })]),
+      installed: s.getScripts(), granted: [], genRequestId: () => 'r',
+    })!;
+    const item = prepared.items[0]!;
+    expect(item.action).toBe('update');
+    expect(item.existingName).toBe('My Dice');   // on-disk name, NOT the card's 'Dice Roller'
+    expect(item.targetEnabled).toBe(true);
+  });
+
+  test('install items carry no on-disk enrichment', async () => {
+    const s = await freshStorage();
+    const prepared = prepareCardScriptDetection({ character: card([embed()]), installed: s.getScripts(), granted: [], genRequestId: () => 'r' })!;
+    expect(prepared.items[0]!.action).toBe('install');
+    expect(prepared.items[0]!.existingName).toBeUndefined();
+    expect(prepared.items[0]!.targetEnabled).toBeUndefined();
+  });
+
   test('null when every embedded script is already up-to-date', async () => {
     const s = await freshStorage([installedScript({ code: 'X', bundleCardId: 'bc1', bundleId: 'b1', version: '1.0.0' })]);
     const prepared = prepareCardScriptDetection({

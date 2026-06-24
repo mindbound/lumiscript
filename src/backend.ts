@@ -126,7 +126,7 @@ import {
   isValidCollectionPath,
 } from './engine/db-admin.js';
 import { dbCacheKey, invalidateDbCache } from './engine/db-cache.js';
-import { on as busOn, clearByScriptId as clearBroadcastByScriptId } from './engine/broadcast-bus.js';
+import { on as busOn, emit as busEmit, clearByScriptId as clearBroadcastByScriptId } from './engine/broadcast-bus.js';
 import { clearCommandHandlerByScriptId } from './engine/api/commands.js';
 import { buildReplayMessages } from './engine/replay.js';
 import {
@@ -2900,20 +2900,73 @@ spindle.onFrontendMessage(async (raw, userId) => {
       case 'ls_card_scripts_install': {
         const prepared = pendingCardDetections.get(msg.requestId);
         if (!prepared || prepared.bundleCardId !== msg.bundleCardId) {
-          // Cache miss (worker respawn between detect + reply) or mismatched
-          // batch — never fabricate an install from FE-supplied data.
+          // Cache miss (worker respawn or LRU eviction between detect + reply) or
+          // mismatched batch — never fabricate an install from FE-supplied data.
+          // Surface it: the FE already closed the modal, so a silent drop would
+          // leave the user thinking the install succeeded.
           spindle.log.warn(`[LumiScript] card-scripts install: stale/unknown requestId ${msg.requestId} — ignoring`);
+          spindle.toast.warning(
+            'This card-scripts install expired before it could be applied. Re-import the character to try again.',
+            // Scope to the replying user — this carries that user's import
+            // activity and must not fan out to other sessions on a shared worker.
+            { title: 'Card scripts', userId: activeUserId ?? undefined },
+          );
+          break;
+        }
+        // Owner guard: on a shared (operator-scoped) worker the detection was
+        // computed against — and must land in — one specific user's library.
+        // Reject a reply arriving under a DIFFERENT active user. Tolerant of a
+        // null owner (detect ran before any FE session) to avoid false rejects.
+        if (prepared.ownerUserId != null && activeUserId != null && prepared.ownerUserId !== activeUserId) {
+          pendingCardDetections.delete(msg.requestId);
+          spindle.log.warn(`[LumiScript] card-scripts install: owner/active user mismatch for ${msg.requestId} — ignoring`);
           break;
         }
         pendingCardDetections.delete(msg.requestId);
+        // Defensive coercion: incoming FE messages are unvalidated; a non-array
+        // selectedBundleIds would throw in `new Set(...)` AFTER the cache delete,
+        // losing the batch. An empty selection simply installs nothing.
+        const selectedBundleIds = Array.isArray(msg.selectedBundleIds) ? msg.selectedBundleIds : [];
         const summary = await applyCardScriptInstall({
           prepared,
-          selectedBundleIds: msg.selectedBundleIds,
+          selectedBundleIds,
           scriptStorage,
           genScriptId: generateUUID,
         });
         pushScripts();
+        // An update overwrites a trigger script's `triggers` while preserving
+        // enabled:true, so the TriggerRegistry must re-sync (mirrors update_script).
+        if (summary.updated.length > 0) void syncTriggers();
         spindle.log.info(`[LumiScript] card-scripts: installed ${summary.installed.length}, updated ${summary.updated.length}, skipped ${summary.skipped}`);
+        const changed = summary.installed.length + summary.updated.length;
+        if (changed > 0) {
+          const parts: string[] = [];
+          if (summary.installed.length) parts.push(`installed ${summary.installed.length}`);
+          if (summary.updated.length) parts.push(`updated ${summary.updated.length}`);
+          const fromCard = prepared.bundleName ? ` from ${prepared.bundleName}` : '';
+          spindle.toast.success(
+            `LumiScript ${parts.join(', ')} script${changed === 1 ? '' : 's'}${fromCard}. ` +
+            `Review and enable ${changed === 1 ? 'it' : 'them'} in the LumiScript panel.`,
+            // Scope to the importing user — the message includes the card name +
+            // their install activity; broadcasting it would leak to other sessions.
+            { title: 'Card scripts', userId: activeUserId ?? undefined },
+          );
+          // Let scripts react to a card-scripts install (e.g. a manager script).
+          busEmit('ls:card-scripts:installed', {
+            bundleCardId: prepared.bundleCardId,
+            hostCharacterId: prepared.hostCharacterId,
+            installed: summary.installed,
+            updated: summary.updated,
+          });
+        }
+        break;
+      }
+
+      // ── Card-embedded scripts (#12) — FE dismissed the consent modal ────────
+      case 'ls_card_scripts_dismiss': {
+        // Free the cached detection (and the embedded source it holds) promptly
+        // rather than waiting for LRU eviction. Harmless no-op if already gone.
+        pendingCardDetections.delete(msg.requestId);
         break;
       }
 
@@ -3782,13 +3835,20 @@ spindle.on('CHARACTER_EDITED', (payload: unknown) => {
 
 // Card-embedded scripts (#12): on character create/import, detect scripts in the
 // card's `extensions` and ask the user (FE consent modal) which to install.
-spindle.on('CHARACTER_CREATED', (payload: unknown) => {
-  void handleCharacterCreated(payload);
+spindle.on('CHARACTER_CREATED', (payload: unknown, userId?: string) => {
+  void handleCharacterCreated(payload, userId ?? null);
 });
 
-async function handleCharacterCreated(payload: unknown): Promise<void> {
+async function handleCharacterCreated(payload: unknown, eventUserId: string | null): Promise<void> {
   try {
     if (!scriptStorage.store.isLoaded) return; // pre-cold-start imports are not retro-detected
+    // On a shared (operator-scoped) worker, CHARACTER_CREATED is delivered for
+    // EVERY user's import. The detection is computed against — and the modal
+    // routed to — `activeUserId` (last FE sender). Skip an import the host
+    // attributes to a different user so we never surface one user's import,
+    // de-duped against another user's library, to the wrong user. No-op on the
+    // single-user posture (eventUserId === activeUserId).
+    if (eventUserId != null && activeUserId != null && eventUserId !== activeUserId) return;
     const character = (payload as { character?: { id?: string; name?: string | null; extensions?: unknown } } | null)?.character;
     if (!character?.id) return;
     const prepared = prepareCardScriptDetection({
@@ -3798,6 +3858,9 @@ async function handleCharacterCreated(payload: unknown): Promise<void> {
       genRequestId: generateUUID,
     });
     if (!prepared) return;
+    // Stamp the user this detection was computed for / routed to; the install
+    // handler asserts the reply arrives under the same active user.
+    prepared.ownerUserId = activeUserId;
     pendingCardDetections.set(prepared.requestId, prepared);
     while (pendingCardDetections.size > MAX_PENDING_CARD_DETECTIONS) {
       const oldest = pendingCardDetections.keys().next().value;

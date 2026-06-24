@@ -65,6 +65,15 @@ export type FrontendToBackend =
       selectedBundleIds: string[];
     }
   | {
+      // ── Card-embedded scripts (#12): FE dismisses a detection without installing ──
+      // Sent on Cancel / Esc so the backend can free the cached PreparedDetection
+      // (which holds the full embedded script source) promptly, rather than letting
+      // it linger until the bounded-cache LRU evicts it. Best-effort; a missing
+      // requestId is a harmless no-op.
+      type: 'ls_card_scripts_dismiss';
+      requestId: string;
+    }
+  | {
       /**
        * Emitted by the frontend as the very first message on mount — before
        * `get_scripts` / `get_settings` / etc. — so the backend knows the

@@ -98,6 +98,51 @@ describe('extractEmbeddedScripts', () => {
     expect(r.scripts[0]!.type).toBe('trigger');
     expect(r.scripts[0]!.metadata).toEqual({ version: '1.0.0', author: 'me' });
   });
+
+  test('ok — caps the embedded-script count, recording the overflow', () => {
+    const many = Array.from({ length: 200 }, (_, i) => okEntry({ bundleId: `b${i}`, name: `S${i}` }));
+    const r = extractEmbeddedScripts(env({ scripts: many }));
+    if (r.kind !== 'ok') throw new Error('expected ok');
+    expect(r.scripts).toHaveLength(64);                       // MAX_EMBEDDED_SCRIPTS
+    expect(r.scripts[63]!.bundleId).toBe('b63');              // first 64 kept, in order
+    expect(r.skipped.at(-1)!.reason).toContain('exceeds 64-script cap');
+  });
+
+  test('ok — bounds the raw scan for an all-invalid / all-duplicate hostile array', () => {
+    // all-invalid: the accept-cap never fires (nothing valid), so the SCAN-cap
+    // must stop the scan instead of walking the whole array.
+    const invalid = extractEmbeddedScripts(env({ scripts: Array.from({ length: 5000 }, () => ({})) }));
+    if (invalid.kind !== 'ok') throw new Error('expected ok');
+    expect(invalid.scripts).toHaveLength(0);
+    expect(invalid.skipped.length).toBeLessThanOrEqual(513);          // MAX_SCANNED_ENTRIES (512) + 1 overflow record
+    expect(invalid.skipped.at(-1)!.reason).toContain('scan limit');
+
+    // all-duplicate with a giant bundleId: scan bounded AND the echoed id clamped
+    // so a huge attacker-controlled bundleId can't amplify skipped[] memory.
+    const bigId = 'x'.repeat(10_000);
+    const dup = extractEmbeddedScripts(env({ scripts: Array.from({ length: 5000 }, () => okEntry({ bundleId: bigId })) }));
+    if (dup.kind !== 'ok') throw new Error('expected ok');
+    expect(dup.scripts).toHaveLength(1);                              // first accepted, the rest are duplicates
+    expect(dup.skipped.length).toBeLessThanOrEqual(513);
+    const dupReason = dup.skipped.find((s) => s.reason.includes('duplicate'))!;
+    expect(dupReason.reason.length).toBeLessThan(120);               // bundleId clamped to 80, not 10_000
+  });
+
+  test('ok — untrusted name / folder / metadata strings are length-clamped', () => {
+    const r = extractEmbeddedScripts(env({ scripts: [{
+      bundleId: 'b', name: 'N'.repeat(5000), code: 'c', folder: 'F'.repeat(5000),
+      metadata: { description: 'D'.repeat(5000), author: 'A'.repeat(5000), version: 'V'.repeat(5000), tags: Array.from({ length: 100 }, () => 't'.repeat(500)) },
+    }] }));
+    if (r.kind !== 'ok') throw new Error('expected ok');
+    const s = r.scripts[0]!;
+    expect(s.name.length).toBe(200);
+    expect(s.folder!.length).toBe(200);
+    expect(s.metadata!.description!.length).toBe(1000);
+    expect(s.metadata!.author!.length).toBe(120);
+    expect(s.metadata!.version!.length).toBe(64);
+    expect(s.metadata!.tags!.length).toBe(32);          // MAX_TAGS
+    expect(s.metadata!.tags!.every((t) => t.length <= 64)).toBe(true);
+  });
 });
 
 // ─── computeInstallActions ───────────────────────────────────────────────────

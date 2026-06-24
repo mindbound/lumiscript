@@ -26,6 +26,14 @@ export interface PreparedDetection {
   hostCharacterId: string;
   bundleCardId: string;
   bundleName?: string;
+  /**
+   * The user this detection was computed for (whose installed scripts it was
+   * de-duped against and whose library the install lands in). Stamped by the
+   * backend; the install handler asserts the replying user matches so one
+   * user's import can't be applied to another's library on a shared
+   * (operator-scoped) worker. `null`/absent when no user context was active.
+   */
+  ownerUserId?: string | null;
   /** Every embedded script + its decision (install/update/skip) + permission
    *  analysis — the FE consent modal renders these. */
   items: DetectedCardScript[];
@@ -47,11 +55,18 @@ export function prepareCardScriptDetection(params: {
   const extracted = extractEmbeddedScripts(character.extensions);
   if (extracted.kind !== 'ok' || extracted.scripts.length === 0) return null;
 
+  const byId = new Map(installed.map((s) => [s.id, s]));
   const decisions = computeInstallActions(extracted.bundleCardId, extracted.scripts, installed);
-  const items: DetectedCardScript[] = decisions.map((d) => ({
-    ...d,
-    permissions: analyzeRequiredPermissions(d.entry.code, granted),
-  }));
+  const items: DetectedCardScript[] = decisions.map((d) => {
+    // For an update, surface the on-disk truth (current name + enabled state) so
+    // the modal reflects what's actually being overwritten, not the card's view.
+    const target = d.action === 'update' && d.existingScriptId ? byId.get(d.existingScriptId) : undefined;
+    return {
+      ...d,
+      permissions: analyzeRequiredPermissions(d.entry.code, granted),
+      ...(target ? { existingName: target.name, targetEnabled: target.enabled } : {}),
+    };
+  });
   // No modal unless there's something to install or update.
   if (!items.some((i) => i.action === 'install' || i.action === 'update')) return null;
 

@@ -68,9 +68,23 @@ export interface InstallDecision {
 }
 
 /**
- * An {@link InstallDecision} enriched with permission analysis — the unit the
- * consent modal renders (carried on `ls_card_scripts_detected`).
+ * An {@link InstallDecision} enriched with the bits the consent modal renders
+ * but the pure decision logic doesn't carry: permission analysis plus, for
+ * `update` rows, the on-disk truth about the script being overwritten (carried
+ * on `ls_card_scripts_detected`).
  */
 export interface DetectedCardScript extends InstallDecision {
   permissions: PermissionRequirement[];
+  /**
+   * For an `update`: the matched installed script's CURRENT name (the update
+   * preserves it, so it may differ from `entry.name` if the card renamed the
+   * script). Lets the modal show what's actually being modified.
+   */
+  existingName?: string;
+  /**
+   * For an `update`: whether the matched installed script is currently ENABLED.
+   * An update overwrites code while preserving `enabled`, so updating an enabled
+   * script re-arms it with new code — the modal warns harder in that case.
+   */
+  targetEnabled?: boolean;
 }

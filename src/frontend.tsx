@@ -3,6 +3,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { PANEL_CSS } from './components/styles/index.js';
 import { LumiScriptPanel } from './components/LumiScriptPanel.js';
+import { CardScriptsConsentHost } from './components/cardscripts/CardScriptsConsentHost.js';
 import { SettingsPanel } from './components/settings/SettingsPanel.js';
 import { ErrorBoundary } from './components/common/ErrorBoundary.js';
 import type { FrontendToBackend } from './types/messages.js';
@@ -221,6 +222,29 @@ export function setup(ctx: SpindleFrontendContext) {
     </StrictMode>,
   );
   cleanups.push(() => settingsRoot.unmount());
+
+  // ─── Card-embedded scripts consent modal (#12) ───────────────────────────
+  // Its own root in a body container so the consent modal can appear on a card
+  // import regardless of whether the dock panel is open (the modal itself
+  // portals to document.body).
+  const cardScriptsContainer = document.createElement('div');
+  cardScriptsContainer.setAttribute('data-ls-cardscripts-root', '');
+  document.body.appendChild(cardScriptsContainer);
+  const cardScriptsRoot = createRoot(cardScriptsContainer);
+  cardScriptsRoot.render(
+    <StrictMode>
+      <ErrorBoundary label="Card-scripts consent">
+        <CardScriptsConsentHost
+          onBackendMessage={virtualOnBackendMessage}
+          sendToBackend={sendToBackend}
+        />
+      </ErrorBoundary>
+    </StrictMode>,
+  );
+  cleanups.push(() => {
+    try { cardScriptsRoot.unmount(); } catch { /* ignore */ }
+    cardScriptsContainer.remove();
+  });
 
   // ─── Teardown ──────────────────────────────────────────────────────────
   return () => {

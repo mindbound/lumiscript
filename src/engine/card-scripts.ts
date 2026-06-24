@@ -16,6 +16,33 @@ import {
   type PermissionRequirement,
 } from '../types/card-scripts.js';
 
+// ─── Defensive caps ──────────────────────────────────────────────────────────
+// A character card's `extensions.lumiscript` is untrusted, host-unvalidated
+// JSON. These bounds keep a hostile/oversized card from producing an enormous
+// consent modal, multi-megabyte stored names, or unbounded scan work. They
+// clamp the SHAREABLE/display surface only — `code` is intentionally uncapped
+// (scripts are legitimately large; it's never rendered, only reviewed in-panel).
+const MAX_EMBEDDED_SCRIPTS = 64;
+// Hard bound on RAW entries scanned, independent of how many are valid. Invalid
+// and duplicate entries don't consume an accept-slot, so without this the
+// accept-cap alone wouldn't stop a card with a giant all-invalid/all-duplicate
+// `scripts` array from being scanned in full — synchronously, on the main
+// worker. 8× the accept-cap leaves ample headroom for legit cards.
+const MAX_SCANNED_ENTRIES = MAX_EMBEDDED_SCRIPTS * 8;
+const MAX_SKIP_ID_LEN = 80;   // bound an attacker-controlled bundleId echoed into a skip reason
+const MAX_NAME_LEN = 200;
+const MAX_FOLDER_LEN = 200;
+const MAX_DESC_LEN = 1000;
+const MAX_AUTHOR_LEN = 120;
+const MAX_VERSION_LEN = 64;
+const MAX_TAGS = 32;
+const MAX_TAG_LEN = 64;
+
+/** Clamp an untrusted string to `max` chars (display + storage hygiene). */
+function clampStr(s: string, max: number): string {
+  return s.length > max ? s.slice(0, max) : s;
+}
+
 // ─── extractEmbeddedScripts ──────────────────────────────────────────────────
 
 export type ExtractResult =
@@ -64,22 +91,37 @@ export function extractEmbeddedScripts(extensions: unknown): ExtractResult {
     const scripts: EmbeddedScriptEntry[] = [];
     const skipped: { index: number; reason: string }[] = [];
     const seen = new Set<string>();
-    env.scripts.forEach((raw, index) => {
+    const rawList = env.scripts;
+    for (let index = 0; index < rawList.length; index++) {
+      // Accept-cap: stop once we've taken MAX valid scripts. Bounds the modal /
+      // message size on a card with many valid scripts.
+      if (scripts.length >= MAX_EMBEDDED_SCRIPTS) {
+        skipped.push({ index, reason: `exceeds ${MAX_EMBEDDED_SCRIPTS}-script cap (${rawList.length - index} more dropped)` });
+        break;
+      }
+      // Scan-cap: stop after a bounded number of RAW entries. The accept-cap
+      // above never fires for an all-invalid / all-duplicate array (those don't
+      // increment scripts.length), so this is what bounds the scan + skipped[]
+      // for a hostile card. One summarizing record, then stop.
+      if (index >= MAX_SCANNED_ENTRIES) {
+        skipped.push({ index, reason: `exceeds ${MAX_SCANNED_ENTRIES}-entry scan limit (${rawList.length - index} more not scanned)` });
+        break;
+      }
       let v: { ok: true; entry: EmbeddedScriptEntry } | { ok: false; reason: string };
       try {
-        v = validateEntry(raw);
+        v = validateEntry(rawList[index]);
       } catch {
         skipped.push({ index, reason: 'threw while reading entry (hostile accessor)' });
-        return;
+        continue;
       }
-      if (!v.ok) { skipped.push({ index, reason: v.reason }); return; }
+      if (!v.ok) { skipped.push({ index, reason: v.reason }); continue; }
       if (seen.has(v.entry.bundleId)) {
-        skipped.push({ index, reason: `duplicate bundleId '${v.entry.bundleId}'` });
-        return;
+        skipped.push({ index, reason: `duplicate bundleId '${clampStr(v.entry.bundleId, MAX_SKIP_ID_LEN)}'` });
+        continue;
       }
       seen.add(v.entry.bundleId);
       scripts.push(v.entry);
-    });
+    }
 
     return { kind: 'ok', bundleCardId, scripts, skipped };
   } catch {
@@ -97,14 +139,14 @@ function validateEntry(raw: unknown): { ok: true; entry: EmbeddedScriptEntry } |
   const type: 'trigger' | 'library' = e.type === 'library' ? 'library' : 'trigger';
   const entry: EmbeddedScriptEntry = {
     bundleId: e.bundleId,
-    name: e.name,
+    name: clampStr(e.name, MAX_NAME_LEN),
     code: e.code,
     type,
     ...(Array.isArray(e.triggers)
       ? { triggers: e.triggers.filter((t): t is string => typeof t === 'string') }
       : {}),
     ...(Array.isArray(e.bindings) ? { bindings: validateBindings(e.bindings) } : {}),
-    ...(typeof e.folder === 'string' ? { folder: e.folder } : {}),
+    ...(typeof e.folder === 'string' ? { folder: clampStr(e.folder, MAX_FOLDER_LEN) } : {}),
     ...(e.metadata !== null && typeof e.metadata === 'object' && !Array.isArray(e.metadata)
       ? { metadata: sanitizeMetadata(e.metadata as Record<string, unknown>) }
       : {}),
@@ -129,10 +171,12 @@ function validateBindings(raw: unknown[]): ScriptBindingEntry[] {
 
 function sanitizeMetadata(m: Record<string, unknown>): ScriptMetadata {
   const out: ScriptMetadata = {};
-  if (typeof m.description === 'string') out.description = m.description;
-  if (typeof m.author === 'string') out.author = m.author;
-  if (typeof m.version === 'string') out.version = m.version;
-  if (Array.isArray(m.tags)) out.tags = m.tags.filter((t): t is string => typeof t === 'string');
+  if (typeof m.description === 'string') out.description = clampStr(m.description, MAX_DESC_LEN);
+  if (typeof m.author === 'string') out.author = clampStr(m.author, MAX_AUTHOR_LEN);
+  if (typeof m.version === 'string') out.version = clampStr(m.version, MAX_VERSION_LEN);
+  if (Array.isArray(m.tags)) {
+    out.tags = m.tags.filter((t): t is string => typeof t === 'string').slice(0, MAX_TAGS).map((t) => clampStr(t, MAX_TAG_LEN));
+  }
   return out;
 }
 
