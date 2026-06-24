@@ -43,6 +43,27 @@ export interface ScriptMetadata {
   tags?: string[];
 }
 
+/**
+ * Provenance stamped on a script installed from a character-card bundle
+ * (`extensions.lumiscript`). The re-import de-dup key is (`bundleCardId`,
+ * `bundleId`). See notes/card-embedded-scripts-design.md.
+ */
+export interface ScriptBundleProvenance {
+  /** Author-assigned stable id of the card bundle — NOT the host character
+   *  UUID (the host regenerates that on every import). */
+  bundleCardId: string;
+  /** Author-assigned id of this script within the bundle. */
+  bundleId: string;
+  /** The host character UUID this was last installed from (provenance only). */
+  hostCharacterId?: string;
+  /** Display name of the source bundle / character. */
+  bundleName?: string;
+  /** `metadata.version` at install time — drives update-if-newer on re-import. */
+  version?: string;
+  /** Hash of the code at install time — detects local edits before overwrite. */
+  sourceHash?: string;
+}
+
 /** Core script record stored in user storage */
 export interface Script {
   id: string;
@@ -73,6 +94,8 @@ export interface Script {
   createdAt: number;   // Unix ms
   updatedAt: number;   // Unix ms
   metadata?: ScriptMetadata;
+  /** Set when this script was installed from a character-card bundle (#12). */
+  bundledFrom?: ScriptBundleProvenance;
 }
 
 /**

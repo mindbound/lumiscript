@@ -28,6 +28,7 @@ import type {
   MessageTagEvent,
   MessageTagOptions,
 } from './script.js';
+import type { DetectedCardScript } from './card-scripts.js';
 import type { CollectionSummary, CollectionStats } from '../engine/db-admin.js';
 
 // ─── Shared payload shapes ────────────────────────────────────────────────────
@@ -46,6 +47,23 @@ export interface VariablesSnapshot {
 // ─── Frontend → Backend ───────────────────────────────────────────────────────
 
 export type FrontendToBackend =
+  // ── Card-embedded scripts (#12): FE confirms which detected scripts to install ──
+  // BACKEND-AUTHORITY INVARIANT (Phase 1 must uphold): the backend is the source of
+  // truth. It caches the full DetectedCardScript[] by requestId at detect time; on
+  // this reply it MUST intersect selectedBundleIds with the cached install/update
+  // decisions, ignore unknown/skip bundleIds, and treat a cache miss (e.g. worker
+  // respawn between detect and install) as a hard error — re-detect, never fabricate
+  // an install (no script data rides on this message by design).
+  | {
+      type: 'ls_card_scripts_install';
+      /** Correlates with the cached `ls_card_scripts_detected` batch. */
+      requestId: string;
+      /** Author-assigned bundle id of the batch — lets the BE assert the reply
+       *  matches the cached batch before installing. */
+      bundleCardId: string;
+      /** bundleIds the user chose to install/update (subset of the detected set). */
+      selectedBundleIds: string[];
+    }
   | {
       /**
        * Emitted by the frontend as the very first message on mount — before
@@ -696,6 +714,19 @@ export type FrontendToBackend =
 // ─── Backend → Frontend ───────────────────────────────────────────────────────
 
 export type BackendToFrontend =
+  // ── Card-embedded scripts (#12): BE asks the FE to show the consent modal ──
+  | {
+      type: 'ls_card_scripts_detected';
+      /** Correlates the later `ls_card_scripts_install` reply. */
+      requestId: string;
+      /** Host character UUID the bundle was imported into (provenance). */
+      hostCharacterId: string;
+      /** Author-assigned stable bundle id (de-dup anchor). */
+      bundleCardId: string;
+      bundleName?: string;
+      /** Per-script decision + permission analysis for the modal. */
+      items: DetectedCardScript[];
+    }
   | {
       type: 'scripts_updated';
       scripts: Script[];
