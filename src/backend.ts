@@ -21,6 +21,7 @@ import {
 import { createHash } from 'node:crypto';
 import { generateUUID } from './utils/uuid.js';
 import { listByMode, listAll, clearEphemeral, clearByScriptId, type InjectionEntry } from './engine/injection-store.js';
+import { prepareCardScriptDetection, applyCardScriptInstall, type PreparedDetection } from './engine/card-scripts-install.js';
 import { applyLumiScriptInjections } from './engine/interceptor-pipeline.js';
 import {
   dispatch as dispatchMacroInterceptor,
@@ -192,6 +193,12 @@ import type { AssistantThread, AssistantThreadIndexEntry } from './assistant/typ
 
 let activeUserId: string | null = null;
 const grantedPermissions = new Set<string>();
+
+// Card-embedded scripts (#12): detections awaiting the user's consent reply,
+// keyed by requestId (bounded; oldest evicted). Lost on worker respawn — a
+// stale install reply then no-ops (see the `ls_card_scripts_install` handler).
+const pendingCardDetections = new Map<string, PreparedDetection>();
+const MAX_PENDING_CARD_DETECTIONS = 16;
 
 // ─── In-app assistant — module-level state (v0.30.2 persistence) ─────────────
 //
@@ -2889,6 +2896,27 @@ spindle.onFrontendMessage(async (raw, userId) => {
         break;
       }
 
+      // ── Card-embedded scripts (#12) — install from a card's consent modal ───
+      case 'ls_card_scripts_install': {
+        const prepared = pendingCardDetections.get(msg.requestId);
+        if (!prepared || prepared.bundleCardId !== msg.bundleCardId) {
+          // Cache miss (worker respawn between detect + reply) or mismatched
+          // batch — never fabricate an install from FE-supplied data.
+          spindle.log.warn(`[LumiScript] card-scripts install: stale/unknown requestId ${msg.requestId} — ignoring`);
+          break;
+        }
+        pendingCardDetections.delete(msg.requestId);
+        const summary = await applyCardScriptInstall({
+          prepared,
+          selectedBundleIds: msg.selectedBundleIds,
+          scriptStorage,
+          genScriptId: generateUUID,
+        });
+        pushScripts();
+        spindle.log.info(`[LumiScript] card-scripts: installed ${summary.installed.length}, updated ${summary.updated.length}, skipped ${summary.skipped}`);
+        break;
+      }
+
       case 'update_script': {
         // v0.26.x diagnostic — log every received update_script with the patch
         // shape + (for code patches) the code length. Helps confirm whether
@@ -3751,6 +3779,43 @@ spindle.on('CHARACTER_EDITED', (payload: unknown) => {
     }
   }
 });
+
+// Card-embedded scripts (#12): on character create/import, detect scripts in the
+// card's `extensions` and ask the user (FE consent modal) which to install.
+spindle.on('CHARACTER_CREATED', (payload: unknown) => {
+  void handleCharacterCreated(payload);
+});
+
+async function handleCharacterCreated(payload: unknown): Promise<void> {
+  try {
+    if (!scriptStorage.store.isLoaded) return; // pre-cold-start imports are not retro-detected
+    const character = (payload as { character?: { id?: string; name?: string | null; extensions?: unknown } } | null)?.character;
+    if (!character?.id) return;
+    const prepared = prepareCardScriptDetection({
+      character: { id: character.id, name: character.name ?? null, extensions: character.extensions },
+      installed: scriptStorage.getScripts(),
+      granted: grantedPermissions,
+      genRequestId: generateUUID,
+    });
+    if (!prepared) return;
+    pendingCardDetections.set(prepared.requestId, prepared);
+    while (pendingCardDetections.size > MAX_PENDING_CARD_DETECTIONS) {
+      const oldest = pendingCardDetections.keys().next().value;
+      if (oldest === undefined) break;
+      pendingCardDetections.delete(oldest);
+    }
+    send({
+      type: 'ls_card_scripts_detected',
+      requestId: prepared.requestId,
+      hostCharacterId: prepared.hostCharacterId,
+      bundleCardId: prepared.bundleCardId,
+      ...(prepared.bundleName !== undefined ? { bundleName: prepared.bundleName } : {}),
+      items: prepared.items,
+    });
+  } catch (err) {
+    spindle.log.warn(`[LumiScript] CHARACTER_CREATED card-scripts detect failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
 
 spindle.on('PERSONA_CHANGED', (payload: unknown) => {
   const p = payload as { persona?: { id?: string; name?: string } } | null;
