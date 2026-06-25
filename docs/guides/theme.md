@@ -15,9 +15,9 @@ All six require the `app_manipulation` permission. They throw `Error: PERMISSION
 
 ## The big idea
 
-Lumiverse's UI is driven by a set of CSS custom properties (`--lumiverse-accent`, `--lumiverse-bg`, `--lumiverse-text`, etc.). The host's theme engine populates these from the user's chosen palette + mode (light/dark). `api.theme.*` lets your script push a *layer* of overrides on top — and the host re-applies them whenever the user's theme changes, so your overrides survive theme switches.
+Lumiverse's UI is driven by a set of CSS custom properties (`--lumiverse-primary`, `--lumiverse-bg`, `--lumiverse-text`, etc.). The host's theme engine populates these from the user's chosen palette + mode (light/dark). `api.theme.*` lets your script push a *layer* of overrides on top — and the host re-applies them whenever the user's theme changes, so your overrides survive theme switches.
 
-Multiple scripts can theme concurrently. The store does per-key last-applied-wins for individual variables and most-recent-wins for palettes. Two scripts overriding the same variable cleanly resolve in favor of whoever ran most recently; two scripts both applying palettes pick the most recent one and discard the older one. This means you don't have to coordinate across scripts that all happen to write `--lumiverse-accent` — the merge is automatic.
+Multiple scripts can theme concurrently. The store does per-key last-applied-wins for individual variables and most-recent-wins for palettes. Two scripts overriding the same variable cleanly resolve in favor of whoever ran most recently; two scripts both applying palettes pick the most recent one and discard the older one. This means you don't have to coordinate across scripts that all happen to write `--lumiverse-primary` — the merge is automatic.
 
 Cleanup is automatic too: when your script is disabled or deleted, the host walks its contributions out and re-derives the merged result.
 
@@ -76,7 +76,7 @@ interface ThemeOverride {
 ```js
 await api.theme.apply({
   variables: {
-    '--lumiverse-border-radius': '12px',
+    '--lumiverse-radius': '12px',
     '--lumiverse-transition-fast': '120ms',
   },
   variablesByMode: {
@@ -88,7 +88,7 @@ await api.theme.apply({
 
 The `variables` and `variablesByMode` slots compose: keys in both are merged, with mode-specific values overriding mode-agnostic ones at apply time. When the user switches mode, the host re-evaluates and pushes the right values without your script needing to react.
 
-Variable names follow `--lumiverse-*`. There's no exhaustive list shipped with LumiScript — the canonical set lives upstream in `lumiverse-spindle-types`'s `ThemeOverrideDTO`. To discover the full set at runtime, call `generateVariables(...)` and inspect its result (see below).
+Variable names follow `--lumiverse-*` — and the names are the same whether you `apply()` them or read them in `addStyle` CSS. See [Token reference](#token-reference) below for the grouped set. `generateVariables(...)` returns the complete applyable set at runtime — it includes a few engine-derived keys beyond the base `:root` list (e.g. `--lumiverse-primary-contrast`).
 
 ### `applyPalette(palette)`
 
@@ -234,11 +234,38 @@ await api.theme.apply({ variables: vars });
 
 This is also how to inspect the full variable list at runtime: call `generateVariables` once with any accent, log the keys.
 
+## Token reference
+
+These are the host's `--lumiverse-*` design tokens. The names are the **same** whichever way you use them:
+
+- **`apply({ variables: { '--lumiverse-primary': '...' } })`** — override a token in your script's theme layer.
+- **`api.ui.dom.addStyle('.box { color: var(--lumiverse-text); }')`** — read a token in CSS for DOM your script injects, so it tracks the user's theme automatically (no `api.theme` call needed at all).
+
+Values shown are the **dark-theme defaults** — the user's active theme may override them, which is exactly why you reference the *token* instead of a hard-coded colour. `generateVariables(...)` returns the complete applyable set at runtime (including a few engine-derived keys beyond this base list, like `--lumiverse-primary-contrast`).
+
+| Group | Tokens (suffixes append to the group base) |
+|---|---|
+| **Accent** — brand purple | `--lumiverse-primary` (rgba(147,112,219,.9)) + `-hover` `-light` `-muted` `-text` (accent text on dark) `-contrast` (derived); opacity `-010` `-015` `-020` `-050` |
+| **Text** — decreasing emphasis | `--lumiverse-text` (.9) · `--lumiverse-text-muted` (.65) · `--lumiverse-text-dim` (.4) · `--lumiverse-text-hint` (.3) |
+| **Backgrounds** — opaque surfaces | `--lumiverse-bg` `--lumiverse-bg-elevated` (+ `-bg-elevated-040`) `-bg-hover` `-bg-dark` `-bg-darker` `-bg-deep`; opacity `-bg-040` `-050` `-070`; `--lumiverse-scene-text-scrim` (text over scene art) |
+| **Fills** — translucent **black** scrims (darken what's under them) | `--lumiverse-fill-subtle` → `--lumiverse-fill` → `-fill-hover` `-medium` `-strong` `-heavy` `-deepest` |
+| **Borders** | `--lumiverse-border` (purple .12) `-border-hover` `-border-light`; neutral grey `--lumiverse-border-neutral` `-border-neutral-hover` |
+| **Status** | `--lumiverse-danger` (#ef4444) · `--lumiverse-success` (#22c55e) · `--lumiverse-warning` (#f59e0b) — each + `-015` `-020` `-050`; `--lumiverse-danger-hover`; `--lumiverse-error` aliases danger |
+| **Radii** | `--lumiverse-radius-sm` (5px) `--lumiverse-radius` (8) `-radius-md` (10) `-radius-lg` (12) `-radius-xl` (16) |
+| **Shadows & sheen** | `--lumiverse-shadow` `-shadow-sm` `-md` `-lg` `-xl`; `--lumiverse-highlight-inset` `-md` `-lg` |
+| **Transitions** | `--lumiverse-transition` (200ms ease) · `--lumiverse-transition-fast` (150ms ease) |
+| **Typography** | `--lumiverse-font-family` (system sans) `--lumiverse-font-mono` `--lumiverse-font-scale` `--lumiverse-ui-scale` |
+| **Icons** | `--lumiverse-icon` `--lumiverse-icon-muted` `--lumiverse-icon-dim` |
+| **Cards & modals** | `--lumiverse-card-bg` (gradient) `-card-bg-solid` `-top` `-bottom`; `--lumiverse-modal-backdrop`; `--lumiverse-gradient-modal`; `--lumiverse-swatch-border` |
+| **Chat-Sheld glass** | `--lcs-glass-bg` `--lcs-glass-border` `--lcs-glass-blur` `--lcs-radius` … — host-internal; read via `getCurrent()` rather than hard-coding |
+
+**`applyPalette` vs `apply`.** `applyPalette({ accent })` regenerates the *whole* coherent set from one accent; `apply({ variables })` overrides *specific* tokens and leaves the rest. Don't blend the two in a single call. **Fallbacks.** Tokens live on `:root`, so they cascade into script-injected DOM — but if a token ever reads as unset (some `document.body` portal contexts), give it an rgb fallback: `var(--lumiverse-text, rgba(255,255,255,.9))`.
+
 ## Per-script attribution
 
 Multiple scripts can theme concurrently. The store applies these rules:
 
-- **Variables** (from `apply`) merge per-key, last-applied-wins. If Script A sets `--lumiverse-border-radius: 12px` and Script B sets `--lumiverse-border-radius: 8px`, whichever applied most recently is active. The OTHER keys each script set remain present.
+- **Variables** (from `apply`) merge per-key, last-applied-wins. If Script A sets `--lumiverse-radius: 12px` and Script B sets `--lumiverse-radius: 8px`, whichever applied most recently is active. The OTHER keys each script set remain present.
 - **Palettes** (from `applyPalette`) are most-recent-script-wins overall. Only one accent palette is active at a time; later `applyPalette` calls replace earlier ones.
 - **Mode-keyed variants** (`variablesByMode.dark`, `.light`) merge independently of each other and of mode-agnostic `variables`.
 
@@ -252,7 +279,7 @@ When the user switches between light and dark mode, the host re-evaluates `varia
 
 ```js
 await api.theme.apply({
-  variables:       { '--lumiverse-border-radius': '12px' },          // Always.
+  variables:       { '--lumiverse-radius': '12px' },          // Always.
   variablesByMode: {
     dark:  { '--lumiverse-bg': '#0f0a1e', '--lumiverse-text': '#e8e2f5' },
     light: { '--lumiverse-bg': '#fbf7ff', '--lumiverse-text': '#1a0f2e' },
@@ -265,7 +292,7 @@ await api.theme.apply({
 ```js
 await api.theme.apply({
   variablesByMode: {
-    dark: { '--lumiverse-accent-fg': '#fff' },                       // Only adjust dark mode.
+    dark: { '--lumiverse-primary-contrast': '#fff' },                       // Only adjust dark mode.
   },
 });
 ```
@@ -294,7 +321,7 @@ In practice, your script never sees this. If you ever do — because all 5 retri
 
 - **`getCurrent` returns the BASE theme, not the merged result.** If you want to see what's *actually* applied (including your overrides and other scripts'), there's no public method to read the merged state. You can only know what you contributed (track it in `globalThis` or `api.scriptStorage`) and what the user's base is.
 
-- **Palettes don't merge.** Two scripts applying `applyPalette` race for "most recent". If you need to coordinate, use `apply({ variables: { '--lumiverse-accent': ... } })` instead — variables merge per-key cleanly.
+- **Palettes don't merge.** Two scripts applying `applyPalette` race for "most recent". If you need to coordinate, use `apply({ variables: { '--lumiverse-primary': ... } })` instead — variables merge per-key cleanly.
 
 - **Theme writes during `CHAT_SWITCHED` may transiently fail.** The macro-race retry handles most cases, but pathological chat-open storms can exhaust the 5 retries. If your script does heavy theming on every chat-open, consider deferring the apply to a subsequent trigger or batching with `generateVariables` (read-only — no race) followed by `apply` slightly later.
 

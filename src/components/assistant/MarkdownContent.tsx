@@ -41,8 +41,9 @@ import { FilePlus, ChevronDown, RefreshCw, Copy, Check } from 'lucide-react';
 // Lets the assistant modal expose a "create a script from this code block"
 // callback to deeply-nested code-block renderers without prop-drilling
 // through `memo`'d MarkdownContent (which would break memoisation). When
-// the context value is non-null, fenced code blocks render a hover-
-// revealed "Apply to script" button in the top-right.
+// the context value is non-null, fenced code blocks render an "Apply to
+// script" control in the persistent header bar above the code (alongside the
+// language label and Copy button).
 //
 // Set to null (or leave at default `null`) when there's no apply target
 // (e.g. tool-chip content viewer, error message rendering, future surfaces
@@ -151,13 +152,21 @@ interface CodeBlockProps {
   [key: string]: unknown;
 }
 
-const CodeBlock = ({ className, children, ...rest }: CodeBlockProps) => {
+const CodeBlock = ({ className, children }: CodeBlockProps) => {
   const match = /language-(\w+)/.exec(className ?? '');
-  if (match) {
-    const code = String(children ?? '').replace(/\n$/, '');
-    return <FencedCode code={code} lang={match[1]!} />;
+  const raw = String(children ?? '');
+  // Route to FencedCode both language-tagged fences (via the language- class)
+  // and bare ``` fences with no language (no class) — the latter detected by a
+  // newline in the content, since markdown gives a fenced block a trailing
+  // newline while inline `code` is single-line. This keeps the Copy/Apply
+  // toolbar on language-less blocks instead of dropping them to inline pills.
+  if (match || raw.includes('\n')) {
+    return <FencedCode code={raw.replace(/\n$/, '')} lang={match?.[1] ?? ''} />;
   }
-  return <code className="ls-asst-md-inline-code" {...rest}>{children}</code>;
+  // Render only className/children — do NOT spread the rest of react-markdown's
+  // props onto the DOM node: v10 injects a hast `node` object that React would
+  // emit as an unknown attribute (markdown inline code carries no HTML attrs).
+  return <code className="ls-asst-md-inline-code">{children}</code>;
 };
 
 /**
@@ -187,26 +196,14 @@ const FencedCode = ({ code, lang }: { code: string; lang: string }) => {
   const targets = apply?.attachedScripts ?? [];
 
   return (
-    // Wrapper sets `position: relative` so the apply control can sit absolutely
-    // in the top-right. The block's outer chrome (margin / background /
-    // border-radius) comes from .ls-asst-md-code-wrap in assistant.css.
+    // The header bar (.ls-asst-md-code-actions) renders ABOVE the highlighter so
+    // the Copy / Apply controls live in their own row instead of floating over
+    // the code's top-right corner (which overlapped the first line). The bar's
+    // rounded top + the highlighter's rounded bottom read as a single block.
     <div className="ls-asst-md-code-wrap">
-      <SyntaxHighlighter
-        language={lang}
-        style={oneDark}
-        PreTag="div"
-        customStyle={{
-          margin: 0,
-          padding: '10px 12px',
-          borderRadius: 6,
-          fontSize: '12px',
-          background: 'rgba(0, 0, 0, 0.42)',
-        }}
-        wrapLongLines
-      >
-        {code}
-      </SyntaxHighlighter>
       <div className="ls-asst-md-code-actions">
+        <span className="ls-asst-md-code-lang">{lang || 'code'}</span>
+        <div className="ls-asst-md-code-buttons">
         <CopyButton text={code} className="ls-asst-md-copy" withLabel title="Copy code" />
         {apply && (targets.length === 0 ? (
         <button
@@ -260,7 +257,23 @@ const FencedCode = ({ code, lang }: { code: string; lang: string }) => {
           )}
         </div>
       ))}
+        </div>
       </div>
+      <SyntaxHighlighter
+        language={lang}
+        style={oneDark}
+        PreTag="div"
+        customStyle={{
+          margin: 0,
+          padding: '10px 12px',
+          borderRadius: '0 0 6px 6px',
+          fontSize: '12px',
+          background: 'rgba(0, 0, 0, 0.42)',
+        }}
+        wrapLongLines
+      >
+        {code}
+      </SyntaxHighlighter>
     </div>
   );
 };

@@ -192,7 +192,7 @@
   border-color: var(--lumiverse-accent, rgb(147, 112, 219));
 }
 .ls-asst-empty code {
-  font-family: var(--lumiverse-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-family: var(--lumiverse-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   font-size: 11px;
   background: rgba(255, 255, 255, 0.06);
   padding: 1px 4px;
@@ -405,7 +405,7 @@
 }
 .ls-asst-reasoning-content {
   margin-top: 6px;
-  font-family: var(--lumiverse-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-family: var(--lumiverse-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   font-size: 11px;
   line-height: 1.5;
   color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.65));
@@ -757,7 +757,7 @@
 .ls-asst-usage-num {
   font-weight: 600;
   color: var(--lumiverse-text, rgba(255, 255, 255, 0.78));
-  font-family: var(--lumiverse-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-family: var(--lumiverse-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
 }
 .ls-asst-usage-label {
   text-transform: uppercase;
@@ -871,7 +871,7 @@
 .ls-asst-bd-tok {
   font-variant-numeric: tabular-nums;
   color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.6));
-  font-family: var(--lumiverse-mono, ui-monospace, monospace);
+  font-family: var(--lumiverse-font-mono, ui-monospace, monospace);
 }
 .ls-asst-bd-note {
   margin: 8px 0 0;
@@ -1442,7 +1442,7 @@
 
 .ls-asst-md-inline-code,
 .ls-asst-md code {
-  font-family: var(--lumiverse-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-family: var(--lumiverse-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   font-size: 0.92em;
   padding: 1px 5px;
   background: rgba(255, 255, 255, 0.08);
@@ -1456,44 +1456,64 @@
 
 /* ── Code-block wrapper + "Apply to script" button ─────────────────────── */
 
-/* Wrapper around each fenced code block — provides the positioning context
-   for the absolutely-placed apply button and supplies the outer 8px
-   vertical margin (the inner SyntaxHighlighter's customStyle margin is
-   zeroed to make room for this wrapper). */
+/* Wrapper around each fenced code block — supplies the outer 8px vertical
+   margin (the inner SyntaxHighlighter's customStyle margin is zeroed). The
+   header bar and highlighter are both in normal flow; the only positioned
+   descendant is the apply drop-down menu, anchored to .ls-asst-md-apply-wrap. */
 .ls-asst-md-code-wrap {
-  position: relative;
   margin: 8px 0;
 }
 
-/* Action row — top-right of a code block. Holds Copy (always present) and,
-   when an AssistantApplyContext provider is mounted (the modal), Apply.
-   Revealed together on hover / focus-within so the block stays clean at rest. */
+/* Header bar above the code — language label (left) + the Copy / Apply controls
+   (right). It sits in normal flow ABOVE the highlighter rather than floating
+   over its top-right corner, so the buttons can never overlap the first code
+   line. Rounded top corners pair with the highlighter's rounded bottom (set in
+   MarkdownContent) so the bar and the code read as a single block. */
 .ls-asst-md-code-actions {
-  position: absolute;
-  top: 6px;
-  right: 6px;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px 4px 10px;
+  background: rgba(0, 0, 0, 0.58);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 6px 6px 0 0;
+}
+/* Language tag (e.g. js / ts / json) — dim, monospace, left of the bar. */
+.ls-asst-md-code-lang {
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: lowercase;
+  color: var(--lumiverse-text-dim, rgba(255, 255, 255, 0.4));
+  /* Host mono token — shared with inline code and the other mono surfaces. */
+  font-family: var(--lumiverse-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  /* Never let a pathological fence tag crowd or wrap the Copy / Apply buttons. */
+  min-width: 0;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Buttons cluster — pinned to the right edge of the bar. */
+.ls-asst-md-code-buttons {
+  display: flex;
+  align-items: center;
   gap: 4px;
-  opacity: 0;
-  transition: opacity 120ms;
+  margin-left: auto;
 }
-.ls-asst-md-code-wrap:hover .ls-asst-md-code-actions,
-.ls-asst-md-code-wrap:focus-within .ls-asst-md-code-actions {
-  opacity: 1;
-}
-/* Shared chrome for the Copy + Apply controls. */
+/* Shared chrome for the Copy + Apply controls — light icon buttons that read as
+   part of the header bar (transparent at rest, accent on hover). */
 .ls-asst-md-copy,
 .ls-asst-md-apply {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 3px 8px;
+  padding: 2px 7px;
   font-size: 10.5px;
   font-weight: 500;
-  background: var(--lumiverse-fill-3, rgba(255, 255, 255, 0.12));
-  color: var(--lumiverse-text, rgba(255, 255, 255, 0.92));
-  border: 1px solid var(--lumiverse-border-light, rgba(128, 128, 128, 0.28));
+  background: transparent;
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.65));
+  border: 1px solid transparent;
   border-radius: 4px;
   cursor: pointer;
   transition: background 120ms, border-color 120ms, color 120ms;
@@ -1510,11 +1530,6 @@
    menu directly beneath the button. */
 .ls-asst-md-apply-wrap {
   position: relative;
-}
-.ls-asst-md-apply-wrap .ls-asst-md-apply {
-  position: static;
-  top: auto;
-  right: auto;
 }
 .ls-asst-md-apply-menu {
   position: absolute;
