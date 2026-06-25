@@ -14,7 +14,7 @@
  */
 import { useEffect, useState, type FC, type CSSProperties } from 'react';
 import { ConfirmDialog } from '../common/ConfirmDialog.js';
-import { isActionable, defaultSelectedBundleIds, actionBadgeLabel } from './consent-helpers.js';
+import { isActionable, isScopable, defaultSelectedBundleIds, defaultScopedBundleIds, actionBadgeLabel } from './consent-helpers.js';
 import type { BackendToFrontend, FrontendToBackend } from '../../types/messages.js';
 import type { CardScriptAction } from '../../types/card-scripts.js';
 
@@ -36,6 +36,8 @@ const descStyle: CSSProperties = { marginTop: 4, marginLeft: 21, color: TEXT, op
 const metaStyle: CSSProperties = { marginTop: 2, marginLeft: 21, color: MUTED, fontSize: 11 };
 const warnStyle: CSSProperties = { marginTop: 5, marginLeft: 21, color: WARN, fontSize: 11.5, lineHeight: 1.4 };
 const noteStyle: CSSProperties = { color: MUTED, fontSize: 12, lineHeight: 1.5, marginBottom: 4 };
+const hookStyle: CSSProperties = { marginTop: 3, marginLeft: 21, color: 'rgb(150,166,205)', fontSize: 11, lineHeight: 1.4 };
+const scopeStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: 6, marginTop: 6, marginLeft: 21, color: TEXT, fontSize: 11.5, cursor: 'pointer', opacity: 0.9 };
 
 function badgeStyle(action: CardScriptAction): CSSProperties {
   const base: CSSProperties = { marginLeft: 'auto', fontSize: 11, padding: '1px 7px', borderRadius: 6, fontWeight: 600, whiteSpace: 'nowrap' };
@@ -54,6 +56,8 @@ interface Props {
 export const CardScriptsConsentHost: FC<Props> = ({ onBackendMessage, sendToBackend }) => {
   const [queue, setQueue] = useState<Detected[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  // bundleIds the user chose to scope to the imported character (#12 Q1).
+  const [scoped, setScoped] = useState<Set<string>>(new Set());
   // The requestId `selected` was computed for. Lets us reset the selection the
   // instant the front-of-queue batch changes (see below).
   const [selectedFor, setSelectedFor] = useState<string | undefined>(undefined);
@@ -74,6 +78,7 @@ export const CardScriptsConsentHost: FC<Props> = ({ onBackendMessage, sendToBack
   if (currentId !== selectedFor) {
     setSelectedFor(currentId);
     setSelected(current ? new Set(defaultSelectedBundleIds(current.items)) : new Set());
+    setScoped(current ? new Set(defaultScopedBundleIds(current.items)) : new Set());
   }
 
   if (!current) return null;
@@ -84,12 +89,19 @@ export const CardScriptsConsentHost: FC<Props> = ({ onBackendMessage, sendToBack
     if (next.has(bundleId)) next.delete(bundleId); else next.add(bundleId);
     return next;
   });
+  const toggleScope = (bundleId: string): void => setScoped((s) => {
+    const next = new Set(s);
+    if (next.has(bundleId)) next.delete(bundleId); else next.add(bundleId);
+    return next;
+  });
   const confirm = (): void => {
     sendToBackend({
       type: 'ls_card_scripts_install',
       requestId: current.requestId,
       bundleCardId: current.bundleCardId,
       selectedBundleIds: [...selected],
+      // Only meaningful for selected scopable scripts; the backend intersects anyway.
+      scopedBundleIds: [...scoped].filter((id) => selected.has(id)),
     });
     advance();
   };
@@ -141,6 +153,21 @@ export const CardScriptsConsentHost: FC<Props> = ({ onBackendMessage, sendToBack
               {item.entry.metadata?.version ? ` · v${item.entry.metadata.version}` : ''}
               {renamedFromCard ? ` · card names it “${item.entry.name}”` : ''}
             </div>
+            {item.entry.type === 'trigger' && item.entry.triggers && item.entry.triggers.length > 0 ? (
+              <div style={hookStyle}>Event hooks: {item.entry.triggers.join(', ')}</div>
+            ) : null}
+            {item.entry.bindings && item.entry.bindings.length > 0 ? (
+              <div style={hookStyle}>
+                Card author scoped this to {item.entry.bindings.map((b) => b.displayName).join(', ')}{' '}
+                <span style={{ color: MUTED }}>(not carried on import — use the toggle below)</span>
+              </div>
+            ) : null}
+            {act && isScopable(item) && selected.has(item.entry.bundleId) ? (
+              <label style={scopeStyle}>
+                <input type="checkbox" checked={scoped.has(item.entry.bundleId)} onChange={() => toggleScope(item.entry.bundleId)} />
+                <span>Run only for {from} <span style={{ color: MUTED }}>(otherwise runs in every chat)</span></span>
+              </label>
+            ) : null}
             {item.targetEnabled ? (
               <div style={warnStyle}>⚠ This replaces the code of an <b>enabled</b> script — the new code runs on its next trigger.</div>
             ) : null}

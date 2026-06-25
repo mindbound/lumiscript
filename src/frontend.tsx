@@ -4,6 +4,9 @@ import { createRoot } from 'react-dom/client';
 import { PANEL_CSS } from './components/styles/index.js';
 import { LumiScriptPanel } from './components/LumiScriptPanel.js';
 import { CardScriptsConsentHost } from './components/cardscripts/CardScriptsConsentHost.js';
+import { BundleIntoCardModal } from './components/cardscripts/BundleIntoCardModal.js';
+import { CardScriptsDeletedOfferHost } from './components/cardscripts/CardScriptsDeletedOfferHost.js';
+import { CardEditorScriptsTab } from './components/cardscripts/CardEditorScriptsTab.js';
 import { SettingsPanel } from './components/settings/SettingsPanel.js';
 import { ErrorBoundary } from './components/common/ErrorBoundary.js';
 import type { FrontendToBackend } from './types/messages.js';
@@ -245,6 +248,88 @@ export function setup(ctx: SpindleFrontendContext) {
     try { cardScriptsRoot.unmount(); } catch { /* ignore */ }
     cardScriptsContainer.remove();
   });
+
+  // ─── Bundle-into-card authoring modal (#12, Phase 3b) ────────────────────
+  // Own root (the script-manager toolbar opens it via a window event), so it
+  // can portal to document.body above the dock panel.
+  const bundleCardContainer = document.createElement('div');
+  bundleCardContainer.setAttribute('data-ls-bundlecard-root', '');
+  document.body.appendChild(bundleCardContainer);
+  const bundleCardRoot = createRoot(bundleCardContainer);
+  bundleCardRoot.render(
+    <StrictMode>
+      <ErrorBoundary label="Card-scripts authoring">
+        <BundleIntoCardModal
+          onBackendMessage={virtualOnBackendMessage}
+          sendToBackend={sendToBackend}
+        />
+      </ErrorBoundary>
+    </StrictMode>,
+  );
+  cleanups.push(() => {
+    try { bundleCardRoot.unmount(); } catch { /* ignore */ }
+    bundleCardContainer.remove();
+  });
+
+  // ─── Card-delete cleanup offer (#12, Phase D) ────────────────────────────
+  // Own root so the confirm can appear when a character is deleted regardless of
+  // dock state (it portals to document.body).
+  const deletedOfferContainer = document.createElement('div');
+  deletedOfferContainer.setAttribute('data-ls-cardscripts-deleted-root', '');
+  document.body.appendChild(deletedOfferContainer);
+  const deletedOfferRoot = createRoot(deletedOfferContainer);
+  deletedOfferRoot.render(
+    <StrictMode>
+      <ErrorBoundary label="Card-scripts delete offer">
+        <CardScriptsDeletedOfferHost
+          onBackendMessage={virtualOnBackendMessage}
+          sendToBackend={sendToBackend}
+        />
+      </ErrorBoundary>
+    </StrictMode>,
+  );
+  cleanups.push(() => {
+    try { deletedOfferRoot.unmount(); } catch { /* ignore */ }
+    deletedOfferContainer.remove();
+  });
+
+  // ─── Character-editor "LumiScript" tab (#12, Phase E) ────────────────────
+  // A tab inside Lumiverse's native character-editor modal listing the scripts
+  // bundled into the card being edited (`extensions.lumiscript`). Its own React
+  // root mounted into the host-provided tab `root`. Guarded for hosts that
+  // predate the `registerCharacterEditorTab` API (spindle-types 0.5.27+ /
+  // host commit 5fa15552) — the rest of the extension works without it.
+  if (typeof ctx.ui.registerCharacterEditorTab === 'function' && ctx.ui.characterEditor) {
+    try {
+      const editorHelper = ctx.ui.characterEditor;
+      const editorTab = ctx.ui.registerCharacterEditorTab({ id: 'lumiscript-bundled', title: 'LumiScript' });
+      const editorTabRoot = createRoot(editorTab.root);
+      editorTabRoot.render(
+        <StrictMode>
+          <ErrorBoundary label="Card-editor scripts tab">
+            <CardEditorScriptsTab
+              editor={editorHelper}
+              sendToBackend={sendToBackend}
+              onBackendMessage={virtualOnBackendMessage}
+              confirm={(opts) =>
+                typeof ctx.ui.showConfirm === 'function'
+                  ? ctx.ui.showConfirm(opts).then((r) => r.confirmed)
+                  : Promise.resolve(typeof window !== 'undefined' && window.confirm(opts.message))
+              }
+            />
+          </ErrorBoundary>
+        </StrictMode>,
+      );
+      cleanups.push(() => {
+        try { editorTabRoot.unmount(); } catch { /* ignore */ }
+        try { editorTab.destroy();     } catch { /* ignore */ }
+      });
+    } catch (err) {
+      // Non-fatal — registration can throw on edge hosts (capacity, race). The
+      // extension keeps working without the editor tab.
+      console.warn('[LumiScript] character-editor tab registration failed:', err);
+    }
+  }
 
   // ─── Teardown ──────────────────────────────────────────────────────────
   return () => {

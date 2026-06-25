@@ -28,7 +28,7 @@ import type {
   MessageTagEvent,
   MessageTagOptions,
 } from './script.js';
-import type { DetectedCardScript } from './card-scripts.js';
+import type { DetectedCardScript, EmbeddedScriptEntry } from './card-scripts.js';
 import type { CollectionSummary, CollectionStats } from '../engine/db-admin.js';
 
 // ─── Shared payload shapes ────────────────────────────────────────────────────
@@ -63,6 +63,10 @@ export type FrontendToBackend =
       bundleCardId: string;
       /** bundleIds the user chose to install/update (subset of the detected set). */
       selectedBundleIds: string[];
+      /** bundleIds (subset of selected) to scope to the imported character — the
+       *  installed script gets a single character binding to the host character
+       *  instead of running globally (#12 Q1). Absent → none scoped (all global). */
+      scopedBundleIds?: string[];
     }
   | {
       // ── Card-embedded scripts (#12): FE dismisses a detection without installing ──
@@ -72,6 +76,77 @@ export type FrontendToBackend =
       // requestId is a harmless no-op.
       type: 'ls_card_scripts_dismiss';
       requestId: string;
+    }
+  | {
+      // ── Card-embedded scripts (#12, Phase 3): bundle scripts INTO a character ──
+      // BACKEND-AUTHORITY: the FE supplies only the chosen script ids + target
+      // character; the backend loads the real script bodies from storage, builds
+      // the envelope, and writes it via spindle.characters.update (never trusts
+      // FE-supplied script content).
+      type: 'ls_card_scripts_export';
+      /** Per-submit token echoed back on the result so the FE can ignore a stale
+       *  result from an abandoned earlier submit (modal is persistently mounted). */
+      requestId: string;
+      /** Ids of installed scripts to bundle (loaded backend-side from storage). */
+      scriptIds: string[];
+      /** Target character UUID whose `extensions.lumiscript` receives the bundle. */
+      characterId: string;
+    }
+  | {
+      // ── Card-embedded scripts (#12, Phase 3): FE requests the character list ──
+      // Populates the target-character picker in the bundle modal. Backend replies
+      // `ls_characters_list`.
+      type: 'ls_list_characters';
+    }
+  | {
+      // ── Card-embedded scripts (#12, Phase C): chat-open banner "Review" ──
+      // The user clicked Review on the passive banner — re-emit the cached
+      // detection as `ls_card_scripts_detected` so the normal consent modal opens.
+      type: 'ls_card_scripts_review';
+      requestId: string;
+    }
+  | {
+      // ── Card-embedded scripts (#12, Phase C): chat-open banner "Dismiss" ──
+      // The user dismissed the banner — record the offered (bundleCardId, bundleId)
+      // pairs so they aren't re-surfaced by a future chat-open re-detect. (Distinct
+      // from `ls_card_scripts_dismiss`, the import-modal cancel, which does NOT
+      // record — importing is the explicit trust act.)
+      type: 'ls_card_scripts_dismiss_available';
+      requestId: string;
+    }
+  | {
+      // ── Card-embedded scripts (#12, Phase C): pull-based banner recheck ──
+      // Sent by the FE whenever the Manage tab is shown (mount + every switch
+      // back). The backend re-runs the chat-open detection against the LIVE
+      // active character and (re-)surfaces `ls_card_scripts_available` if there
+      // is anything offerable. This makes the banner resilient to the one-shot
+      // CHAT_SWITCHED push being missed (panel not mounted / cleared by a later
+      // active_context / ordering) — the user reliably sees it when they look.
+      type: 'recheck_card_scripts';
+    }
+  | {
+      // ── Card-editor tab (#12, Phase E): request the installed-status of the
+      // bundled scripts in the character being edited (drives the per-script
+      // badges). The backend reads the SAVED card + compares against the user's
+      // library via computeInstallActions. ──
+      type: 'ls_card_editor_status';
+      characterId: string;
+    }
+  | {
+      // ── Card-editor tab (#12, Phase E): late-import the edited character's
+      // bundled scripts. Opens the standard consent modal (backend reads the
+      // SAVED card — never FE-supplied script data). ──
+      type: 'ls_card_editor_import';
+      characterId: string;
+    }
+  | {
+      // ── Card-editor tab (#12, Phase E): bundle-from-here. Ask the backend to
+      // build embedded entries for these library script ids (from real storage,
+      // backend-authority) so the FE can merge them into the edited card's draft
+      // `extensions.lumiscript`. ──
+      type: 'ls_card_editor_bundle_build';
+      requestId: string;
+      scriptIds: string[];
     }
   | {
       /**
@@ -735,6 +810,85 @@ export type BackendToFrontend =
       bundleName?: string;
       /** Per-script decision + permission analysis for the modal. */
       items: DetectedCardScript[];
+    }
+  | {
+      // ── Card-embedded scripts (#12, Phase C): passive chat-open banner ──
+      // The open character bundles scripts the user doesn't have (and hasn't
+      // dismissed). Surfaced as a non-blocking banner, NOT an auto-modal. The
+      // FE replies `ls_card_scripts_review` (→ opens the modal) or
+      // `ls_card_scripts_dismiss_available` (→ records the dismissal).
+      type: 'ls_card_scripts_available';
+      /** Correlates the banner's review/dismiss reply to the cached detection. */
+      requestId: string;
+      characterName: string | null;
+      /** Count of offerable (install/update, not-dismissed) bundled scripts. */
+      count: number;
+    }
+  | {
+      // ── Card-editor tab (#12, Phase E): installed-status reply. One entry per
+      // bundled script in the edited card, telling the tab whether the user
+      // already has it. Gated on `characterId` so a stale reply for a since-
+      // switched character is ignored. ──
+      type: 'ls_card_editor_status_result';
+      characterId: string;
+      statuses: {
+        bundleId: string;
+        state: 'installed' | 'not-installed' | 'update-available' | 'library-newer';
+        /** Name of the installed copy (when state !== 'not-installed'). */
+        installedName?: string;
+        /** Whether the installed copy is enabled. */
+        installedEnabled?: boolean;
+      }[];
+    }
+  | {
+      // ── Card-editor tab (#12, Phase E): a library change happened (a card-
+      // scripts install completed) — nudge the editor tab to re-request status
+      // so its badges refresh. No payload; the tab re-asks for its own card. ──
+      type: 'ls_card_editor_status_stale';
+    }
+  | {
+      // ── Card-editor tab (#12, Phase E): backend-built embedded entries for a
+      // `ls_card_editor_bundle_build` request. The FE merges these into the
+      // edited card's draft `extensions.lumiscript`. ──
+      type: 'ls_card_editor_bundle_entries';
+      requestId: string;
+      entries: EmbeddedScriptEntry[];
+    }
+  | {
+      // ── Card-embedded scripts (#12, Phase D): a card was deleted ──
+      // Offer (non-destructive default) to remove the scripts that card installed.
+      // The FE fires the existing `delete_script` per chosen id on confirm — no
+      // backend remove-handler needed; delete already records the dismissal.
+      type: 'ls_card_scripts_deleted_offer';
+      characterName: string | null;
+      /** Scripts whose provenance points at the deleted character instance. */
+      scripts: { id: string; name: string }[];
+    }
+  | {
+      // ── Card-embedded scripts (#12, Phase 3): character picker options ──
+      type: 'ls_characters_list';
+      /** `avatarUrl` (when resolvable from the character's image) drives the
+       *  picker dropdown's thumbnail; absent → the FE shows an initial bubble. */
+      characters: { id: string; name: string; avatarUrl?: string }[];
+      /** Host's total character count — lets the FE flag a truncated list. */
+      total: number;
+    }
+  | {
+      // ── Card-embedded scripts (#12, Phase 3): result of an export/bundle ──
+      type: 'ls_card_scripts_export_result';
+      /** Echoes the request's token — the FE ignores results for a non-current submit. */
+      requestId: string;
+      ok: boolean;
+      /** Resolved target character name (success only). */
+      characterName?: string;
+      /** The bundleCardId written (new or reused) — success only. */
+      bundleCardId?: string;
+      /** Number of scripts actually written into the envelope (success only). */
+      scriptCount?: number;
+      /** Selected scripts dropped because they shared a bundle identity (success only). */
+      droppedCount?: number;
+      /** Failure reason (failure only). */
+      error?: string;
     }
   | {
       type: 'scripts_updated';

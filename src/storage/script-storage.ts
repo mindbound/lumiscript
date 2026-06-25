@@ -101,13 +101,19 @@ export class ScriptStorage {
     const baseName = `${original.name} (copy)`;
     const uniqueName = await this.getUniqueName(baseName);
     const now = Date.now();
-    return this.store.create({
+    const copy: Script = {
       ...original,
       id: generateUUID(),
       name: uniqueName,
       createdAt: now,
       updatedAt: now,
-    });
+    };
+    // A duplicate is a fresh LOCAL script, not another copy of the source card-
+    // bundle entry — drop `bundledFrom` so it doesn't inherit the original's
+    // bundle identity. Otherwise both would resolve to the same `bundleId` on
+    // export and one would be silently de-duped away (#12).
+    delete copy.bundledFrom;
+    return this.store.create(copy);
   }
 
   /**

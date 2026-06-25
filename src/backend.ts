@@ -22,6 +22,8 @@ import { createHash } from 'node:crypto';
 import { generateUUID } from './utils/uuid.js';
 import { listByMode, listAll, clearEphemeral, clearByScriptId, type InjectionEntry } from './engine/injection-store.js';
 import { prepareCardScriptDetection, applyCardScriptInstall, type PreparedDetection } from './engine/card-scripts-install.js';
+import { extractEmbeddedScripts, computeInstallActions } from './engine/card-scripts.js';
+import { buildCardBundle, buildEmbeddedEntry } from './engine/card-scripts-export.js';
 import { applyLumiScriptInjections } from './engine/interceptor-pipeline.js';
 import {
   dispatch as dispatchMacroInterceptor,
@@ -199,6 +201,22 @@ const grantedPermissions = new Set<string>();
 // stale install reply then no-ops (see the `ls_card_scripts_install` handler).
 const pendingCardDetections = new Map<string, PreparedDetection>();
 const MAX_PENDING_CARD_DETECTIONS = 16;
+// Chat-open BANNER re-detects (#12 Phase C) use a SEPARATE bounded map so that
+// high-frequency chat navigation can't LRU-evict a still-open IMPORT consent
+// modal's cached detection (lifecycle audit). De-duped by hostCharacterId, so
+// revisiting a character replaces rather than appends.
+const bannerCardDetections = new Map<string, PreparedDetection>();
+const MAX_BANNER_CARD_DETECTIONS = 8;
+
+/** Look up a cached detection from either the import-consent or banner map. */
+function getCardDetection(requestId: string): PreparedDetection | undefined {
+  return pendingCardDetections.get(requestId) ?? bannerCardDetections.get(requestId);
+}
+/** Remove a cached detection from whichever map holds it. */
+function deleteCardDetection(requestId: string): void {
+  pendingCardDetections.delete(requestId);
+  bannerCardDetections.delete(requestId);
+}
 
 // ─── In-app assistant — module-level state (v0.30.2 persistence) ─────────────
 //
@@ -342,6 +360,16 @@ const settingsStore = new SettingsStore<LumiScriptSettings>(
   getUserId,
   DEFAULT_SETTINGS,
 );
+
+// #12 Phase B — per-user record of card-bundled scripts the user has dismissed
+// (banner Dismiss) or deleted, so the passive chat-open re-detect (Phase C)
+// doesn't nag about them. The explicit import consent path never consults it.
+// Characters the user has hushed the chat-open banner for THIS SESSION (via the
+// banner's ✕, or by acting on it through Review/install). Session-scoped on
+// purpose: the character-editor tab's "Import to library" is the durable late-
+// import path, so the banner is only a transient discovery nudge — there's no
+// persistent dismissals file to accumulate or hand-clear. Cleared on restart.
+const sessionHushedCharacters = new Set<string>();
 
 // Register {{lumiScriptActive}} + character-var macros at module scope so they
 // are available to the macro engine the instant the worker boots. The
@@ -2898,7 +2926,16 @@ spindle.onFrontendMessage(async (raw, userId) => {
 
       // ── Card-embedded scripts (#12) — install from a card's consent modal ───
       case 'ls_card_scripts_install': {
-        const prepared = pendingCardDetections.get(msg.requestId);
+        // Capture the replying user BEFORE any await — `activeUserId` is a mutable
+        // module global reassigned per incoming FE message, so a concurrent message
+        // on a shared (operator) worker could flip it mid-await and misroute the
+        // post-install toast + editor-tab nudge. (Matches every sibling handler.)
+        const replyUserId = activeUserId;
+        const prepared = getCardDetection(msg.requestId);
+        // Was this consent modal opened from the passive chat-open BANNER? If so,
+        // anything the user reviews but does NOT install is a decline → record it
+        // so the banner stops re-surfacing. (Import-originated installs don't.)
+        const installFromBanner = bannerCardDetections.has(msg.requestId);
         if (!prepared || prepared.bundleCardId !== msg.bundleCardId) {
           // Cache miss (worker respawn or LRU eviction between detect + reply) or
           // mismatched batch — never fabricate an install from FE-supplied data.
@@ -2918,22 +2955,28 @@ spindle.onFrontendMessage(async (raw, userId) => {
         // Reject a reply arriving under a DIFFERENT active user. Tolerant of a
         // null owner (detect ran before any FE session) to avoid false rejects.
         if (prepared.ownerUserId != null && activeUserId != null && prepared.ownerUserId !== activeUserId) {
-          pendingCardDetections.delete(msg.requestId);
+          deleteCardDetection(msg.requestId);
           spindle.log.warn(`[LumiScript] card-scripts install: owner/active user mismatch for ${msg.requestId} — ignoring`);
           break;
         }
-        pendingCardDetections.delete(msg.requestId);
+        deleteCardDetection(msg.requestId);
         // Defensive coercion: incoming FE messages are unvalidated; a non-array
         // selectedBundleIds would throw in `new Set(...)` AFTER the cache delete,
         // losing the batch. An empty selection simply installs nothing.
         const selectedBundleIds = Array.isArray(msg.selectedBundleIds) ? msg.selectedBundleIds : [];
+        const scopedBundleIds = Array.isArray(msg.scopedBundleIds) ? msg.scopedBundleIds : [];
         const summary = await applyCardScriptInstall({
           prepared,
           selectedBundleIds,
+          scopedBundleIds,
           scriptStorage,
           genScriptId: generateUUID,
         });
         pushScripts();
+        // Banner-originated review: the user engaged with this character's banner,
+        // so hush it for the rest of the session (installed items already exist →
+        // not re-offered; anything they left unchecked won't re-nag until restart).
+        if (installFromBanner) sessionHushedCharacters.add(prepared.hostCharacterId);
         // An update overwrites a trigger script's `triggers` while preserving
         // enabled:true, so the TriggerRegistry must re-sync (mirrors update_script).
         if (summary.updated.length > 0) void syncTriggers();
@@ -2949,7 +2992,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
             `Review and enable ${changed === 1 ? 'it' : 'them'} in the LumiScript panel.`,
             // Scope to the importing user — the message includes the card name +
             // their install activity; broadcasting it would leak to other sessions.
-            { title: 'Card scripts', userId: activeUserId ?? undefined },
+            { title: 'Card scripts', userId: replyUserId ?? undefined },
           );
           // Let scripts react to a card-scripts install (e.g. a manager script).
           busEmit('ls:card-scripts:installed', {
@@ -2958,15 +3001,285 @@ spindle.onFrontendMessage(async (raw, userId) => {
             installed: summary.installed,
             updated: summary.updated,
           });
+          // Nudge the character-editor tab (if open) to refresh its installed-
+          // status badges now that the library changed.
+          send({ type: 'ls_card_editor_status_stale' }, replyUserId);
         }
         break;
       }
 
-      // ── Card-embedded scripts (#12) — FE dismissed the consent modal ────────
+      // ── Card-embedded scripts (#12) — FE cancelled the consent modal ────────
       case 'ls_card_scripts_dismiss': {
-        // Free the cached detection (and the embedded source it holds) promptly
-        // rather than waiting for LRU eviction. Harmless no-op if already gone.
-        pendingCardDetections.delete(msg.requestId);
+        // Cancelling the consent modal is NOT a decline — it just closes the
+        // modal. This fires both for the IMPORT (CHARACTER_CREATED) modal and
+        // for the modal reached via the chat-open banner's "Review". In NEITHER
+        // case do we record a dismissal: the banner re-surfaces on the next
+        // chat-open / Manage-tab recheck. Only the banner's explicit "Dismiss"
+        // (the ✕ → ls_card_scripts_dismiss_available) records one.
+        //
+        // (Field-test correction: a banner-originated cancel USED to record a
+        // dismissal — treating "Review → look → close" as a decline. That
+        // surprised users: clicking Review to inspect the scripts, then closing
+        // without importing, hid the banner permanently. Review is exploratory;
+        // the ✕ is the deliberate "stop showing this".)
+        deleteCardDetection(msg.requestId);
+        break;
+      }
+
+      // ── Card-embedded scripts (#12, Phase C) — chat-open banner "Review" ─────
+      case 'ls_card_scripts_review': {
+        // Re-emit the cached (dismissed-filtered) detection so the normal consent
+        // modal opens. Leave it cached — install/cancel manage its lifecycle.
+        const prepared = getCardDetection(msg.requestId);
+        if (prepared) {
+          send({
+            type: 'ls_card_scripts_detected',
+            requestId: prepared.requestId,
+            hostCharacterId: prepared.hostCharacterId,
+            bundleCardId: prepared.bundleCardId,
+            ...(prepared.bundleName !== undefined ? { bundleName: prepared.bundleName } : {}),
+            items: prepared.items,
+          });
+        } else {
+          // Cache miss (worker respawn / eviction) — the FE already cleared the
+          // banner, so surface it (mirrors the install cache-miss) rather than a
+          // silent dead click.
+          spindle.toast.warning(
+            'This card-scripts prompt expired — re-open the chat to see it again.',
+            { title: 'Card scripts', userId: activeUserId ?? undefined },
+          );
+        }
+        break;
+      }
+
+      // ── Card-embedded scripts (#12, Phase C) — chat-open banner "Dismiss" ────
+      case 'ls_card_scripts_dismiss_available': {
+        // Hush this character's banner for the rest of the session (returns on the
+        // next restart — the editor tab is the durable import path), then free the
+        // cached detection.
+        const prepared = bannerCardDetections.get(msg.requestId);
+        if (prepared) sessionHushedCharacters.add(prepared.hostCharacterId);
+        deleteCardDetection(msg.requestId);
+        break;
+      }
+
+      // ── Card-embedded scripts (#12, Phase C) — pull-based banner recheck ─────
+      case 'recheck_card_scripts': {
+        // Resilience over the one-shot CHAT_SWITCHED push: the FE asks for a
+        // re-detect every time the Manage tab is shown. Re-resolve the LIVE
+        // active character and re-run the same detection — idempotent (banner
+        // detections de-dup by hostCharacterId). Capture the user before the
+        // awaits so the reply can't be misrouted by a concurrent message.
+        const replyUserId = activeUserId;
+        await refreshActiveContext(replyUserId).catch(() => {});
+        const ctx = getActiveContext();
+        if (!ctx.characterId) break;   // no active character → nothing to check
+        const char = await spindle.characters.get(ctx.characterId, replyUserId ?? undefined).catch(() => null);
+        if (!char) break;
+        await handleChatOpenDetect(
+          { id: ctx.characterId, name: char.name ?? null, extensions: (char as { extensions?: unknown }).extensions },
+          replyUserId,
+        );
+        break;
+      }
+
+      // ── Card-editor tab (#12, Phase E) — installed-status of bundled scripts ──
+      case 'ls_card_editor_status': {
+        // Read the SAVED card (authoritative) and compare its bundle against the
+        // user's library so the editor tab can badge each script. Read-only.
+        const replyUserId = activeUserId;
+        const char = await spindle.characters.get(msg.characterId, replyUserId ?? undefined).catch(() => null);
+        if (!char) break;
+        const extracted = extractEmbeddedScripts((char as { extensions?: unknown }).extensions);
+        if (extracted.kind !== 'ok') {
+          send({ type: 'ls_card_editor_status_result', characterId: msg.characterId, statuses: [] }, replyUserId);
+          break;
+        }
+        const installed = scriptStorage.getScripts();
+        const byId = new Map(installed.map((s) => [s.id, s]));
+        const statuses = computeInstallActions(extracted.bundleCardId, extracted.scripts, installed).map((d) => {
+          if (d.action === 'update') {
+            const t = d.existingScriptId ? byId.get(d.existingScriptId) : undefined;
+            return { bundleId: d.entry.bundleId, state: 'update-available' as const, ...(t ? { installedName: t.name, installedEnabled: t.enabled } : {}) };
+          }
+          if (d.action === 'skip') {
+            const t = d.existingScriptId ? byId.get(d.existingScriptId) : undefined;
+            const state = d.skipReason === 'not-newer' ? 'library-newer' as const : 'installed' as const;
+            return { bundleId: d.entry.bundleId, state, ...(t ? { installedName: t.name, installedEnabled: t.enabled } : {}) };
+          }
+          // action 'install' — no from-this-card copy. But the same code may
+          // already exist in the library as an UNLINKED script (e.g. the author
+          // just bundled it from their own library). Treat a content match as
+          // "in your library" so we don't tempt a duplicate import.
+          const contentMatch = installed.find((s) => s.code === d.entry.code);
+          if (contentMatch) {
+            return { bundleId: d.entry.bundleId, state: 'installed' as const, installedName: contentMatch.name, installedEnabled: contentMatch.enabled };
+          }
+          return { bundleId: d.entry.bundleId, state: 'not-installed' as const };
+        });
+        send({ type: 'ls_card_editor_status_result', characterId: msg.characterId, statuses }, replyUserId);
+        break;
+      }
+
+      // ── Card-editor tab (#12, Phase E) — late-import the card's bundled scripts ──
+      case 'ls_card_editor_import': {
+        // Reuse the standard consent flow: read the SAVED card (backend-authority,
+        // never FE-supplied script data), detect actionable scripts, cache the
+        // detection, and open the existing consent modal (it renders at z-index
+        // 10010, above the editor modal's 10001).
+        const replyUserId = activeUserId;
+        const char = await spindle.characters.get(msg.characterId, replyUserId ?? undefined).catch(() => null);
+        if (!char) {
+          spindle.toast.warning('Could not read this character to import its scripts.', { title: 'Card scripts', userId: replyUserId ?? undefined });
+          break;
+        }
+        const prepared = prepareCardScriptDetection({
+          character: { id: msg.characterId, name: char.name ?? null, extensions: (char as { extensions?: unknown }).extensions },
+          installed: scriptStorage.getScripts(),
+          granted: grantedPermissions,
+          genRequestId: generateUUID,
+        });
+        if (!prepared) {
+          spindle.toast.info('Nothing to import — every bundled script here is already in your library.', { title: 'Card scripts', userId: replyUserId ?? undefined });
+          break;
+        }
+        prepared.ownerUserId = replyUserId;
+        pendingCardDetections.set(prepared.requestId, prepared);
+        while (pendingCardDetections.size > MAX_PENDING_CARD_DETECTIONS) {
+          const oldest = pendingCardDetections.keys().next().value;
+          if (oldest === undefined) break;
+          pendingCardDetections.delete(oldest);
+        }
+        send({
+          type: 'ls_card_scripts_detected',
+          requestId: prepared.requestId,
+          hostCharacterId: prepared.hostCharacterId,
+          bundleCardId: prepared.bundleCardId,
+          ...(prepared.bundleName !== undefined ? { bundleName: prepared.bundleName } : {}),
+          items: prepared.items,
+        }, replyUserId);
+        break;
+      }
+
+      // ── Card-editor tab (#12, Phase E) — bundle-from-here: build entries ─────
+      case 'ls_card_editor_bundle_build': {
+        // Backend-authority: build the embedded entries from the REAL stored
+        // scripts (never FE-supplied code). The FE merges the returned entries
+        // into the edited card's draft. Unknown ids are silently dropped.
+        const replyUserId = activeUserId;
+        const ids = Array.isArray(msg.scriptIds) ? msg.scriptIds : [];
+        const entries = ids
+          .map((id) => scriptStorage.getScript(id))
+          .filter((s): s is NonNullable<typeof s> => s != null)
+          .map((s) => buildEmbeddedEntry(s));
+        send({ type: 'ls_card_editor_bundle_entries', requestId: msg.requestId, entries }, replyUserId);
+        break;
+      }
+
+      // ── Card-embedded scripts (#12, Phase 3) — character picker options ──────
+      case 'ls_list_characters': {
+        // Capture the requesting user BEFORE the await — `send()` defaults to the
+        // mutable module-level activeUserId, which a concurrent message could flip
+        // mid-await on an operator-scoped worker (misrouting the reply).
+        const replyUserId = activeUserId;
+        try {
+          // Generous single-page cap — covers the vast majority of libraries; the
+          // FE surfaces `total` so it can flag a truncated list.
+          const result = await spindle.characters.list({ limit: 500, userId: replyUserId ?? undefined });
+          // Resolve each character's avatar to a URL for the picker thumbnails:
+          // image_id → ImageDTO.url via one images.get per character (parallel;
+          // bounded by the 500-char list cap). A missing image_id or a failed
+          // lookup simply omits avatarUrl — the FE falls back to an initial bubble,
+          // so a broken/absent image never breaks the list.
+          const characters = await Promise.all(result.data.map(async (c) => {
+            const base = { id: c.id, name: c.name };
+            if (!c.image_id) return base;
+            try {
+              const img = await spindle.images.get(c.image_id, replyUserId ?? undefined);
+              return img?.url ? { ...base, avatarUrl: img.url } : base;
+            } catch {
+              return base;
+            }
+          }));
+          send({ type: 'ls_characters_list', characters, total: result.total }, replyUserId);
+        } catch (err) {
+          spindle.log.warn(`[LumiScript] ls_list_characters failed: ${err instanceof Error ? err.message : String(err)}`);
+          send({ type: 'ls_characters_list', characters: [], total: 0 }, replyUserId);
+        }
+        break;
+      }
+
+      // ── Card-embedded scripts (#12, Phase 3) — bundle scripts into a card ────
+      case 'ls_card_scripts_export': {
+        // Freeze the requesting user (replies fire after host-API awaits; the
+        // mutable activeUserId could otherwise misroute them on a shared worker)
+        // and echo the request token so the FE can drop a stale/abandoned result.
+        const replyUserId = activeUserId;
+        const requestId = msg.requestId;
+        const fail = (error: string): void => {
+          send({ type: 'ls_card_scripts_export_result', requestId, ok: false, error }, replyUserId);
+        };
+        // Writing a character's extensions needs the `characters` permission.
+        if (!grantedPermissions.has('characters')) {
+          fail('LumiScript needs the “characters” permission to write scripts into a card. Grant it in Lumiverse → Extensions.');
+          break;
+        }
+        // Backend-authority: load the real scripts from storage by id; never trust
+        // FE-supplied script content. Skip ids that no longer resolve.
+        const ids = Array.isArray(msg.scriptIds) ? msg.scriptIds : [];
+        const selected = ids
+          .map((id) => scriptStorage.getScript(id))
+          .filter((s): s is NonNullable<typeof s> => s != null);
+        if (selected.length === 0) {
+          fail('None of the selected scripts could be found.');
+          break;
+        }
+        try {
+          const uid = replyUserId ?? undefined;
+          const character = await spindle.characters.get(msg.characterId, uid);
+          if (!character) {
+            fail('The target character could not be found.');
+            break;
+          }
+          // Reuse an existing bundleCardId on the target so re-exports update the
+          // same logical bundle rather than spawning a parallel install; else mint.
+          const existingLumiscript = (character as { extensions?: Record<string, unknown> }).extensions?.lumiscript as { bundleCardId?: unknown } | undefined;
+          const reusedId = typeof existingLumiscript?.bundleCardId === 'string' && existingLumiscript.bundleCardId.trim() !== ''
+            ? existingLumiscript.bundleCardId
+            : undefined;
+          const bundleCardId = reusedId ?? generateUUID();
+          const envelope = buildCardBundle(selected, bundleCardId);
+          // Write ONLY our namespaced key. The host shallow-merges it onto the
+          // character's CURRENT extensions, leaving every other top-level key
+          // untouched — so we must NOT re-send a read-back snapshot (that would
+          // clobber any sibling key a concurrent writer changed during this
+          // round-trip). The `get` above is solely for bundleCardId reuse.
+          await spindle.characters.update(msg.characterId, { extensions: { lumiscript: envelope } }, uid);
+          const written = envelope.scripts.length;
+          const dropped = selected.length - written; // selected scripts that shared a bundle identity → de-duped
+          send({
+            type: 'ls_card_scripts_export_result',
+            requestId,
+            ok: true,
+            characterName: character.name,
+            bundleCardId,
+            scriptCount: written,
+            droppedCount: dropped,
+          }, replyUserId);
+          const mergedNote = dropped > 0
+            ? ` (${dropped} shared a bundle id and ${dropped === 1 ? 'was' : 'were'} merged)`
+            : '';
+          spindle.toast.success(
+            `Bundled ${written} script${written === 1 ? '' : 's'} into ${character.name}${mergedNote}. ` +
+            `Export the card to share ${written === 1 ? 'it' : 'them'}.`,
+            { title: 'Card scripts', userId: uid },
+          );
+          spindle.log.info(`[LumiScript] card-scripts export: ${written} script(s)${dropped > 0 ? ` (${dropped} merged)` : ''} → character ${msg.characterId} (bundleCardId ${bundleCardId})`);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          spindle.log.warn(`[LumiScript] ls_card_scripts_export failed: ${message}`);
+          fail(`Failed to write scripts into the card: ${message}`);
+        }
         break;
       }
 
@@ -3172,6 +3485,9 @@ spindle.onFrontendMessage(async (raw, userId) => {
         // before the storage record disappears.
         unregisterScriptFromChild(msg.id);
         await scriptStorage.deleteScript(msg.id);
+        // (Deleting a bundled script no longer suppresses its chat-open banner —
+        // dismissals are session-scoped now, and you may well want to re-import it
+        // later. The banner re-offers it next session; the editor tab, anytime.)
         pushScripts();
         void syncTriggers();
         pushTools();
@@ -3751,11 +4067,12 @@ spindle.onFrontendMessage(async (raw, userId) => {
  * this). The next chat-open overwrites both fields atomically via the
  * two-phase update above.
  */
-spindle.on('CHAT_SWITCHED', (payload: unknown) => {
+spindle.on('CHAT_SWITCHED', (payload: unknown, userId?: string) => {
   const p = payload as { chatId?: unknown } | null;
   if (!p) return;
   const newChatId = typeof p.chatId === 'string' ? p.chatId : null;
   if (!newChatId) return;   // chat-close — leave context unchanged
+  const switchUserId = userId ?? null;   // captured for the passive re-detect below
 
   // Phase 1: sync chatId update for binding-gate semantics.
   setActiveContext({ chatId: newChatId });
@@ -3779,6 +4096,11 @@ spindle.on('CHAT_SWITCHED', (payload: unknown) => {
       const chat = await spindle.chats.get(newChatId, activeUserId ?? undefined);
       if (!chat) return;
       const char = await spindle.characters.get(chat.character_id, activeUserId ?? undefined).catch(() => null);
+      // A newer CHAT_SWITCHED may have landed while we awaited the host RPCs. If
+      // so this closure is STALE — don't overwrite the active context or fire a
+      // banner for a character the user already navigated away from (lifecycle
+      // audit: stale-late-resolution race).
+      if (getActiveContext().chatId !== newChatId) return;
       setActiveContext({
         characterId:   chat.character_id,
         characterName: char?.name ?? null,
@@ -3788,6 +4110,14 @@ spindle.on('CHAT_SWITCHED', (payload: unknown) => {
       // the panel's display name updates without an explicit refresh.
       const updated = getActiveContext();
       send({ type: 'active_context', characterId: updated.characterId, characterName: updated.characterName, chatId: updated.chatId });
+      // #12 Phase C — passive chat-open re-detect: surface a banner (not a modal)
+      // if this character bundles scripts the user doesn't have and hasn't dismissed.
+      if (char) {
+        void handleChatOpenDetect(
+          { id: chat.character_id, name: char.name ?? null, extensions: (char as { extensions?: unknown }).extensions },
+          switchUserId,
+        );
+      }
     } catch (err) {
       // Non-fatal — manifests as the original bug shape (null /
       // stale characterId), which the tool-invocation.ts sanity
@@ -3839,6 +4169,47 @@ spindle.on('CHARACTER_CREATED', (payload: unknown, userId?: string) => {
   void handleCharacterCreated(payload, userId ?? null);
 });
 
+// Card-embedded scripts (#12, Phase D): on character delete, offer (default-keep)
+// to remove the scripts that card installed. CHARACTER_DELETED is undocumented —
+// the payload is parsed defensively.
+spindle.on('CHARACTER_DELETED', (payload: unknown, userId?: string) => {
+  void handleCharacterDeleted(payload, userId ?? null);
+});
+
+async function handleCharacterDeleted(payload: unknown, eventUserId: string | null): Promise<void> {
+  try {
+    if (!scriptStorage.store.isLoaded) return;
+    if (eventUserId != null && activeUserId != null && eventUserId !== activeUserId) return;
+    // Undocumented payload — try the common id locations, then bail if none.
+    const p = payload as { id?: unknown; characterId?: unknown; character?: { id?: unknown; name?: unknown } } | null;
+    const deletedId =
+      typeof p?.id === 'string' ? p.id
+      : typeof p?.characterId === 'string' ? p.characterId
+      : typeof p?.character?.id === 'string' ? p.character.id
+      : null;
+    if (!deletedId) return;
+    const deletedName = typeof p?.character?.name === 'string' ? p.character.name : null;
+    // Scripts whose provenance points at THIS deleted character instance. NB:
+    // not a guaranteed 1:1 tie (a bundled script may be generic), so this is an
+    // OFFER, never an auto-delete; the FE defaults to keep.
+    const orphaned = scriptStorage.getScripts().filter((s) => s.bundledFrom?.hostCharacterId === deletedId);
+    if (orphaned.length === 0) return;
+    // The host's CHARACTER_DELETED payload carries only the id — and the
+    // character is already gone, so it can't be re-fetched for a name. Fall
+    // back to the source-bundle name we recorded in provenance at install time
+    // so the offer can name the deleted card instead of saying "A character".
+    const characterName =
+      deletedName ?? orphaned.find((s) => s.bundledFrom?.bundleName)?.bundledFrom?.bundleName ?? null;
+    send({
+      type: 'ls_card_scripts_deleted_offer',
+      characterName,
+      scripts: orphaned.map((s) => ({ id: s.id, name: s.name })),
+    }, eventUserId ?? activeUserId);
+  } catch (err) {
+    spindle.log.warn(`[LumiScript] CHARACTER_DELETED card-scripts cleanup offer failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 async function handleCharacterCreated(payload: unknown, eventUserId: string | null): Promise<void> {
   try {
     if (!scriptStorage.store.isLoaded) return; // pre-cold-start imports are not retro-detected
@@ -3877,6 +4248,55 @@ async function handleCharacterCreated(payload: unknown, eventUserId: string | nu
     });
   } catch (err) {
     spindle.log.warn(`[LumiScript] CHARACTER_CREATED card-scripts detect failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/**
+ * #12 Phase C — passive chat-open re-detect. Unlike the import path (which always
+ * offers), this FILTERS OUT scripts the user dismissed/deleted and surfaces a
+ * NON-blocking banner instead of the consent modal. Caches a dismissed-filtered
+ * detection so the banner's "Review" can re-emit it as `ls_card_scripts_detected`.
+ */
+async function handleChatOpenDetect(
+  character: { id: string; name?: string | null; extensions?: unknown },
+  eventUserId: string | null,
+): Promise<void> {
+  try {
+    if (!scriptStorage.store.isLoaded) return;
+    if (eventUserId != null && activeUserId != null && eventUserId !== activeUserId) return;
+    // Hushed for this session (the user ✕'d the banner, or acted on it) — don't
+    // re-nag about this character until the next restart.
+    if (sessionHushedCharacters.has(character.id)) return;
+    const prepared = prepareCardScriptDetection({
+      character: { id: character.id, name: character.name ?? null, extensions: character.extensions },
+      installed: scriptStorage.getScripts(),
+      granted: grantedPermissions,
+      genRequestId: generateUUID,
+    });
+    if (!prepared) return;
+    const offerable = prepared.items.filter((i) => i.action === 'install' || i.action === 'update');
+    if (offerable.length === 0) return;   // nothing to surface (all up-to-date)
+    const filtered: PreparedDetection = { ...prepared, ownerUserId: activeUserId };
+    // Banner detections live in their OWN bounded map (not the import-consent
+    // cache) so chat navigation can't evict a pending import modal. De-dup by
+    // hostCharacterId: re-visiting a character replaces its prior banner entry.
+    for (const [rid, det] of bannerCardDetections) {
+      if (det.hostCharacterId === filtered.hostCharacterId) bannerCardDetections.delete(rid);
+    }
+    bannerCardDetections.set(filtered.requestId, filtered);
+    while (bannerCardDetections.size > MAX_BANNER_CARD_DETECTIONS) {
+      const oldest = bannerCardDetections.keys().next().value;
+      if (oldest === undefined) break;
+      bannerCardDetections.delete(oldest);
+    }
+    send({
+      type: 'ls_card_scripts_available',
+      requestId: filtered.requestId,
+      characterName: character.name ?? null,
+      count: offerable.length,
+    }, eventUserId ?? activeUserId);
+  } catch (err) {
+    spindle.log.warn(`[LumiScript] chat-open card-scripts re-detect failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 

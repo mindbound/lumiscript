@@ -7,7 +7,7 @@
  * the `ls_card_scripts_install` message; it lives here so it's unit-testable
  * without the spindle global. Spec: notes/card-embedded-scripts-design.md.
  */
-import type { Script, ScriptBundleProvenance } from '../types/script.js';
+import type { Script, ScriptBundleProvenance, ScriptBindingEntry } from '../types/script.js';
 import type { DetectedCardScript } from '../types/card-scripts.js';
 import type { ScriptStorage } from '../storage/script-storage.js';
 import {
@@ -100,6 +100,10 @@ export interface InstallSummary {
 export async function applyCardScriptInstall(params: {
   prepared: PreparedDetection;
   selectedBundleIds: readonly string[];
+  /** Subset of selected bundleIds to scope to the imported character (#12 Q1):
+   *  the installed script gets a single character binding to the host character
+   *  instead of the author's (dead-on-import) bindings or running globally. */
+  scopedBundleIds?: readonly string[];
   scriptStorage: ScriptStorage;
   genScriptId: () => string;
   now?: () => number;
@@ -107,7 +111,17 @@ export async function applyCardScriptInstall(params: {
   const { prepared, selectedBundleIds, scriptStorage, genScriptId } = params;
   const now = params.now ?? Date.now;
   const selected = new Set(selectedBundleIds);
+  const scoped = new Set(params.scopedBundleIds ?? []);
   const summary: InstallSummary = { installed: [], updated: [], skipped: 0 };
+
+  // Resolve the bindings to write for an entry. The author's bundled bindings
+  // reference THEIR character UUIDs (regenerated on import → dead), so they're
+  // never carried. The consent toggle decides: scoped → one character binding to
+  // the imported host character; otherwise global (no bindings).
+  const resolveBindings = (bundleId: string): ScriptBindingEntry[] =>
+    scoped.has(bundleId)
+      ? [{ type: 'character', characterId: prepared.hostCharacterId, displayName: prepared.bundleName ?? 'this character' }]
+      : [];
 
   for (const item of prepared.items) {
     if (!selected.has(item.entry.bundleId) || (item.action !== 'install' && item.action !== 'update')) {
@@ -124,17 +138,32 @@ export async function applyCardScriptInstall(params: {
       sourceHash: hashScriptCode(item.entry.code),
     };
 
-    const existing = item.action === 'update' && item.existingScriptId
-      ? scriptStorage.getScript(item.existingScriptId)
-      : null;
+    // Resolve the script this entry targets. For an `update` use the matched id;
+    // for either action ALSO re-check current storage for a script already
+    // carrying this (bundleCardId, bundleId) — the cached decision is a snapshot
+    // from detect time, and the script may have been installed since (e.g. a
+    // co-pending import + chat-open Review for the same bundle). Matching here
+    // updates-in-place instead of creating a `Foo (2)` duplicate.
+    const existing =
+      (item.action === 'update' && item.existingScriptId
+        ? scriptStorage.getScript(item.existingScriptId)
+        : null)
+      ?? scriptStorage.getScripts().find(
+        (s) => s.bundledFrom?.bundleCardId === prepared.bundleCardId && s.bundledFrom?.bundleId === item.entry.bundleId,
+      )
+      ?? null;
 
     if (existing) {
       // Overwrite code/config/provenance; preserve enabled + allowDangerous + name.
+      // NOTE: `bindings` is deliberately NOT in the patch — scope is an
+      // install-only decision (the toggle), so an update must PRESERVE whatever
+      // bindings the script currently has (incl. a scope the user set manually
+      // via BindingsSection). Re-applying the toggle here would silently clobber
+      // that — worst case flipping a manually-scoped script to global (#12 Q1).
       const updated = await scriptStorage.updateScript(existing.id, {
         code: item.entry.code,
         type: item.entry.type,
         triggers: item.entry.triggers ?? [],
-        bindings: item.entry.bindings ?? [],
         ...(item.entry.folder !== undefined ? { folder: item.entry.folder } : {}),
         ...(item.entry.metadata !== undefined ? { metadata: item.entry.metadata } : {}),
         bundledFrom: provenance,
@@ -151,7 +180,7 @@ export async function applyCardScriptInstall(params: {
         enabled: false,
         allowDangerous: false,
         type: item.entry.type,
-        bindings: item.entry.bindings ?? [],
+        bindings: resolveBindings(item.entry.bundleId),
         triggers: item.entry.triggers ?? [],
         ...(item.entry.folder !== undefined ? { folder: item.entry.folder } : {}),
         ...(item.entry.metadata !== undefined ? { metadata: item.entry.metadata } : {}),

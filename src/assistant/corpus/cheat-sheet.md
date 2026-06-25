@@ -829,6 +829,7 @@ Lumiverse + LumiScript lifecycle events. Scripts react to these by being **wired
 | `CHAT_CHANGED` | { chat, changedFields }  // chat = the full updated Chat; chatId is `chat.id`, not flat | Chat **metadata** mutations only (rename, etc.). The primary emission carries `{ chat, changedFields }` (read the id as `chat.id`). Does NOT fire on chat open/switch — use `CHAT_SWITCHED` for that. |
 | `CHAT_SWITCHED` | { chatId: string \| null }  // null on return-to-home — NO characterId on the payload | Active chat opens, switches, or closes (chatId becomes null on return-to-home). **Important — Phase-1/Phase-2 character resolution**: triggers fire during Phase 1 (chatId set sync); characterId is resolved Phase-2 ~10–15 ms later via async lookup. So `data.characterId` does NOT exist on the payload, and reading the active-context characterId at trigger-fire time can see null/stale. **Pattern**: call `api.chats.getActive()` and read `chat.characterId` — that hits the host's live state which has it populated regardless of Phase-2 status. |
 | `CHAT_FORKED` | { sourceChatId, forkedChatId, chat, branchId, forkedAtMessageId, forkedAtMessageIndex } | A chat was forked (branched) from a message into a new chat that shares the source character — messages up to and including the fork point are copied. `forkedChatId === chat.id`; the forked `chat.metadata` carries `branched_from` + `branch_at_message`. Use it to clone per-chat state into the fork, log lineage, or re-decorate the new chat. Emitted by the host branch-chat flow on newer Lumiverse builds. |
+| `CHARACTER_CREATED` | { character: Character } | A character was created OR imported (the host emits it on card import too). `data.character` is the new character record (carries its `extensions` blob). NOTE: LumiScript itself subscribes to this internally for card-embedded-script detection; your trigger handler runs alongside that, independently. |
 | `CHARACTER_EDITED` | { id, character: Character } |  |
 | `CHARACTER_DELETED` | { id } |  |
 | `CHARACTER_DUPLICATED` | { id, newId } |  |
@@ -845,6 +846,7 @@ Lumiverse + LumiScript lifecycle events. Scripts react to these by being **wired
 | `CONNECTION_PROFILE_LOADED` | { connectionId } |  |
 | `REGEX_SCRIPT_CHANGED` | { id, script: RegexScriptInfo }  // create / update / duplicate / reorder / enable / disable. Requires regex_scripts permission. |  |
 | `REGEX_SCRIPT_DELETED` | { id }  // Requires regex_scripts permission. |  |
+| `PERMISSION_CHANGED` | { extensionId, permission, granted, allGranted: string[] } | A Lumiverse permission was granted to or revoked from LumiScript. `granted` is the new boolean state of `permission`; `allGranted` is the full current permission list. Use to (re)initialize a feature when its permission is granted, or degrade gracefully when revoked. `extensionId` identifies which extension — filter if you only care about LumiScript's. |
 
 ## Broadcast events (script-to-script pub/sub)
 

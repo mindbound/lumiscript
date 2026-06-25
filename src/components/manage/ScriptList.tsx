@@ -1,5 +1,5 @@
 import { FC, useRef, useState } from 'react';
-import { Code2, BookMarked, Plus, Upload, Download, FileCode2, FolderOpen, ChevronDown, ChevronRight, Pencil, AlertTriangle } from 'lucide-react';
+import { Code2, BookMarked, Plus, Upload, Download, Package, FileCode2, FolderOpen, ChevronDown, ChevronRight, Pencil, AlertTriangle } from 'lucide-react';
 import type { Script, ScriptType, ScriptPackEntry } from '../../types/script.js';
 import type { FrontendToBackend } from '../../types/messages.js';
 import { ScriptListItem, type ExecutionDot } from './ScriptListItem.js';
@@ -7,6 +7,7 @@ import { ConfirmDialog } from '../common/ConfirmDialog.js';
 import { PromptDialog } from '../common/PromptDialog.js';
 import { exportScriptPack, buildScriptPackBytes } from '../../utils/pack-export.js';
 import { parseScriptPack } from '../../utils/pack-import.js';
+import { openBundleModal } from '../cardscripts/bundle-helpers.js';
 import { bytesToBase64, groupByFolder } from './script-list-logic.js';
 
 interface ScriptExecInfo {
@@ -219,6 +220,14 @@ export const ScriptList: FC<ScriptListProps> = ({
           >
             <Download size={15} />
           </button>
+          <button
+            className="ls-icon-btn"
+            onClick={() => openBundleModal(scripts)}
+            title="Bundle scripts into a character card"
+            disabled={scripts.length === 0}
+          >
+            <Package size={15} />
+          </button>
           <button className="ls-icon-btn" onClick={handleNew} title="New script">
             <Plus size={15} />
           </button>
@@ -300,14 +309,30 @@ export const ScriptList: FC<ScriptListProps> = ({
           enable them manually.
         </p>
         <ul className="ls-confirm-list">
-          {pendingImport.map((s, i) => (
-            <li key={i}>
-              <span className="ls-confirm-list-type">
-                {s.type === 'library' ? 'Library' : 'Script'}
-              </span>
-              <span className="ls-confirm-list-name">{s.name}</span>
-            </li>
-          ))}
+          {pendingImport.map((s, i) => {
+            const hooks = s.type === 'trigger' && s.triggers && s.triggers.length > 0 ? s.triggers : null;
+            const hasBindings = !!(s.bindings && s.bindings.length > 0);
+            return (
+              <li key={i} style={{ display: 'block' }}>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
+                  <span className="ls-confirm-list-type">
+                    {s.type === 'library' ? 'Library' : 'Script'}
+                  </span>
+                  <span className="ls-confirm-list-name">{s.name}</span>
+                </div>
+                {hooks ? (
+                  <div style={{ marginTop: 2, color: 'rgb(150,166,205)', fontSize: 11, lineHeight: 1.4 }}>
+                    Event hooks: {hooks.join(', ')}
+                  </div>
+                ) : null}
+                {hasBindings ? (
+                  <div style={{ marginTop: 3, color: 'rgb(214,158,46)', fontSize: 11, lineHeight: 1.4 }}>
+                    ⚠ Bound to specific characters/chats — those won&apos;t match after import; re-bind it in the script&apos;s settings.
+                  </div>
+                ) : null}
+              </li>
+            );
+          })}
         </ul>
       </ConfirmDialog>
     )}

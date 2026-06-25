@@ -150,4 +150,64 @@ describe('applyCardScriptInstall', () => {
     expect(summary.updated).toEqual([]);
     expect(s.getScript('sid-fresh')).not.toBeNull();
   });
+
+  test('a stale "install" snapshot updates an existing (bundleCardId,bundleId) instead of duplicating', async () => {
+    // The script already exists (installed via a co-pending detection since detect).
+    const s = await freshStorage([installedScript({ id: 'pre-1', name: 'Dice', code: 'OLD', bundleCardId: 'bc1', bundleId: 'b1', enabled: true })]);
+    // Detection computed against an EMPTY library → stale action='install' for (bc1,b1).
+    const prepared = prepareCardScriptDetection({
+      character: card([embed({ bundleId: 'b1', code: 'NEW' })]),
+      installed: [], granted: [], genRequestId: () => 'r',
+    })!;
+    expect(prepared.items[0]!.action).toBe('install');
+    const summary = await applyCardScriptInstall({ prepared, selectedBundleIds: ['b1'], scriptStorage: s, genScriptId });
+    expect(s.getScripts()).toHaveLength(1);            // updated in place — NO 'Dice (2)' duplicate
+    expect(s.getScript('pre-1')!.code).toBe('NEW');
+    expect(summary.installed).toEqual([]);             // not a fresh install
+    expect(summary.updated).toEqual(['Dice']);
+  });
+
+  test('scopedBundleIds → a single character binding to the host character; unscoped is global (#12 Q1)', async () => {
+    const s = await freshStorage();
+    const prepared = prepareCardScriptDetection({
+      character: card([embed({ bundleId: 'b1', code: 'C1' }), embed({ bundleId: 'b2', name: 'Two', code: 'C2' })]),
+      installed: s.getScripts(), granted: [], genRequestId: () => 'r',
+    })!;
+    await applyCardScriptInstall({
+      prepared, selectedBundleIds: ['b1', 'b2'], scopedBundleIds: ['b1'], scriptStorage: s, genScriptId,
+    });
+    const scoped = s.getScripts().find((x) => x.bundledFrom?.bundleId === 'b1')!;
+    const global = s.getScripts().find((x) => x.bundledFrom?.bundleId === 'b2')!;
+    // Scoped → bound to the imported character (host-uuid-1), label = the card name.
+    expect(scoped.bindings).toEqual([{ type: 'character', characterId: 'host-uuid-1', displayName: 'Alice' }]);
+    expect(global.bindings).toEqual([]);   // unscoped → runs globally
+  });
+
+  test('the author’s bundled bindings are NOT carried (dead on import) — only the scope toggle binds', async () => {
+    const s = await freshStorage();
+    const prepared = prepareCardScriptDetection({
+      // Author shipped a binding to THEIR character; it must not survive import.
+      character: card([embed({ bundleId: 'b1', code: 'C1', bindings: [{ type: 'character', displayName: 'AuthorChar', characterId: 'author-uuid' }] })]),
+      installed: s.getScripts(), granted: [], genRequestId: () => 'r',
+    })!;
+    await applyCardScriptInstall({ prepared, selectedBundleIds: ['b1'], scriptStorage: s, genScriptId }); // not scoped
+    const installed = s.getScripts().find((x) => x.bundledFrom?.bundleId === 'b1')!;
+    expect(installed.bindings).toEqual([]);   // the dead author binding was dropped, not carried
+  });
+
+  test('an UPDATE preserves the installed script’s bindings — never clobbers a manual scope (#12 Q1)', async () => {
+    const s = await freshStorage([installedScript({ id: 'old-1', name: 'Dice', code: 'OLD', bundleCardId: 'bc1', bundleId: 'b1', version: '1.0.0', enabled: true })]);
+    // The user manually scoped it to a character after the first install.
+    await s.updateScript('old-1', { bindings: [{ type: 'character', displayName: 'MyChar', characterId: 'my-uuid' }] });
+    const prepared = prepareCardScriptDetection({
+      character: card([embed({ bundleId: 'b1', code: 'NEW', metadata: { version: '1.1.0' } })]),
+      installed: s.getScripts(), granted: [], genRequestId: () => 'r',
+    })!;
+    expect(prepared.items[0]!.action).toBe('update');
+    // Even with scope NOT requested, the update must NOT wipe the manual binding.
+    await applyCardScriptInstall({ prepared, selectedBundleIds: ['b1'], scopedBundleIds: [], scriptStorage: s, genScriptId });
+    const updated = s.getScript('old-1')!;
+    expect(updated.code).toBe('NEW');                                                                  // code updated
+    expect(updated.bindings).toEqual([{ type: 'character', displayName: 'MyChar', characterId: 'my-uuid' }]); // scope preserved
+  });
 });

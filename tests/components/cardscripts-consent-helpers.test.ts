@@ -3,8 +3,9 @@
  * action-badge labels. (The React component itself is field-tested.)
  */
 import { describe, test, expect } from 'bun:test';
-import { isActionable, defaultSelectedBundleIds, actionBadgeLabel } from '../../src/components/cardscripts/consent-helpers.js';
+import { isActionable, isScopable, defaultSelectedBundleIds, defaultScopedBundleIds, actionBadgeLabel } from '../../src/components/cardscripts/consent-helpers.js';
 import type { DetectedCardScript } from '../../src/types/card-scripts.js';
+import type { ScriptBindingEntry } from '../../src/types/script.js';
 
 function di(action: DetectedCardScript['action'], extra: Partial<DetectedCardScript> = {}, bundleId = 'b1'): DetectedCardScript {
   return { entry: { bundleId, name: 'X', code: '', type: 'trigger' }, action, permissions: [], ...extra };
@@ -30,5 +31,29 @@ describe('consent-helpers', () => {
     expect(actionBadgeLabel(di('skip', { skipReason: 'up-to-date' }))).toBe('Up to date');
     expect(actionBadgeLabel(di('skip', { skipReason: 'not-newer' }))).toBe('Older — skipped');
     expect(actionBadgeLabel(di('skip', { skipReason: 'unchanged' }))).toBe('Unchanged');
+  });
+});
+
+describe('scoping helpers (#12 Q1)', () => {
+  const charBinding: ScriptBindingEntry[] = [{ type: 'character', displayName: 'Alice', characterId: 'c1' }];
+  const chatBinding: ScriptBindingEntry[] = [{ type: 'chat', displayName: 'Chat', chatId: 'h1' }];
+  const si = (bundleId: string, type: 'trigger' | 'library', bindings?: ScriptBindingEntry[]): DetectedCardScript =>
+    ({ entry: { bundleId, name: 'X', code: '', type, ...(bindings ? { bindings } : {}) }, action: 'install', permissions: [] });
+
+  test('isScopable: only fresh-install trigger scripts (update/library/skip → no toggle)', () => {
+    expect(isScopable(si('b', 'trigger'))).toBe(true);                                          // install trigger
+    expect(isScopable(si('b', 'library'))).toBe(false);                                         // library
+    expect(isScopable({ ...si('b', 'trigger'), action: 'update' })).toBe(false);                // update preserves bindings
+    expect(isScopable({ ...si('b', 'trigger'), action: 'skip', skipReason: 'unchanged' })).toBe(false);
+  });
+
+  test('defaultScopedBundleIds = trigger scripts the author CHARACTER-bound (not chat-only, not libraries)', () => {
+    const items: DetectedCardScript[] = [
+      si('bound', 'trigger', charBinding),
+      si('global', 'trigger'),                 // no binding → global by default
+      si('chatonly', 'trigger', chatBinding),  // chat binding only → not character-scoped
+      si('lib', 'library', charBinding),        // library → excluded (bindings don't gate require())
+    ];
+    expect(defaultScopedBundleIds(items)).toEqual(['bound']);
   });
 });
