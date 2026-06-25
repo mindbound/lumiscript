@@ -3,6 +3,7 @@ import { Copy, Trash2, ToggleLeft, ToggleRight, UserRound, MessageSquare, Pencil
 import type { Script } from '../../types/script.js';
 import type { FrontendToBackend } from '../../types/messages.js';
 import { ConfirmDialog } from '../common/ConfirmDialog.js';
+import { TypeBadge, HookPills, pillStyle, formatScriptSize } from '../cardscripts/script-pills.js';
 
 export type ExecutionDot = 'idle' | 'running' | 'success' | 'error';
 
@@ -169,6 +170,18 @@ export const ScriptListItem: FC<ScriptListItemProps> = ({
           This will permanently delete the {script.type === 'library' ? 'library' : 'script'}{' '}
           <strong>{script.name}</strong>.
         </p>
+        <div style={{ border: '1px solid rgba(255,255,255,0.10)', borderRadius: 6, background: 'rgba(255,255,255,0.03)', padding: '8px 10px', margin: '4px 0 2px' }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+            <TypeBadge type={script.type} />
+            <HookPills type={script.type} triggers={script.triggers} />
+            <span style={pillStyle}>{formatScriptSize(script.code)}</span>
+          </div>
+          {script.bindings && script.bindings.length > 0 ? (
+            <div style={{ marginTop: 8, fontSize: 11.5, color: 'rgba(222,223,230,0.7)' }}>
+              Bound to {script.bindings.map((b) => b.displayName).join(', ')}
+            </div>
+          ) : null}
+        </div>
         <div className="ls-confirm-warning">
           <AlertTriangle size={12} />
           <span>This action cannot be undone.</span>

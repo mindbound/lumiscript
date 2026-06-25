@@ -31,6 +31,7 @@ describe('consent-helpers', () => {
     expect(actionBadgeLabel(di('skip', { skipReason: 'up-to-date' }))).toBe('Up to date');
     expect(actionBadgeLabel(di('skip', { skipReason: 'not-newer' }))).toBe('Older — skipped');
     expect(actionBadgeLabel(di('skip', { skipReason: 'unchanged' }))).toBe('Unchanged');
+    expect(actionBadgeLabel(di('skip', { skipReason: 'duplicate-code' }))).toBe('Already in your library');
   });
 });
 

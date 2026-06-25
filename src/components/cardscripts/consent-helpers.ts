@@ -42,8 +42,9 @@ export function actionBadgeLabel(item: DetectedCardScript): string {
     return d && d.from && d.to ? `Update v${d.from} → v${d.to}` : 'Update';
   }
   switch (item.skipReason) {
-    case 'up-to-date': return 'Up to date';
-    case 'not-newer':  return 'Older — skipped';
-    default:           return 'Unchanged';
+    case 'up-to-date':     return 'Up to date';
+    case 'not-newer':      return 'Older — skipped';
+    case 'duplicate-code': return 'Already in your library';
+    default:               return 'Unchanged';
   }
 }

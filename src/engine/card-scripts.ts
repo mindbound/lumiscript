@@ -203,7 +203,18 @@ export function computeInstallActions(
     const match = installed.find(
       (s) => s.bundledFrom?.bundleCardId === bundleCardId && s.bundledFrom.bundleId === entry.bundleId,
     );
-    if (!match) return { entry, action: 'install' };
+    if (!match) {
+      // No from-this-card copy by identity. But the SAME code may already be in
+      // the library as an UNLINKED script — the author bundled their own scripts,
+      // or an identical script arrived via a different card. Treat that as
+      // already-present (skip) so the chat-open banner doesn't over-count and the
+      // consent modal doesn't tempt a duplicate install. Content identity is a
+      // deliberate softening of the (bundleCardId, bundleId) model for the
+      // "do you already have this behaviour?" question.
+      const contentMatch = installed.find((s) => s.code === entry.code);
+      if (contentMatch) return { entry, action: 'skip', skipReason: 'duplicate-code', existingScriptId: contentMatch.id };
+      return { entry, action: 'install' };
+    }
 
     const incomingHash = hashScriptCode(entry.code);
     const currentHash = hashScriptCode(match.code);

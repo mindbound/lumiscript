@@ -11,12 +11,15 @@
 import { useEffect, useState, type FC, type CSSProperties } from 'react';
 import { Trash2 } from 'lucide-react';
 import { ConfirmDialog } from '../common/ConfirmDialog.js';
+import { TypeBadge, HookPills, pillStyle, formatSizeChars } from './script-pills.js';
 import type { BackendToFrontend, FrontendToBackend } from '../../types/messages.js';
 
 type Offer = Extract<BackendToFrontend, { type: 'ls_card_scripts_deleted_offer' }>;
 
 const bodyStyle: CSSProperties = { color: 'rgb(222,223,230)', fontSize: 13, lineHeight: 1.5, marginBottom: 8 };
-const listStyle: CSSProperties = { margin: 0, paddingLeft: 18, color: 'rgba(222,223,230,0.85)', fontSize: 12.5, lineHeight: 1.6, maxHeight: 200, overflowY: 'auto' };
+const listStyle: CSSProperties = { margin: 0, maxHeight: 220, overflowY: 'auto' };
+const scriptBoxStyle: CSSProperties = { border: '1px solid rgba(255,255,255,0.10)', borderRadius: 6, background: 'rgba(255,255,255,0.03)', padding: '8px 10px', marginBottom: 6 };
+const bindLineStyle: CSSProperties = { marginTop: 8, fontSize: 11.5, color: 'rgba(222,223,230,0.7)' };
 
 interface Props {
   onBackendMessage: (handler: (msg: unknown) => void) => () => void;
@@ -58,9 +61,21 @@ export const CardScriptsDeletedOfferHost: FC<Props> = ({ onBackendMessage, sendT
         {current.characterName ? <b>{current.characterName}</b> : 'A character'} was deleted. It installed{' '}
         {n} script{n === 1 ? '' : 's'} — remove {n === 1 ? 'it' : 'them'} too?
       </p>
-      <ul style={listStyle}>
-        {current.scripts.map((s) => <li key={s.id}>{s.name}</li>)}
-      </ul>
+      <div style={listStyle}>
+        {current.scripts.map((s) => (
+          <div key={s.id} style={scriptBoxStyle}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+              <TypeBadge type={s.type} />
+              <span style={{ fontWeight: 600, fontSize: 13 }}>{s.name}</span>
+              <HookPills type={s.type} triggers={s.triggers} />
+              <span style={pillStyle}>{formatSizeChars(s.sizeChars)}</span>
+            </div>
+            {s.bindingNames && s.bindingNames.length > 0 ? (
+              <div style={bindLineStyle}>Bound to {s.bindingNames.join(', ')}</div>
+            ) : null}
+          </div>
+        ))}
+      </div>
     </ConfirmDialog>
   );
 };

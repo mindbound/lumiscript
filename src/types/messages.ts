@@ -858,11 +858,21 @@ export type BackendToFrontend =
       // ── Card-embedded scripts (#12, Phase D): a card was deleted ──
       // Offer (non-destructive default) to remove the scripts that card installed.
       // The FE fires the existing `delete_script` per chosen id on confirm — no
-      // backend remove-handler needed; delete already records the dismissal.
+      // backend remove-handler needed.
       type: 'ls_card_scripts_deleted_offer';
       characterName: string | null;
-      /** Scripts whose provenance points at the deleted character instance. */
-      scripts: { id: string; name: string }[];
+      /** Scripts whose provenance points at the deleted character instance, with
+       *  enough to render each one's shape (type / event hooks / size / bindings). */
+      scripts: {
+        id: string;
+        name: string;
+        type: ScriptType;
+        triggers?: string[];
+        /** Display names of the script's character/chat bindings, if any. */
+        bindingNames?: string[];
+        /** Code length in chars, for the size pill. */
+        sizeChars: number;
+      }[];
     }
   | {
       // ── Card-embedded scripts (#12, Phase 3): character picker options ──

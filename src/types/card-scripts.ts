@@ -47,7 +47,7 @@ export interface PermissionRequirement {
 }
 
 export type CardScriptAction = 'install' | 'update' | 'skip';
-export type CardScriptSkipReason = 'up-to-date' | 'not-newer' | 'unchanged';
+export type CardScriptSkipReason = 'up-to-date' | 'not-newer' | 'unchanged' | 'duplicate-code';
 
 /** Per-embedded-script decision computed at import time (without permissions). */
 export interface InstallDecision {

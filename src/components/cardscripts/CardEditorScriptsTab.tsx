@@ -30,9 +30,10 @@ import type {
   SpindleCharacterEditorState,
   SpindleConfirmOptions,
 } from 'lumiverse-spindle-types';
-import { Zap, Library, AlertTriangle, Package, Trash2, Download, CheckCircle2, ArrowUpCircle, Plus, Folder } from 'lucide-react';
+import { AlertTriangle, Package, Trash2, Download, CheckCircle2, ArrowUpCircle, Plus, Folder } from 'lucide-react';
 import { extractEmbeddedScripts } from '../../engine/card-scripts.js';
 import { ScriptPickerList } from './ScriptPickerList.js';
+import { TypeBadge, HookPills, pillStyle, formatScriptSize } from './script-pills.js';
 import { LUMISCRIPT_CARD_FORMAT_VERSION, type EmbeddedScriptEntry } from '../../types/card-scripts.js';
 import type { Script } from '../../types/script.js';
 import type { FrontendToBackend, BackendToFrontend } from '../../types/messages.js';
@@ -68,14 +69,6 @@ const rowStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: 8,
 const nameStyle: CSSProperties = { fontWeight: 600, fontSize: 13.5, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };
 const descStyle: CSSProperties = { color: DIM, fontSize: 12, marginTop: 6 };
 const metaRowStyle: CSSProperties = { ...rowStyle, marginTop: 8, gap: 6 };
-const pillStyle: CSSProperties = {
-  display: 'inline-flex', alignItems: 'center', gap: 4, padding: '1px 7px', borderRadius: 999, fontSize: 11,
-  background: 'var(--lumiverse-fill, rgba(255,255,255,0.06))', color: DIM, border: `1px solid ${BORDER}`,
-};
-const badgeStyle: CSSProperties = {
-  display: 'inline-flex', alignItems: 'center', gap: 4, padding: '1px 7px', borderRadius: 999, fontSize: 11, fontWeight: 600,
-  background: 'rgba(147,112,219,0.14)', color: ACCENT, border: '1px solid rgba(147,112,219,0.30)',
-};
 const iconBtnStyle: CSSProperties = {
   display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 26, height: 26, flexShrink: 0, padding: 0,
   background: 'transparent', border: `1px solid ${BORDER}`, borderRadius: RADIUS, color: DIM, cursor: 'pointer',
@@ -95,11 +88,6 @@ const warnStyle: CSSProperties = {
 };
 const pickerStyle: CSSProperties = { border: `1px solid ${BORDER}`, borderRadius: RADIUS, background: FILL_SUBTLE, padding: '10px 12px', marginBottom: 10 };
 const pickerActionsStyle: CSSProperties = { display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 4 };
-
-function formatSize(code: string): string {
-  const n = code.length;
-  return n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} chars`;
-}
 
 /** The de-dup id a library script would take inside a card bundle. */
 function libraryBundleId(s: Script): string {
@@ -165,14 +153,12 @@ const StatusBadge: FC<{ status: ScriptStatus }> = ({ status }) => {
 };
 
 const ScriptCard: FC<{ entry: EmbeddedScriptEntry; status?: ScriptStatus; onDelete: () => void }> = ({ entry, status, onDelete }) => {
-  const isTrigger = entry.type === 'trigger';
   const meta = entry.metadata;
-  const triggers = entry.triggers ?? [];
   const bindings = entry.bindings ?? [];
   return (
     <div style={cardStyle}>
       <div style={rowStyle}>
-        <span style={badgeStyle}>{isTrigger ? <Zap size={11} /> : <Library size={11} />}{isTrigger ? 'Trigger' : 'Library'}</span>
+        <TypeBadge type={entry.type} />
         <span style={{ ...nameStyle, flex: 1 }} title={entry.name}>{entry.name}</span>
         {meta?.version && <span style={pillStyle}>v{meta.version}</span>}
         <button type="button" style={iconBtnStyle} title="Remove from card" aria-label={`Remove ${entry.name} from card`} onClick={onDelete}>
@@ -184,9 +170,8 @@ const ScriptCard: FC<{ entry: EmbeddedScriptEntry; status?: ScriptStatus; onDele
 
       <div style={metaRowStyle}>
         {status && <StatusBadge status={status} />}
-        {isTrigger && triggers.length > 0 && triggers.map((t) => <span key={t} style={pillStyle}><Zap size={10} />{t}</span>)}
-        {isTrigger && triggers.length === 0 && <span style={{ ...pillStyle, color: DIM }}>no event hooks</span>}
-        <span style={pillStyle}>{formatSize(entry.code)}</span>
+        <HookPills type={entry.type} triggers={entry.triggers} />
+        <span style={pillStyle}>{formatScriptSize(entry.code)}</span>
         {meta?.author && <span style={pillStyle}>by {meta.author}</span>}
         {entry.folder && <span style={pillStyle}><Folder size={10} />{entry.folder}</span>}
       </div>

@@ -152,10 +152,25 @@ describe('computeInstallActions', () => {
     expect(d[0]!.action).toBe('install');
   });
 
-  test('match is scoped to (bundleCardId, bundleId) — same bundleId, other card → install', () => {
-    const installed = [mkInstalled({ bundleCardId: 'card-OTHER', bundleId: 'b1' })];
-    const d = computeInstallActions('card-A', [mkEntry({ bundleId: 'b1' })], installed);
+  test('match is scoped to (bundleCardId, bundleId) — same bundleId, other card, different code → install', () => {
+    // Distinct code so the content-duplicate fallback doesn't fire — this asserts
+    // the IDENTITY de-dup is card-scoped, not the content heuristic.
+    const installed = [mkInstalled({ bundleCardId: 'card-OTHER', bundleId: 'b1', code: 'fromOtherCard()' })];
+    const d = computeInstallActions('card-A', [mkEntry({ bundleId: 'b1', code: 'fromThisCard()' })], installed);
     expect(d[0]!.action).toBe('install');
+  });
+
+  test('duplicate-code — unmatched by identity but identical code already in the library → skip(duplicate-code)', () => {
+    // An UNLINKED library script (no bundledFrom) with identical code — e.g. the
+    // author bundled their own script, then re-imports the card. Importing would
+    // duplicate it, so it's classified as already-present, not offered.
+    const code = 'console.log("shared")';
+    const installed: Script[] = [{
+      id: 'lib-1', name: 'My Script', code, enabled: true, allowDangerous: false,
+      type: 'trigger', createdAt: 0, updatedAt: 0,
+    }];
+    expect(computeInstallActions('card-A', [mkEntry({ bundleId: 'b-new', code })], installed)[0])
+      .toMatchObject({ action: 'skip', skipReason: 'duplicate-code', existingScriptId: 'lib-1' });
   });
 
   test('update — incoming semver newer', () => {

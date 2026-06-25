@@ -3107,14 +3107,9 @@ spindle.onFrontendMessage(async (raw, userId) => {
             const state = d.skipReason === 'not-newer' ? 'library-newer' as const : 'installed' as const;
             return { bundleId: d.entry.bundleId, state, ...(t ? { installedName: t.name, installedEnabled: t.enabled } : {}) };
           }
-          // action 'install' — no from-this-card copy. But the same code may
-          // already exist in the library as an UNLINKED script (e.g. the author
-          // just bundled it from their own library). Treat a content match as
-          // "in your library" so we don't tempt a duplicate import.
-          const contentMatch = installed.find((s) => s.code === d.entry.code);
-          if (contentMatch) {
-            return { bundleId: d.entry.bundleId, state: 'installed' as const, installedName: contentMatch.name, installedEnabled: contentMatch.enabled };
-          }
+          // action 'install' — genuinely new: no identity match AND no content
+          // match (computeInstallActions classifies a content duplicate as a
+          // 'duplicate-code' skip, handled by the skip branch above → 'installed').
           return { bundleId: d.entry.bundleId, state: 'not-installed' as const };
         });
         send({ type: 'ls_card_editor_status_result', characterId: msg.characterId, statuses }, replyUserId);
@@ -4203,7 +4198,14 @@ async function handleCharacterDeleted(payload: unknown, eventUserId: string | nu
     send({
       type: 'ls_card_scripts_deleted_offer',
       characterName,
-      scripts: orphaned.map((s) => ({ id: s.id, name: s.name })),
+      scripts: orphaned.map((s) => ({
+        id: s.id,
+        name: s.name,
+        type: s.type,
+        ...(s.triggers && s.triggers.length > 0 ? { triggers: s.triggers } : {}),
+        ...(s.bindings && s.bindings.length > 0 ? { bindingNames: s.bindings.map((b) => b.displayName) } : {}),
+        sizeChars: s.code.length,
+      })),
     }, eventUserId ?? activeUserId);
   } catch (err) {
     spindle.log.warn(`[LumiScript] CHARACTER_DELETED card-scripts cleanup offer failed: ${err instanceof Error ? err.message : String(err)}`);

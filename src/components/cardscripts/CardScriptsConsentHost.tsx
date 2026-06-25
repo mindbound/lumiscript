@@ -15,6 +15,7 @@
 import { useEffect, useState, type FC, type CSSProperties } from 'react';
 import { ConfirmDialog } from '../common/ConfirmDialog.js';
 import { isActionable, isScopable, defaultSelectedBundleIds, defaultScopedBundleIds, actionBadgeLabel } from './consent-helpers.js';
+import { TypeBadge, HookPills, pillStyle, formatScriptSize } from './script-pills.js';
 import type { BackendToFrontend, FrontendToBackend } from '../../types/messages.js';
 import type { CardScriptAction } from '../../types/card-scripts.js';
 
@@ -33,7 +34,7 @@ const rowStyle: CSSProperties = {
   fontSize: 13,
 };
 const descStyle: CSSProperties = { marginTop: 4, marginLeft: 21, color: TEXT, opacity: 0.85, lineHeight: 1.4 };
-const metaStyle: CSSProperties = { marginTop: 2, marginLeft: 21, color: MUTED, fontSize: 11 };
+const pillsRowStyle: CSSProperties = { display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6, marginLeft: 21 };
 const warnStyle: CSSProperties = { marginTop: 5, marginLeft: 21, color: WARN, fontSize: 11.5, lineHeight: 1.4 };
 const noteStyle: CSSProperties = { color: MUTED, fontSize: 12, lineHeight: 1.5, marginBottom: 4 };
 const hookStyle: CSSProperties = { marginTop: 3, marginLeft: 21, color: 'rgb(150,166,205)', fontSize: 11, lineHeight: 1.4 };
@@ -143,19 +144,18 @@ export const CardScriptsConsentHost: FC<Props> = ({ onBackendMessage, sendToBack
               {act
                 ? <input type="checkbox" checked={selected.has(item.entry.bundleId)} onChange={() => toggle(item.entry.bundleId)} />
                 : <span style={{ width: 13, display: 'inline-block' }} />}
+              <TypeBadge type={item.entry.type} />
               <span style={{ fontWeight: 600 }}>{displayName}</span>
               <span style={badgeStyle(item.action)}>{actionBadgeLabel(item)}</span>
             </label>
             {item.entry.metadata?.description ? <div style={descStyle}>{item.entry.metadata.description}</div> : null}
-            <div style={metaStyle}>
-              {item.entry.type}
-              {item.entry.metadata?.author ? ` · by ${item.entry.metadata.author}` : ''}
-              {item.entry.metadata?.version ? ` · v${item.entry.metadata.version}` : ''}
-              {renamedFromCard ? ` · card names it “${item.entry.name}”` : ''}
+            <div style={pillsRowStyle}>
+              <HookPills type={item.entry.type} triggers={item.entry.triggers} />
+              <span style={pillStyle}>{formatScriptSize(item.entry.code)}</span>
+              {item.entry.metadata?.author ? <span style={pillStyle}>by {item.entry.metadata.author}</span> : null}
+              {item.entry.metadata?.version ? <span style={pillStyle}>v{item.entry.metadata.version}</span> : null}
+              {renamedFromCard ? <span style={pillStyle}>card: “{item.entry.name}”</span> : null}
             </div>
-            {item.entry.type === 'trigger' && item.entry.triggers && item.entry.triggers.length > 0 ? (
-              <div style={hookStyle}>Event hooks: {item.entry.triggers.join(', ')}</div>
-            ) : null}
             {item.entry.bindings && item.entry.bindings.length > 0 ? (
               <div style={hookStyle}>
                 Card author scoped this to {item.entry.bindings.map((b) => b.displayName).join(', ')}{' '}
