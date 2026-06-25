@@ -5,7 +5,7 @@ import type { BackendToFrontend, FrontendToBackend } from '../../types/messages.
 import { DEFAULT_SETTINGS } from '../../types/script.js';
 import { DiagnosticsModal } from '../diagnostics/DiagnosticsModal.js';
 import { AssistantModal } from '../assistant/AssistantModal.js';
-import { LS_OPEN_ASSISTANT_EVENT, dispatchOpenAssistant } from '../assistant/openAssistant.js';
+import { LS_OPEN_ASSISTANT_EVENT } from '../assistant/openAssistant.js';
 import { HostSelect } from '../common/HostSelect.js';
 
 // Connection rows as pushed by the backend's `assistant_connections` reply —
@@ -548,16 +548,6 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
         >
           <Trash2 size={11} style={{ marginRight: 4 }} />
           Clear all threads
-        </button>
-
-        <button
-          type="button"
-          className="ls-btn"
-          onClick={() => dispatchOpenAssistant()}
-          title="Open the in-app code assistant. Quality depends on the LLM connection you're using."
-        >
-          <MessageCircle size={11} style={{ marginRight: 4 }} />
-          Ask Lisa
         </button>
       </div>
 

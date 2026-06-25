@@ -1,5 +1,5 @@
 import { FC, useRef, useState } from 'react';
-import { Code2, BookMarked, Plus, Upload, Download, Package, FileCode2, FolderOpen, ChevronDown, ChevronRight, Pencil, AlertTriangle } from 'lucide-react';
+import { Code2, BookMarked, Plus, Upload, Download, Package, MessageCircle, FileCode2, FolderOpen, ChevronDown, ChevronRight, Pencil, AlertTriangle } from 'lucide-react';
 import type { Script, ScriptType, ScriptPackEntry } from '../../types/script.js';
 import type { FrontendToBackend } from '../../types/messages.js';
 import { ScriptListItem, type ExecutionDot } from './ScriptListItem.js';
@@ -8,6 +8,7 @@ import { PromptDialog } from '../common/PromptDialog.js';
 import { exportScriptPack, buildScriptPackBytes } from '../../utils/pack-export.js';
 import { parseScriptPack } from '../../utils/pack-import.js';
 import { openBundleModal } from '../cardscripts/bundle-helpers.js';
+import { dispatchOpenAssistant } from '../assistant/openAssistant.js';
 import { bytesToBase64, groupByFolder } from './script-list-logic.js';
 
 interface ScriptExecInfo {
@@ -227,6 +228,14 @@ export const ScriptList: FC<ScriptListProps> = ({
             disabled={scripts.length === 0}
           >
             <Package size={15} />
+          </button>
+          <button
+            className="ls-icon-btn"
+            onClick={() => dispatchOpenAssistant()}
+            title="Ask Lisa — the LumiScript chat assistant"
+            aria-label="Ask Lisa"
+          >
+            <MessageCircle size={15} />
           </button>
           <button className="ls-icon-btn" onClick={handleNew} title="New script">
             <Plus size={15} />

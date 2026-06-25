@@ -6,7 +6,7 @@ Lisa lives inside the LumiScript panel and answers questions about LumiScript's 
 
 ## Opening a chat with Lisa
 
-Click the **Lisa** button in the editor's top bar — the speech-bubble icon, alongside **Run** and **Reload**. (There's also an **Ask Lisa** button in the LumiScript settings.) Either opens the chat as an overlay.
+Click the **Lisa** button in the editor's top bar — the speech-bubble icon, alongside **Run** and **Reload** — or the speech-bubble button in the **script-manager toolbar** (next to Import / Export / the bundle button). Either opens the chat as an overlay.
 
 A fresh chat shows a few example prompts to get you going. The composer sends on **Enter** and inserts a newline on **Shift+Enter**; while she's answering, the send button turns into a **Stop** button that aborts the turn. You'll see "Lisa is thinking…" before the first token, then her reply streams in.
 
