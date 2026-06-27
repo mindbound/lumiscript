@@ -5722,6 +5722,28 @@ export interface DOMDelegateOptions {
    * event. Default: `false` (compose with the host).
    */
   stopPropagation?: boolean;
+
+  /**
+   * When `true`, ALSO intercept events on elements inside the host's OPEN
+   * shadow-DOM "islands" — the isolated subtrees Lumiverse renders when a
+   * message's HTML contains a `<style>` tag or several inline styles. Without
+   * this, controls the LLM emits inside a styled block (e.g. `<button>` /
+   * `<input>` / `<select>` choice UIs) are unreachable: their events retarget
+   * to the island host at `document.body`, so a light-DOM selector never
+   * matches. Default: `false`.
+   *
+   * Notes:
+   * - Only `mode: 'open'` islands are reachable (Lumiverse's are open).
+   * - `change` / `submit` are `composed: false` and only surface because this
+   *   mode attaches the listener *inside* the shadow root.
+   * - Selectors are matched relative to the island: a leading
+   *   `[data-component="MessageContent"] ` scope prefix is stripped and the
+   *   host placement re-validated in light DOM. Selectors that reference a
+   *   light-DOM ancestor mid-string, or span the boundary via `>` / sibling
+   *   combinators, fall back to light-DOM-only matching.
+   * - Pairs with `root: 'chat'`.
+   */
+  pierceShadow?: boolean;
 }
 
 /**

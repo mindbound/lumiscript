@@ -1737,6 +1737,18 @@ interface DOMDelegateOptions {
   preventDefault?: boolean | ConditionalPreventDefault;
   /** Call event.stopPropagation() after dispatching. Default: false. */
   stopPropagation?: boolean;
+  /**
+   * When \`true\`, ALSO intercept events on elements inside the host's OPEN
+   * shadow-DOM "islands" (styled assistant-message HTML Lumiverse isolates when
+   * it has a <style> tag or several inline styles). Lets a delegation reach
+   * LLM-emitted controls inside styled blocks that would otherwise be
+   * unreachable. \`change\` / \`submit\` work because the listener attaches
+   * inside the shadow root. A leading \`[data-component="MessageContent"] \`
+   * selector prefix is stripped and re-validated in light DOM; selectors that
+   * can't be decomposed fall back to light-DOM-only. Only mode:'open' roots;
+   * pairs with root:'chat'. Default: false.
+   */
+  pierceShadow?: boolean;
 }
 
 /** Options for DOMHandle.on(event, handler, options?). */

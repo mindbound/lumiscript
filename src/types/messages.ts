@@ -1022,6 +1022,11 @@ export type BackendToFrontend =
        */
       preventDefault?: boolean | ConditionalPreventDefault;
       stopPropagation?: boolean;
+      /**
+       * When `true`, also attach in-shadow listeners so this delegation reaches
+       * controls inside the host's open shadow-DOM islands. Default: `false`.
+       */
+      pierceShadow?: boolean;
     }
   | { type: 'dom_delegate_unregister'; delegationId: string; event: string }
   | { type: 'dom_cleanup_script';  scriptId: string }

@@ -432,6 +432,7 @@ export function listDelegationReplayMessages(): import('../types/messages.js').B
       messageId:       entry.options.messageId,
       preventDefault:  entry.options.preventDefault,
       stopPropagation: entry.options.stopPropagation,
+      pierceShadow:    entry.options.pierceShadow,
     });
   }
   return out;

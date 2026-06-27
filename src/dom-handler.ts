@@ -158,6 +158,11 @@ const elementMap = new Map<string, Element>();
  */
 let domHelper: SpindleFrontendContext['dom'] | undefined;
 
+// Captured in installDOMHandler so the lazily-created in-shadow delegation
+// listeners (pierceShadow) can post `dom_delegate_event` without threading
+// sendToBackend through the MutationObserver-driven discovery path.
+let delegateSendToBackend: ((msg: FrontendToBackend) => void) | undefined;
+
 /**
  * componentId → mounted host shared-component handle (v1.0.0-rc.9). The value
  * is the `SpindleMountedComponent` returned by `ctx.components.mountX`. Typed
@@ -325,6 +330,9 @@ interface DelegationEntry {
   messageId?:      string;
   preventDefault?: boolean | ConditionalPreventDefault;
   stopPropagation?: boolean;
+  /** When true, this delegation also fires for matches inside open shadow-DOM
+   *  islands — see the pierceShadow subsystem below. */
+  pierceShadow?: boolean;
 }
 const delegationsByDelegationId = new Map<string, DelegationEntry>();
 
@@ -421,6 +429,9 @@ function extractEventData(event: Event): DOMEventData {
 function buildDelegatedEventData(
   event:   Event,
   matched: HTMLElement,
+  // For shadow-pierced matches, message context resolves off the light-DOM
+  // island host (passed here) rather than the in-shadow matched element.
+  messageScopeEl: HTMLElement = matched,
 ): DOMDelegatedEventData {
   // Base — same target/dataset/value/coords as `extractEventData` for
   // backward compat; `DOMDelegatedEventData extends DOMEventData`.
@@ -498,7 +509,7 @@ function buildDelegatedEventData(
   // rename can't break us. Role still comes from the [data-part] descendant
   // ('user' / 'character' / 'streaming') under the message row.
   let message: DOMDelegatedEventData['message'] | undefined;
-  const msgId = domHelper?.getMessageId(matched);
+  const msgId = domHelper?.getMessageId(messageScopeEl);
   if (msgId) {
     // 'character' / 'streaming' / falsy → 'assistant'; only 'user' is user.
     const msgRow = domHelper?.findMessageElement(msgId) ?? matched;
@@ -615,12 +626,24 @@ function installDelegationListenerIfNeeded(
     const target = e.target as HTMLElement | null;
     if (!target) return;
 
+    // pierceShadow delegations are ALSO served by in-shadow listeners. When an
+    // event originated inside a tracked island, skip pierce delegations here so
+    // a composed event (click / keydown) that also bubbled out to document.body
+    // fires exactly once — the in-shadow listener owns it.
+    let originatedInIsland = false;
+    if (anyShadowPierce()) {
+      const real = e.composedPath()[0];
+      const realRoot = real instanceof Node ? real.getRootNode() : null;
+      originatedInIsland = realRoot instanceof ShadowRoot && islandShadowRoots.has(realRoot);
+    }
+
     // Iterate every delegation registered under this (root, event)
     // tuple. Most clicks won't match anything, so the inner `closest()`
     // walk + early-continue keeps the cost proportional to fired events,
     // not to total registered selectors.
     for (const reg of delegationsByDelegationId.values()) {
       if (reg.root !== root || reg.event !== event) continue;
+      if (reg.pierceShadow && originatedInIsland) continue;
 
       // Chat-scope filter: target must be inside a tracked message. Resolve
       // the message id via the host's stable contract, not the host-private
@@ -672,6 +695,233 @@ function uninstallDelegationListenerIfUnused(
   if (entry.count > 0) return;
   document.body.removeEventListener(event, entry.handler, true);
   installedDelegationListeners.delete(key);
+}
+
+// ─── Shadow-DOM island piercing (pierceShadow) ───────────────────────────────
+//
+// Lumiverse isolates styled assistant-message HTML into OPEN shadow roots
+// (`IsolatedHtml` → `attachShadow({ mode: 'open' })`). The single document.body
+// capture listener above can't reach controls inside them: composed events
+// (click / keydown) retarget `e.target` to the island host at the body
+// boundary, and `change` (composed:false) never escapes the root at all. So a
+// delegation flagged `pierceShadow` ALSO attaches a capture listener INSIDE each
+// island's shadow root. Islands are discovered via an initial scan + a coalesced
+// MutationObserver; matching strips the recognized `[data-component=
+// "MessageContent"] ` scope prefix (the in-shadow tree has no such ancestor) and
+// re-validates the host's message placement in light DOM.
+
+const SHADOW_SCOPE_PREFIX = '[data-component="MessageContent"] ';
+const MESSAGE_CONTENT_SEL = '[data-component="MessageContent"]';
+
+/** Open island shadow roots currently tracked. */
+const islandShadowRoots = new Set<ShadowRoot>();
+/** Per-shadow-root → per-event attached capture listeners (for exact teardown). */
+const shadowDelegationListeners = new WeakMap<ShadowRoot, Map<string, EventListener>>();
+/** Live pierceShadow delegation count per event — drives attach/detach + observer. */
+const shadowPierceEventCounts = new Map<string, number>();
+let islandObserver: MutationObserver | undefined;
+let islandRescanScheduled = false;
+let islandFullScanPending = false;
+/** Element subtrees added since the last scan — scanned incrementally so the
+ *  hot streaming path doesn't re-walk every visible message each frame. */
+const pendingIslandScanNodes = new Set<Element>();
+
+function anyShadowPierce(): boolean {
+  return shadowPierceEventCounts.size > 0;
+}
+
+/**
+ * Re-scope a MessageContent-scoped selector for matching INSIDE an island.
+ * Removes the `[data-component="MessageContent"] ` prefix wherever it appears
+ * (the in-shadow tree has no such ancestor) and returns the remainder — a full
+ * selector LIST, with commas / `:is()` / attribute-value commas intact, since
+ * `closest()` accepts a list natively. We deliberately do NOT split on commas:
+ * a naive split corrupts `input[name="a,b"]` / `:is(button, a)` and can yield a
+ * malformed selector that makes `closest()` throw. Returns `null` only when
+ * nothing is left (e.g. the selector was exactly the bare prefix).
+ */
+function shadowInnerSelector(selector: string): string | null {
+  const inner = selector.split(SHADOW_SCOPE_PREFIX).join('').trim();
+  return inner || null;
+}
+
+/**
+ * Build the capture handler for one (shadowRoot, event): iterate the pierce
+ * delegations for `event`, match the real in-shadow target, resolve scope off
+ * the light-DOM host, and dispatch.
+ */
+function makeShadowDelegationHandler(event: string): EventListener {
+  return (e: Event) => {
+    const target = e.target;
+    if (!(target instanceof Element)) return;
+    const sr = target.getRootNode();
+    if (!(sr instanceof ShadowRoot)) return;
+    const host = sr.host as HTMLElement;
+
+    for (const reg of delegationsByDelegationId.values()) {
+      if (!reg.pierceShadow || reg.event !== event) continue;
+
+      // Chat-scope pierce delegations require the island host to sit inside a
+      // tracked message; resolve the id off the light-DOM host.
+      if (reg.root === 'chat') {
+        const msgId = domHelper?.getMessageId(host);
+        if (!msgId) continue;
+        if (reg.messageId && msgId !== reg.messageId) continue;
+      }
+
+      const inner = shadowInnerSelector(reg.selector);
+      if (inner === null) continue; // nothing left to match in-shadow
+      // Isolate a malformed selector: closest() throws SyntaxError on bad input,
+      // which would otherwise abort the loop and starve sibling delegations.
+      let matched: HTMLElement | null;
+      try {
+        matched = target.closest(inner) as HTMLElement | null;
+      } catch {
+        continue;
+      }
+      if (!matched) continue;
+
+      if (shouldPreventDefault(reg.preventDefault, e)) e.preventDefault();
+      if (reg.stopPropagation) e.stopPropagation();
+
+      // Message context resolves off the light-DOM host, not the in-shadow match.
+      const data = buildDelegatedEventData(e, matched, host);
+      delegateSendToBackend?.({ type: 'dom_delegate_event', delegationId: reg.delegationId, data });
+    }
+  };
+}
+
+function attachShadowListener(sr: ShadowRoot, event: string): void {
+  let perEvent = shadowDelegationListeners.get(sr);
+  if (!perEvent) { perEvent = new Map(); shadowDelegationListeners.set(sr, perEvent); }
+  if (perEvent.has(event)) return;
+  const handler = makeShadowDelegationHandler(event);
+  sr.addEventListener(event, handler, true /* capture */);
+  perEvent.set(event, handler);
+}
+
+function detachShadowListener(sr: ShadowRoot, event: string): void {
+  const perEvent = shadowDelegationListeners.get(sr);
+  const handler = perEvent?.get(event);
+  if (!perEvent || !handler) return;
+  sr.removeEventListener(event, handler, true);
+  perEvent.delete(event);
+  if (perEvent.size === 0) shadowDelegationListeners.delete(sr);
+}
+
+function trackIslandShadow(sr: ShadowRoot): void {
+  if (islandShadowRoots.has(sr)) return;
+  islandShadowRoots.add(sr);
+  for (const event of shadowPierceEventCounts.keys()) attachShadowListener(sr, event);
+}
+
+function untrackIslandShadow(sr: ShadowRoot): void {
+  if (!islandShadowRoots.has(sr)) return;
+  for (const event of shadowPierceEventCounts.keys()) detachShadowListener(sr, event);
+  islandShadowRoots.delete(sr);
+}
+
+/** Track `el`'s open shadow root if it's an island host (inside a MessageContent). */
+function trackIfIsland(el: Element): void {
+  const sr = (el as HTMLElement).shadowRoot;
+  if (sr && el.closest(MESSAGE_CONTENT_SEL)) trackIslandShadow(sr);
+}
+
+/** Scan a subtree (the node + its descendants) for island shadow hosts. */
+function scanSubtreeForIslands(node: Element): void {
+  trackIfIsland(node);
+  for (const el of node.querySelectorAll('*')) trackIfIsland(el);
+}
+
+/**
+ * Run a coalesced island scan. `full` walks every visible MessageContent (used
+ * once at observer start + as a belt for the host's attach-after-mount gap);
+ * otherwise only the subtrees added since the last scan are walked — so active
+ * streaming doesn't re-walk the whole transcript each frame. Always prunes
+ * islands whose host has left the DOM. No-ops once no pierce delegation remains,
+ * so a scan still queued at teardown can't repopulate the tracking set.
+ */
+function runIslandScan(full: boolean): void {
+  if (!anyShadowPierce()) { pendingIslandScanNodes.clear(); return; }
+  for (const sr of Array.from(islandShadowRoots)) {
+    if (!sr.host.isConnected) untrackIslandShadow(sr);
+  }
+  if (full) {
+    for (const mc of document.querySelectorAll(MESSAGE_CONTENT_SEL)) scanSubtreeForIslands(mc);
+  } else {
+    for (const node of pendingIslandScanNodes) {
+      if (node.isConnected) scanSubtreeForIslands(node);
+    }
+  }
+  pendingIslandScanNodes.clear();
+}
+
+function scheduleIslandScan(full: boolean): void {
+  if (full) islandFullScanPending = true;
+  if (islandRescanScheduled) return;
+  islandRescanScheduled = true;
+  const run = () => {
+    islandRescanScheduled = false;
+    const doFull = islandFullScanPending;
+    islandFullScanPending = false;
+    runIslandScan(doFull);
+  };
+  // rAF coalesces streaming bursts; microtask fallback for non-rAF envs (tests).
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+  else queueMicrotask(run);
+}
+
+function ensureIslandObserver(): void {
+  if (islandObserver) return;
+  islandObserver = new MutationObserver((records) => {
+    // Only react to ELEMENT add/remove — pure text/characterData churn (the
+    // streaming token text) can't introduce or remove an island host, so we
+    // skip the scan entirely for it (the streaming hot path).
+    let relevant = false;
+    for (const rec of records) {
+      for (const n of rec.addedNodes) {
+        if (n instanceof Element) { pendingIslandScanNodes.add(n); relevant = true; }
+      }
+      if (rec.removedNodes.length > 0) relevant = true; // may need a prune
+    }
+    if (relevant) scheduleIslandScan(false);
+  });
+  islandObserver.observe(document.body, { childList: true, subtree: true });
+  runIslandScan(true); // synchronous initial sweep for islands already present
+}
+
+function stopIslandObserver(): void {
+  islandObserver?.disconnect();
+  islandObserver = undefined;
+}
+
+/**
+ * A pierceShadow delegation for `event` registered: ref-count it, ensure the
+ * observer is live, and attach an in-shadow listener for `event` to every
+ * tracked island.
+ */
+function registerShadowPierce(event: string): void {
+  const first = !anyShadowPierce();
+  shadowPierceEventCounts.set(event, (shadowPierceEventCounts.get(event) ?? 0) + 1);
+  if (first) ensureIslandObserver();
+  for (const sr of islandShadowRoots) attachShadowListener(sr, event);
+  scheduleIslandScan(true); // belt-and-suspenders for the host's attach-after-mount gap
+}
+
+/**
+ * A pierceShadow delegation for `event` unregistered: decrement; detach the
+ * event's in-shadow listeners at zero; stop the observer + clear tracking when
+ * no pierce delegations remain.
+ */
+function unregisterShadowPierce(event: string): void {
+  const n = (shadowPierceEventCounts.get(event) ?? 0) - 1;
+  if (n > 0) { shadowPierceEventCounts.set(event, n); return; }
+  shadowPierceEventCounts.delete(event);
+  for (const sr of islandShadowRoots) detachShadowListener(sr, event);
+  if (!anyShadowPierce()) {
+    stopIslandObserver();
+    islandShadowRoots.clear();
+  }
 }
 
 /**
@@ -773,6 +1023,7 @@ export function installDOMHandler(
 ): () => void {
   // Capture the host DOM helper for the delegation helpers (see `domHelper`).
   domHelper = ctx.dom;
+  delegateSendToBackend = sendToBackend;
 
   const unsubMessages = onBackendMessage((raw) => {
     if (!isDOMMessage(raw)) return;
@@ -1046,13 +1297,14 @@ export function installDOMHandler(
       case 'dom_delegate_register': {
         const {
           delegationId, scriptId, selector, event, root,
-          messageId, preventDefault, stopPropagation,
+          messageId, preventDefault, stopPropagation, pierceShadow,
         } = msg;
         delegationsByDelegationId.set(delegationId, {
           delegationId, scriptId, selector, event, root,
-          messageId, preventDefault, stopPropagation,
+          messageId, preventDefault, stopPropagation, pierceShadow,
         });
         installDelegationListenerIfNeeded(root, event, sendToBackend);
+        if (pierceShadow) registerShadowPierce(event);
         break;
       }
 
@@ -1065,6 +1317,7 @@ export function installDOMHandler(
         if (!reg) break;
         delegationsByDelegationId.delete(delegationId);
         uninstallDelegationListenerIfUnused(reg.root, event);
+        if (reg.pierceShadow) unregisterShadowPierce(event);
         break;
       }
 
@@ -1347,6 +1600,19 @@ export function installDOMHandler(
     }
     installedDelegationListeners.clear();
     delegationsByDelegationId.clear();
+
+    // Shadow-pierce teardown (pierceShadow): detach every in-shadow listener,
+    // stop the discovery observer, and clear tracking.
+    for (const sr of islandShadowRoots) {
+      const perEvent = shadowDelegationListeners.get(sr);
+      if (perEvent) for (const [ev, h] of perEvent) sr.removeEventListener(ev, h, true);
+    }
+    islandShadowRoots.clear();
+    shadowPierceEventCounts.clear();
+    stopIslandObserver();
+    islandRescanScheduled = false;
+    islandFullScanPending = false;
+    pendingIslandScanNodes.clear();
 
     // Remove all elements
     for (const [, el] of elementMap) {
