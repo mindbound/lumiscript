@@ -25,6 +25,12 @@ const LIBS: VmLib[] = [
     constName: 'VM_ZOD_BUNDLE',
     label:     'zod',
   },
+  {
+    entry:     join('scripts', 'vm-libs', 'handlebars-entry.ts'),
+    out:       'vm-handlebars-bundle.ts',
+    constName: 'VM_HANDLEBARS_BUNDLE',
+    label:     'handlebars',
+  },
 ];
 
 await mkdir(OUT_DIR, { recursive: true });

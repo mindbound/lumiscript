@@ -31,6 +31,7 @@ import variant from '@jitl/quickjs-singlefile-mjs-release-sync';
 import { marshalEncode, marshalDecode, VM_MARSHAL_BOOTSTRAP } from './vm-marshal.js';
 import { VM_WEBGLOBALS_BOOTSTRAP } from './vm-webglobals.js';
 import { VM_ZOD_BUNDLE } from './generated/vm-zod-bundle.js';
+import { VM_HANDLEBARS_BUNDLE } from './generated/vm-handlebars-bundle.js';
 
 /** Captured-console surface the harness forwards in-VM `console.*` to. Modeled
  *  as an index-signature record to match `buildChildCapturedConsole`'s actual
@@ -102,6 +103,27 @@ globalThis.__lsBuildApi = function (hostDispatch) {
       return raw;
     });
   };
+  // #11 P3 C — template.* re-homed onto the in-VM Handlebars (globalThis.__hbs):
+  // compile returns an in-VM function (sync), registerHelper takes an in-VM fn
+  // (sync void), render dispatches macros.resolve to the host then compiles +
+  // renders in-VM so in-VM-registered helpers apply. Mirrors the asyncfn proxy.
+  var templateCompile = function (a) {
+    var compiled = globalThis.__hbs.compile(a[0]);
+    return function (data) { return compiled(data || {}); };
+  };
+  var templateRegisterHelper = function (a) {
+    globalThis.__hbs.registerHelper(a[0], a[1]);
+    return undefined;
+  };
+  var templateRender = function (a) {
+    var template = a[0], data = a[1] || {}, options = a[2] || {};
+    var macroOpts = {};
+    if (options.chatId !== undefined) macroOpts.chatId = options.chatId;
+    if (options.characterId !== undefined) macroOpts.characterId = options.characterId;
+    return send('utils.macros.resolve', [template, macroOpts]).then(function (result) {
+      return globalThis.__hbs.compile(result.text)(data);
+    });
+  };
   var make = function (path) {
     return new Proxy(function () {}, {
       get: function (_t, prop) {
@@ -112,6 +134,9 @@ globalThis.__lsBuildApi = function (hostDispatch) {
         var a = args || [];
         if (path === 'llm.generateStructured') return generateStructured(a);
         if (path === 'llm.generateWithTools') return generateWithTools(a);
+        if (path === 'utils.template.compile') return templateCompile(a);
+        if (path === 'utils.template.registerHelper') return templateRegisterHelper(a);
+        if (path === 'utils.template.render') return templateRender(a);
         return send(path, a);
       },
     });
@@ -188,6 +213,15 @@ async function createContext(): Promise<QuickJSContext> {
   // context (a cold-start cost amortized over the child's lifetime; lazy-load is
   // a tracked optimization).
   ctx.unwrapResult(ctx.evalCode(VM_ZOD_BUNDLE)).dispose();
+  // P3 C — bundle Handlebars in-VM + a per-context instance for
+  // template.compile/render/registerHelper. Snapshot the built-in helpers so
+  // each run can reset to them (per-run helper isolation matching the asyncfn
+  // per-run Handlebars.create()).
+  ctx.unwrapResult(ctx.evalCode(VM_HANDLEBARS_BUNDLE)).dispose();
+  ctx.unwrapResult(ctx.evalCode(
+    'globalThis.__hbs = globalThis.Handlebars.create();' +
+    'globalThis.__hbsBuiltins = Object.assign({}, globalThis.__hbs.helpers);',
+  )).dispose();
   ctx.unwrapResult(ctx.evalCode(API_BOOTSTRAP)).dispose();
 
   // ── Stable __hostDispatch (built ONCE) — reads activeRun at call time. ──
@@ -322,8 +356,9 @@ export async function runUserScriptInQuickJS(opts: QuickJSRunOptions): Promise<u
       globalThis.data = globalThis.__lsDecode(JSON.parse(globalThis.__lsDataJson));
       globalThis.script = JSON.parse(globalThis.__lsScriptJson);
       globalThis.script.require = function () {
-        throw new Error('script.require() is not available in the QuickJS engine yet (lands in #11 P3).');
+        throw new Error('script.require() is not available in the QuickJS engine yet (lands in #11 P3 D).');
       };
+      globalThis.__hbs.helpers = Object.assign({}, globalThis.__hbsBuiltins);
     `)).dispose();
 
     // ── Run the body as an async IIFE; top-level await works because it's async.
