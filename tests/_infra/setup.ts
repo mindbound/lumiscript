@@ -54,6 +54,7 @@ import { __resetForTests as resetApiProxy }       from '../../src/script-runner/
 import {
   _clearActiveProxiesForTests,
   _resetUnhandledRejectionRateStateForTests,
+  _setEngineModeForTests,
 } from '../../src/script-runner/child-entry.js';
 
 // `dom-handler.ts` imports DOMPurify at module load — before any per-file DOM env
@@ -103,6 +104,9 @@ beforeEach(() => {
   // Prevents cross-file leakage of seam-seeded proxy stubs (see import note).
   _clearActiveProxiesForTests();
   _resetUnhandledRejectionRateStateForTests();
+  // #11 — clear the per-process engine-mode override so a parity test that
+  // pins engineMode='quickjs' can't leak into the next file's runs.
+  _setEngineModeForTests(undefined);
   // api.db collection cache (module-global) — clear so a cached collection from
   // one test can't leak into the next.
   _clearDbCache();

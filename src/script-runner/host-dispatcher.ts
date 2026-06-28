@@ -6394,6 +6394,9 @@ export async function dispatchRunScript(
     timeoutMs:          request.timeoutMs,
     grantedPermissions: Array.from(request.grantedPermissions),
     allowDangerous:     script.allowDangerous,
+    // #11 — pinned to the AsyncFunction engine until the QuickJS path is wired
+    // (P1 increment 2). Becomes LumiScriptSettings-driven at rollout (Gate 1+).
+    engineMode:         'asyncfn',
     chatIdAtStart:      getActiveChatId(),
     characterIdAtStart: getActiveCharacterId(),
     // Phase 9d.X — sync-array-read snapshots at dispatch time. The proxy

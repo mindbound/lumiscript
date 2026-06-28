@@ -67,6 +67,9 @@ import { serializeConsoleArg } from '../engine/console-format.js';
 // AsyncFunction sandbox as a top-level binding).
 import * as z from 'zod';
 import { LumiScriptSecurityError } from '../types/lumiscript-errors.js';
+// #11 — QuickJS-WASM isolate harness (engineMode='quickjs'). Reuses the
+// api-proxy dispatch path verbatim; only the in-VM user-code boundary differs.
+import { runUserScriptInQuickJS } from './qjs-engine.js';
 
 // ─── Error classes ──────────────────────────────────────────────────────────
 
@@ -1044,6 +1047,41 @@ async function runOne(
           );
         }) as unknown as typeof globalThis.fetch);
 
+    // #11 — engine selection. Default 'asyncfn' (the AsyncFunction path below);
+    // 'quickjs' will route to the QuickJS-WASM isolate harness (P1 increment 2).
+    // Per-run via RunScriptRequest.engineMode; the test seam overrides per-process
+    // for the parity harness. Branch sits inside the try so a quickjs failure is
+    // surfaced as RunScriptResult { ok:false } like any other body error.
+    const engineMode: 'asyncfn' | 'quickjs' = testEngineMode ?? req.engineMode ?? 'asyncfn';
+    if (engineMode === 'quickjs') {
+      // #11 — QuickJS-WASM isolate. The harness reuses proxy.dispatch / the
+      // pending-map / api-response routing / flush / activeProxies verbatim;
+      // only the in-VM user-code boundary differs. Wrapped in the SAME
+      // raceWithTimeout + runIdContext.run as the AsyncFunction path so the
+      // async-timeout semantics, ScriptTimeoutError shape, and runId
+      // attribution are identical across engines. (The harness ALSO sets an
+      // in-VM interrupt deadline as a sync-loop guard — the two are
+      // complementary: this race catches a stalled host Promise, the interrupt
+      // catches a sync `while(true){}` the race can't see.)
+      value = await raceWithTimeout(
+        runIdContext.run(req.runId, () =>
+          runUserScriptInQuickJS({
+            code:           req.code,
+            dispatch:       proxy.dispatch,
+            data:           req.data,
+            script:         { id: req.scriptId, name: req.scriptName, type: req.scriptType },
+            console:        capturedConsole,
+            timeoutMs:      req.timeoutMs,
+            serializeError,
+          }),
+        ),
+        req.timeoutMs,
+        () => new ScriptTimeoutError(
+          `Script "${req.scriptName}" exceeded the ${req.timeoutMs / 1000}s execution timeout. ` +
+          `(Looking for await on a stalled Promise? Tighten error handling around your async calls.)`,
+        ),
+      );
+    } else {
     // CRIT-01 Layer 3: hard lexical rebindings layered on top of the
     // AsyncFunction parameter shadowing. Belt-and-braces against the
     // globalThis lockdown (Layer 2):
@@ -1126,6 +1164,7 @@ ${req.code}
         `(Looking for await on a stalled Promise? Tighten error handling around your async calls.)`,
       ),
     );
+    }
   } catch (err) {
     ok = false;
     error = serializeError(err);
@@ -1440,6 +1479,17 @@ export function _setActiveProxyForTests(runId: string, scriptId: string): void {
 /** @internal Test seam — clear all activeProxies entries. */
 export function _clearActiveProxiesForTests(): void {
   activeProxies.clear();
+}
+
+/**
+ * @internal Test seam (#11) — force the engine mode per-process for the parity
+ * harness (mirrors `_setActiveProxyForTests`). `runOne` reads it ahead of
+ * `req.engineMode`. Reset to `undefined` in `tests/_infra/setup.ts` (wired with
+ * P1 increment 2's parity tests) so it can't leak across test files.
+ */
+let testEngineMode: 'asyncfn' | 'quickjs' | undefined;
+export function _setEngineModeForTests(mode: 'asyncfn' | 'quickjs' | undefined): void {
+  testEngineMode = mode;
 }
 
 /** @internal Test seam — current activeProxies cardinality (leak measurement). */

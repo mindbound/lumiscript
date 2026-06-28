@@ -150,6 +150,13 @@ export interface RunScriptRequest {
   /** Whether the script has the `allowDangerous` flag (gates http etc.). */
   allowDangerous:     boolean;
   /**
+   * #11 — which sandbox engine runs the user body: `'asyncfn'` (the
+   * `new AsyncFunction` path, default) or `'quickjs'` (the QuickJS-WASM
+   * isolate). Optional for forward-compat with older parents; the child
+   * defaults to `'asyncfn'` when unset.
+   */
+  engineMode?:        'asyncfn' | 'quickjs';
+  /**
    * Phase 9d.1 — snapshot of the active chat / character ID at run-dispatch
    * time. Used by the child to implement sync-returning api methods like
    * `api.chat.getChatId()` locally without an IPC roundtrip.

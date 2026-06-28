@@ -744,6 +744,13 @@ export interface ProxyHandle {
    * (`update`, `injectChild`, etc.) silently never apply.
    */
   flush(): Promise<void>;
+  /**
+   * The universal api dispatcher — every `api.*` method funnels through this
+   * (`mkAsync(dispatch, 'path')`). Exposed (#11) so the QuickJS engine path can
+   * route in-VM `api.*` calls through the SAME pending-map / IPC as the
+   * AsyncFunction path, instead of presenting the built `api` object.
+   */
+  dispatch(method: string, args: unknown[]): Promise<unknown>;
 }
 
 // ─── Proxy builder ──────────────────────────────────────────────────────────
@@ -4667,6 +4674,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
     handleStreamEnd,
     cleanup,
     flush,
+    dispatch,
   };
 }
 
