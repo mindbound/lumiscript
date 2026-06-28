@@ -214,7 +214,7 @@ const VM_REQUIRE_BOOTSTRAP = `
 // deep-frozen.) Eval'd LAST in getContext, after all scaffolding is built.
 const VM_FREEZE_BOOTSTRAP = `
 (function () {
-  var locked = ['__lsEncode', '__lsDecode', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__console', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams'];
+  var locked = ['__lsEncode', '__lsDecode', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams'];
   for (var i = 0; i < locked.length; i++) {
     var name = locked[i];
     if (Object.prototype.hasOwnProperty.call(globalThis, name)) {
@@ -226,6 +226,35 @@ const VM_FREEZE_BOOTSTRAP = `
   if (globalThis.__hbsBuiltins) Object.freeze(globalThis.__hbsBuiltins);
   if (globalThis.__hbsBuiltinPartials) Object.freeze(globalThis.__hbsBuiltinPartials);
   if (globalThis.__hbsBuiltinDecorators) Object.freeze(globalThis.__hbsBuiltinDecorators);
+})();
+`;
+
+// #11 P3 A2 — in-VM crypto. The sync CSPRNG bridge: __lsRandomFill(n) (a host
+// newFunction in createContext) returns a JSON array of n cryptographically-
+// strong bytes from the HOST crypto. Host-function calls run SYNCHRONOUSLY in the
+// VM (unlike __hostDispatch's deferred promise), so getRandomValues / randomUUID
+// stay synchronous (the Web contract) with real entropy — no PRNG / entropy-pool
+// compromise. crypto.subtle is intentionally absent (QuickJS lacks it; async).
+const VM_CRYPTO_BOOTSTRAP = `
+(function () {
+  var fill = function (n) { return JSON.parse(globalThis.__lsRandomFill(n)); };
+  globalThis.crypto = {
+    getRandomValues: function (arr) {
+      if (!arr || typeof arr.byteLength !== 'number') throw new TypeError('crypto.getRandomValues: an integer-typed array is required');
+      var view = (arr instanceof Uint8Array) ? arr : new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength);
+      var b = fill(view.length);
+      for (var i = 0; i < view.length; i++) view[i] = b[i];
+      return arr;
+    },
+    randomUUID: function () {
+      var b = fill(16);
+      b[6] = (b[6] & 0x0f) | 0x40; // version 4
+      b[8] = (b[8] & 0x3f) | 0x80; // variant 10
+      var h = [];
+      for (var i = 0; i < 16; i++) h.push((b[i] + 256).toString(16).slice(1));
+      return h.slice(0, 4).join('') + '-' + h.slice(4, 6).join('') + '-' + h.slice(6, 8).join('') + '-' + h.slice(8, 10).join('') + '-' + h.slice(10, 16).join('');
+    },
+  };
 })();
 `;
 
@@ -363,8 +392,20 @@ async function createContext(): Promise<QuickJSContext> {
   ctx.setProp(ctx.global, '__console', consoleObj);
   consoleObj.dispose();
 
+  // ── Sync CSPRNG bridge (P3 A2 crypto) — host fn returns n strong bytes as JSON.
+  // newFunction callbacks run synchronously in the VM, so crypto.* stays sync. ──
+  const randomFill = ctx.newFunction('__lsRandomFill', (nHandle) => {
+    const n = Math.max(0, Math.min(ctx.getNumber(nHandle) | 0, 65536));
+    const bytes = new Uint8Array(n);
+    globalThis.crypto.getRandomValues(bytes); // host (Bun) crypto — CSPRNG, sync
+    return ctx.newString(JSON.stringify(Array.from(bytes)));
+  });
+  ctx.setProp(ctx.global, '__lsRandomFill', randomFill);
+  randomFill.dispose();
+  ctx.unwrapResult(ctx.evalCode(VM_CRYPTO_BOOTSTRAP)).dispose();
+
   // P3 audit H1 — lock the trusted scaffolding bindings. MUST be the last eval,
-  // after api / __hostDispatch / __console are built, so those are frozen too.
+  // after api / __hostDispatch / __console / crypto are built, so those are frozen.
   ctx.unwrapResult(ctx.evalCode(VM_FREEZE_BOOTSTRAP)).dispose();
 
   context = ctx;
