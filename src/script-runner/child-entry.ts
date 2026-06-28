@@ -1073,6 +1073,12 @@ async function runOne(
             console:        capturedConsole,
             timeoutMs:      req.timeoutMs,
             serializeError,
+            allowDangerous: req.allowDangerous,
+            // Pass the host fetch CAPTURED PRE-LOCKDOWN (_hostFetch). `globalThis.fetch`
+            // is nulled by installSandboxLockdown(), so the in-VM bridge must use this
+            // reference. Only granted when allowDangerous (defense-in-depth alongside
+            // the engine's own allowDangerous gate). Mirrors the asyncfn safeFetch.
+            hostFetch:      req.allowDangerous ? _hostFetch : undefined,
           }),
         ),
         req.timeoutMs,

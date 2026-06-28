@@ -48,6 +48,17 @@ export interface QuickJSRunOptions {
   console:        QuickJSConsole;
   timeoutMs:      number;
   serializeError: (err: unknown) => { name: string; message: string; stack?: string };
+  /** Gates the in-VM `fetch` global (direct host fetch), mirroring the asyncfn
+   *  safeFetch: only allowDangerous scripts may fetch directly. Optional with a
+   *  fail-safe default — absent means the capability is OFF (fetch blocked). */
+  allowDangerous?: boolean;
+  /** The host `fetch` reference CAPTURED BEFORE `installSandboxLockdown()` nulls
+   *  `globalThis.fetch` (fetch is deliberately not in SAFE_GLOBALS — see
+   *  child-entry's `_hostFetch`). The in-VM fetch bridge MUST use this captured
+   *  reference, not a live `globalThis.fetch` read, or it sees `undefined` in the
+   *  locked child realm. Absent → the in-VM `fetch` reports the capability is
+   *  unavailable (the host did not grant it for this run). */
+  hostFetch?: (url: string, init?: RequestInit) => Promise<Response>;
 }
 
 // In-VM bootstrap: the recursive `api` Proxy. `api.chat.getMessages(a,b)` →
@@ -214,7 +225,7 @@ const VM_REQUIRE_BOOTSTRAP = `
 // deep-frozen.) Eval'd LAST in getContext, after all scaffolding is built.
 const VM_FREEZE_BOOTSTRAP = `
 (function () {
-  var locked = ['__lsEncode', '__lsDecode', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams'];
+  var locked = ['__lsEncode', '__lsDecode', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', 'fetch', 'Headers', 'Response'];
   for (var i = 0; i < locked.length; i++) {
     var name = locked[i];
     if (Object.prototype.hasOwnProperty.call(globalThis, name)) {
@@ -258,6 +269,47 @@ const VM_CRYPTO_BOOTSTRAP = `
 })();
 `;
 
+// #11 P3 A2 — in-VM fetch. DIRECT host fetch (gated by the run's allowDangerous),
+// mirroring the asyncfn safeFetch — NOT cors-proxied (api.utils.http covers that).
+// __lsFetch(url, optsJson) is an ASYNC host fn (createContext, deferred-promise
+// pattern like __hostDispatch): it runs the child's globalThis.fetch, reads the
+// body as bytes, and settles with {ok,status,statusText,headers,bytes}. The VM
+// wrapper builds a Response (text/json/arrayBuffer/bytes + a Headers).
+const VM_FETCH_BOOTSTRAP = `
+(function () {
+  var unwrap = function (s) {
+    var o = JSON.parse(s);
+    if (o && o.e) { var e = new Error((o.e && o.e.message) || 'fetch failed'); if (o.e.name) e.name = o.e.name; throw e; }
+    return globalThis.__lsDecode(o ? o.v : undefined);
+  };
+  function Headers(obj) {
+    this._h = {};
+    if (obj) { var ks = Object.keys(obj); for (var i = 0; i < ks.length; i++) this._h[ks[i].toLowerCase()] = String(obj[ks[i]]); }
+  }
+  Headers.prototype.get = function (k) { var v = this._h[String(k).toLowerCase()]; return v === undefined ? null : v; };
+  Headers.prototype.has = function (k) { return Object.prototype.hasOwnProperty.call(this._h, String(k).toLowerCase()); };
+  Headers.prototype.forEach = function (cb, t) { var ks = Object.keys(this._h); for (var i = 0; i < ks.length; i++) cb.call(t, this._h[ks[i]], ks[i], this); };
+  globalThis.Headers = Headers;
+  function Response(r) {
+    this.ok = !!r.ok; this.status = r.status; this.statusText = r.statusText || '';
+    this.url = r.url || ''; this.redirected = !!r.redirected;
+    this.headers = new Headers(r.headers || {});
+    this._bytes = (r.bytes instanceof Uint8Array) ? r.bytes : new Uint8Array(0);
+    this.bodyUsed = false;
+  }
+  Response.prototype.arrayBuffer = function () { this.bodyUsed = true; return Promise.resolve(this._bytes.buffer); };
+  Response.prototype.bytes = function () { this.bodyUsed = true; return Promise.resolve(this._bytes); };
+  Response.prototype.text = function () { this.bodyUsed = true; return Promise.resolve(new TextDecoder().decode(this._bytes)); };
+  Response.prototype.json = function () { return this.text().then(function (t) { return JSON.parse(t); }); };
+  globalThis.Response = Response;
+  globalThis.fetch = function (url, opts) {
+    var o = opts || {};
+    var norm = { method: o.method || 'GET', headers: o.headers || {}, body: (o.body === undefined ? null : o.body) };
+    return Promise.resolve(globalThis.__lsFetch(String(url), JSON.stringify(globalThis.__lsEncode(norm)))).then(unwrap).then(function (r) { return new Response(r); });
+  };
+})();
+`;
+
 let modulePromise: Promise<QuickJSWASMModule> | undefined;
 let context: QuickJSContext | undefined;
 /** Per-run wall-clock deadline read by the (sync-loop) interrupt handler. */
@@ -277,6 +329,9 @@ interface ActiveRun {
   dispatch:       (method: string, args: unknown[]) => Promise<unknown>;
   console:        QuickJSConsole;
   serializeError: (err: unknown) => { name: string; message: string; stack?: string };
+  allowDangerous: boolean;
+  /** Pre-lockdown host fetch (see QuickJSRunOptions.hostFetch). */
+  hostFetch?: (url: string, init?: RequestInit) => Promise<Response>;
 }
 let activeRun: ActiveRun | undefined;
 /** Cached context build — promise-based so concurrent first calls share ONE
@@ -404,8 +459,59 @@ async function createContext(): Promise<QuickJSContext> {
   randomFill.dispose();
   ctx.unwrapResult(ctx.evalCode(VM_CRYPTO_BOOTSTRAP)).dispose();
 
+  // ── Direct fetch bridge (P3 A2) — async host fn (deferred-promise pattern, like
+  // __hostDispatch). Gated by the run's allowDangerous (mirrors asyncfn safeFetch);
+  // runs the child's globalThis.fetch and settles with the response + body bytes. ──
+  const fetchFn = ctx.newFunction('__lsFetch', (urlHandle, optsHandle) => {
+    const url = ctx.getString(urlHandle);
+    const reqInit = marshalDecode(JSON.parse(ctx.getString(optsHandle))) as { method?: string; headers?: Record<string, string>; body?: unknown };
+    const deferred = ctx.newPromise();
+    const settle = (kind: 'v' | 'e', payload: unknown, fallbackMessage: string) => {
+      let s: string;
+      try {
+        s = JSON.stringify(kind === 'v' ? { v: marshalEncode(payload) } : { e: payload });
+      } catch {
+        s = JSON.stringify({ e: { name: 'QuickJSMarshalError', message: fallbackMessage } });
+      }
+      ctx.newString(s).consume((h) => deferred.resolve(h));
+      pump();
+    };
+    const run = activeRun;
+    if (!run) {
+      settle('e', { name: 'Error', message: 'LumiScript QuickJS: no active run for fetch().' }, 'no active run');
+    } else if (!run.allowDangerous) {
+      settle('e', { name: 'Error', message: 'fetch() requires Allow Dangerous in the QuickJS engine. Use api.utils.http.* for HTTP.' }, 'fetch blocked');
+    } else if (!run.hostFetch) {
+      // allowDangerous but the host did not pass a captured fetch — should not
+      // happen in production (child-entry always supplies _hostFetch when
+      // allowDangerous); fail loudly rather than reading a lockdown-nulled global.
+      settle('e', { name: 'Error', message: 'fetch() is unavailable: the host did not grant a fetch capability for this run.' }, 'fetch unavailable');
+    } else {
+      const hostFetch = run.hostFetch;
+      void (async () => {
+        try {
+          const init: RequestInit = { method: reqInit?.method ?? 'GET' };
+          if (reqInit?.headers) init.headers = reqInit.headers;
+          if (reqInit?.body !== undefined && reqInit?.body !== null) init.body = reqInit.body as BodyInit;
+          const res = await hostFetch(url, init);
+          const bytes = new Uint8Array(await res.arrayBuffer());
+          const headers: Record<string, string> = {};
+          res.headers.forEach((v, k) => { headers[k] = v; });
+          settle('v', { ok: res.ok, status: res.status, statusText: res.statusText, url: res.url, redirected: res.redirected, headers, bytes }, 'fetch result could not be marshaled');
+        } catch (err) {
+          settle('e', run.serializeError(err), 'fetch error could not be serialized');
+        }
+      })();
+    }
+    void deferred.settled.then(pump);
+    return deferred.handle;
+  });
+  ctx.setProp(ctx.global, '__lsFetch', fetchFn);
+  fetchFn.dispose();
+  ctx.unwrapResult(ctx.evalCode(VM_FETCH_BOOTSTRAP)).dispose();
+
   // P3 audit H1 — lock the trusted scaffolding bindings. MUST be the last eval,
-  // after api / __hostDispatch / __console / crypto are built, so those are frozen.
+  // after api / __hostDispatch / __console / crypto / fetch are built, so frozen.
   ctx.unwrapResult(ctx.evalCode(VM_FREEZE_BOOTSTRAP)).dispose();
 
   context = ctx;
@@ -447,7 +553,7 @@ export async function runUserScriptInQuickJS(opts: QuickJSRunOptions): Promise<u
   await prior;
 
   currentDeadline = Date.now() + opts.timeoutMs;
-  activeRun = { dispatch: opts.dispatch, console: opts.console, serializeError: opts.serializeError };
+  activeRun = { dispatch: opts.dispatch, console: opts.console, serializeError: opts.serializeError, allowDangerous: opts.allowDangerous ?? false, hostFetch: opts.hostFetch };
   const pump = () => ctx.runtime.executePendingJobs();
 
   // #11 fix (d) — a synchronous `while(true){}` blocks the host event loop, so
