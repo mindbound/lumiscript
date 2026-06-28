@@ -30,7 +30,12 @@ const BUDGETS: Record<string, number> = {
   // unconditionally. Authoring size was 597,243; post-#11 it's ~1,966,389.
   // Bumped to ~1.97 MB + ~17% headroom. (Revisit if the engine is later
   // code-split out of the default-path bundle — see notes/sandbox-isolate-impl-plan.md.)
-  'dist/script-runner.js': 2_300_000,
+  // #11 P3 B — additionally embeds zod bundled as a VM-evaluable IIFE
+  // (src/script-runner/generated/vm-zod-bundle.ts, ~262 KB) so `z` runs IN the
+  // QuickJS isolate. This is a second copy of zod (the asyncfn path keeps the
+  // module form); it collapses to one when asyncfn is retired in P9. Post-B size
+  // ~2,327,867; bumped to ~2.7 MB + headroom. P3 C (in-VM Handlebars) will add more.
+  'dist/script-runner.js': 2_700_000,
 };
 
 for (const [rel, max] of Object.entries(BUDGETS)) {

@@ -29,6 +29,8 @@ import {
 } from 'quickjs-emscripten-core';
 import variant from '@jitl/quickjs-singlefile-mjs-release-sync';
 import { marshalEncode, marshalDecode, VM_MARSHAL_BOOTSTRAP } from './vm-marshal.js';
+import { VM_WEBGLOBALS_BOOTSTRAP } from './vm-webglobals.js';
+import { VM_ZOD_BUNDLE } from './generated/vm-zod-bundle.js';
 
 /** Captured-console surface the harness forwards in-VM `console.*` to. Modeled
  *  as an index-signature record to match `buildChildCapturedConsole`'s actual
@@ -66,6 +68,40 @@ globalThis.__lsBuildApi = function (hostDispatch) {
     }
     return globalThis.__lsDecode(o ? o.v : undefined);
   };
+  // Raw dispatch: marshal args → host → unwrap result.
+  var send = function (method, args) {
+    return Promise.resolve(hostDispatch(method, JSON.stringify(globalThis.__lsEncode(args || [])))).then(unwrap);
+  };
+  // #11 P3 B — a Zod schema is a VM object (methods) that cannot cross IPC.
+  // Convert it to JSON Schema IN the VM (z.toJSONSchema) before dispatch and run
+  // .parse on the response IN the VM, mirroring the asyncfn proxy's
+  // convertZodToJsonSchemaIfNeeded (api-proxy.ts). Plain-object schemas pass through.
+  var isZod = function (s) {
+    return !!(s && typeof s === 'object' && globalThis.z && globalThis.z.ZodType && (s instanceof globalThis.z.ZodType));
+  };
+  var toJsonSchema = function (s) {
+    return globalThis.z.toJSONSchema(s, { target: 'openapi-3.0', cycles: 'ref', unrepresentable: 'any' });
+  };
+  var generateStructured = function (args) {
+    var messages = args[0], schema = args[1], options = args[2];
+    var zodSchema = isZod(schema) ? schema : null;
+    var jsonSchema = zodSchema ? toJsonSchema(schema) : schema;
+    var dispatchArgs = options !== undefined ? [messages, jsonSchema, options] : [messages, jsonSchema];
+    return send('llm.generateStructured', dispatchArgs).then(function (parsed) {
+      return zodSchema ? zodSchema.parse(parsed) : parsed;
+    });
+  };
+  var generateWithTools = function (args) {
+    var messages = args[0], tools = args[1], options = args[2], schema = args[3];
+    var zodSchema = isZod(schema) ? schema : null;
+    var jsonSchema = zodSchema ? toJsonSchema(schema) : schema;
+    return send('llm.generateWithTools', [messages, tools, options || {}, jsonSchema]).then(function (raw) {
+      if (zodSchema && raw && (raw.tool_calls === undefined || raw.tool_calls === null || raw.tool_calls.length === 0)) {
+        try { return Object.assign({}, raw, { content: zodSchema.parse(raw.content) }); } catch (e) { return raw; }
+      }
+      return raw;
+    });
+  };
   var make = function (path) {
     return new Proxy(function () {}, {
       get: function (_t, prop) {
@@ -73,7 +109,10 @@ globalThis.__lsBuildApi = function (hostDispatch) {
         return make(path ? path + '.' + prop : prop);
       },
       apply: function (_t, _thisArg, args) {
-        return Promise.resolve(hostDispatch(path, JSON.stringify(globalThis.__lsEncode(args || [])))).then(unwrap);
+        var a = args || [];
+        if (path === 'llm.generateStructured') return generateStructured(a);
+        if (path === 'llm.generateWithTools') return generateWithTools(a);
+        return send(path, a);
       },
     });
   };
@@ -142,6 +181,13 @@ async function createContext(): Promise<QuickJSContext> {
   // Order matters: the marshaler twin defines __lsEncode/__lsDecode, which the
   // api proxy (API_BOOTSTRAP's __lsBuildApi) references at call time.
   ctx.unwrapResult(ctx.evalCode(VM_MARSHAL_BOOTSTRAP)).dispose();
+  // P3 A1 — pure-JS Web-global polyfills (structuredClone reuses the marshaler).
+  ctx.unwrapResult(ctx.evalCode(VM_WEBGLOBALS_BOOTSTRAP)).dispose();
+  // P3 B — bundle zod in-VM (sets globalThis.z) so user `z.object(...)` works and
+  // the api proxy can convert Zod schemas → JSON Schema in-VM. ~95ms one-time per
+  // context (a cold-start cost amortized over the child's lifetime; lazy-load is
+  // a tracked optimization).
+  ctx.unwrapResult(ctx.evalCode(VM_ZOD_BUNDLE)).dispose();
   ctx.unwrapResult(ctx.evalCode(API_BOOTSTRAP)).dispose();
 
   // ── Stable __hostDispatch (built ONCE) — reads activeRun at call time. ──
