@@ -21,6 +21,7 @@
 import { describe, test, expect } from 'bun:test';
 import {
   runUserScriptInQuickJS,
+  _vmObjectCountForTests,
   type QuickJSRunOptions,
 } from '../../src/script-runner/qjs-engine.js';
 import { dispatchRunScript } from '../../src/script-runner/host-dispatcher.js';
@@ -46,17 +47,19 @@ function makeOpts(over: Partial<QuickJSRunOptions> & { code: string }): QuickJSR
 // ─── (a) bridge always settles ────────────────────────────────────────────────
 
 describe('#11 fix(a): the bridge settles for every outcome', () => {
-  test('a non-JSON-serializable dispatch RESULT rejects cleanly instead of hanging', async () => {
-    // dispatch returns a BigInt → host-side JSON.stringify({v:10n}) throws →
-    // the settle() fallback must resolve the deferred with an {e} envelope.
-    // If the deferred ever failed to settle this test would hang to its timeout.
+  test('a non-marshalable dispatch RESULT rejects cleanly instead of hanging', async () => {
+    // dispatch returns a value containing a function → marshalEncode throws
+    // INSIDE settle()'s try → the deferred is still resolved with an {e}
+    // envelope. If the deferred ever failed to settle this test would hang to
+    // its timeout. (BigInt is now SUPPORTED by structured marshaling — P2 — so
+    // a function is the trigger for the un-marshalable path.)
     const v = await runUserScriptInQuickJS(makeOpts({
-      dispatch: async () => 10n,
+      dispatch: async () => ({ fn: () => 1 }),
       code: `try { await api.foo(); return 'NO-THROW'; } catch (e) { return 'caught:' + e.message; }`,
     }));
     expect(typeof v).toBe('string');
     expect(v as string).toContain('caught:');
-    expect(v as string).toContain('not JSON-serializable');
+    expect(v as string).toContain('could not be marshaled');
   });
 });
 
@@ -74,17 +77,9 @@ describe('#11 fix(b): non-JSON args fail loud (not silently mangled)', () => {
     expect(dispatched).toBe(false);
   });
 
-  test('a Date / Map argument throws (would otherwise silently change shape)', async () => {
-    const dateV = await runUserScriptInQuickJS(makeOpts({
-      code: `try { await api.scriptStorage.set('k', new Date()); return 'NO-THROW'; } catch (e) { return 'caught:' + e.message; }`,
-    }));
-    expect(dateV as string).toContain('Date would silently become');
-
-    const mapV = await runUserScriptInQuickJS(makeOpts({
-      code: `try { await api.scriptStorage.set('k', new Map()); return 'NO-THROW'; } catch (e) { return 'caught:' + e.message; }`,
-    }));
-    expect(mapV as string).toContain('Map/Set');
-  });
+  // Date / Map / Set / BigInt / typed-array args are now SUPPORTED by structured
+  // marshaling (P2) — their round-trips live in qjs-engine-marshal.test.ts.
+  // Functions / symbols / cycles remain fail-loud (callbacks are P5).
 
   test('a nested function (inside an object/array arg) is also caught', async () => {
     const v = await runUserScriptInQuickJS(makeOpts({
@@ -177,4 +172,56 @@ describe('#11 fix(c): host method resolver rejects prototype-chain paths (quickj
     expect(res.ok).toBe(true);
     expect(res.value).toBe('v');
   });
+});
+
+// ─── M4: per-run handle arena (leak oracle) ────────────────────────────────────
+
+describe('#11 P2 (M4): per-run handle arena leaves no handles behind', () => {
+  test('VM object count stays flat across 450 mixed (success / api-call / throwing) runs', async () => {
+    // Warm up so the context + QuickJS atom/shape caches stabilize first.
+    for (let i = 0; i < 10; i++) {
+      await runUserScriptInQuickJS(makeOpts({ code: `return ({ a: [1, 2, 3], d: new Date(), m: new Map([['k', 1]]) });` }));
+    }
+    const before = _vmObjectCountForTests();
+    expect(before).not.toBeNull();
+
+    for (let i = 0; i < 150; i++) {
+      await runUserScriptInQuickJS(makeOpts({ code: `return ({ a: [1, 2, 3], d: new Date(), m: new Map([['k', 1]]) });` }));
+      // api-call run exercises the per-call deferred bridge + arg marshaling
+      await runUserScriptInQuickJS(makeOpts({ code: `await api.foo(new Date()); return await api.bar();` }));
+      // throwing run exercises the finally/arena disposal on the error path
+      try { await runUserScriptInQuickJS(makeOpts({ code: `throw new Error('boom');` })); } catch { /* expected */ }
+    }
+    const after = _vmObjectCountForTests();
+
+    // QuickJS is refcounted; the stable context-lifetime scaffolding + the per-run
+    // arena keep the VM heap flat (measured: exactly 0 growth/run). A regression
+    // that recreated per-run scaffolding or leaked a handle would add hundreds of
+    // live objects over 450 runs. The tight bound makes that impossible to miss.
+    expect((after as number) - (before as number)).toBeLessThan(50);
+  }, 30_000);
+});
+
+// ─── H1: run serialization on the shared context ───────────────────────────────
+
+describe('#11 P2 audit H1: concurrent runs are serialized (no cross-run corruption)', () => {
+  test('two un-awaited runs each see only their OWN data/dispatch across an await', async () => {
+    // Each run reads data.tag before AND after an api call whose dispatch yields
+    // the event loop (setTimeout). If the runs interleaved on the shared context,
+    // run A's post-await read of globalThis.data / activeRun.dispatch would see
+    // run B's. The run lock serializes them, so each stays isolated.
+    const mk = (tag: string) => makeOpts({
+      data: { tag },
+      dispatch: async (m: string) => { await new Promise((r) => setTimeout(r, 5)); return tag + ':' + m; },
+      code: `const before = data.tag; const d = await api.ping(); const after = data.tag; return { before, after, d };`,
+    });
+
+    const [a, b] = await Promise.all([
+      runUserScriptInQuickJS(mk('A')),
+      runUserScriptInQuickJS(mk('B')),
+    ]) as Array<{ before: string; after: string; d: string }>;
+
+    expect(a).toEqual({ before: 'A', after: 'A', d: 'A:ping' });
+    expect(b).toEqual({ before: 'B', after: 'B', d: 'B:ping' });
+  }, 10_000);
 });
