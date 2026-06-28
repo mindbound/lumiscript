@@ -61,16 +61,20 @@ export const VM_WEBGLOBALS_BOOTSTRAP = `
     var bytes = [];
     for (var i = 0; i < str.length; i++) {
       var c = str.charCodeAt(i);
-      if (c < 0x80) bytes.push(c);
-      else if (c < 0x800) bytes.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f));
-      else if (c >= 0xd800 && c <= 0xdbff && i + 1 < str.length) {
-        var c2 = str.charCodeAt(i + 1);
+      if (c < 0x80) { bytes.push(c); continue; }
+      if (c < 0x800) { bytes.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f)); continue; }
+      if (c >= 0xd800 && c <= 0xdbff) {
+        // high surrogate — must be followed by a low surrogate, else U+FFFD (per spec)
+        var c2 = (i + 1 < str.length) ? str.charCodeAt(i + 1) : 0;
         if (c2 >= 0xdc00 && c2 <= 0xdfff) {
           i++;
           var cp = 0x10000 + ((c & 0x3ff) << 10) + (c2 & 0x3ff);
           bytes.push(0xf0 | (cp >> 18), 0x80 | ((cp >> 12) & 0x3f), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
-        } else bytes.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
-      } else bytes.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
+        } else { bytes.push(0xef, 0xbf, 0xbd); } // lone high surrogate → U+FFFD
+        continue;
+      }
+      if (c >= 0xdc00 && c <= 0xdfff) { bytes.push(0xef, 0xbf, 0xbd); continue; } // lone low surrogate → U+FFFD
+      bytes.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
     }
     return Uint8Array.from(bytes);
   };
@@ -78,22 +82,37 @@ export const VM_WEBGLOBALS_BOOTSTRAP = `
 
   function TextDecoder() {}
   TextDecoder.prototype.encoding = 'utf-8';
+  // Validating UTF-8 decoder. Rejects overlong forms, surrogate code points,
+  // out-of-range, and truncated/ill-formed sequences — emitting U+FFFD — instead
+  // of the previous lenient bit-assembly (which decoded overlong C1 81 → "A", a
+  // smuggling vector, and read past the buffer on truncation).
   TextDecoder.prototype.decode = function (buf) {
     if (buf === undefined || buf === null) return '';
     var bytes = (buf instanceof Uint8Array) ? buf
       : (typeof ArrayBuffer !== 'undefined' && buf instanceof ArrayBuffer) ? new Uint8Array(buf)
       : (buf.buffer ? new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength) : new Uint8Array(buf));
     var out = '', i = 0, n = bytes.length;
+    var FFFD = String.fromCharCode(0xfffd);
     while (i < n) {
-      var c = bytes[i++];
-      if (c < 0x80) out += String.fromCharCode(c);
-      else if (c < 0xe0) out += String.fromCharCode(((c & 0x1f) << 6) | (bytes[i++] & 0x3f));
-      else if (c < 0xf0) out += String.fromCharCode(((c & 0x0f) << 12) | ((bytes[i++] & 0x3f) << 6) | (bytes[i++] & 0x3f));
-      else {
-        var cp = ((c & 0x07) << 18) | ((bytes[i++] & 0x3f) << 12) | ((bytes[i++] & 0x3f) << 6) | (bytes[i++] & 0x3f);
-        cp -= 0x10000;
-        out += String.fromCharCode(0xd800 + (cp >> 10), 0xdc00 + (cp & 0x3ff));
+      var b0 = bytes[i];
+      if (b0 < 0x80) { out += String.fromCharCode(b0); i++; continue; }
+      var len, cp, min;
+      if (b0 >= 0xc2 && b0 <= 0xdf)      { len = 2; cp = b0 & 0x1f; min = 0x80; }
+      else if (b0 >= 0xe0 && b0 <= 0xef) { len = 3; cp = b0 & 0x0f; min = 0x800; }
+      else if (b0 >= 0xf0 && b0 <= 0xf4) { len = 4; cp = b0 & 0x07; min = 0x10000; }
+      else { out += FFFD; i++; continue; } // invalid lead (C0/C1, F5-FF, stray continuation)
+      if (i + len > n) { out += FFFD; i++; continue; } // truncated
+      var ok = true;
+      for (var k = 1; k < len; k++) {
+        var bk = bytes[i + k];
+        if (bk < 0x80 || bk > 0xbf) { ok = false; break; } // bad continuation
+        cp = (cp << 6) | (bk & 0x3f);
       }
+      if (!ok) { out += FFFD; i++; continue; } // resync at the offending byte
+      if (cp < min || (cp >= 0xd800 && cp <= 0xdfff) || cp > 0x10ffff) { out += FFFD; i += len; continue; } // overlong / surrogate / too big
+      if (cp < 0x10000) out += String.fromCharCode(cp);
+      else { cp -= 0x10000; out += String.fromCharCode(0xd800 + (cp >> 10), 0xdc00 + (cp & 0x3ff)); }
+      i += len;
     }
     return out;
   };

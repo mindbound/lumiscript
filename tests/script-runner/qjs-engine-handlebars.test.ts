@@ -83,4 +83,22 @@ describe('#11 P3 C: in-VM Handlebars', () => {
     })) as string;
     expect(r2.startsWith('MISSING')).toBe(true);
   });
+
+  test('partials are isolated between runs too (P3-audit M2)', async () => {
+    const r1 = await runUserScriptInQuickJS(makeOpts({
+      code: `
+        __hbs.registerPartial('greeting', 'Hello {{name}}');
+        return __hbs.compile('{{> greeting}}')({ name: 'A' });
+      `,
+    }));
+    expect(r1).toBe('Hello A');
+
+    const r2 = await runUserScriptInQuickJS(makeOpts({
+      code: `
+        try { return __hbs.compile('{{> greeting}}')({ name: 'B' }); }
+        catch (e) { return 'MISSING'; }
+      `,
+    })) as string;
+    expect(r2).toBe('MISSING');
+  });
 });

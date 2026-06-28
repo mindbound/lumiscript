@@ -145,6 +145,90 @@ globalThis.__lsBuildApi = function (hostDispatch) {
 };
 `;
 
+// #11 P3 D — in-VM script.require. User-library SOURCE is fetched via the
+// existing 'script.fetchLibrary' dispatch, then compiled + run INSIDE the VM
+// (replacing the host AsyncFunctionCtor at api-proxy.ts:4582) so library code is
+// isolated like the main script. Per-run cache + circular detection. `ls:*`
+// built-ins are host-side TS factories returning function-bearing objects that
+// can't be marshaled, so they fail loud for now (a later pass re-homes them).
+// __lsMakeRequire(hostDispatch) returns a fresh require (its own cache) per run.
+const VM_REQUIRE_BOOTSTRAP = `
+(function () {
+  var AsyncFunction = (async function () {}).constructor;
+  var unwrap = function (s) {
+    var o = JSON.parse(s);
+    if (o && o.e) {
+      var e = new Error((o.e && o.e.message) || 'error');
+      if (o.e.name) e.name = o.e.name;
+      if (o.e.stack) e.stack = o.e.stack;
+      throw e;
+    }
+    return globalThis.__lsDecode(o ? o.v : undefined);
+  };
+  var hostCall = function (method, args) {
+    return Promise.resolve(globalThis.__hostDispatch(method, JSON.stringify(globalThis.__lsEncode(args)))).then(unwrap);
+  };
+  // Built ONCE per context (a recursive per-run closure forms a scope↔fn cycle
+  // QuickJS can't refcount-free → per-run churn the leak oracle catches). The
+  // per-run cache + in-progress maps live on globalThis (reset each run); runs
+  // are serialized (P2/H1) so they never overlap.
+  globalThis.__lsRequire = function (nameOrId) {
+    var cache = globalThis.__lsRequireCache;
+    var inProgress = globalThis.__lsRequireInProgress;
+    if (typeof nameOrId !== 'string' || nameOrId.length === 0) {
+      return Promise.reject(new Error('script.require: name must be a non-empty string'));
+    }
+    if (nameOrId.indexOf('ls:') === 0) {
+      return Promise.reject(new Error('script.require: built-in "' + nameOrId + '" libraries are not yet available in the QuickJS engine (host-side ls:* factories).'));
+    }
+    if (Object.prototype.hasOwnProperty.call(cache, nameOrId)) return Promise.resolve(cache[nameOrId]);
+    if (inProgress[nameOrId]) return Promise.reject(new Error('script.require: circular dependency detected for "' + nameOrId + '"'));
+    return hostCall('script.fetchLibrary', [nameOrId]).then(function (libInfo) {
+      inProgress[nameOrId] = true;
+      var done = function () { delete inProgress[nameOrId]; };
+      try {
+        var libExports = {};
+        var libModule = { exports: libExports };
+        var libScript = { id: libInfo.id, name: libInfo.name, type: 'library', require: globalThis.__lsRequire };
+        var silent = { log: function () {}, warn: function () {}, error: function () {}, info: function () {} };
+        var libFetch = function () { throw new Error('"' + libInfo.name + '" cannot use fetch directly in the QuickJS engine yet (#11 P3 A2). Use api.utils.http.*.'); };
+        var libFn = new AsyncFunction('api', 'data', 'script', '__console', 'exports', 'module', 'fetch', 'Bun', 'process', '"use strict";\\nconst console = __console;\\n' + libInfo.code + '\\n');
+        return Promise.resolve(libFn(globalThis.api, {}, libScript, silent, libExports, libModule, libFetch, undefined, undefined)).then(function () {
+          done();
+          cache[nameOrId] = libModule.exports;
+          return libModule.exports;
+        }, function (err) { done(); throw err; });
+      } catch (e) { done(); throw e; }
+    });
+  };
+})();
+`;
+
+// #11 P3 audit (H1) — lock the trusted scaffolding bindings so one run can't
+// reassign them (e.g. globalThis.__lsEncode = evil, globalThis.api = evilProxy)
+// and poison the NEXT run on the shared process-global context. data / script /
+// __lsRequireCache / __hbs.helpers stay per-run-mutable (reset each run); the
+// frozen `__hbsBuiltins*` snapshots are the reset SOURCES so they can't be
+// tampered. (Third-party z/Handlebars internal-property mutation remains a
+// residual until per-run contexts land in P7 — bindings are locked, objects not
+// deep-frozen.) Eval'd LAST in getContext, after all scaffolding is built.
+const VM_FREEZE_BOOTSTRAP = `
+(function () {
+  var locked = ['__lsEncode', '__lsDecode', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__console', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone'];
+  for (var i = 0; i < locked.length; i++) {
+    var name = locked[i];
+    if (Object.prototype.hasOwnProperty.call(globalThis, name)) {
+      // Pass 'value' explicitly: QuickJS defineProperty clears the value to
+      // undefined when 'value' is omitted (non-spec), so re-state the current one.
+      try { Object.defineProperty(globalThis, name, { value: globalThis[name], writable: false, configurable: false }); } catch (e) {}
+    }
+  }
+  if (globalThis.__hbsBuiltins) Object.freeze(globalThis.__hbsBuiltins);
+  if (globalThis.__hbsBuiltinPartials) Object.freeze(globalThis.__hbsBuiltinPartials);
+  if (globalThis.__hbsBuiltinDecorators) Object.freeze(globalThis.__hbsBuiltinDecorators);
+})();
+`;
+
 let modulePromise: Promise<QuickJSWASMModule> | undefined;
 let context: QuickJSContext | undefined;
 /** Per-run wall-clock deadline read by the (sync-loop) interrupt handler. */
@@ -220,9 +304,13 @@ async function createContext(): Promise<QuickJSContext> {
   ctx.unwrapResult(ctx.evalCode(VM_HANDLEBARS_BUNDLE)).dispose();
   ctx.unwrapResult(ctx.evalCode(
     'globalThis.__hbs = globalThis.Handlebars.create();' +
-    'globalThis.__hbsBuiltins = Object.assign({}, globalThis.__hbs.helpers);',
+    'globalThis.__hbsBuiltins = Object.assign({}, globalThis.__hbs.helpers);' +
+    'globalThis.__hbsBuiltinPartials = Object.assign({}, globalThis.__hbs.partials);' +
+    'globalThis.__hbsBuiltinDecorators = Object.assign({}, globalThis.__hbs.decorators || {});',
   )).dispose();
   ctx.unwrapResult(ctx.evalCode(API_BOOTSTRAP)).dispose();
+  // P3 D — in-VM script.require (defines globalThis.__lsRequire).
+  ctx.unwrapResult(ctx.evalCode(VM_REQUIRE_BOOTSTRAP)).dispose();
 
   // ── Stable __hostDispatch (built ONCE) — reads activeRun at call time. ──
   // Each call creates a per-CALL deferred, resolved when the host dispatch
@@ -274,6 +362,10 @@ async function createContext(): Promise<QuickJSContext> {
   }
   ctx.setProp(ctx.global, '__console', consoleObj);
   consoleObj.dispose();
+
+  // P3 audit H1 — lock the trusted scaffolding bindings. MUST be the last eval,
+  // after api / __hostDispatch / __console are built, so those are frozen too.
+  ctx.unwrapResult(ctx.evalCode(VM_FREEZE_BOOTSTRAP)).dispose();
 
   context = ctx;
   return ctx;
@@ -355,10 +447,12 @@ export async function runUserScriptInQuickJS(opts: QuickJSRunOptions): Promise<u
     ctx.unwrapResult(ctx.evalCode(`
       globalThis.data = globalThis.__lsDecode(JSON.parse(globalThis.__lsDataJson));
       globalThis.script = JSON.parse(globalThis.__lsScriptJson);
-      globalThis.script.require = function () {
-        throw new Error('script.require() is not available in the QuickJS engine yet (lands in #11 P3 D).');
-      };
+      globalThis.__lsRequireCache = {};
+      globalThis.__lsRequireInProgress = {};
+      globalThis.script.require = globalThis.__lsRequire;
       globalThis.__hbs.helpers = Object.assign({}, globalThis.__hbsBuiltins);
+      globalThis.__hbs.partials = Object.assign({}, globalThis.__hbsBuiltinPartials);
+      globalThis.__hbs.decorators = Object.assign({}, globalThis.__hbsBuiltinDecorators);
     `)).dispose();
 
     // ── Run the body as an async IIFE; top-level await works because it's async.
