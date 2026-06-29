@@ -68,9 +68,13 @@ describe('#11 fix(a): the bridge settles for every outcome', () => {
 describe('#11 fix(b): non-JSON args fail loud (not silently mangled)', () => {
   test('a function argument throws a clear error and never reaches the host', async () => {
     let dispatched = false;
+    // Use a GENERIC method (api.foo) — handler-registration paths like
+    // api.broadcast.on / api.commands.onInvoked legitimately accept a function
+    // (P5 intercepts them in the apply trap before marshaling). A top-level
+    // function arg to a non-handler method must still fail loud.
     const v = await runUserScriptInQuickJS(makeOpts({
       dispatch: async () => { dispatched = true; return undefined; },
-      code: `try { await api.broadcast.on('x', () => {}); return 'NO-THROW'; } catch (e) { return 'caught:' + e.message; }`,
+      code: `try { await api.foo(() => {}); return 'NO-THROW'; } catch (e) { return 'caught:' + e.message; }`,
     }));
     expect(v as string).toContain('caught:');
     expect(v as string).toContain('functions/callbacks');

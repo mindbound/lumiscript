@@ -37,6 +37,8 @@ import type {
   ScriptRunningNotice,
   ApiProxyResponse,
   BroadcastFireMessage,
+  BroadcastSubscribeMessage,
+  BroadcastUnsubscribeMessage,
   BroadcastClearMessage,
   ConsoleEntryNotice,
   SerializedError,
@@ -75,7 +77,9 @@ import {
   runUserScriptInQuickJS,
   fireHandlerInQuickJS,
   hasVmHandler,
+  hasVmBroadcast,
   disposeScriptVmHandlers,
+  disposeScriptVmBroadcast,
 } from './qjs-engine.js';
 
 // ─── Error classes ──────────────────────────────────────────────────────────
@@ -526,6 +530,12 @@ function handleBroadcastFire(
   proc: SpindleBackendProcessContext,
   msg: BroadcastFireMessage,
 ): void {
+  // #11 P5 inc3b — a quickjs broadcast handler closure lives in the VM (keyed by subId
+  // in the engine's broadcast registry), NOT in broadcastHandlers. Route by presence.
+  if (hasVmBroadcast(msg.scriptId, msg.subId)) {
+    fireVmBroadcast(proc, msg);
+    return;
+  }
   const scriptHandlers = broadcastHandlers.get(msg.scriptId);
   const handler = scriptHandlers?.get(msg.subId);
   if (!handler) return; // late fire after clear/unsub — drop silently
@@ -594,6 +604,9 @@ function handleBroadcastFire(
 
 function handleBroadcastClear(msg: BroadcastClearMessage): void {
   broadcastHandlers.delete(msg.scriptId);
+  // #11 P5 inc3b — also drop the quickjs script's VM broadcast handler dups (parity:
+  // broadcast subs are wiped at the start of each new run, unlike persistent handlers).
+  disposeScriptVmBroadcast(msg.scriptId);
 }
 
 /**
@@ -752,6 +765,8 @@ function makeHandlerDispatchers(
 ): {
   dispatchRegisterHandler: (kind: string, handlerId: string, meta: unknown) => void;
   dispatchUnregisterHandler: (kind: string, handlerId: string) => void;
+  dispatchBroadcastSubscribe: (subId: string, event: string) => void;
+  dispatchBroadcastUnsubscribe: (subId: string) => void;
 } {
   return {
     dispatchRegisterHandler: (kind, handlerId, meta) => {
@@ -769,6 +784,15 @@ function makeHandlerDispatchers(
     dispatchUnregisterHandler: (kind, handlerId) => {
       const msg = { type: 'unregister-handler', kind, scriptId, handlerId } as unknown as UnregisterHandler;
       proc.send(msg);
+    },
+    // P5 inc3b — broadcast.on uses the separate broadcast-subscribe / -unsubscribe IPC
+    // (keyed by subId, no kind/handlerId/runId/hasHandler). The closure lives in the VM
+    // registry; the parent fires it via broadcast-fire. Boundary #1 unchanged.
+    dispatchBroadcastSubscribe: (subId, event) => {
+      proc.send({ type: 'broadcast-subscribe', scriptId, subId, event } as BroadcastSubscribeMessage);
+    },
+    dispatchBroadcastUnsubscribe: (subId) => {
+      proc.send({ type: 'broadcast-unsubscribe', scriptId, subId } as BroadcastUnsubscribeMessage);
     },
   };
 }
@@ -860,6 +884,55 @@ async function fireVmHandler(
       `(scriptId=${req.scriptId}, runId=${req.runId}); terminating to clear the wedged engine runChain`,
     );
   }
+}
+
+/**
+ * #11 P5 inc3b — fire a broadcast handler whose closure lives in the QuickJS VM.
+ * Unlike a RunHandlerRequest fire this is FIRE-AND-FORGET (the bus expects no result)
+ * and UNWRAPPED — no at-fire chat/character context and no per-fire runId, so the
+ * handler's api.* calls route through the proxy's originating-run id, parity with the
+ * asyncfn broadcast path (handleBroadcastFire does not wrap in liveContext/runIdContext).
+ * Handler errors are SWALLOWED (one bad subscriber can't break the bus). The async-hang
+ * guard still applies: a never-settling api call would strand the shared runChain, so on
+ * timeout we proc.fail (same posture as the body-run). Nested registrations from a
+ * broadcast handler are rare; their IPC runId is synthetic (no originating run here).
+ */
+function fireVmBroadcast(proc: SpindleBackendProcessContext, msg: BroadcastFireMessage): void {
+  let proxy: ProxyHandle | undefined;
+  for (const entry of activeProxies.values()) {
+    if (entry.scriptId === msg.scriptId) { proxy = entry.proxy; break; }
+  }
+  if (!proxy) return; // no proxy for the script — drop (like the broadcastHandlers miss)
+  const theProxy = proxy;
+  proc.heartbeat();
+  const synthRunId = `broadcast:${msg.subId}`;
+  const capturedConsole = buildChildCapturedConsole(proc, synthRunId, msg.scriptId);
+  const dispatchers = makeHandlerDispatchers(proc, synthRunId, msg.scriptId);
+  void raceWithTimeout(
+    fireHandlerInQuickJS({
+      scriptId:                     msg.scriptId,
+      handlerId:                    msg.subId,
+      args:                         [msg.payload],
+      timeoutMs:                    BROADCAST_HANDLER_TIMEOUT_MS,
+      dispatch:                     theProxy.dispatch,
+      dispatchOnHandle:             theProxy.dispatchOnHandle,
+      console:                      capturedConsole,
+      serializeError,
+      allowDangerous:               false,
+      dispatchRegisterHandler:      dispatchers.dispatchRegisterHandler,
+      dispatchUnregisterHandler:    dispatchers.dispatchUnregisterHandler,
+      dispatchBroadcastSubscribe:   dispatchers.dispatchBroadcastSubscribe,
+      dispatchBroadcastUnsubscribe: dispatchers.dispatchBroadcastUnsubscribe,
+    }),
+    BROADCAST_HANDLER_TIMEOUT_MS,
+    () => new ScriptTimeoutError(`Broadcast handler ${msg.subId} (event ${msg.event}) exceeded ${BROADCAST_HANDLER_TIMEOUT_MS / 1000}s timeout`),
+  ).catch((err: unknown) => {
+    // Swallow handler errors (bus parity). On the async-hang ScriptTimeoutError, kill
+    // the worker so the wedged runChain slot is cleared by respawn.
+    if (err instanceof Error && err.name === 'ScriptTimeoutError') {
+      proc.fail(`script-runner: async-timeout firing broadcast handler ${msg.subId} (scriptId=${msg.scriptId}); terminating to clear the wedged engine runChain`);
+    }
+  });
 }
 
 /**

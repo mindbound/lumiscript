@@ -16,8 +16,11 @@ import {
   runUserScriptInQuickJS,
   fireHandlerInQuickJS,
   hasVmHandler,
+  hasVmBroadcast,
   disposeScriptVmHandlers,
+  disposeScriptVmBroadcast,
   _vmHandlerIdsForTests,
+  _vmBroadcastIdsForTests,
   _vmObjectCountForTests,
   type QuickJSRunOptions,
   type QuickJSFireOptions,
@@ -282,5 +285,108 @@ describe('#11 P5 inc3a: ui.events / oauth.onCallback / ui.dom.delegate', () => {
     expect(ids.length).toBe(2);
     expect(ids.every((i) => i.startsWith('uiDrawerChange:'))).toBe(true);
     disposeScriptVmHandlers('s-multi-sub');
+  });
+});
+
+describe('#11 P5 inc3b: broadcast.on (separate per-run registry)', () => {
+  test('registration stores a sub in the SEPARATE broadcast registry (not the handler registry)', async () => {
+    const subs: Array<{ subId: string; event: string }> = [];
+    const ret = await runUserScriptInQuickJS({
+      ...runOpts({
+        script: { id: 's-bc', name: 'BC', type: 'trigger' },
+        code: `return typeof api.broadcast.on('ping', (payload) => payload);`,
+      }),
+      dispatchBroadcastSubscribe: (subId, event) => subs.push({ subId, event }),
+    }) as string;
+    expect(ret).toBe('function'); // returns a sync unsub fn
+    const ids = _vmBroadcastIdsForTests('s-bc');
+    expect(ids.length).toBe(1);
+    expect(ids[0]).toMatch(/^sub:/);
+    expect(hasVmBroadcast('s-bc', ids[0]!)).toBe(true);
+    // The sub must NOT leak into the persistent-handler registry (distinct lifecycle).
+    expect(hasVmHandler('s-bc', ids[0]!)).toBe(false);
+    expect(_vmHandlerIdsForTests('s-bc')).toEqual([]);
+    // The subscribe IPC carried the subId + event verbatim.
+    expect(subs).toEqual([{ subId: ids[0]!, event: 'ping' }]);
+    disposeScriptVmBroadcast('s-bc');
+  });
+
+  test('a fired broadcast handler receives the payload + can await an api.* call (nested bridge)', async () => {
+    const seen: unknown[] = [];
+    const dispatch = async (m: string, args: unknown[]): Promise<unknown> => { if (m === 'echo') { seen.push(args[0]); return args[0]; } return undefined; };
+    await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-bc-fire', name: 'BF', type: 'trigger' }, dispatch,
+      code: `api.broadcast.on('evt', async (payload) => { await api.echo(payload.n); }); return null;`,
+    }));
+    const subId = _vmBroadcastIdsForTests('s-bc-fire')[0]!;
+    await fireHandlerInQuickJS(fireOpts({ scriptId: 's-bc-fire', handlerId: subId, args: [{ n: 99 }], dispatch }));
+    expect(seen).toEqual([99]);
+    disposeScriptVmBroadcast('s-bc-fire');
+  });
+
+  test('disposeScriptVmBroadcast (broadcast-clear at run-start) drops ONLY broadcast subs; persistent handlers survive', async () => {
+    await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-mix', name: 'MIX', type: 'trigger' },
+      code: `api.commands.onInvoked(() => 'h'); api.broadcast.on('e', () => 'b'); return null;`,
+    }));
+    const hid = _vmHandlerIdsForTests('s-mix')[0]!;
+    const subId = _vmBroadcastIdsForTests('s-mix')[0]!;
+    expect(hasVmHandler('s-mix', hid)).toBe(true);
+    expect(hasVmBroadcast('s-mix', subId)).toBe(true);
+    // broadcast-clear drops the sub but leaves the persistent command handler intact.
+    expect(disposeScriptVmBroadcast('s-mix')).toBe(1);
+    expect(hasVmBroadcast('s-mix', subId)).toBe(false);
+    expect(hasVmHandler('s-mix', hid)).toBe(true);
+    // full teardown then drops the handler too (broadcast already gone -> count 1).
+    expect(disposeScriptVmHandlers('s-mix')).toBe(1);
+    expect(hasVmHandler('s-mix', hid)).toBe(false);
+  });
+
+  test('full teardown (disposeScriptVmHandlers) drops BOTH handlers and broadcast subs', async () => {
+    await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-both', name: 'BOTH', type: 'trigger' },
+      code: `api.commands.onInvoked(() => {}); api.broadcast.on('e', () => {}); return null;`,
+    }));
+    expect(_vmHandlerIdsForTests('s-both').length).toBe(1);
+    expect(_vmBroadcastIdsForTests('s-both').length).toBe(1);
+    expect(disposeScriptVmHandlers('s-both')).toBe(2); // 1 broadcast + 1 handler
+    expect(_vmHandlerIdsForTests('s-both')).toEqual([]);
+    expect(_vmBroadcastIdsForTests('s-both')).toEqual([]);
+  });
+
+  test('the returned unsub disposes the sub + dispatches a matching broadcast-unsubscribe IPC', async () => {
+    const subbed: string[] = [];
+    const unsubbed: string[] = [];
+    await runUserScriptInQuickJS({
+      ...runOpts({
+        script: { id: 's-bc-unsub', name: 'UN', type: 'trigger' },
+        code: `var off = api.broadcast.on('e', () => {}); off(); return null;`,
+      }),
+      dispatchBroadcastSubscribe: (subId) => subbed.push(subId),
+      dispatchBroadcastUnsubscribe: (subId) => unsubbed.push(subId),
+    });
+    expect(subbed.length).toBe(1);
+    expect(unsubbed).toEqual(subbed); // unsub dispatched the SAME subId it subscribed
+    expect(_vmBroadcastIdsForTests('s-bc-unsub')).toEqual([]); // disposed in-run
+  });
+
+  test('multiple broadcast.on subs on one script are each uniquely keyed', async () => {
+    await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-bc-multi', name: 'BM', type: 'trigger' },
+      code: `api.broadcast.on('a', () => {}); api.broadcast.on('b', () => {}); return null;`,
+    }));
+    const ids = _vmBroadcastIdsForTests('s-bc-multi');
+    expect(ids.length).toBe(2);
+    expect(new Set(ids).size).toBe(2);
+    expect(ids.every((i) => i.startsWith('sub:'))).toBe(true);
+    disposeScriptVmBroadcast('s-bc-multi');
+  });
+
+  test('non-function handler fails loud at api.broadcast.on', async () => {
+    let msg = '';
+    try {
+      await runUserScriptInQuickJS(runOpts({ script: { id: 's-bc-bad', name: 'BAD', type: 'trigger' }, code: `api.broadcast.on('e', 42); return null;` }));
+    } catch (e) { msg = (e as Error).message; }
+    expect(msg).toContain('handler must be a function');
   });
 });
