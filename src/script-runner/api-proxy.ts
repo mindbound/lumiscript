@@ -751,6 +751,15 @@ export interface ProxyHandle {
    * AsyncFunction path, instead of presenting the built `api` object.
    */
   dispatch(method: string, args: unknown[]): Promise<unknown>;
+  /**
+   * Handle-method dispatcher — a method call on a held `HandleRef` (e.g. a
+   * `db.collection` returned to the script). Sets `targetHandle` on the
+   * `ApiProxyRequest` so the host resolves the handle + applies the
+   * persistent-handle fallback. Exposed (#11 P4) so the QuickJS engine's in-VM
+   * handle proxies route through the SAME IPC as the AsyncFunction path's own
+   * handle proxies (which call this closure directly).
+   */
+  dispatchOnHandle(targetHandle: HandleRef, method: string, args: unknown[]): Promise<unknown>;
 }
 
 // ─── Proxy builder ──────────────────────────────────────────────────────────
@@ -4675,6 +4684,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
     cleanup,
     flush,
     dispatch,
+    dispatchOnHandle,
   };
 }
 

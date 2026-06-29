@@ -29,6 +29,7 @@ import {
 } from 'quickjs-emscripten-core';
 import variant from '@jitl/quickjs-singlefile-mjs-release-sync';
 import { marshalEncode, marshalDecode, VM_MARSHAL_BOOTSTRAP } from './vm-marshal.js';
+import type { HandleKind, HandleRef } from '../types/script-runner-ipc.js';
 import { VM_WEBGLOBALS_BOOTSTRAP } from './vm-webglobals.js';
 import { VM_ZOD_BUNDLE } from './generated/vm-zod-bundle.js';
 import { VM_HANDLEBARS_BUNDLE } from './generated/vm-handlebars-bundle.js';
@@ -59,6 +60,12 @@ export interface QuickJSRunOptions {
    *  locked child realm. Absent → the in-VM `fetch` reports the capability is
    *  unavailable (the host did not grant it for this run). */
   hostFetch?: (url: string, init?: RequestInit) => Promise<Response>;
+  /** Host-side handle-method dispatcher (`proxy.dispatchOnHandle`), threaded so the
+   *  in-VM handle proxies (P4) can route a method call on a held HandleRef back to
+   *  the canonical host implementation (same IPC + targetHandle envelope as the
+   *  asyncfn path). Absent → in-VM handle methods report the capability is
+   *  unavailable (the host did not grant it for this run). */
+  dispatchOnHandle?: (targetHandle: HandleRef, method: string, args: unknown[]) => Promise<unknown>;
 }
 
 // In-VM bootstrap: the recursive `api` Proxy. `api.chat.getMessages(a,b)` →
@@ -135,6 +142,19 @@ globalThis.__lsBuildApi = function (hostDispatch) {
       return globalThis.__hbs.compile(result.text)(data);
     });
   };
+  // #11 P4 — db.collection: in the asyncfn path a Zod schema arg is stripped
+  // before IPC and validated CHILD-side (a non-cloneable ZodType can't cross).
+  // The in-VM specialized collection proxy with schema validation is a P4
+  // follow-up; until then fail LOUD with an actionable message rather than the
+  // generic 'functions not marshaled' marshaler error (or silently skipping
+  // validation). Schemaless db.collection works via the normal dispatch.
+  var dbCollection = function (a) {
+    var opts = a[1];
+    if (opts && typeof opts === 'object' && isZod(opts.schema)) {
+      throw new Error('api.db.collection: a Zod schema is not yet supported on the QuickJS engine (P4 follow-up). Create the collection without a schema and validate in script code, or run on the default engine.');
+    }
+    return send('db.collection', a);
+  };
   var make = function (path) {
     return new Proxy(function () {}, {
       get: function (_t, prop) {
@@ -148,11 +168,52 @@ globalThis.__lsBuildApi = function (hostDispatch) {
         if (path === 'utils.template.compile') return templateCompile(a);
         if (path === 'utils.template.registerHelper') return templateRegisterHelper(a);
         if (path === 'utils.template.render') return templateRender(a);
+        if (path === 'db.collection') return dbCollection(a);
         return send(path, a);
       },
     });
   };
   return make('');
+};
+`;
+
+// #11 P4 — in-VM handle proxy factory. A host HandleRef (db.collection / addStyle
+// return, or a held handle decoded from an arg) crosses Boundary #2 as {$:'h'} and
+// the marshaler twin's dec() turns it into one of these: a reflective Proxy whose
+// methods dispatch via __hostHandleDispatch(id, kind, method, argsJson) — the
+// handle-method analogue of __hostDispatch (which produces the host's
+// targetHandle-bearing ApiProxyRequest). Cached per-run in __lsVmHandles by id so
+// two decodes of the same handle return the SAME object (identity parity with the
+// asyncfn proxy). The table is per-run-mutable (reset each run), NOT frozen.
+const VM_HANDLE_BOOTSTRAP = `
+globalThis.__lsVmHandleProxy = function (id, kind) {
+  var unwrap = function (s) {
+    var o = JSON.parse(s);
+    if (o && o.e) {
+      var err = new Error((o.e && o.e.message) || 'error');
+      if (o.e.name) err.name = o.e.name;
+      if (o.e.stack) err.stack = o.e.stack;
+      throw err;
+    }
+    return globalThis.__lsDecode(o ? o.v : undefined);
+  };
+  var table = globalThis.__lsVmHandles || (globalThis.__lsVmHandles = {});
+  if (Object.prototype.hasOwnProperty.call(table, id)) return table[id];
+  var proxy = new Proxy(function () {}, {
+    get: function (_t, prop) {
+      if (prop === '__handleRef') return true;
+      if (prop === 'id') return id;
+      if (prop === 'kind') return kind;
+      // Not thenable (so 'await handle' does not try to call .then) and no symbol props.
+      if (typeof prop !== 'string' || prop === 'then') return undefined;
+      return function () {
+        var args = Array.prototype.slice.call(arguments);
+        return Promise.resolve(globalThis.__hostHandleDispatch(id, kind, prop, JSON.stringify(globalThis.__lsEncode(args)))).then(unwrap);
+      };
+    },
+  });
+  table[id] = proxy;
+  return proxy;
 };
 `;
 
@@ -225,7 +286,7 @@ const VM_REQUIRE_BOOTSTRAP = `
 // deep-frozen.) Eval'd LAST in getContext, after all scaffolding is built.
 const VM_FREEZE_BOOTSTRAP = `
 (function () {
-  var locked = ['__lsEncode', '__lsDecode', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', 'fetch', 'Headers', 'Response'];
+  var locked = ['__lsEncode', '__lsDecode', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', 'fetch', 'Headers', 'Response', '__hostHandleDispatch', '__lsVmHandleProxy'];
   for (var i = 0; i < locked.length; i++) {
     var name = locked[i];
     if (Object.prototype.hasOwnProperty.call(globalThis, name)) {
@@ -332,6 +393,8 @@ interface ActiveRun {
   allowDangerous: boolean;
   /** Pre-lockdown host fetch (see QuickJSRunOptions.hostFetch). */
   hostFetch?: (url: string, init?: RequestInit) => Promise<Response>;
+  /** Per-run handle-method dispatcher (see QuickJSRunOptions.dispatchOnHandle). */
+  dispatchOnHandle?: (targetHandle: HandleRef, method: string, args: unknown[]) => Promise<unknown>;
 }
 let activeRun: ActiveRun | undefined;
 /** Cached context build — promise-based so concurrent first calls share ONE
@@ -433,6 +496,47 @@ async function createContext(): Promise<QuickJSContext> {
   // Build the api proxy ONCE (its recursive `make` closure is cyclic; building
   // it per run was the churn the leak oracle caught).
   ctx.unwrapResult(ctx.evalCode('globalThis.api = __lsBuildApi(__hostDispatch);')).dispose();
+
+  // ── Stable __hostHandleDispatch (built ONCE) — the handle-method analogue of
+  // __hostDispatch (P4). An in-VM handle proxy calls it with (id, kind, method,
+  // argsJson); it routes to activeRun.dispatchOnHandle, which produces the host's
+  // targetHandle-bearing ApiProxyRequest (Boundary #1 unchanged). Same per-call
+  // deferred + settle/pump idiom as __hostDispatch so the in-VM promise never hangs. ──
+  const hostHandleDispatch = ctx.newFunction('__hostHandleDispatch', (idHandle, kindHandle, methodHandle, argsHandle) => {
+    const id = ctx.getString(idHandle);
+    const handleKind = ctx.getString(kindHandle) as HandleKind;
+    const method = ctx.getString(methodHandle);
+    const args = marshalDecode(JSON.parse(ctx.getString(argsHandle))) as unknown[];
+    const deferred = ctx.newPromise();
+    const settle = (kind: 'v' | 'e', payload: unknown, fallbackMessage: string) => {
+      let s: string;
+      try {
+        s = JSON.stringify(kind === 'v' ? { v: marshalEncode(payload) } : { e: payload });
+      } catch {
+        s = JSON.stringify({ e: { name: 'QuickJSMarshalError', message: fallbackMessage } });
+      }
+      ctx.newString(s).consume((h) => deferred.resolve(h));
+      pump();
+    };
+    const run = activeRun;
+    if (!run) {
+      settle('e', { name: 'Error', message: `LumiScript QuickJS: no active run for handle ${handleKind}.${method}().` }, 'no active run');
+    } else if (!run.dispatchOnHandle) {
+      settle('e', { name: 'Error', message: 'LumiScript QuickJS: handle dispatch is unavailable for this run.' }, 'no handle dispatch');
+    } else {
+      const targetHandle: HandleRef = { __handleRef: true, id, kind: handleKind };
+      void run.dispatchOnHandle(targetHandle, method, args).then(
+        (result) => settle('v', result, `Result of handle ${handleKind}.${method}() could not be marshaled to the QuickJS engine.`),
+        (err) => settle('e', run.serializeError(err), `Error from handle ${handleKind}.${method}() could not be serialized.`),
+      );
+    }
+    void deferred.settled.then(pump);
+    return deferred.handle;
+  });
+  ctx.setProp(ctx.global, '__hostHandleDispatch', hostHandleDispatch);
+  hostHandleDispatch.dispose();
+  // The in-VM handle-proxy factory (reads __hostHandleDispatch at method-call time).
+  ctx.unwrapResult(ctx.evalCode(VM_HANDLE_BOOTSTRAP)).dispose();
 
   // ── Stable __console (built ONCE) — forwards to activeRun.console at call time. ──
   const consoleObj = ctx.newObject();
@@ -553,7 +657,7 @@ export async function runUserScriptInQuickJS(opts: QuickJSRunOptions): Promise<u
   await prior;
 
   currentDeadline = Date.now() + opts.timeoutMs;
-  activeRun = { dispatch: opts.dispatch, console: opts.console, serializeError: opts.serializeError, allowDangerous: opts.allowDangerous ?? false, hostFetch: opts.hostFetch };
+  activeRun = { dispatch: opts.dispatch, console: opts.console, serializeError: opts.serializeError, allowDangerous: opts.allowDangerous ?? false, hostFetch: opts.hostFetch, dispatchOnHandle: opts.dispatchOnHandle };
   const pump = () => ctx.runtime.executePendingJobs();
 
   // #11 fix (d) — a synchronous `while(true){}` blocks the host event loop, so
@@ -596,6 +700,7 @@ export async function runUserScriptInQuickJS(opts: QuickJSRunOptions): Promise<u
       globalThis.script = JSON.parse(globalThis.__lsScriptJson);
       globalThis.__lsRequireCache = {};
       globalThis.__lsRequireInProgress = {};
+      globalThis.__lsVmHandles = {};
       globalThis.script.require = globalThis.__lsRequire;
       globalThis.__hbs.helpers = Object.assign({}, globalThis.__hbsBuiltins);
       globalThis.__hbs.partials = Object.assign({}, globalThis.__hbsBuiltinPartials);

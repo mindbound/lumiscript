@@ -16,6 +16,7 @@
  *   Map                                  → { $: 'm', v: [[encK, encV], …] }
  *   Set                                  → { $: 's', v: [encV, …] }
  *   ArrayBuffer / typed array / DataView → { $: 'b', k: <ctor name>, v: [byte,…] }
+ *   HandleRef (P4)                       → { $: 'h', id, kind }
  *   Array                                → [ enc, … ]
  *   plain object WITHOUT own '$'         → { key: enc, … }            (pass-through)
  *   plain object WITH own '$'            → { $: 'o', v: { key: enc, … } }  (escaped)
@@ -36,6 +37,8 @@
  * pass can switch to base64 if large-binary wire size becomes a concern. Bytes
  * are endian-preserving only across same-endian peers (LE everywhere relevant).
  */
+
+import { isHandleRef, type HandleKind, type HandleRef } from '../types/script-runner-ipc.js';
 
 const UNSUPPORTED = 'LumiScript QuickJS engine: unsupported value — ';
 
@@ -74,6 +77,10 @@ function encodeInner(v: unknown, seen: Set<object>): unknown {
   const obj = v as object;
   if (v instanceof Date) return { $: 'd', v: (v as Date).getTime() };
   if (v instanceof RegExp) return { $: 'r', s: (v as RegExp).source, f: (v as RegExp).flags };
+  // P4 — a HandleRef (db.collection / addStyle return, or a held handle passed
+  // back as an arg) crosses as {$:'h'}; the VM twin's dec() rebuilds a
+  // method-bearing handle proxy, the host twin rebuilds a plain HandleRef.
+  if (isHandleRef(v)) return { $: 'h', id: v.id, kind: v.kind };
   if (seen.has(obj)) throw new Error(UNSUPPORTED + 'circular reference.');
   seen.add(obj);
   try {
@@ -128,6 +135,7 @@ export function marshalDecode(shadow: unknown): unknown {
       case 'm': return new Map((o.v as Array<[unknown, unknown]>).map(([k, val]) => [marshalDecode(k), marshalDecode(val)]));
       case 's': return new Set((o.v as unknown[]).map(marshalDecode));
       case 'b': return decodeBytes(o.k as string, o.v as number[]);
+      case 'h': return { __handleRef: true, id: o.id as string, kind: o.kind as HandleKind } satisfies HandleRef;
       case 'o': {
         const inner = o.v as Record<string, unknown>;
         const out: Record<string, unknown> = {};
@@ -174,6 +182,12 @@ export const VM_MARSHAL_BOOTSTRAP = `
     }
     if (t === 'undefined') return { $: 'u' };
     if (t === 'bigint') return { $: 'n', v: v.toString() };
+    // P4 — an in-VM handle proxy is a Proxy over a function (typeof === 'function'),
+    // so this MUST precede the function throw. Its get-trap exposes __handleRef/id/kind.
+    // Predicate kept in LOCKSTEP with the host twin's isHandleRef (script-runner-ipc):
+    // __handleRef===true AND string id AND string kind — so a decoy object/function
+    // with only __handleRef set is NOT mistagged (it stays a plain value / fails loud).
+    if (v && (t === 'object' || t === 'function') && v.__handleRef === true && typeof v.id === 'string' && typeof v.kind === 'string') return { $: 'h', id: v.id, kind: v.kind };
     if (t === 'function') throw new Error(BAD + 'functions/callbacks are not yet marshaled (a later phase).');
     if (t === 'symbol') throw new Error(BAD + 'symbol.');
     if (v instanceof Date) return { $: 'd', v: v.getTime() };
@@ -220,6 +234,7 @@ export const VM_MARSHAL_BOOTSTRAP = `
         case 'm': { var m = new Map(); for (var i = 0; i < x.v.length; i++) m.set(dec(x.v[i][0]), dec(x.v[i][1])); return m; }
         case 's': { var s = new Set(); for (var i = 0; i < x.v.length; i++) s.add(dec(x.v[i])); return s; }
         case 'b': return decB(x.k, x.v);
+        case 'h': return globalThis.__lsVmHandleProxy(x.id, x.kind);
         case 'o': { var o = {}; var ks = Object.keys(x.v); for (var i = 0; i < ks.length; i++) o[ks[i]] = dec(x.v[ks[i]]); return o; }
         default: throw new Error(BAD + 'unknown marshaling tag ' + String(x.$) + '.');
       }

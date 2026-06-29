@@ -1079,6 +1079,10 @@ async function runOne(
             // reference. Only granted when allowDangerous (defense-in-depth alongside
             // the engine's own allowDangerous gate). Mirrors the asyncfn safeFetch.
             hostFetch:      req.allowDangerous ? _hostFetch : undefined,
+            // P4 — handle-method dispatcher, so in-VM handle proxies (db.collection
+            // etc.) route method calls back through the SAME targetHandle IPC as the
+            // asyncfn path. Boundary #1 unchanged.
+            dispatchOnHandle: proxy.dispatchOnHandle,
           }),
         ),
         req.timeoutMs,
