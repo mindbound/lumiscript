@@ -71,6 +71,8 @@ export interface QuickJSRunOptions {
   dispatchRegisterHandler?: (kind: string, handlerId: string, meta: unknown) => void;
   /** P5 — dispatch the unregister-handler IPC to the parent on an in-VM unsub. */
   dispatchUnregisterHandler?: (kind: string, handlerId: string) => void;
+  /** P5 inc3c — name-keyed unregister IPC for macro/tool (api.macros/tools.unregister). */
+  dispatchUnregisterHandlerNamed?: (kind: string, name: string) => void;
   /** P5 inc3b — broadcast.on uses a SEPARATE IPC (broadcast-subscribe, keyed by subId,
    *  not handlerId/kind). The closure still lives in the VM registry (keyed by subId). */
   dispatchBroadcastSubscribe?: (subId: string, event: string) => void;
@@ -250,6 +252,22 @@ globalThis.__lsBuildApi = function (hostDispatch) {
     globalThis.__hostBroadcastSubscribe(subId, handler, String(event));
     return function () { globalThis.__hostBroadcastUnsubscribe(subId); };
   };
+  // #11 P5 inc3c — macro/tool registration: VOID return, NAME-keyed unregister. The
+  // handler is dup'd + fired by handlerId (like commands.onInvoked), but the register IPC
+  // ALSO carries {name, def} (the host stores the wrapper by NAME) and unregister is BY
+  // NAME. The name<->handlerId bridge lives HOST-side (one shared VM context can't be
+  // namespaced by scriptId, which is host-stamped), so the VM just sends the name on
+  // unregister; the dup is reaped at teardown (asyncfn keeps its closure until teardown
+  // too). registerNamedHandler validates fn loud + returns undefined (these methods are
+  // canonically sync-void, NOT an unsub fn / handle).
+  var registerNamedHandler = function (kind, method, name, def, fn) {
+    if (typeof fn !== 'function') throw new Error('api.' + method + ': handler must be a function.');
+    var handlerId = kind + ':' + globalThis.crypto.randomUUID();
+    globalThis.__hostRegisterHandler(kind, handlerId, fn, JSON.stringify(globalThis.__lsEncode({ name: String(name), def: def })));
+  };
+  var unregisterNamedHandler = function (kind, name) {
+    globalThis.__hostUnregisterHandlerNamed(kind, String(name));
+  };
   var make = function (path) {
     return new Proxy(function () {}, {
       get: function (_t, prop) {
@@ -279,11 +297,33 @@ globalThis.__lsBuildApi = function (hostDispatch) {
         if (path === 'ui.dom.delegate') return registerVmHandler('domDelegate', 'ui.dom.delegate', a[2], { selector: a[0], event: a[1], options: a[3] || {} });
         // P5 inc3b — broadcast.on(event, handler): separate broadcast-subscribe IPC.
         if (path === 'broadcast.on') return broadcastOn(a[0], a[1]);
+        // P5 inc3c — macros/tools registration. PULL-mode macro + tools register a
+        // handler fn (dup'd + fired by handlerId); the register IPC also carries {name,
+        // def} and unregister is BY NAME. PUSH-mode macro (no handler) + updateValue are
+        // fire-and-forget passthroughs (sync void, swallowed rejection — asyncfn parity).
+        if (path === 'macros.register') {
+          if (a[2] === undefined) { send(path, a).catch(function () {}); return; } // push-mode (handler===undefined)
+          return registerNamedHandler('macro', 'macros.register', a[0], a[1], a[2]);  // pull (validates fn)
+        }
+        if (path === 'macros.updateValue') { send(path, a).catch(function () {}); return; }
+        if (path === 'macros.unregister') { unregisterNamedHandler('macro', a[0]); return; }
+        if (path === 'tools.register') {
+          var __toolFn = a[2];
+          if (typeof __toolFn !== 'function') throw new Error('api.tools.register: handler must be a function.');
+          // ToolHandler signature is (args, api, ctx?) — the host fires with [toolArgs] or
+          // [toolArgs, toolCtx] (api is NOT on the wire); re-inject the in-VM api as arg 1.
+          return registerNamedHandler('tool', 'tools.register', a[0], a[1], function (toolArgs, toolCtx) {
+            return __toolFn(toolArgs, rootApi, toolCtx);
+          });
+        }
+        if (path === 'tools.unregister') { unregisterNamedHandler('tool', a[0]); return; }
         return send(path, a);
       },
     });
   };
-  return make('');
+  // Capture the root api proxy once so tool handlers can re-inject it (see tools.register).
+  var rootApi = make('');
+  return rootApi;
 };
 `;
 
@@ -408,7 +448,7 @@ const VM_REQUIRE_BOOTSTRAP = `
 // deep-frozen.) Eval'd LAST in getContext, after all scaffolding is built.
 const VM_FREEZE_BOOTSTRAP = `
 (function () {
-  var locked = ['__lsEncode', '__lsDecode', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', 'fetch', 'Headers', 'Response', '__hostHandleDispatch', '__lsVmHandleProxy', '__hostRegisterHandler', '__hostUnregisterHandler', '__lsCallHandler', '__hostBroadcastSubscribe', '__hostBroadcastUnsubscribe'];
+  var locked = ['__lsEncode', '__lsDecode', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', 'fetch', 'Headers', 'Response', '__hostHandleDispatch', '__lsVmHandleProxy', '__hostRegisterHandler', '__hostUnregisterHandler', '__hostUnregisterHandlerNamed', '__lsCallHandler', '__hostBroadcastSubscribe', '__hostBroadcastUnsubscribe'];
   for (var i = 0; i < locked.length; i++) {
     var name = locked[i];
     if (Object.prototype.hasOwnProperty.call(globalThis, name)) {
@@ -527,6 +567,8 @@ interface ActiveRun {
    *  unsub fn runs, so the parent drops its canonical subscription (else it leaks a
    *  ghost registration that errors on every later invoke). */
   dispatchUnregisterHandler?: (kind: string, handlerId: string) => void;
+  /** P5 inc3c — name-keyed unregister for macro/tool (see QuickJSRunOptions). */
+  dispatchUnregisterHandlerNamed?: (kind: string, name: string) => void;
   /** P5 inc3b — broadcast subscribe/unsubscribe IPC (see QuickJSRunOptions). */
   dispatchBroadcastSubscribe?: (subId: string, event: string) => void;
   dispatchBroadcastUnsubscribe?: (subId: string) => void;
@@ -730,6 +772,23 @@ async function createContext(): Promise<QuickJSContext> {
   ctx.setProp(ctx.global, '__hostUnregisterHandler', hostUnregisterHandler);
   hostUnregisterHandler.dispose();
 
+  // ── P5 inc3c: macro/tool unregister BY NAME. macro/tool stores resolve by (scriptId,
+  // name), NOT handlerId, so this sends a name-keyed unregister IPC (distinct from
+  // __hostUnregisterHandler's handlerId-keyed one). The VM dup (pull-mode) is NOT disposed
+  // here — it is reaped at teardown (asyncfn parity: the closure outlives unregister(name),
+  // and a stale dup never fires once the host drops the name from its store). ──
+  const hostUnregisterHandlerNamed = ctx.newFunction('__hostUnregisterHandlerNamed', (kindHandle, nameHandle) => {
+    const run = activeRun;
+    if (run?.scriptId) {
+      const kind = ctx.getString(kindHandle);
+      const name = ctx.getString(nameHandle);
+      run.dispatchUnregisterHandlerNamed?.(kind, name);
+    }
+    // returns undefined to the VM
+  });
+  ctx.setProp(ctx.global, '__hostUnregisterHandlerNamed', hostUnregisterHandlerNamed);
+  hostUnregisterHandlerNamed.dispose();
+
   // ── P5 inc3b: broadcast subscription. Same dup-the-VM-fn pattern as
   // __hostRegisterHandler, but the closure is keyed by subId and lives in the SEPARATE
   // vmBroadcastHandles registry (broadcast subs are cleared per-run by the parent's
@@ -889,7 +948,7 @@ export async function runUserScriptInQuickJS(opts: QuickJSRunOptions): Promise<u
   await prior;
 
   currentDeadline = Date.now() + opts.timeoutMs;
-  activeRun = { dispatch: opts.dispatch, console: opts.console, serializeError: opts.serializeError, allowDangerous: opts.allowDangerous ?? false, hostFetch: opts.hostFetch, dispatchOnHandle: opts.dispatchOnHandle, scriptId: opts.script.id, dispatchRegisterHandler: opts.dispatchRegisterHandler, dispatchUnregisterHandler: opts.dispatchUnregisterHandler, dispatchBroadcastSubscribe: opts.dispatchBroadcastSubscribe, dispatchBroadcastUnsubscribe: opts.dispatchBroadcastUnsubscribe };
+  activeRun = { dispatch: opts.dispatch, console: opts.console, serializeError: opts.serializeError, allowDangerous: opts.allowDangerous ?? false, hostFetch: opts.hostFetch, dispatchOnHandle: opts.dispatchOnHandle, scriptId: opts.script.id, dispatchRegisterHandler: opts.dispatchRegisterHandler, dispatchUnregisterHandler: opts.dispatchUnregisterHandler, dispatchUnregisterHandlerNamed: opts.dispatchUnregisterHandlerNamed, dispatchBroadcastSubscribe: opts.dispatchBroadcastSubscribe, dispatchBroadcastUnsubscribe: opts.dispatchBroadcastUnsubscribe };
   const pump = () => ctx.runtime.executePendingJobs();
 
   // #11 fix (d) — a synchronous `while(true){}` blocks the host event loop, so
@@ -1038,6 +1097,7 @@ export interface QuickJSFireOptions {
   dispatchOnHandle?: (targetHandle: HandleRef, method: string, args: unknown[]) => Promise<unknown>;
   dispatchRegisterHandler?: (kind: string, handlerId: string, meta: unknown) => void;
   dispatchUnregisterHandler?: (kind: string, handlerId: string) => void;
+  dispatchUnregisterHandlerNamed?: (kind: string, name: string) => void;
   dispatchBroadcastSubscribe?: (subId: string, event: string) => void;
   dispatchBroadcastUnsubscribe?: (subId: string) => void;
 }
@@ -1088,6 +1148,7 @@ export async function fireHandlerInQuickJS(opts: QuickJSFireOptions): Promise<un
     dispatchOnHandle: opts.dispatchOnHandle, scriptId: opts.scriptId,
     dispatchRegisterHandler: opts.dispatchRegisterHandler,
     dispatchUnregisterHandler: opts.dispatchUnregisterHandler,
+    dispatchUnregisterHandlerNamed: opts.dispatchUnregisterHandlerNamed,
     dispatchBroadcastSubscribe: opts.dispatchBroadcastSubscribe,
     dispatchBroadcastUnsubscribe: opts.dispatchBroadcastUnsubscribe,
   };

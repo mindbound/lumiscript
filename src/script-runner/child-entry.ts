@@ -765,6 +765,7 @@ function makeHandlerDispatchers(
 ): {
   dispatchRegisterHandler: (kind: string, handlerId: string, meta: unknown) => void;
   dispatchUnregisterHandler: (kind: string, handlerId: string) => void;
+  dispatchUnregisterHandlerNamed: (kind: string, name: string) => void;
   dispatchBroadcastSubscribe: (subId: string, event: string) => void;
   dispatchBroadcastUnsubscribe: (subId: string) => void;
 } {
@@ -783,6 +784,12 @@ function makeHandlerDispatchers(
     },
     dispatchUnregisterHandler: (kind, handlerId) => {
       const msg = { type: 'unregister-handler', kind, scriptId, handlerId } as unknown as UnregisterHandler;
+      proc.send(msg);
+    },
+    // P5 inc3c — macro/tool unregister is BY NAME (the host's macro/tool stores resolve
+    // by (scriptId, name), not handlerId). Same IPC type, name field instead of handlerId.
+    dispatchUnregisterHandlerNamed: (kind, name) => {
+      const msg = { type: 'unregister-handler', kind, scriptId, name } as unknown as UnregisterHandler;
       proc.send(msg);
     },
     // P5 inc3b — broadcast.on uses the separate broadcast-subscribe / -unsubscribe IPC
@@ -849,8 +856,9 @@ async function fireVmHandler(
           // rarely fetch; threading the script's allowDangerous onto RunHandlerRequest
           // is a tracked follow-up).
           allowDangerous:            false,
-          dispatchRegisterHandler:   dispatchers.dispatchRegisterHandler,
-          dispatchUnregisterHandler: dispatchers.dispatchUnregisterHandler,
+          dispatchRegisterHandler:        dispatchers.dispatchRegisterHandler,
+          dispatchUnregisterHandler:      dispatchers.dispatchUnregisterHandler,
+          dispatchUnregisterHandlerNamed: dispatchers.dispatchUnregisterHandlerNamed,
         })),
       ),
       req.timeoutMs,
@@ -919,9 +927,10 @@ function fireVmBroadcast(proc: SpindleBackendProcessContext, msg: BroadcastFireM
       console:                      capturedConsole,
       serializeError,
       allowDangerous:               false,
-      dispatchRegisterHandler:      dispatchers.dispatchRegisterHandler,
-      dispatchUnregisterHandler:    dispatchers.dispatchUnregisterHandler,
-      dispatchBroadcastSubscribe:   dispatchers.dispatchBroadcastSubscribe,
+      dispatchRegisterHandler:        dispatchers.dispatchRegisterHandler,
+      dispatchUnregisterHandler:      dispatchers.dispatchUnregisterHandler,
+      dispatchUnregisterHandlerNamed: dispatchers.dispatchUnregisterHandlerNamed,
+      dispatchBroadcastSubscribe:     dispatchers.dispatchBroadcastSubscribe,
       dispatchBroadcastUnsubscribe: dispatchers.dispatchBroadcastUnsubscribe,
     }),
     BROADCAST_HANDLER_TIMEOUT_MS,

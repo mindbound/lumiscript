@@ -166,4 +166,78 @@ describe('#11 P5 e2e: quickjs commands.onInvoked', () => {
     );
     expect(handlerResult.ok).toBe(true);
   });
+
+  test('macros.register (inc3c, pull): register IPC carries name+def; fires with MacroContext + awaited api round-trips', async () => {
+    const { ipc } = await setupE2E();
+    _setEngineModeForTests('quickjs');
+    const code = `
+      api.macros.register('mymacro', { description: 'test macro' }, async (ctx) => {
+        await api.scriptStorage.set('macro-last', ctx.args[0]);
+        return 'macro:' + (await api.scriptStorage.get('macro-last'));
+      });
+      return 'registered';
+    `;
+    expect((await dispatchRunScript(makeScript('macro-script', code), makeRequest())).ok).toBe(true);
+
+    const reg = ipc.parentInbox().find((m): m is RegisterHandler => {
+      if (typeof m !== 'object' || m === null) return false;
+      const r = m as RegisterHandler;
+      return r.type === 'register-handler' && r.kind === 'macro';
+    });
+    expect(reg).toBeDefined();
+    expect(reg!.handlerId).toMatch(/^macro:/);
+    expect((reg as { name?: string }).name).toBe('mymacro');
+    expect((reg as { def?: unknown }).def).toEqual({ description: 'test macro' });
+
+    // Fire it — macro args shape [MacroContext]; ctx.args[0] is the first macro arg.
+    const handlerResult = await __sendRunHandlerRequestForTests(
+      'macro-script', reg!.handlerId, 'macro', [{ args: ['hello'] }], 5_000,
+    );
+    expect(handlerResult.ok).toBe(true);
+    expect(handlerResult.value).toBe('macro:hello');
+  });
+
+  test('tools.register (inc3c): register IPC carries name+def; fires with (args, api, ctx) and the in-VM api round-trips', async () => {
+    const { ipc } = await setupE2E();
+    _setEngineModeForTests('quickjs');
+    const code = `
+      api.tools.register('mytool', { description: 'a tool', parameters: {} }, async (args, api, ctx) => {
+        await api.scriptStorage.set('tool-last', args.q);
+        return 'tool:' + (await api.scriptStorage.get('tool-last')) + ':' + (ctx ? ctx.id : 'noctx');
+      });
+      return 'registered';
+    `;
+    expect((await dispatchRunScript(makeScript('tool-script', code), makeRequest())).ok).toBe(true);
+
+    const reg = ipc.parentInbox().find((m): m is RegisterHandler => {
+      if (typeof m !== 'object' || m === null) return false;
+      const r = m as RegisterHandler;
+      return r.type === 'register-handler' && r.kind === 'tool';
+    });
+    expect(reg).toBeDefined();
+    expect(reg!.handlerId).toMatch(/^tool:/);
+    expect((reg as { name?: string }).name).toBe('mytool');
+
+    // Fire with [toolArgs, toolCtx] — the in-VM wrapper injects the api as arg 1.
+    const handlerResult = await __sendRunHandlerRequestForTests(
+      'tool-script', reg!.handlerId, 'tool', [{ q: 'ping' }, { id: 'call-9' }], 5_000,
+    );
+    expect(handlerResult.ok).toBe(true);
+    expect(handlerResult.value).toBe('tool:ping:call-9');
+  });
+
+  test('macros.unregister(name) (inc3c): sends a name-keyed unregister-handler IPC (no handlerId)', async () => {
+    const { ipc } = await setupE2E();
+    _setEngineModeForTests('quickjs');
+    expect((await dispatchRunScript(
+      makeScript('macro-unreg', `api.macros.register('z', {}, () => 'x'); api.macros.unregister('z'); return null;`), makeRequest(),
+    )).ok).toBe(true);
+    const unreg = ipc.parentInbox().find((m): m is UnregisterHandler => {
+      if (typeof m !== 'object' || m === null) return false;
+      const r = m as { type?: unknown; kind?: unknown; name?: unknown };
+      return r.type === 'unregister-handler' && r.kind === 'macro' && r.name === 'z';
+    });
+    expect(unreg).toBeDefined();
+    expect(unreg!.handlerId).toBeUndefined();
+  });
 });

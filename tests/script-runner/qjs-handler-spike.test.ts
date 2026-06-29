@@ -390,3 +390,134 @@ describe('#11 P5 inc3b: broadcast.on (separate per-run registry)', () => {
     expect(msg).toContain('handler must be a function');
   });
 });
+
+describe('#11 P5 inc3c: macros.register / tools.register (named, void, unregister-by-name)', () => {
+  test('macros.register (pull) stores a macro-kind handler; register IPC carries {name, def}; fires with MacroContext', async () => {
+    const reg: Array<{ kind: string; handlerId: string; meta: unknown }> = [];
+    await runUserScriptInQuickJS({
+      ...runOpts({
+        script: { id: 's-macro', name: 'M', type: 'trigger' },
+        code: `var r = api.macros.register('greet', { description: 'hi' }, (ctx) => 'H:' + ctx.args[0]); return typeof r;`,
+      }),
+      dispatchRegisterHandler: (kind, handlerId, meta) => reg.push({ kind, handlerId, meta }),
+    });
+    expect(reg.length).toBe(1);
+    expect(reg[0]!.kind).toBe('macro');
+    expect(reg[0]!.handlerId).toMatch(/^macro:/);
+    expect(reg[0]!.meta).toEqual({ name: 'greet', def: { description: 'hi' } });
+    const hid = _vmHandlerIdsForTests('s-macro')[0]!;
+    expect(hid).toBe(reg[0]!.handlerId);
+    const result = await fireHandlerInQuickJS(fireOpts({ scriptId: 's-macro', handlerId: hid, args: [{ args: ['world'] }] }));
+    expect(result).toBe('H:world');
+    disposeScriptVmHandlers('s-macro');
+  });
+
+  test('macros.register returns sync void (NOT an unsub fn / Promise) in both modes', async () => {
+    const pull = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-mv1', name: 'V1', type: 'trigger' },
+      code: `return typeof api.macros.register('g', {}, () => 'x');`,
+    })) as string;
+    expect(pull).toBe('undefined');
+    const push = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-mv2', name: 'V2', type: 'trigger' },
+      code: `return typeof api.macros.register('g', {});`,
+    })) as string;
+    expect(push).toBe('undefined');
+    disposeScriptVmHandlers('s-mv1'); disposeScriptVmHandlers('s-mv2');
+  });
+
+  test('macros.register (push, no handler) sends NO register-handler IPC + creates no VM dup (generic passthrough)', async () => {
+    const reg: unknown[] = [];
+    const dispatched: Array<[string, unknown[]]> = [];
+    await runUserScriptInQuickJS({
+      ...runOpts({
+        script: { id: 's-push', name: 'P', type: 'trigger' },
+        dispatch: async (m, a) => { dispatched.push([m, a]); return undefined; },
+        code: `api.macros.register('pm', { description: 'push' }); return null;`,
+      }),
+      dispatchRegisterHandler: (kind, handlerId, meta) => reg.push({ kind, handlerId, meta }),
+    });
+    expect(reg.length).toBe(0);
+    expect(_vmHandlerIdsForTests('s-push')).toEqual([]);
+    const pushDispatch = dispatched.find(([m]) => m === 'macros.register');
+    expect(pushDispatch).toBeDefined();
+    expect(pushDispatch![1]).toEqual(['pm', { description: 'push' }]);
+  });
+
+  test('macros.unregister(name) sends a NAME-keyed unregister IPC (no handlerId); the dup survives until teardown (parity)', async () => {
+    const unreg: Array<{ kind: string; name: string }> = [];
+    await runUserScriptInQuickJS({
+      ...runOpts({
+        script: { id: 's-unreg', name: 'U', type: 'trigger' },
+        code: `api.macros.register('g', { description: 'd' }, () => 'x'); api.macros.unregister('g'); return null;`,
+      }),
+      dispatchUnregisterHandlerNamed: (kind, name) => unreg.push({ kind, name }),
+    });
+    expect(unreg).toEqual([{ kind: 'macro', name: 'g' }]);
+    // asyncfn parity: unregister(name) does NOT dispose the VM dup — it is reaped at
+    // teardown (a stale dup never fires once the host drops the name from its store).
+    expect(_vmHandlerIdsForTests('s-unreg').length).toBe(1);
+    disposeScriptVmHandlers('s-unreg');
+    expect(_vmHandlerIdsForTests('s-unreg')).toEqual([]);
+  });
+
+  test('tools.register fires the handler with (toolArgs, api, ctx) — api is the in-VM proxy; ctx present + absent', async () => {
+    const reg: Array<{ kind: string; meta: unknown }> = [];
+    const dispatch = async (m: string, a: unknown[]): Promise<unknown> => (m === 'echo' ? a[0] : undefined);
+    await runUserScriptInQuickJS({
+      ...runOpts({
+        script: { id: 's-tool', name: 'T', type: 'trigger' }, dispatch,
+        code: `api.tools.register('t', { description: 'd', parameters: {} }, async (args, api, ctx) => { var v = await api.echo(args.n); return 'R:' + v + ':' + (ctx ? ctx.id : 'noctx'); }); return null;`,
+      }),
+      dispatchRegisterHandler: (kind, handlerId, meta) => reg.push({ kind, meta }),
+    });
+    expect(reg.length).toBe(1);
+    expect(reg[0]!.kind).toBe('tool');
+    expect(reg[0]!.meta).toEqual({ name: 't', def: { description: 'd', parameters: {} } });
+    const hid = _vmHandlerIdsForTests('s-tool')[0]!;
+    expect(hid).toMatch(/^tool:/);
+    // fire with [toolArgs, toolCtx] — proves api re-injection (api.echo round-trips) + ctx passthrough
+    const r1 = await fireHandlerInQuickJS(fireOpts({ scriptId: 's-tool', handlerId: hid, args: [{ n: 5 }, { id: 'call-1' }], dispatch }));
+    expect(r1).toBe('R:5:call-1');
+    // fire with [toolArgs] only — ctx is undefined (host omits it when absent)
+    const r2 = await fireHandlerInQuickJS(fireOpts({ scriptId: 's-tool', handlerId: hid, args: [{ n: 9 }], dispatch }));
+    expect(r2).toBe('R:9:noctx');
+    disposeScriptVmHandlers('s-tool');
+  });
+
+  test('a non-function handler fails loud for both macros.register (pull) and tools.register', async () => {
+    let m1 = '';
+    try { await runUserScriptInQuickJS(runOpts({ script: { id: 's-mbad', name: 'MB', type: 'trigger' }, code: `api.macros.register('m', {}, 42); return null;` })); }
+    catch (e) { m1 = (e as Error).message; }
+    expect(m1).toContain('api.macros.register: handler must be a function');
+    let m2 = '';
+    try { await runUserScriptInQuickJS(runOpts({ script: { id: 's-tbad', name: 'TB', type: 'trigger' }, code: `api.tools.register('t', {}, 42); return null;` })); }
+    catch (e) { m2 = (e as Error).message; }
+    expect(m2).toContain('api.tools.register: handler must be a function');
+  });
+
+  test('re-register of the same macro name generates a fresh handlerId (old dup orphaned — host fires latest by name)', async () => {
+    await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-rereg', name: 'RR', type: 'trigger' },
+      code: `api.macros.register('m', {}, () => 'a'); api.macros.register('m', {}, () => 'b'); return null;`,
+    }));
+    const ids = _vmHandlerIdsForTests('s-rereg');
+    expect(ids.length).toBe(2);
+    expect(new Set(ids).size).toBe(2);
+    expect(ids.every((i) => i.startsWith('macro:'))).toBe(true);
+    disposeScriptVmHandlers('s-rereg');
+  });
+
+  test('tools.unregister(name) sends a name-keyed unregister IPC (symmetric with macros)', async () => {
+    const unreg: Array<{ kind: string; name: string }> = [];
+    await runUserScriptInQuickJS({
+      ...runOpts({
+        script: { id: 's-tunreg', name: 'TU', type: 'trigger' },
+        code: `api.tools.register('t', {}, () => 'x'); api.tools.unregister('t'); return null;`,
+      }),
+      dispatchUnregisterHandlerNamed: (kind, name) => unreg.push({ kind, name }),
+    });
+    expect(unreg).toEqual([{ kind: 'tool', name: 't' }]);
+    disposeScriptVmHandlers('s-tunreg');
+  });
+});
