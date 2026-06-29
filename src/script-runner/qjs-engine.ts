@@ -66,6 +66,11 @@ export interface QuickJSRunOptions {
    *  asyncfn path). Absent → in-VM handle methods report the capability is
    *  unavailable (the host did not grant it for this run). */
   dispatchOnHandle?: (targetHandle: HandleRef, method: string, args: unknown[]) => Promise<unknown>;
+  /** P5 — dispatch the (function-less) register-handler IPC to the parent when an
+   *  in-VM handler is registered. The closure stays in the VM registry. Optional. */
+  dispatchRegisterHandler?: (kind: string, handlerId: string, meta: unknown) => void;
+  /** P5 — dispatch the unregister-handler IPC to the parent on an in-VM unsub. */
+  dispatchUnregisterHandler?: (kind: string, handlerId: string) => void;
 }
 
 // In-VM bootstrap: the recursive `api` Proxy. `api.chat.getMessages(a,b)` →
@@ -204,6 +209,19 @@ globalThis.__lsBuildApi = function (hostDispatch) {
       return buildVmCollection(handle, schema);
     });
   };
+  // #11 P5 — handler-registering methods are INTERCEPTED in-VM (the asyncfn proxy
+  // that does this runs in the child and is bypassed for quickjs). The user fn is
+  // handed UN-marshaled to the host __hostRegisterHandler (which dups its VM handle
+  // to survive run-end + sends the function-less register-handler IPC to the parent
+  // keyed by the same handlerId); the parent fires it later via fireHandlerInQuickJS.
+  // handlerId is UNIQUE per registration (mirrors the asyncfn generateHandlerId), so
+  // the parent's register/run/unregister envelopes round-trip it. Returns an unsub fn.
+  var registerVmHandler = function (kind, method, fn, meta) {
+    if (typeof fn !== 'function') throw new Error('api.' + method + ': handler must be a function.');
+    var handlerId = kind + ':' + globalThis.crypto.randomUUID();
+    globalThis.__hostRegisterHandler(kind, handlerId, fn, JSON.stringify(meta || {}));
+    return function () { globalThis.__hostUnregisterHandler(kind, handlerId); };
+  };
   var make = function (path) {
     return new Proxy(function () {}, {
       get: function (_t, prop) {
@@ -218,6 +236,7 @@ globalThis.__lsBuildApi = function (hostDispatch) {
         if (path === 'utils.template.registerHelper') return templateRegisterHelper(a);
         if (path === 'utils.template.render') return templateRender(a);
         if (path === 'db.collection') return dbCollection(a);
+        if (path === 'commands.onInvoked') return registerVmHandler('commandsOnInvoked', 'commands.onInvoked(handler)', a[0], {});
         return send(path, a);
       },
     });
@@ -263,6 +282,18 @@ globalThis.__lsVmHandleProxy = function (id, kind) {
   });
   table[id] = proxy;
   return proxy;
+};
+`;
+
+// #11 P5 — the in-VM handler-call trampoline. fireHandlerInQuickJS hands it the
+// stored handler fn + a decoded args array; it applies the fn, awaits a (possibly
+// async) result, and encodes it to the wire (mirroring the body-run return path).
+// Errors propagate as a rejection → resolvePromise's settled.error on the host.
+const VM_HANDLER_BOOTSTRAP = `
+globalThis.__lsCallHandler = function (fn, args) {
+  return Promise.resolve(fn.apply(undefined, args || [])).then(function (r) {
+    return JSON.stringify(globalThis.__lsEncode(r));
+  });
 };
 `;
 
@@ -335,7 +366,7 @@ const VM_REQUIRE_BOOTSTRAP = `
 // deep-frozen.) Eval'd LAST in getContext, after all scaffolding is built.
 const VM_FREEZE_BOOTSTRAP = `
 (function () {
-  var locked = ['__lsEncode', '__lsDecode', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', 'fetch', 'Headers', 'Response', '__hostHandleDispatch', '__lsVmHandleProxy'];
+  var locked = ['__lsEncode', '__lsDecode', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', 'fetch', 'Headers', 'Response', '__hostHandleDispatch', '__lsVmHandleProxy', '__hostRegisterHandler', '__hostUnregisterHandler', '__lsCallHandler'];
   for (var i = 0; i < locked.length; i++) {
     var name = locked[i];
     if (Object.prototype.hasOwnProperty.call(globalThis, name)) {
@@ -444,8 +475,23 @@ interface ActiveRun {
   hostFetch?: (url: string, init?: RequestInit) => Promise<Response>;
   /** Per-run handle-method dispatcher (see QuickJSRunOptions.dispatchOnHandle). */
   dispatchOnHandle?: (targetHandle: HandleRef, method: string, args: unknown[]) => Promise<unknown>;
+  /** P5 — the scriptId of the current run/fire; keys the per-script VM handler registry. */
+  scriptId?: string;
+  /** P5 — dispatch the (function-less) register-handler IPC to the parent (the closure
+   *  lives in the VM registry, never crosses). Optional so unit tests can exercise the
+   *  fire path without the parent IPC wiring. */
+  dispatchRegisterHandler?: (kind: string, handlerId: string, meta: unknown) => void;
+  /** P5 — dispatch the unregister-handler IPC to the parent when an in-VM handler's
+   *  unsub fn runs, so the parent drops its canonical subscription (else it leaks a
+   *  ghost registration that errors on every later invoke). */
+  dispatchUnregisterHandler?: (kind: string, handlerId: string) => void;
 }
 let activeRun: ActiveRun | undefined;
+/** #11 P5 — per-script registry of DUP'd in-VM handler fn handles. Keyed (scriptId,
+ *  handlerId). The dup keeps the VM fn alive across runs (it is NOT in any run's
+ *  arena); disposed on unregister / script teardown. The parent fires a stored
+ *  handler via `fireHandlerInQuickJS`. */
+const vmHandlerHandles = new Map<string, Map<string, QuickJSHandle>>();
 /** Cached context build — promise-based so concurrent first calls share ONE
  *  context (a plain `if (context)` check races two builds). Cleared on failure
  *  so a transient build error doesn't poison every later run. */
@@ -587,6 +633,51 @@ async function createContext(): Promise<QuickJSContext> {
   // The in-VM handle-proxy factory (reads __hostHandleDispatch at method-call time).
   ctx.unwrapResult(ctx.evalCode(VM_HANDLE_BOOTSTRAP)).dispose();
 
+  // ── P5: handler registration. __hostRegisterHandler receives the user fn as a raw
+  // VM handle (newFunction args are handles, never marshaled) and DUPS it so it
+  // survives the run's arena disposal; the dup lives in the per-script vmHandlerHandles
+  // registry until unregister/teardown. The parent fires it later via
+  // fireHandlerInQuickJS. The function-less register IPC reaches the parent via
+  // activeRun.dispatchRegisterHandler (so the parent knows to route the event here). ──
+  const hostRegisterHandler = ctx.newFunction('__hostRegisterHandler', (kindHandle, handlerIdHandle, fnHandle, metaHandle) => {
+    const run = activeRun;
+    const handlerId = ctx.getString(handlerIdHandle);
+    if (run?.scriptId) {
+      const kind = ctx.getString(kindHandle);
+      let meta: unknown;
+      try { meta = JSON.parse(ctx.getString(metaHandle)); } catch { meta = undefined; }
+      const dup = fnHandle.dup(); // survives run-end; disposed on unregister/teardown
+      let perScript = vmHandlerHandles.get(run.scriptId);
+      if (!perScript) { perScript = new Map(); vmHandlerHandles.set(run.scriptId, perScript); }
+      const prev = perScript.get(handlerId);
+      if (prev?.alive) { try { prev.dispose(); } catch { /* re-register replaces */ } }
+      perScript.set(handlerId, dup);
+      run.dispatchRegisterHandler?.(kind, handlerId, meta);
+    }
+    // returns undefined to the VM
+  });
+  ctx.setProp(ctx.global, '__hostRegisterHandler', hostRegisterHandler);
+  hostRegisterHandler.dispose();
+  const hostUnregisterHandler = ctx.newFunction('__hostUnregisterHandler', (kindHandle, handlerIdHandle) => {
+    const run = activeRun;
+    const kind = ctx.getString(kindHandle);
+    const handlerId = ctx.getString(handlerIdHandle);
+    if (run?.scriptId) {
+      const perScript = vmHandlerHandles.get(run.scriptId);
+      const h = perScript?.get(handlerId);
+      if (h?.alive) { try { h.dispose(); } catch { /* */ } }
+      perScript?.delete(handlerId);
+      // Tell the parent to drop its canonical subscription (parity with the asyncfn
+      // unsub) — otherwise it keeps a ghost registration that errors on every invoke.
+      run.dispatchUnregisterHandler?.(kind, handlerId);
+    }
+    // returns undefined to the VM
+  });
+  ctx.setProp(ctx.global, '__hostUnregisterHandler', hostUnregisterHandler);
+  hostUnregisterHandler.dispose();
+  // The in-VM handler-call trampoline (reads __lsEncode at fire time).
+  ctx.unwrapResult(ctx.evalCode(VM_HANDLER_BOOTSTRAP)).dispose();
+
   // ── Stable __console (built ONCE) — forwards to activeRun.console at call time. ──
   const consoleObj = ctx.newObject();
   for (const level of ['log', 'warn', 'error', 'info'] as const) {
@@ -706,7 +797,7 @@ export async function runUserScriptInQuickJS(opts: QuickJSRunOptions): Promise<u
   await prior;
 
   currentDeadline = Date.now() + opts.timeoutMs;
-  activeRun = { dispatch: opts.dispatch, console: opts.console, serializeError: opts.serializeError, allowDangerous: opts.allowDangerous ?? false, hostFetch: opts.hostFetch, dispatchOnHandle: opts.dispatchOnHandle };
+  activeRun = { dispatch: opts.dispatch, console: opts.console, serializeError: opts.serializeError, allowDangerous: opts.allowDangerous ?? false, hostFetch: opts.hostFetch, dispatchOnHandle: opts.dispatchOnHandle, scriptId: opts.script.id, dispatchRegisterHandler: opts.dispatchRegisterHandler, dispatchUnregisterHandler: opts.dispatchUnregisterHandler };
   const pump = () => ctx.runtime.executePendingJobs();
 
   // #11 fix (d) — a synchronous `while(true){}` blocks the host event loop, so
@@ -787,6 +878,134 @@ ${opts.code}
       try { if (h.alive) h.dispose(); } catch { /* swallow — run is over */ }
     }
     releaseRun(); // release the run lock so the next queued run can proceed
+  }
+}
+
+/** #11 P5 — true iff a quickjs handler closure is registered for (scriptId, handlerId).
+ *  child-entry routes a RunHandlerRequest to the quickjs fire path by this predicate
+ *  (no engineMode needed on the wire — a handler's engine is where its closure lives). */
+export function hasVmHandler(scriptId: string, handlerId: string): boolean {
+  return vmHandlerHandles.get(scriptId)?.get(handlerId)?.alive ?? false;
+}
+
+/** Test-only — the registered handlerIds for a script (handlerIds are unique per
+ *  registration, generated in-VM, so tests need a way to discover them). */
+export function _vmHandlerIdsForTests(scriptId: string): string[] {
+  return [...(vmHandlerHandles.get(scriptId)?.keys() ?? [])];
+}
+
+/** #11 P5 — dispose every dup'd handler handle for a script (teardown / reload /
+ *  unregister-all). Returns the count disposed. */
+export function disposeScriptVmHandlers(scriptId: string): number {
+  const perScript = vmHandlerHandles.get(scriptId);
+  if (!perScript) return 0;
+  let n = 0;
+  for (const h of perScript.values()) {
+    try { if (h.alive) { h.dispose(); n++; } } catch { /* swallow — teardown */ }
+  }
+  vmHandlerHandles.delete(scriptId);
+  return n;
+}
+
+/** Options for firing a stored in-VM handler (see fireHandlerInQuickJS). */
+export interface QuickJSFireOptions {
+  scriptId:       string;
+  handlerId:      string;
+  args:           unknown[];
+  timeoutMs:      number;
+  dispatch:       (method: string, args: unknown[]) => Promise<unknown>;
+  console:        QuickJSConsole;
+  serializeError: (err: unknown) => { name: string; message: string; stack?: string };
+  allowDangerous?: boolean;
+  hostFetch?:      (url: string, init?: RequestInit) => Promise<Response>;
+  dispatchOnHandle?: (targetHandle: HandleRef, method: string, args: unknown[]) => Promise<unknown>;
+  dispatchRegisterHandler?: (kind: string, handlerId: string, meta: unknown) => void;
+  dispatchUnregisterHandler?: (kind: string, handlerId: string) => void;
+}
+
+/**
+ * #11 P5 — fire a stored in-VM handler. Looks up the dup'd fn handle, marshals the
+ * event args INTO the VM, calls the handler via the __lsCallHandler trampoline, and
+ * bridges its (possibly async) result back — the INVERSE of __hostDispatch's bridge,
+ * and structurally identical to the body-run (callFunction → resolvePromise → pump),
+ * so a handler that `await`s an api.* call drains through the same machinery.
+ *
+ * Fires are SERIALIZED through the same `runChain` as body-runs: the shared context
+ * has one `activeRun`/`currentDeadline`, so two overlapping fires (or a fire during a
+ * body-run) would corrupt each other. The handler's own `api.*` calls route through
+ * the fire's `activeRun`. The fn handle is NOT disposed here — it lives in the
+ * registry until unregister/teardown.
+ */
+export async function fireHandlerInQuickJS(opts: QuickJSFireOptions): Promise<unknown> {
+  const ctx = await getContext();
+  if (!vmHandlerHandles.get(opts.scriptId)?.get(opts.handlerId)?.alive) {
+    throw new Error(`LumiScript QuickJS: no handler ${opts.handlerId} registered for script ${opts.scriptId}.`);
+  }
+
+  // Serialize against body-runs + other fires on the shared context.
+  const prior = runChain;
+  let releaseRun: () => void = () => {};
+  runChain = new Promise<void>((resolve) => { releaseRun = resolve; });
+  await prior;
+
+  // RE-FETCH after the await — an unregister/teardown (which runs off the message
+  // loop, NOT runChain-serialized) may have disposed the handle while we were
+  // queued. Using a stale disposed handle in callFunction would throw a confusing
+  // use-after-free; surface the clean not-found instead.
+  const fnHandle = vmHandlerHandles.get(opts.scriptId)?.get(opts.handlerId);
+  if (!fnHandle?.alive) {
+    releaseRun();
+    throw new Error(`LumiScript QuickJS: handler ${opts.handlerId} was unregistered before its fire ran (script ${opts.scriptId}).`);
+  }
+
+  currentDeadline = Date.now() + opts.timeoutMs;
+  activeRun = {
+    dispatch: opts.dispatch, console: opts.console, serializeError: opts.serializeError,
+    allowDangerous: opts.allowDangerous ?? false, hostFetch: opts.hostFetch,
+    dispatchOnHandle: opts.dispatchOnHandle, scriptId: opts.scriptId,
+    dispatchRegisterHandler: opts.dispatchRegisterHandler,
+    dispatchUnregisterHandler: opts.dispatchUnregisterHandler,
+  };
+  const pump = () => ctx.runtime.executePendingJobs();
+  const timedOut = () => Date.now() > currentDeadline;
+  const timeoutError = () => {
+    const err = new Error(`Handler ${opts.handlerId} exceeded the ${opts.timeoutMs / 1000}s timeout (a synchronous loop was interrupted by the QuickJS engine).`);
+    err.name = 'ScriptTimeoutError';
+    return err;
+  };
+  const arena: QuickJSHandle[] = [];
+  const track = <T extends QuickJSHandle>(h: T): T => { arena.push(h); return h; };
+
+  try {
+    // Marshal the args INTO the VM as a decoded array (mirror the per-run data path).
+    ctx.newString(JSON.stringify(marshalEncode(opts.args))).consume((h) => ctx.setProp(ctx.global, '__lsFireArgsJson', h));
+    const argsRes = ctx.evalCode('globalThis.__lsDecode(JSON.parse(globalThis.__lsFireArgsJson))');
+    if (argsRes.error) throw toHostError(ctx.dump(track(argsRes.error)));
+    const argsArray = track(argsRes.value);
+
+    // Call the handler via the in-VM trampoline (applies fn + encodes the result).
+    const callHandler = track(ctx.getProp(ctx.global, '__lsCallHandler'));
+    const callRes = ctx.callFunction(callHandler, ctx.undefined, fnHandle, argsArray);
+    if (callRes.error) {
+      const e = ctx.dump(track(callRes.error));
+      throw timedOut() ? timeoutError() : toHostError(e);
+    }
+    // Bridge the (possibly async) VM result back — same as the body-run.
+    const settledP = ctx.resolvePromise(track(callRes.value));
+    pump();
+    const settled = await settledP;
+    if (settled.error) {
+      const e = ctx.dump(track(settled.error));
+      throw timedOut() ? timeoutError() : toHostError(e);
+    }
+    return marshalDecode(JSON.parse(ctx.getString(track(settled.value))));
+  } finally {
+    currentDeadline = Number.POSITIVE_INFINITY;
+    activeRun = undefined;
+    for (const h of arena) {
+      try { if (h.alive) h.dispose(); } catch { /* swallow — fire is over */ }
+    }
+    releaseRun();
   }
 }
 

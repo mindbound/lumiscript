@@ -41,6 +41,8 @@ import type {
   ConsoleEntryNotice,
   SerializedError,
   RunHandlerRequest,
+  RegisterHandler,
+  UnregisterHandler,
   HandlerResult,
   ScriptUnregisterMessage,
   AdvancedModalDismissedNotice,
@@ -69,7 +71,12 @@ import * as z from 'zod';
 import { LumiScriptSecurityError } from '../types/lumiscript-errors.js';
 // #11 — QuickJS-WASM isolate harness (engineMode='quickjs'). Reuses the
 // api-proxy dispatch path verbatim; only the in-VM user-code boundary differs.
-import { runUserScriptInQuickJS } from './qjs-engine.js';
+import {
+  runUserScriptInQuickJS,
+  fireHandlerInQuickJS,
+  hasVmHandler,
+  disposeScriptVmHandlers,
+} from './qjs-engine.js';
 
 // ─── Error classes ──────────────────────────────────────────────────────────
 
@@ -659,6 +666,15 @@ async function handleRunHandlerRequest(
   req:  RunHandlerRequest,
 ): Promise<void> {
   const startedAt = Date.now();
+
+  // #11 P5 — a quickjs handler closure lives IN the VM (the dup'd fn handle in the
+  // engine's per-script registry), NOT in handlerClosures. Route by registry presence
+  // (no engineMode needed on the wire — a handler's engine is where its closure lives).
+  if (hasVmHandler(req.scriptId, req.handlerId)) {
+    await fireVmHandler(proc, req, startedAt);
+    return;
+  }
+
   const scriptHandlers = handlerClosures.get(req.scriptId);
   const handler = scriptHandlers?.get(req.handlerId);
 
@@ -720,6 +736,133 @@ async function handleRunHandlerRequest(
 }
 
 /**
+ * #11 P5 — build the register/unregister-handler IPC dispatchers for an in-VM
+ * registration (during a body-run OR a handler fire). The closure stays in the VM
+ * registry; only the function-less IPC crosses, so the parent wires the canonical
+ * wrapper identically to the asyncfn path (Boundary #1 unchanged).
+ *
+ * SECURITY: a VM-supplied `meta` is spread FIRST so the host-stamped trust-critical
+ * fields (type/kind/runId/scriptId/handlerId/hasHandler) always win — a crafted meta
+ * cannot forge another script's registration.
+ */
+function makeHandlerDispatchers(
+  proc:     SpindleBackendProcessContext,
+  runId:    string,
+  scriptId: string,
+): {
+  dispatchRegisterHandler: (kind: string, handlerId: string, meta: unknown) => void;
+  dispatchUnregisterHandler: (kind: string, handlerId: string) => void;
+} {
+  return {
+    dispatchRegisterHandler: (kind, handlerId, meta) => {
+      const msg = {
+        ...(meta && typeof meta === 'object' ? meta : {}),
+        type:       'register-handler',
+        kind,
+        runId,
+        scriptId,
+        handlerId,
+        hasHandler: true,
+      } as unknown as RegisterHandler;
+      proc.send(msg);
+    },
+    dispatchUnregisterHandler: (kind, handlerId) => {
+      const msg = { type: 'unregister-handler', kind, scriptId, handlerId } as unknown as UnregisterHandler;
+      proc.send(msg);
+    },
+  };
+}
+
+/**
+ * #11 P5 — fire a handler whose closure lives in the QuickJS VM. Dispatches the
+ * handler's api.* calls through a PERSISTED proxy for this script (any run's — the
+ * runId is overridden to the fire's runId via runIdContext, and api-responses route
+ * by requestId broadcast across all proxies). Wrapped in the SAME liveContextStore +
+ * runIdContext + raceWithTimeout as the asyncfn path so at-fire chat/character context
+ * and the async-hang guard behave identically. The dup'd fn handle stays in the
+ * engine registry (disposed on unregister), not here.
+ */
+async function fireVmHandler(
+  proc:      SpindleBackendProcessContext,
+  req:       RunHandlerRequest,
+  startedAt: number,
+): Promise<void> {
+  // A persisted proxy for this script provides dispatch/dispatchOnHandle. Proxies are
+  // kept across runs for fires (see runOne's activeProxies note); any one for this
+  // script works — they share scriptId and the runId is overridden per-fire.
+  let proxy: ProxyHandle | undefined;
+  for (const entry of activeProxies.values()) {
+    if (entry.scriptId === req.scriptId) { proxy = entry.proxy; break; }
+  }
+
+  proc.heartbeat();
+  let value: unknown = undefined;
+  let ok = true;
+  let error: SerializedError | undefined;
+  try {
+    if (!proxy) {
+      throw new Error(`api-proxy host: no active proxy for script ${req.scriptId} firing handler ${req.handlerId}`);
+    }
+    const theProxy = proxy;
+    const capturedConsole = buildChildCapturedConsole(proc, req.runId, req.scriptId);
+    // A handler may itself register/unregister handlers (api.commands.onInvoked from
+    // inside a fire) — thread the same IPC dispatchers as the body-run so those reach
+    // the parent (else the new registration stores a dup the parent never wires).
+    const dispatchers = makeHandlerDispatchers(proc, req.runId, req.scriptId);
+    value = await raceWithTimeout(
+      liveContextStore.run(
+        { chatId: req.chatIdAtFire, characterId: req.characterIdAtFire },
+        () => runIdContext.run(req.runId, () => fireHandlerInQuickJS({
+          scriptId:                  req.scriptId,
+          handlerId:                 req.handlerId,
+          args:                      req.args,
+          timeoutMs:                 req.timeoutMs,
+          dispatch:                  theProxy.dispatch,
+          dispatchOnHandle:          theProxy.dispatchOnHandle,
+          console:                   capturedConsole,
+          serializeError,
+          // P5 inc1: fires run without the fetch capability (commands.onInvoked et al.
+          // rarely fetch; threading the script's allowDangerous onto RunHandlerRequest
+          // is a tracked follow-up).
+          allowDangerous:            false,
+          dispatchRegisterHandler:   dispatchers.dispatchRegisterHandler,
+          dispatchUnregisterHandler: dispatchers.dispatchUnregisterHandler,
+        })),
+      ),
+      req.timeoutMs,
+      // ScriptTimeoutError so the proc.fail gate below fires: an ASYNC-hung handler
+      // (awaiting a never-settling api call) leaves fireHandlerInQuickJS parked on the
+      // shared runChain slot (the interrupt only catches SYNC loops), wedging every
+      // later run/fire on this child. Killing + respawning the worker is the only
+      // rescue (parity with the body-run's async-timeout posture).
+      () => new ScriptTimeoutError(`Handler ${req.kind}/${req.handlerId} exceeded ${req.timeoutMs / 1000}s timeout`),
+    );
+  } catch (err) {
+    ok = false;
+    error = serializeError(err);
+  }
+
+  const result: HandlerResult = {
+    type:       'handler-result',
+    runId:      req.runId,
+    ok,
+    durationMs: Date.now() - startedAt,
+  };
+  if (ok)    result.value = value;
+  if (error) result.error = error;
+  proc.send(result);
+
+  // Async-hang rescue (see the ScriptTimeoutError above): kill the worker so the
+  // wedged runChain slot is cleared by respawn. Same posture as runOne's body-run.
+  if (!ok && error?.name === 'ScriptTimeoutError') {
+    proc.fail(
+      `script-runner: async-timeout firing handler ${req.kind}/${req.handlerId} ` +
+      `(scriptId=${req.scriptId}, runId=${req.runId}); terminating to clear the wedged engine runChain`,
+    );
+  }
+}
+
+/**
  * Phase 9d.3 — drop all per-script state when a script is unregistered
  * (extension disable, script delete, etc.). Mirrors the existing
  * `clearByScriptId` semantics on the parent's macro / tool / etc. stores.
@@ -732,6 +875,8 @@ async function handleRunHandlerRequest(
 function handleScriptUnregister(msg: ScriptUnregisterMessage): void {
   handlerClosures.delete(msg.scriptId);
   broadcastHandlers.delete(msg.scriptId);
+  // #11 P5 — dispose this script's dup'd in-VM handler fn handles (quickjs engine).
+  disposeScriptVmHandlers(msg.scriptId);
   // audit C8-03 + C8-04 — prune the per-script rate-limit buckets so they don't
   // accumulate one entry per ever-seen scriptId across the child's lifetime.
   consoleRateState.delete(msg.scriptId);
@@ -1083,6 +1228,11 @@ async function runOne(
             // etc.) route method calls back through the SAME targetHandle IPC as the
             // asyncfn path. Boundary #1 unchanged.
             dispatchOnHandle: proxy.dispatchOnHandle,
+            // P5 — when an in-VM handler is registered/unregistered, send the
+            // function-less register/unregister-handler IPC to the parent (the closure
+            // stays in the VM registry, keyed by the same handlerId). Boundary #1
+            // unchanged — the parent wires the wrapper identically across engines.
+            ...makeHandlerDispatchers(proc, req.runId, req.scriptId),
           }),
         ),
         req.timeoutMs,
