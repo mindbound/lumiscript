@@ -140,4 +140,30 @@ describe('#11 P5 e2e: quickjs commands.onInvoked', () => {
     expect(handlerResult.ok).toBe(true);
     expect(handlerResult.value).toBe('X:bar');
   });
+
+  test('ui.dom.delegate (inc3a): the register IPC carries selector/event/options and the handler fires', async () => {
+    const { ipc } = await setupE2E();
+    _setEngineModeForTests('quickjs');
+    const code = `
+      api.ui.dom.delegate('.my-btn', 'click', (data) => { return; }, { capture: true });
+      return null;
+    `;
+    expect((await dispatchRunScript(makeScript('dd-script', code), makeRequest())).ok).toBe(true);
+
+    const reg = ipc.parentInbox().find((m): m is RegisterHandler => {
+      if (typeof m !== 'object' || m === null) return false;
+      const r = m as RegisterHandler;
+      return r.type === 'register-handler' && r.kind === 'domDelegate';
+    });
+    expect(reg).toBeDefined();
+    const r = reg as { selector?: unknown; event?: unknown; options?: { capture?: unknown } };
+    expect(r.selector).toBe('.my-btn');
+    expect(r.event).toBe('click');
+    expect(r.options?.capture).toBe(true);
+
+    const handlerResult = await __sendRunHandlerRequestForTests(
+      'dd-script', reg!.handlerId, 'domDelegate', [{ type: 'click', dataset: {} }], 5_000,
+    );
+    expect(handlerResult.ok).toBe(true);
+  });
 });

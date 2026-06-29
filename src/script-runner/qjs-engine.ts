@@ -255,6 +255,15 @@ globalThis.__lsBuildApi = function (hostDispatch) {
         if (path === 'macros.registerInterceptor') return registerInterceptor('macroInterceptor', 'macros.registerInterceptor', a[0], a[1]);
         if (path === 'chat.registerContentProcessor') return registerInterceptor('contentProcessor', 'chat.registerContentProcessor', a[0], a[1]);
         if (path === 'worldInfo.registerInterceptor') return registerInterceptor('worldInfoInterceptor', 'worldInfo.registerInterceptor', a[0], a[1]);
+        // P5 inc3a — clean standalone subscription kinds (single-arg handler, unsub fn).
+        if (path === 'ui.events.onKeyboardChange') return registerVmHandler('uiKeyboardChange', 'ui.events.onKeyboardChange', a[0], {});
+        if (path === 'ui.events.onDrawerChange') return registerVmHandler('uiDrawerChange', 'ui.events.onDrawerChange', a[0], {});
+        if (path === 'ui.events.onSettingsChange') return registerVmHandler('uiSettingsChange', 'ui.events.onSettingsChange', a[0], {});
+        if (path === 'oauth.onCallback') return registerVmHandler('oauthCallback', 'oauth.onCallback', a[0], {});
+        // ui.dom.delegate(selector, event, handler, options?) — handler is a[2]; the
+        // selector/event/options ride in the register IPC (meta), the parent binds the
+        // delegated listener. Returns an unsub fn.
+        if (path === 'ui.dom.delegate') return registerVmHandler('domDelegate', 'ui.dom.delegate', a[2], { selector: a[0], event: a[1], options: a[3] || {} });
         return send(path, a);
       },
     });

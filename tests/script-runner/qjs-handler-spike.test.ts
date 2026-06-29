@@ -228,3 +228,59 @@ describe('#11 P5 inc2: interceptors (macroInterceptor / contentProcessor / world
     expect(msg).toContain('handler must be a function');
   });
 });
+
+// ─── P5 inc3a: clean standalone subscription kinds (unsub-fn shape) ──────────
+
+describe('#11 P5 inc3a: ui.events / oauth.onCallback / ui.dom.delegate', () => {
+  test('ui.events.onKeyboardChange registers (unsub fn) + fires with the state arg', async () => {
+    const seen: unknown[] = [];
+    const dispatch = async (m: string, args: unknown[]): Promise<unknown> => { if (m === 'echo') { seen.push(args[0]); return args[0]; } return undefined; };
+    const ret = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-uk', name: 'UK', type: 'trigger' }, dispatch,
+      code: `return typeof api.ui.events.onKeyboardChange(async (state) => { await api.echo(state.visible); });`,
+    })) as string;
+    expect(ret).toBe('function');
+    const id = _vmHandlerIdsForTests('s-uk')[0]!;
+    expect(id).toMatch(/^uiKeyboardChange:/);
+    await fireHandlerInQuickJS(fireOpts({ scriptId: 's-uk', handlerId: id, args: [{ visible: true }], dispatch }));
+    expect(seen).toEqual([true]);
+    disposeScriptVmHandlers('s-uk');
+  });
+
+  test('oauth.onCallback registers (unsub fn) + fires with params, returning a value', async () => {
+    const ret = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-oc', name: 'OC', type: 'trigger' },
+      code: `return typeof api.oauth.onCallback((params) => params.code);`,
+    })) as string;
+    expect(ret).toBe('function');
+    const id = _vmHandlerIdsForTests('s-oc')[0]!;
+    expect(id).toMatch(/^oauthCallback:/);
+    const result = await fireHandlerInQuickJS(fireOpts({ scriptId: 's-oc', handlerId: id, args: [{ code: 'xyz' }] }));
+    expect(result).toBe('xyz');
+    disposeScriptVmHandlers('s-oc');
+  });
+
+  test('ui.dom.delegate registers a handler (handler is arg[2]) + fires with event data', async () => {
+    const ret = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-dd', name: 'DD', type: 'trigger' },
+      code: `return typeof api.ui.dom.delegate('.btn', 'click', (e) => e.kind, { capture: true });`,
+    })) as string;
+    expect(ret).toBe('function');
+    const id = _vmHandlerIdsForTests('s-dd')[0]!;
+    expect(id).toMatch(/^domDelegate:/);
+    const result = await fireHandlerInQuickJS(fireOpts({ scriptId: 's-dd', handlerId: id, args: [{ kind: 'click' }] }));
+    expect(result).toBe('click');
+    disposeScriptVmHandlers('s-dd');
+  });
+
+  test('each subscription kind generates a uniquely-keyed handler (multiple per channel)', async () => {
+    await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-multi-sub', name: 'MS', type: 'trigger' },
+      code: `api.ui.events.onDrawerChange(() => {}); api.ui.events.onDrawerChange(() => {}); return null;`,
+    }));
+    const ids = _vmHandlerIdsForTests('s-multi-sub');
+    expect(ids.length).toBe(2);
+    expect(ids.every((i) => i.startsWith('uiDrawerChange:'))).toBe(true);
+    disposeScriptVmHandlers('s-multi-sub');
+  });
+});
