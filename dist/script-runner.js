@@ -1173,18 +1173,67 @@ globalThis.__lsBuildApi = function (hostDispatch) {
       return globalThis.__hbs.compile(result.text)(data);
     });
   };
-  // #11 P4 \u2014 db.collection: in the asyncfn path a Zod schema arg is stripped
-  // before IPC and validated CHILD-side (a non-cloneable ZodType can't cross).
-  // The in-VM specialized collection proxy with schema validation is a P4
-  // follow-up; until then fail LOUD with an actionable message rather than the
-  // generic 'functions not marshaled' marshaler error (or silently skipping
-  // validation). Schemaless db.collection works via the normal dispatch.
-  var dbCollection = function (a) {
-    var opts = a[1];
-    if (opts && typeof opts === 'object' && isZod(opts.schema)) {
-      throw new Error('api.db.collection: a Zod schema is not yet supported on the QuickJS engine (P4 follow-up). Create the collection without a schema and validate in script code, or run on the default engine.');
+  // #11 P4 \u2014 db.collection. Mirrors the asyncfn buildCollectionProxy (api-proxy.ts):
+  // a Zod schema is a non-cloneable ZodType, so it is STRIPPED before IPC and
+  // validation happens CHILD-side (here, in-VM) at the insert/insertMany/update
+  // boundaries. Returns a specialized validating wrapper \u2014 NOT a passable handle
+  // (no __handleRef), exactly like the asyncfn Collection \u2014 over the underlying
+  // handle proxy from the {$:'h'} handle-OUT path.
+  var collectionRejectFn = function (method, filter) {
+    if (typeof filter === 'function') {
+      throw new Error('api.db.' + method + ': function predicates cannot cross the QuickJS engine boundary. ' +
+        'Use clear() for "delete all", an object filter (e.g. { field: value }), or query(jsonQueryString); ' +
+        'for find/findOne, fetch with find() (no filter) and apply your predicate in script code.');
     }
-    return send('db.collection', a);
+  };
+  var buildVmCollection = function (handle, schema) {
+    var validateOnInsert = function (record, context) {
+      if (!schema) return;
+      try { schema.parse(record); }
+      catch (err) { throw new Error('api.db: schema validation failed on ' + context + ': ' + ((err && err.message) ? err.message : String(err))); }
+    };
+    return {
+      insert: function (record) { validateOnInsert(record, 'insert'); return handle.insert(record); },
+      insertMany: function (records) {
+        if (Array.isArray(records)) for (var i = 0; i < records.length; i++) validateOnInsert(records[i], 'insertMany[' + i + ']');
+        return handle.insertMany(records);
+      },
+      find: function (filter) { collectionRejectFn('find', filter); return filter !== undefined ? handle.find(filter) : handle.find(); },
+      findOne: function (filter) { collectionRejectFn('findOne', filter); return handle.findOne(filter); },
+      update: function (filter, patch) {
+        collectionRejectFn('update', filter);
+        if (schema && globalThis.z && globalThis.z.ZodObject && (schema instanceof globalThis.z.ZodObject)) {
+          try { schema.partial().parse(patch); }
+          catch (err) { throw new Error('api.db: schema validation failed on update (patch): ' + ((err && err.message) ? err.message : String(err))); }
+        }
+        return handle.update(filter, patch);
+      },
+      'delete': function (filter) { collectionRejectFn('delete', filter); return handle['delete'](filter); },
+      count: function (filter) { collectionRejectFn('count', filter); return filter !== undefined ? handle.count(filter) : handle.count(); },
+      clear: function () { return handle.clear(); },
+      query: function (jsonQuery) { return handle.query(jsonQuery); },
+    };
+  };
+  var dbCollection = function (a) {
+    var name = a[0], opts = a[1];
+    var schema = (opts && typeof opts === 'object' && isZod(opts.schema)) ? opts.schema : null;
+    var optsForIpc = opts;
+    if (schema) {
+      optsForIpc = {};
+      var keys = Object.keys(opts);
+      for (var i = 0; i < keys.length; i++) if (keys[i] !== 'schema') optsForIpc[keys[i]] = opts[keys[i]];
+    }
+    return send('db.collection', [name, optsForIpc]).then(function (handle) {
+      // Parity with the asyncfn proxy's post-dispatch guard (api-proxy.ts): the host
+      // registers db.collection as Collection-returning, so a non-handle / wrong-kind
+      // return is structurally impossible \u2014 but assert it for an actionable error if
+      // that host contract ever regresses. NOTE: here 'handle' is the DECODED in-VM
+      // proxy (its get-trap exposes __handleRef/kind), not a raw ref.
+      if (!(handle && handle.__handleRef === true && handle.kind === 'Collection')) {
+        throw new Error('api.db.collection: expected a Collection handle from the host.');
+      }
+      return buildVmCollection(handle, schema);
+    });
   };
   var make = function (path) {
     return new Proxy(function () {}, {
