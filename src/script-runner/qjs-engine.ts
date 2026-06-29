@@ -219,8 +219,23 @@ globalThis.__lsBuildApi = function (hostDispatch) {
   var registerVmHandler = function (kind, method, fn, meta) {
     if (typeof fn !== 'function') throw new Error('api.' + method + ': handler must be a function.');
     var handlerId = kind + ':' + globalThis.crypto.randomUUID();
-    globalThis.__hostRegisterHandler(kind, handlerId, fn, JSON.stringify(meta || {}));
+    globalThis.__hostRegisterHandler(kind, handlerId, fn, JSON.stringify(globalThis.__lsEncode(meta || {})));
     return function () { globalThis.__hostUnregisterHandler(kind, handlerId); };
+  };
+  // #11 P5 — the interceptor family (macros.registerInterceptor / chat.register-
+  // ContentProcessor / worldInfo.registerInterceptor): (handler, options) returning a
+  // sync { id, remove() } handle (per the asyncfn baseline). The child generates the
+  // entry id and forwards it as options.id so the parent stores under the SAME id the
+  // returned handle exposes (handle.remove() then resolves parent-side). Handler
+  // returns string | void; the fire marshals that back.
+  var registerInterceptor = function (kind, method, handler, options) {
+    if (typeof handler !== 'function') throw new Error('api.' + method + ': handler must be a function.');
+    // Nullish (not truthy) guard, parity with the asyncfn options.id-or-generate: a
+    // present-but-empty-string id is preserved as the entry id, not regenerated.
+    var handlerId = (options && options.id != null) ? options.id : (kind + ':' + globalThis.crypto.randomUUID());
+    var optsForIpc = Object.assign({}, options || {}, { id: handlerId });
+    globalThis.__hostRegisterHandler(kind, handlerId, handler, JSON.stringify(globalThis.__lsEncode({ options: optsForIpc })));
+    return { id: handlerId, remove: function () { globalThis.__hostUnregisterHandler(kind, handlerId); } };
   };
   var make = function (path) {
     return new Proxy(function () {}, {
@@ -237,6 +252,9 @@ globalThis.__lsBuildApi = function (hostDispatch) {
         if (path === 'utils.template.render') return templateRender(a);
         if (path === 'db.collection') return dbCollection(a);
         if (path === 'commands.onInvoked') return registerVmHandler('commandsOnInvoked', 'commands.onInvoked(handler)', a[0], {});
+        if (path === 'macros.registerInterceptor') return registerInterceptor('macroInterceptor', 'macros.registerInterceptor', a[0], a[1]);
+        if (path === 'chat.registerContentProcessor') return registerInterceptor('contentProcessor', 'chat.registerContentProcessor', a[0], a[1]);
+        if (path === 'worldInfo.registerInterceptor') return registerInterceptor('worldInfoInterceptor', 'worldInfo.registerInterceptor', a[0], a[1]);
         return send(path, a);
       },
     });
@@ -644,8 +662,11 @@ async function createContext(): Promise<QuickJSContext> {
     const handlerId = ctx.getString(handlerIdHandle);
     if (run?.scriptId) {
       const kind = ctx.getString(kindHandle);
+      // meta crosses with STRUCTURED marshaling (the in-VM helpers __lsEncode it),
+      // so non-JSON register options survive — e.g. a macroInterceptor matchTemplate
+      // RegExp reaches the parent as a real RegExp (Boundary #1 structured-clones it).
       let meta: unknown;
-      try { meta = JSON.parse(ctx.getString(metaHandle)); } catch { meta = undefined; }
+      try { meta = marshalDecode(JSON.parse(ctx.getString(metaHandle))); } catch { meta = undefined; }
       const dup = fnHandle.dup(); // survives run-end; disposed on unregister/teardown
       let perScript = vmHandlerHandles.get(run.scriptId);
       if (!perScript) { perScript = new Map(); vmHandlerHandles.set(run.scriptId, perScript); }

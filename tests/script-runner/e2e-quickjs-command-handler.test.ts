@@ -110,4 +110,34 @@ describe('#11 P5 e2e: quickjs commands.onInvoked', () => {
     });
     expect(unreg).toBeDefined();
   });
+
+  test('macros.registerInterceptor (inc2): register IPC carries options (+ a surviving RegExp matchTemplate) and the handler fires + returns', async () => {
+    const { ipc } = await setupE2E();
+    _setEngineModeForTests('quickjs');
+    const code = `
+      const h = api.macros.registerInterceptor((ctx) => 'X:' + ctx.text, { priority: 50, matchTemplate: /foo/gi });
+      return h.id;
+    `;
+    expect((await dispatchRunScript(makeScript('mi-script', code), makeRequest())).ok).toBe(true);
+
+    const reg = ipc.parentInbox().find((m): m is RegisterHandler => {
+      if (typeof m !== 'object' || m === null) return false;
+      const r = m as RegisterHandler;
+      return r.type === 'register-handler' && r.kind === 'macroInterceptor';
+    });
+    expect(reg).toBeDefined();
+    const opts = (reg as { options?: { id?: string; priority?: number; matchTemplate?: unknown } }).options;
+    // The child forwards options.id = handlerId so the returned handle.id matches the parent entry.
+    expect(opts?.id).toBe(reg!.handlerId);
+    expect(opts?.priority).toBe(50);
+    // The RegExp matchTemplate survived the in-VM __lsEncode -> host marshalDecode -> IPC path.
+    expect(opts?.matchTemplate instanceof RegExp).toBe(true);
+    expect((opts?.matchTemplate as RegExp).source).toBe('foo');
+
+    const handlerResult = await __sendRunHandlerRequestForTests(
+      'mi-script', reg!.handlerId, 'macroInterceptor', [{ text: 'bar' }], 5_000,
+    );
+    expect(handlerResult.ok).toBe(true);
+    expect(handlerResult.value).toBe('X:bar');
+  });
 });

@@ -164,3 +164,67 @@ describe('#11 P5: commands.onInvoked registration + fire', () => {
     expect((after as number) - (before as number)).toBeLessThan(50);
   }, 30_000);
 });
+
+// ─── P5 inc2: the interceptor family (return-valued handlers + {id, remove} handle) ──
+
+describe('#11 P5 inc2: interceptors (macroInterceptor / contentProcessor / worldInfoInterceptor)', () => {
+  test('macros.registerInterceptor returns an {id, remove} handle; the handler fires + returns a string', async () => {
+    const reg = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-mi', name: 'MI', type: 'trigger' },
+      code: `const h = api.macros.registerInterceptor((ctx) => 'INTERCEPTED:' + ctx.text);
+             return { id: h.id, hasRemove: typeof h.remove };`,
+    })) as { id: string; hasRemove: string };
+    expect(reg.id).toMatch(/^macroInterceptor:/);
+    expect(reg.hasRemove).toBe('function');
+    expect(hasVmHandler('s-mi', reg.id)).toBe(true);
+    const result = await fireHandlerInQuickJS(fireOpts({ scriptId: 's-mi', handlerId: reg.id, args: [{ text: 'hi' }] }));
+    expect(result).toBe('INTERCEPTED:hi');
+    disposeScriptVmHandlers('s-mi');
+  });
+
+  test('an async content-processor handler returning void fires cleanly (string | void)', async () => {
+    const id = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-cp', name: 'CP', type: 'trigger' },
+      code: `return api.chat.registerContentProcessor(async (ctx) => { await Promise.resolve(); }).id;`,
+    })) as string;
+    expect(id).toMatch(/^contentProcessor:/);
+    const result = await fireHandlerInQuickJS(fireOpts({ scriptId: 's-cp', handlerId: id, args: [{ content: 'x' }] }));
+    expect(result).toBeUndefined();
+    disposeScriptVmHandlers('s-cp');
+  });
+
+  test('a user-supplied options.id is preserved as the handle id', async () => {
+    const id = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-uid', name: 'UID', type: 'trigger' },
+      code: `return api.worldInfo.registerInterceptor((ctx) => 'wi', { id: 'my-custom-id', priority: 5 }).id;`,
+    })) as string;
+    expect(id).toBe('my-custom-id');
+    expect(hasVmHandler('s-uid', 'my-custom-id')).toBe(true);
+    disposeScriptVmHandlers('s-uid');
+  });
+
+  test('the interceptor {id, remove} handle disposes the handler', async () => {
+    await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-rm', name: 'RM', type: 'trigger' },
+      code: `globalThis.__r = api.worldInfo.registerInterceptor((ctx) => 'wi'); return null;`,
+    }));
+    const id = _vmHandlerIdsForTests('s-rm')[0]!;
+    expect(hasVmHandler('s-rm', id)).toBe(true);
+    await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-rm', name: 'RM', type: 'trigger' },
+      code: `globalThis.__r.remove(); return null;`,
+    }));
+    expect(hasVmHandler('s-rm', id)).toBe(false);
+  });
+
+  test('a non-function interceptor handler fails loud', async () => {
+    let msg = '';
+    try {
+      await runUserScriptInQuickJS(runOpts({
+        script: { id: 's-badi', name: 'BadI', type: 'trigger' },
+        code: `api.macros.registerInterceptor('not-a-fn'); return null;`,
+      }));
+    } catch (e) { msg = (e as Error).message; }
+    expect(msg).toContain('handler must be a function');
+  });
+});
