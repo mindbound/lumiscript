@@ -268,6 +268,77 @@ globalThis.__lsBuildApi = function (hostDispatch) {
   var unregisterNamedHandler = function (kind, name) {
     globalThis.__hostUnregisterHandlerNamed(kind, String(name));
   };
+  // #11 P4b Inc 1 — string-id DOM handles (mirrors api-proxy.ts buildDOMHandleProxy/inject).
+  // elementId is generated UPFRONT (so the handle returns synchronously) + threaded via the
+  // @internal _elementId option so the canonical adopts the SAME id; methods dispatch via
+  // plain send('ui._dom.*', [elementId, ...]) — the host routes by method-prefix + args[0],
+  // IGNORING targetHandle (host-dispatcher.ts:3839), so no HandleRef is needed. Stable-id
+  // dedup is host-side (__hostAllocElementId, cross-run). Each void dispatch is gateOrFire'd
+  // (un-gated fires now; a .root behind a future open-ack queues behind it — P4b Inc 2) +
+  // __lsTrackChain'd so the run-loop flush drains un-awaited calls.
+  var allocElementId = function (options) {
+    var sid = options && options.id;
+    return (sid === undefined || sid === null)
+      ? globalThis.crypto.randomUUID()
+      : globalThis.__hostAllocElementId(String(sid), globalThis.crypto.randomUUID());
+  };
+  var buildDomHandle = function (elementId, gateAck) {
+    var gateOrFire = function (thunk) { return (gateAck === undefined) ? thunk() : gateAck.then(thunk); };
+    var fireVoid = function (method, args) {
+      globalThis.__lsTrackChain(gateOrFire(function () { return send(method, args); }).catch(function () {}));
+    };
+    return {
+      id: elementId,
+      update: function (html) { fireVoid('ui._dom.update', [elementId, html]); },
+      remove: function () { fireVoid('ui._dom.remove', [elementId]); },
+      makeDraggable: function (handleSelector) {
+        fireVoid('ui._dom.makeDraggable', (handleSelector !== undefined) ? [elementId, handleSelector] : [elementId]);
+      },
+      injectChild: function (target, html, options) {
+        var childElementId = allocElementId(options);
+        var fullOptions = Object.assign({}, options, { _elementId: childElementId });
+        fireVoid('ui._dom.injectChild', [elementId, target, html, fullOptions]);
+        return buildDomHandle(childElementId, gateAck);
+      },
+      // P4b Inc 1b — DOMHandle.on(event, handler, options?): a per-element DOM event
+      // listener. Same register-handler path as commands.onInvoked (the host dups the fn
+      // + fires it via RunHandlerRequest with [DOMEventData]); the elementId/event/options
+      // ride in meta (spread top-level → kind 'domEventListener' variant). When this handle
+      // is a gated .root (showAdvancedModal/createFloatWidget, P4b Inc 2), the register is
+      // queued behind the open-ack so the parent has the canonical DOMHandle stored under
+      // elementId before its .on lookup runs. Returns a sync unsub; a cancelled-flag guard
+      // drops a still-gated registration if unsub runs before the gate resolves.
+      on: function (event, handler, options) {
+        if (typeof handler !== 'function') throw new Error('DOMHandle.on(event, handler): handler must be a function.');
+        var handlerId = 'domEventListener:' + globalThis.crypto.randomUUID();
+        var meta = { elementId: elementId, event: String(event) };
+        if (options !== undefined) meta.options = options;
+        var cancelled = false;
+        var register = function () {
+          if (cancelled) return;
+          globalThis.__hostRegisterHandler('domEventListener', handlerId, handler, JSON.stringify(globalThis.__lsEncode(meta)));
+        };
+        if (gateAck === undefined) {
+          register();
+        } else {
+          globalThis.__lsTrackChain(gateAck.then(register).catch(function () {}));
+        }
+        return function () {
+          cancelled = true;
+          globalThis.__hostUnregisterHandler('domEventListener', handlerId);
+        };
+      },
+      read: function (options) {
+        return gateOrFire(function () { return send('ui._dom.read', (options !== undefined) ? [elementId, options] : [elementId]); });
+      },
+    };
+  };
+  var injectDom = function (method, target, html, options) {
+    var elementId = allocElementId(options);
+    var fullOptions = Object.assign({}, options, { _elementId: elementId });
+    globalThis.__lsTrackChain(send(method, [target, html, fullOptions]).catch(function () {}));
+    return buildDomHandle(elementId);
+  };
   var make = function (path) {
     return new Proxy(function () {}, {
       get: function (_t, prop) {
@@ -282,6 +353,11 @@ globalThis.__lsBuildApi = function (hostDispatch) {
         if (path === 'utils.template.registerHelper') return templateRegisterHelper(a);
         if (path === 'utils.template.render') return templateRender(a);
         if (path === 'db.collection') return dbCollection(a);
+        // P4b Inc 1 — string-id DOM injection. Allocates elementId in-VM, threads _elementId,
+        // un-gated fire-and-forget send, returns a sync DOMHandle (update/remove/makeDraggable/
+        // injectChild/read). injectAtMessage's a[0] is a messageId (positional, same shape).
+        if (path === 'ui.dom.inject') return injectDom('ui.dom.inject', a[0], a[1], a[2]);
+        if (path === 'ui.dom.injectAtMessage') return injectDom('ui.dom.injectAtMessage', a[0], a[1], a[2]);
         if (path === 'commands.onInvoked') return registerVmHandler('commandsOnInvoked', 'commands.onInvoked(handler)', a[0], {});
         if (path === 'macros.registerInterceptor') return registerInterceptor('macroInterceptor', 'macros.registerInterceptor', a[0], a[1]);
         if (path === 'chat.registerContentProcessor') return registerInterceptor('contentProcessor', 'chat.registerContentProcessor', a[0], a[1]);
@@ -444,6 +520,36 @@ const VM_REQUIRE_BOOTSTRAP = `
 })();
 `;
 
+// #11 P4b Inc 1 — intra-run deferred-chain drain (port of api-proxy.ts trackChain/flush,
+// :807-858). The qjs run-loop awaits ONLY the body IIFE, then nulls activeRun; an un-awaited
+// dispatch (esp. a gated factory method queued behind an FE open-ack) settles AFTER that →
+// __hostDispatch sees no active run → silent drop (the in-VM RunCompletedError analogue).
+// __lsTrackChain registers each such chain; the run-loop calls __lsFlush after the body
+// settles (activeRun still live) to drain them. Cap 32 bounds cascade depth (runaway is
+// still bounded by the per-run timeout). __lsOutstanding is reset per run (next to
+// __lsVmHandles); the done-closure captures its run's Set so a late settle after a per-run
+// reset deletes from the correct (now-garbage) Set, never the live one.
+const VM_FLUSH_BOOTSTRAP = `
+(function () {
+  globalThis.__lsTrackChain = function (p) {
+    var set = globalThis.__lsOutstanding || (globalThis.__lsOutstanding = new Set());
+    set.add(p);
+    var done = function () { set.delete(p); };
+    Promise.resolve(p).then(done, done);
+    return p;
+  };
+  globalThis.__lsFlush = function () {
+    var set = globalThis.__lsOutstanding || (globalThis.__lsOutstanding = new Set());
+    return (async function () {
+      var cap = 32;
+      while (set.size > 0 && cap-- > 0) {
+        await Promise.allSettled(Array.from(set));
+      }
+    })();
+  };
+})();
+`;
+
 // #11 P3 audit (H1) — lock the trusted scaffolding bindings so one run can't
 // reassign them (e.g. globalThis.__lsEncode = evil, globalThis.api = evilProxy)
 // and poison the NEXT run on the shared process-global context. data / script /
@@ -454,7 +560,7 @@ const VM_REQUIRE_BOOTSTRAP = `
 // deep-frozen.) Eval'd LAST in getContext, after all scaffolding is built.
 const VM_FREEZE_BOOTSTRAP = `
 (function () {
-  var locked = ['__lsEncode', '__lsDecode', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', 'fetch', 'Headers', 'Response', '__hostHandleDispatch', '__lsVmHandleProxy', '__hostRegisterHandler', '__hostUnregisterHandler', '__hostUnregisterHandlerNamed', '__lsCallHandler', '__hostBroadcastSubscribe', '__hostBroadcastUnsubscribe'];
+  var locked = ['__lsEncode', '__lsDecode', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', 'fetch', 'Headers', 'Response', '__hostHandleDispatch', '__lsVmHandleProxy', '__hostRegisterHandler', '__hostUnregisterHandler', '__hostUnregisterHandlerNamed', '__lsCallHandler', '__hostBroadcastSubscribe', '__hostBroadcastUnsubscribe', '__lsTrackChain', '__lsFlush', '__hostAllocElementId'];
   for (var i = 0; i < locked.length; i++) {
     var name = locked[i];
     if (Object.prototype.hasOwnProperty.call(globalThis, name)) {
@@ -591,6 +697,14 @@ const vmHandlerHandles = new Map<string, Map<string, QuickJSHandle>>();
  *  BroadcastClearMessage), whereas RunHandlerRequest handlers persist until unregister.
  *  Disposed on broadcast-clear (per-run) + on full script teardown. */
 const vmBroadcastHandles = new Map<string, Map<string, QuickJSHandle>>();
+/** #11 P4b Inc 1 — DOM stable-id → elementId map for inject dedup, keyed (scriptId,
+ *  stableId). CROSS-RUN (a script re-injecting with the same stable id reuses the
+ *  elementId so the host updates in place), mirroring api-proxy.ts's domStableIdToElementId.
+ *  The single shared VM context can't see scriptId (host-stamped), so the dedup lives
+ *  host-side (same reason as inc3c's named-handler resolution); the VM generates the
+ *  candidate uuid in-VM and __hostAllocElementId returns the cached one for a known
+ *  stableId. Cleared on full script teardown (disposeScriptVmHandlers). */
+const vmDomStableIds = new Map<string, Map<string, string>>();
 /** Cached context build — promise-based so concurrent first calls share ONE
  *  context (a plain `if (context)` check races two builds). Cleared on failure
  *  so a transient build error doesn't poison every later run. */
@@ -795,6 +909,26 @@ async function createContext(): Promise<QuickJSContext> {
   ctx.setProp(ctx.global, '__hostUnregisterHandlerNamed', hostUnregisterHandlerNamed);
   hostUnregisterHandlerNamed.dispose();
 
+  // ── P4b Inc 1: DOM stable-id → elementId dedup. The VM allocates a candidate uuid
+  // in-VM (no host-side crypto needed) and calls this with (stableId, candidate); for a
+  // KNOWN (scriptId, stableId) we return the cached elementId so the host updates in place
+  // across runs, else we store + return the candidate. scriptId is host-stamped (activeRun),
+  // so two scripts' same stable id never collide. ──
+  const hostAllocElementId = ctx.newFunction('__hostAllocElementId', (stableIdHandle, candidateHandle) => {
+    const run = activeRun;
+    const stableId = ctx.getString(stableIdHandle);
+    const candidate = ctx.getString(candidateHandle);
+    if (!stableId || !run?.scriptId) return ctx.newString(candidate);
+    let perScript = vmDomStableIds.get(run.scriptId);
+    if (!perScript) { perScript = new Map(); vmDomStableIds.set(run.scriptId, perScript); }
+    const cached = perScript.get(stableId);
+    if (cached !== undefined) return ctx.newString(cached);
+    perScript.set(stableId, candidate);
+    return ctx.newString(candidate);
+  });
+  ctx.setProp(ctx.global, '__hostAllocElementId', hostAllocElementId);
+  hostAllocElementId.dispose();
+
   // ── P5 inc3b: broadcast subscription. Same dup-the-VM-fn pattern as
   // __hostRegisterHandler, but the closure is keyed by subId and lives in the SEPARATE
   // vmBroadcastHandles registry (broadcast subs are cleared per-run by the parent's
@@ -834,6 +968,8 @@ async function createContext(): Promise<QuickJSContext> {
 
   // The in-VM handler-call trampoline (reads __lsEncode at fire time).
   ctx.unwrapResult(ctx.evalCode(VM_HANDLER_BOOTSTRAP)).dispose();
+  // #11 P4b Inc 1 — the intra-run deferred-chain drain harness (__lsTrackChain / __lsFlush).
+  ctx.unwrapResult(ctx.evalCode(VM_FLUSH_BOOTSTRAP)).dispose();
 
   // ── Stable __console (built ONCE) — forwards to activeRun.console at call time. ──
   const consoleObj = ctx.newObject();
@@ -998,6 +1134,7 @@ export async function runUserScriptInQuickJS(opts: QuickJSRunOptions): Promise<u
       globalThis.__lsRequireCache = {};
       globalThis.__lsRequireInProgress = {};
       globalThis.__lsVmHandles = {};
+      globalThis.__lsOutstanding = new Set();
       globalThis.script.require = globalThis.__lsRequire;
       globalThis.__hbs.helpers = Object.assign({}, globalThis.__hbsBuiltins);
       globalThis.__hbs.partials = Object.assign({}, globalThis.__hbsBuiltinPartials);
@@ -1024,9 +1161,30 @@ ${opts.code}
       const e = ctx.dump(track(settled.error));
       throw timedOut() ? timeoutError() : toHostError(e);
     }
-    const value = marshalDecode(JSON.parse(ctx.getString(track(settled.value))));
-    return value;
+    return marshalDecode(JSON.parse(ctx.getString(track(settled.value))));
   } finally {
+    // #11 P4b Inc 1 — drain intra-run deferred chains (un-awaited dispatches, e.g. a
+    // gate-deferred factory call) while activeRun is STILL LIVE, on BOTH the success and
+    // the body-error path — mirroring asyncfn's proxy.flush() in child-entry's OUTER finally
+    // (which runs on both, NOT only after a clean settle). The in-VM flush is the only
+    // drainer of not-yet-sent gated chains (host-side trackChain only sees already-sent
+    // dispatches), so skipping it on a throwing body would silently drop a queued gated
+    // side-effect once Inc 2 lands gated handles. Best-effort: __lsFlush is allSettled in-VM
+    // (won't reject); the try/catch keeps a flush hiccup from masking the body error. Skipped
+    // on timeout — the worker is being torn down, and a hung chain (the timeout's own cause)
+    // would hang the flush. Runs before activeRun is nulled so the drained sends still route.
+    const wasTimedOut = timedOut();
+    if (!wasTimedOut) {
+      try {
+        const flushHandle = ctx.unwrapResult(ctx.evalCode('globalThis.__lsFlush()'));
+        const flushP = ctx.resolvePromise(flushHandle);
+        pump();
+        const flushSettled = (await flushP) as { value?: QuickJSHandle; error?: QuickJSHandle };
+        flushHandle.dispose();
+        if (flushSettled.value) flushSettled.value.dispose();
+        if (flushSettled.error) flushSettled.error.dispose();
+      } catch { /* best-effort drain — never let the flush mask the run's outcome */ }
+    }
     currentDeadline = Number.POSITIVE_INFINITY;
     activeRun = undefined;
     // Dispose every handle this run allocated, even on the throw paths. `.alive`
@@ -1086,6 +1244,9 @@ export function disposeScriptVmHandlers(scriptId: string): number {
     }
     vmHandlerHandles.delete(scriptId);
   }
+  // #11 P4b Inc 1 — full teardown also drops the DOM stable-id map (mirrors asyncfn's
+  // clearScriptDomStableIds on unregister; a fresh script re-injects with new elementIds).
+  vmDomStableIds.delete(scriptId);
   return n;
 }
 
