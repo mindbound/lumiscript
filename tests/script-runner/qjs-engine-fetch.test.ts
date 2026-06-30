@@ -152,6 +152,43 @@ describe('#11 P3 A2: fetch', () => {
     expect(seenInit?.body).toBeUndefined(); // null body is dropped, not forwarded
   });
 
+  test('forwards the JSON-able RequestInit fields to the host (fetch-dropped-requestinit)', async () => {
+    let seenInit: RequestInit | undefined;
+    await runUserScriptInQuickJS(makeOpts({
+      allowDangerous: true,
+      hostFetch: async (_url, init) => { seenInit = init; return new Response('ok'); },
+      code: `await fetch('https://x', {
+        method: 'POST', credentials: 'include', mode: 'cors', redirect: 'manual', cache: 'no-store',
+        referrer: 'about:client', referrerPolicy: 'no-referrer', integrity: 'sha256-abc', keepalive: true,
+        headers: { 'X-T': '1' }, body: 'b',
+      }); return null;`,
+    }));
+    expect(seenInit?.method).toBe('POST');
+    expect(seenInit?.credentials).toBe('include');
+    expect(seenInit?.mode).toBe('cors');
+    expect(seenInit?.redirect).toBe('manual');
+    expect(seenInit?.cache).toBe('no-store');
+    expect(seenInit?.referrer).toBe('about:client');
+    expect(seenInit?.referrerPolicy).toBe('no-referrer');
+    expect(seenInit?.integrity).toBe('sha256-abc');
+    expect(seenInit?.keepalive).toBe(true);
+    expect((seenInit?.headers as Record<string, string>)['X-T']).toBe('1');
+    expect(seenInit?.body).toBe('b');
+  });
+
+  test('omitted RequestInit fields are NOT forwarded (no undefined junk in init)', async () => {
+    let seenInit: RequestInit | undefined;
+    await runUserScriptInQuickJS(makeOpts({
+      allowDangerous: true,
+      hostFetch: async (_url, init) => { seenInit = init; return new Response('ok'); },
+      code: `await fetch('https://x', { method: 'GET' }); return null;`,
+    }));
+    expect('credentials' in (seenInit ?? {})).toBe(false);
+    expect('mode' in (seenInit ?? {})).toBe(false);
+    expect('redirect' in (seenInit ?? {})).toBe(false);
+    expect('keepalive' in (seenInit ?? {})).toBe(false);
+  });
+
   test('host fetch rejection surfaces as an in-VM fetch rejection', async () => {
     const v = await runUserScriptInQuickJS(makeOpts({
       allowDangerous: true,
@@ -159,6 +196,87 @@ describe('#11 P3 A2: fetch', () => {
       code: `try { await fetch('https://x'); return 'no-throw'; } catch (e) { return 'caught:' + e.message; }`,
     })) as string;
     expect(v).toBe('caught:network down');
+  });
+
+  // ── 3b fetch-abortsignal ──────────────────────────────────────────────────
+  test('AbortController / AbortSignal basics work in-VM', async () => {
+    const v = await runUserScriptInQuickJS(makeOpts({
+      code: `
+        var c = new AbortController();
+        var fired = false; c.signal.addEventListener('abort', function () { fired = true; });
+        var before = c.signal.aborted;
+        c.abort();
+        var s2 = AbortSignal.abort();
+        return { before: before, after: c.signal.aborted, fired: fired, reason: c.signal.reason.name, staticAborted: s2.aborted };
+      `,
+    })) as { before: boolean; after: boolean; fired: boolean; reason: string; staticAborted: boolean };
+    expect(v).toEqual({ before: false, after: true, fired: true, reason: 'AbortError', staticAborted: true });
+  });
+
+  test('aborting an in-flight fetch cancels the host request + rejects with AbortError', async () => {
+    let hostSignalAborted = false;
+    const v = await runUserScriptInQuickJS(makeOpts({
+      allowDangerous: true,
+      // A host fetch that never resolves unless its signal aborts (mirrors a real cancellable request).
+      hostFetch: (_url, init) => new Promise((_resolve, reject) => {
+        const sig = init?.signal;
+        if (sig) sig.addEventListener('abort', () => {
+          hostSignalAborted = true;
+          reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+        });
+      }),
+      code: `
+        var ctrl = new AbortController();
+        var p = fetch('https://x', { signal: ctrl.signal });
+        ctrl.abort();
+        try { await p; return 'no-throw'; } catch (e) { return 'caught:' + e.name; }
+      `,
+    })) as string;
+    expect(v).toBe('caught:AbortError');
+    expect(hostSignalAborted).toBe(true);
+  });
+
+  test('fetch with an ALREADY-aborted signal rejects immediately without calling the host', async () => {
+    let called = false;
+    const v = await runUserScriptInQuickJS(makeOpts({
+      allowDangerous: true,
+      hostFetch: async () => { called = true; return new Response('x'); },
+      code: `
+        var ctrl = new AbortController(); ctrl.abort();
+        try { await fetch('https://x', { signal: ctrl.signal }); return 'no-throw'; } catch (e) { return 'caught:' + e.name; }
+      `,
+    })) as string;
+    expect(v).toBe('caught:AbortError');
+    expect(called).toBe(false); // host fetch never invoked
+  });
+
+  // ── 3c fetch-binary-base64 ────────────────────────────────────────────────
+  test('binary body round-trips via base64 (non-UTF8 bytes preserved)', async () => {
+    const v = await runUserScriptInQuickJS(makeOpts({
+      allowDangerous: true,
+      hostFetch: async () => new Response(new Uint8Array([0, 1, 2, 254, 255, 128])),
+      code: `
+        var b = await (await fetch('https://x')).bytes();
+        return { isU8: b instanceof Uint8Array, len: b.length, vals: Array.from(b) };
+      `,
+    })) as { isU8: boolean; len: number; vals: number[] };
+    expect(v.isU8).toBe(true);
+    expect(v.len).toBe(6);
+    expect(v.vals).toEqual([0, 1, 2, 254, 255, 128]);
+  });
+
+  test('a response whose Content-Length exceeds the cap is rejected before the body read', async () => {
+    let bodyRead = false;
+    const v = await runUserScriptInQuickJS(makeOpts({
+      allowDangerous: true,
+      hostFetch: async () => {
+        const r = new Response('x', { headers: { 'content-length': String(64 * 1024 * 1024 + 1) } });
+        return new Proxy(r, { get(t, p) { if (p === 'arrayBuffer') { bodyRead = true; } return Reflect.get(t, p); } });
+      },
+      code: `try { await fetch('https://x'); return 'no-throw'; } catch (e) { return 'caught:' + e.message; }`,
+    })) as string;
+    expect(v).toContain('exceeds');
+    expect(bodyRead).toBe(false); // rejected before pulling the body
   });
 
   test('fetch / Headers / Response globals are frozen', async () => {

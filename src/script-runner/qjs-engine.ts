@@ -799,7 +799,7 @@ const VM_FLUSH_BOOTSTRAP = `
 // deep-frozen.) Eval'd LAST in getContext, after all scaffolding is built.
 const VM_FREEZE_BOOTSTRAP = `
 (function () {
-  var locked = ['__lsEncode', '__lsDecode', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', 'fetch', 'Headers', 'Response', '__hostHandleDispatch', '__lsVmHandleProxy', '__hostRegisterHandler', '__hostUnregisterHandler', '__hostUnregisterHandlerNamed', '__lsCallHandler', '__hostBroadcastSubscribe', '__hostBroadcastUnsubscribe', '__lsTrackChain', '__lsFlush', '__hostAllocElementId', '__hostRegisterWidget', '__hostRegisterModal', '__hostRegisterModalDismiss', '__hostUnregisterModalDismiss'];
+  var locked = ['__lsEncode', '__lsDecode', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', '__lsFetchAbort', 'fetch', 'Headers', 'Response', 'AbortController', 'AbortSignal', '__hostHandleDispatch', '__lsVmHandleProxy', '__hostRegisterHandler', '__hostUnregisterHandler', '__hostUnregisterHandlerNamed', '__lsCallHandler', '__hostBroadcastSubscribe', '__hostBroadcastUnsubscribe', '__lsTrackChain', '__lsFlush', '__hostAllocElementId', '__hostRegisterWidget', '__hostRegisterModal', '__hostRegisterModalDismiss', '__hostUnregisterModalDismiss'];
   for (var i = 0; i < locked.length; i++) {
     var name = locked[i];
     if (Object.prototype.hasOwnProperty.call(globalThis, name)) {
@@ -845,12 +845,57 @@ const VM_CRYPTO_BOOTSTRAP = `
 
 // #11 P3 A2 — in-VM fetch. DIRECT host fetch (gated by the run's allowDangerous),
 // mirroring the asyncfn safeFetch — NOT cors-proxied (api.utils.http covers that).
+// The JSON-able RequestInit fields the VM fetch wrapper threads through to the host fetch
+// (fetch-dropped-requestinit) — kept in sync with __lsFetchPassThrough in VM_FETCH_BOOTSTRAP.
+// signal/body/headers/method are handled explicitly; these are the plain string/boolean extras.
+const FETCH_INIT_PASSTHROUGH = ['mode', 'credentials', 'cache', 'redirect', 'referrer', 'referrerPolicy', 'integrity', 'keepalive'] as const;
+
+// 3c fetch-binary-base64 — cap the response body the host pulls into memory + transfers to the VM
+// (asyncfn raw fetch is uncapped, but the VM transfer + decode is the cost we bound). Checked
+// against Content-Length first (reject before the body read) and again post-read.
+const FETCH_MAX_RESPONSE_BYTES = 64 * 1024 * 1024; // 64 MiB
+
+// 3b fetch-abortsignal — pending host AbortControllers keyed by the VM-generated abortId, so an
+// in-VM ctrl.abort() (routed via __lsFetchAbort) cancels the real host fetch. Self-cleared when the
+// fetch settles; entries are host objects (GC'd on delete), no VM handle to dispose.
+const vmFetchAborts = new Map<string, AbortController>();
+
 // __lsFetch(url, optsJson) is an ASYNC host fn (createContext, deferred-promise
 // pattern like __hostDispatch): it runs the child's globalThis.fetch, reads the
 // body as bytes, and settles with {ok,status,statusText,headers,bytes}. The VM
 // wrapper builds a Response (text/json/arrayBuffer/bytes + a Headers).
 const VM_FETCH_BOOTSTRAP = `
 (function () {
+  var __lsMakeAbortError = function (msg) { var e = new Error(msg || 'The operation was aborted.'); e.name = 'AbortError'; return e; };
+  // 3c fetch-binary-base64 — decode a base64 body string to bytes (atob is a frozen VM global).
+  // Bodies cross as base64 (not a marshaled number array) to cut the transfer blowup ~3x.
+  var __lsB64ToBytes = function (b64) {
+    if (!b64) return new Uint8Array(0);
+    var bin = globalThis.atob(b64); var len = bin.length; var out = new Uint8Array(len);
+    for (var i = 0; i < len; i++) out[i] = bin.charCodeAt(i) & 0xff;
+    return out;
+  };
+  // 3b fetch-abortsignal — minimal AbortController / AbortSignal (the VM has none). abort()
+  // fans out to onabort + addEventListener('abort') listeners; the fetch wrapper registers a
+  // listener that signals the host to abort the real request.
+  function AbortSignal() { this.aborted = false; this.reason = undefined; this._abortListeners = []; this.onabort = null; }
+  AbortSignal.prototype.addEventListener = function (type, cb) { if (type === 'abort' && typeof cb === 'function') this._abortListeners.push(cb); };
+  AbortSignal.prototype.removeEventListener = function (type, cb) { if (type === 'abort') { var idx = this._abortListeners.indexOf(cb); if (idx >= 0) this._abortListeners.splice(idx, 1); } };
+  AbortSignal.prototype.throwIfAborted = function () { if (this.aborted) throw this.reason; };
+  AbortSignal.prototype.dispatchEvent = function () { return true; };
+  AbortSignal.abort = function (reason) { var s = new AbortSignal(); s.aborted = true; s.reason = (reason !== undefined) ? reason : __lsMakeAbortError(); return s; };
+  globalThis.AbortSignal = AbortSignal;
+  function AbortController() { this.signal = new AbortSignal(); }
+  AbortController.prototype.abort = function (reason) {
+    var s = this.signal;
+    if (s.aborted) return;
+    s.aborted = true; s.reason = (reason !== undefined) ? reason : __lsMakeAbortError();
+    var ev = { type: 'abort' };
+    if (typeof s.onabort === 'function') { try { s.onabort.call(s, ev); } catch (e) {} }
+    var ls = s._abortListeners.slice();
+    for (var i = 0; i < ls.length; i++) { try { ls[i].call(s, ev); } catch (e) {} }
+  };
+  globalThis.AbortController = AbortController;
   var unwrap = function (s) {
     var o = JSON.parse(s);
     if (o && o.e) { var e = new Error((o.e && o.e.message) || 'fetch failed'); if (o.e.name) e.name = o.e.name; throw e; }
@@ -868,7 +913,8 @@ const VM_FETCH_BOOTSTRAP = `
     this.ok = !!r.ok; this.status = r.status; this.statusText = r.statusText || '';
     this.url = r.url || ''; this.redirected = !!r.redirected;
     this.headers = new Headers(r.headers || {});
-    this._bytes = (r.bytes instanceof Uint8Array) ? r.bytes : new Uint8Array(0);
+    // 3c — body arrives as base64 (bodyB64); legacy bytes path kept as a fallback.
+    this._bytes = (typeof r.bodyB64 === 'string') ? __lsB64ToBytes(r.bodyB64) : ((r.bytes instanceof Uint8Array) ? r.bytes : new Uint8Array(0));
     this.bodyUsed = false;
   }
   Response.prototype.arrayBuffer = function () { this.bodyUsed = true; return Promise.resolve(this._bytes.buffer); };
@@ -876,10 +922,28 @@ const VM_FETCH_BOOTSTRAP = `
   Response.prototype.text = function () { this.bodyUsed = true; return Promise.resolve(new TextDecoder().decode(this._bytes)); };
   Response.prototype.json = function () { return this.text().then(function (t) { return JSON.parse(t); }); };
   globalThis.Response = Response;
+  var __lsFetchPassThrough = ['mode', 'credentials', 'cache', 'redirect', 'referrer', 'referrerPolicy', 'integrity', 'keepalive'];
   globalThis.fetch = function (url, opts) {
     var o = opts || {};
     var norm = { method: o.method || 'GET', headers: o.headers || {}, body: (o.body === undefined ? null : o.body) };
-    return Promise.resolve(globalThis.__lsFetch(String(url), JSON.stringify(globalThis.__lsEncode(norm)))).then(unwrap).then(function (r) { return new Response(r); });
+    // Thread the JSON-able RequestInit fields asyncfn's raw fetch passes through (fetch-dropped-
+    // requestinit). signal is NOT JSON-serializable and is handled via the abort path below.
+    for (var i = 0; i < __lsFetchPassThrough.length; i++) { var k = __lsFetchPassThrough[i]; if (o[k] !== undefined) norm[k] = o[k]; }
+    var signal = o.signal;
+    // Already aborted before the request started -> reject with the signal's reason (AbortError parity).
+    if (signal && signal.aborted) return Promise.reject(signal.reason || __lsMakeAbortError());
+    var abortId = null, onAbort = null;
+    if (signal && typeof signal.addEventListener === 'function') {
+      abortId = 'fetchAbort:' + globalThis.crypto.randomUUID();
+      norm.__lsAbortId = abortId;
+      onAbort = function () { try { globalThis.__lsFetchAbort(abortId); } catch (e) {} };
+      signal.addEventListener('abort', onAbort);
+    }
+    var cleanup = function () { if (signal && onAbort && typeof signal.removeEventListener === 'function') { try { signal.removeEventListener('abort', onAbort); } catch (e) {} } };
+    return Promise.resolve(globalThis.__lsFetch(String(url), JSON.stringify(globalThis.__lsEncode(norm)))).then(unwrap).then(
+      function (r) { cleanup(); return new Response(r); },
+      function (e) { cleanup(); throw e; }
+    );
   };
 })();
 `;
@@ -1350,18 +1414,46 @@ async function createContext(): Promise<QuickJSContext> {
       settle('e', { name: 'Error', message: 'fetch() is unavailable: the host did not grant a fetch capability for this run.' }, 'fetch unavailable');
     } else {
       const hostFetch = run.hostFetch;
+      const rawInit = reqInit as Record<string, unknown> | undefined;
+      // 3b fetch-abortsignal — if the VM wrapper threaded an abortId, create a real host AbortController
+      // for it so an in-VM ctrl.abort() (via __lsFetchAbort) cancels this request.
+      const abortId = typeof rawInit?.__lsAbortId === 'string' ? (rawInit.__lsAbortId as string) : undefined;
+      let controller: AbortController | undefined;
+      if (abortId) { controller = new AbortController(); vmFetchAborts.set(abortId, controller); }
       void (async () => {
         try {
           const init: RequestInit = { method: reqInit?.method ?? 'GET' };
           if (reqInit?.headers) init.headers = reqInit.headers;
           if (reqInit?.body !== undefined && reqInit?.body !== null) init.body = reqInit.body as BodyInit;
+          // fetch-dropped-requestinit — thread the JSON-able RequestInit fields the VM wrapper copied
+          // through (credentials/mode/redirect/cache/etc.), matching asyncfn's raw-fetch pass-through.
+          if (rawInit) {
+            for (const k of FETCH_INIT_PASSTHROUGH) {
+              if (rawInit[k] !== undefined) (init as Record<string, unknown>)[k] = rawInit[k];
+            }
+          }
+          if (controller) init.signal = controller.signal;
           const res = await hostFetch(url, init);
+          // 3c fetch-binary-base64 — cap by Content-Length BEFORE pulling the body when declared.
+          const clen = Number(res.headers.get('content-length'));
+          if (Number.isFinite(clen) && clen > FETCH_MAX_RESPONSE_BYTES) {
+            settle('e', { name: 'Error', message: `fetch() response Content-Length ${clen} exceeds the ${FETCH_MAX_RESPONSE_BYTES}-byte limit.` }, 'response too large');
+            return;
+          }
           const bytes = new Uint8Array(await res.arrayBuffer());
+          if (bytes.byteLength > FETCH_MAX_RESPONSE_BYTES) {
+            settle('e', { name: 'Error', message: `fetch() response (${bytes.byteLength} bytes) exceeds the ${FETCH_MAX_RESPONSE_BYTES}-byte limit.` }, 'response too large');
+            return;
+          }
           const headers: Record<string, string> = {};
           res.headers.forEach((v, k) => { headers[k] = v; });
-          settle('v', { ok: res.ok, status: res.status, statusText: res.statusText, url: res.url, redirected: res.redirected, headers, bytes }, 'fetch result could not be marshaled');
+          // 3c — body crosses as base64 (bodyB64), not a marshaled number array (~3x smaller transfer).
+          const bodyB64 = Buffer.from(bytes).toString('base64');
+          settle('v', { ok: res.ok, status: res.status, statusText: res.statusText, url: res.url, redirected: res.redirected, headers, bodyB64 }, 'fetch result could not be marshaled');
         } catch (err) {
           settle('e', run.serializeError(err), 'fetch error could not be serialized');
+        } finally {
+          if (abortId) vmFetchAborts.delete(abortId);
         }
       })();
     }
@@ -1370,6 +1462,15 @@ async function createContext(): Promise<QuickJSContext> {
   });
   ctx.setProp(ctx.global, '__lsFetch', fetchFn);
   fetchFn.dispose();
+  // 3b fetch-abortsignal — the in-VM AbortController routes ctrl.abort() here; abort the mapped
+  // host controller so the real request cancels (hostFetch then rejects with AbortError).
+  const fetchAbortFn = ctx.newFunction('__lsFetchAbort', (abortIdHandle) => {
+    const abortId = ctx.getString(abortIdHandle);
+    const controller = vmFetchAborts.get(abortId);
+    if (controller) { try { controller.abort(); } catch { /* */ } vmFetchAborts.delete(abortId); }
+  });
+  ctx.setProp(ctx.global, '__lsFetchAbort', fetchAbortFn);
+  fetchAbortFn.dispose();
   ctx.unwrapResult(ctx.evalCode(VM_FETCH_BOOTSTRAP)).dispose();
 
   // P3 audit H1 — lock the trusted scaffolding bindings. MUST be the last eval,
