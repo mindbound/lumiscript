@@ -284,6 +284,136 @@ describe('#11 P4b Inc 3b: mountApp (gated, callback-free)', () => {
   });
 });
 
+describe('#11 P4b Inc 3b-2: showModal (awaited-value handle)', () => {
+  test('returns {openRequestId, result(Promise), close(fn)}; open threads openRequestId in options + items as arg0; result resolves to awaitResult', async () => {
+    const s = spy({ returns: { 'ui._modal.awaitResult': { action: 'confirm', value: 'yes' } } });
+    const ret = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-showmodal', name: 'SM', type: 'trigger' }, dispatch: s.dispatch,
+      code: `var h = api.ui.showModal([{ type: 'text', text: 'Q?' }], { title: 'Ask' }); var r = await h.result; return { orid: h.openRequestId, closeType: typeof h.close, result: r }; `,
+    })) as { orid: string; closeType: string; result: unknown };
+    expect(ret.orid).toMatch(UUID_RE);
+    expect(ret.closeType).toBe('function');
+    expect(ret.result).toEqual({ action: 'confirm', value: 'yes' }); // awaited value
+    const open = s.find('ui.showModal')!;
+    expect(open.args[0]).toEqual([{ type: 'text', text: 'Q?' }]); // items positional
+    expect((open.args[1] as { openRequestId?: string; title?: string }).openRequestId).toBe(ret.orid);
+    expect((open.args[1] as { title?: string }).title).toBe('Ask'); // user options preserved
+    expect(s.find('ui._modal.awaitResult')!.args).toEqual([ret.orid]);
+  });
+
+  test('close() dispatches ui._modal.close [openRequestId] + returns a promise', async () => {
+    const s = spy();
+    const orid = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-smclose', name: 'SMC', type: 'trigger' }, dispatch: s.dispatch,
+      code: `var h = api.ui.showModal([], {}); await h.close(); return h.openRequestId;`,
+    })) as string;
+    expect(s.find('ui._modal.close')!.args).toEqual([orid]);
+  });
+
+  test('a failed open surfaces via result rejecting (the user awaits + catches)', async () => {
+    const s = spy({ rejects: ['ui.showModal'] });
+    const msg = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-smreject', name: 'SMR', type: 'trigger' }, dispatch: s.dispatch,
+      code: `var h = api.ui.showModal([], {}); try { await h.result; return 'NO-THROW'; } catch (e) { return 'caught:' + e.message; }`,
+    })) as string;
+    expect(msg).toContain('caught:');
+    expect(msg).toContain('ui.showModal failed');
+  });
+
+  test('a BARE showModal whose open rejects (no await) does not leak an unhandled rejection', async () => {
+    const s = spy({ rejects: ['ui.showModal'] });
+    const ret = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-smbare', name: 'SMB', type: 'trigger' }, dispatch: s.dispatch,
+      code: `api.ui.showModal([], {}); return 'done';`,
+    }));
+    expect(ret).toBe('done'); // showModalAck + the eager result are both __lsTrackChain'd → rejection observed
+  });
+});
+
+describe('#11 P4b Inc 3c-1: gated register-handler callbacks (onDragEnd / onActivate / onClick)', () => {
+  test('floatWidget.onDragEnd registers a GATED floatWidgetDragEnd handler (meta {widgetId}); fires with [pos]', async () => {
+    const reg: Array<{ kind: string; handlerId: string; meta: Record<string, unknown> }> = [];
+    const s = spy();
+    await runUserScriptInQuickJS({
+      ...runOpts({
+        script: { id: 's-drag', name: 'DG', type: 'trigger' }, dispatch: s.dispatch,
+        code: `var w = api.ui.createFloatWidget({}); var off = w.onDragEnd((pos) => pos.x + ',' + pos.y); return typeof off; `,
+      }),
+      dispatchRegisterHandler: (kind, handlerId, meta) => reg.push({ kind, handlerId, meta: meta as Record<string, unknown> }),
+    });
+    const r = reg.find((x) => x.kind === 'floatWidgetDragEnd')!;
+    expect(r).toBeDefined();
+    const wid = (s.find('ui.createFloatWidget')!.args[0] as { _widgetId: string })._widgetId;
+    expect(r.meta).toEqual({ widgetId: wid });
+    const result = await fireHandlerInQuickJS(fireOpts({ scriptId: 's-drag', handlerId: r.handlerId, args: [{ x: 3, y: 4 }] }));
+    expect(result).toBe('3,4'); // the handler receives the drag pos as its arg
+    disposeScriptVmHandlers('s-drag');
+  });
+
+  test('drawerTab.onActivate registers a gated drawerTabActivate handler (meta {tabId}); fires no-arg', async () => {
+    const reg: Array<{ kind: string; handlerId: string; meta: Record<string, unknown> }> = [];
+    await runUserScriptInQuickJS({
+      ...runOpts({
+        script: { id: 's-act', name: 'AC', type: 'trigger' },
+        code: `var t = api.ui.registerDrawerTab({ id: 't1', title: 'T' }); t.onActivate(() => 'activated'); return null;`,
+      }),
+      dispatchRegisterHandler: (kind, handlerId, meta) => reg.push({ kind, handlerId, meta: meta as Record<string, unknown> }),
+    });
+    const r = reg.find((x) => x.kind === 'drawerTabActivate')!;
+    expect(r.meta).toEqual({ tabId: 't1' });
+    const result = await fireHandlerInQuickJS(fireOpts({ scriptId: 's-act', handlerId: r.handlerId, args: [] }));
+    expect(result).toBe('activated');
+    disposeScriptVmHandlers('s-act');
+  });
+
+  test('registerInputBarAction: sync handle (actionId=options.id, raw options on wire); setLabel gated; onClick registers inputBarActionClick + fires no-arg', async () => {
+    const reg: Array<{ kind: string; handlerId: string; meta: Record<string, unknown> }> = [];
+    const s = spy();
+    const aid = await runUserScriptInQuickJS({
+      ...runOpts({
+        script: { id: 's-iba', name: 'IBA', type: 'trigger' }, dispatch: s.dispatch,
+        code: `var a = api.ui.registerInputBarAction({ id: 'act1', label: 'Go' }); a.setLabel('New'); a.onClick(() => 'clicked'); return a.actionId; `,
+      }),
+      dispatchRegisterHandler: (kind, handlerId, meta) => reg.push({ kind, handlerId, meta: meta as Record<string, unknown> }),
+    }) as string;
+    expect(aid).toBe('act1');
+    expect((s.find('ui.registerInputBarAction')!.args[0] as { id: string }).id).toBe('act1'); // raw options
+    expect(s.find('ui._inputBar.setLabel')!.args).toEqual(['act1', 'New']);
+    const r = reg.find((x) => x.kind === 'inputBarActionClick')!;
+    expect(r.meta).toEqual({ actionId: 'act1' });
+    const result = await fireHandlerInQuickJS(fireOpts({ scriptId: 's-iba', handlerId: r.handlerId, args: [] }));
+    expect(result).toBe('clicked');
+    disposeScriptVmHandlers('s-iba');
+  });
+
+  test('registerInputBarAction sync validation throws on empty/missing id', async () => {
+    let m = '';
+    try { await runUserScriptInQuickJS(runOpts({ script: { id: 's-ibabad', name: 'IB', type: 'trigger' }, code: `api.ui.registerInputBarAction({ label: 'x' }); return null;` })); }
+    catch (e) { m = (e as Error).message; }
+    expect(m).toContain('options.id must be a non-empty string');
+  });
+
+  test('a callback on an already-destroyed handle returns a no-op unsub + never registers', async () => {
+    const reg: Array<{ kind: string }> = [];
+    const ret = await runUserScriptInQuickJS({
+      ...runOpts({
+        script: { id: 's-destcb', name: 'DC', type: 'trigger' },
+        code: `var a = api.ui.registerInputBarAction({ id: 'x' }); a.destroy(); return typeof a.onClick(() => {}); `,
+      }),
+      dispatchRegisterHandler: (kind) => reg.push({ kind }),
+    }) as string;
+    expect(ret).toBe('function');           // a no-op unsub fn
+    expect(reg.find((r) => r.kind === 'inputBarActionClick')).toBeUndefined(); // destroyed → never registered
+  });
+
+  test('a non-function callback fails loud', async () => {
+    let m = '';
+    try { await runUserScriptInQuickJS(runOpts({ script: { id: 's-cbbad', name: 'CB', type: 'trigger' }, code: `api.ui.createFloatWidget({}).onDragEnd(42); return null;` })); }
+    catch (e) { m = (e as Error).message; }
+    expect(m).toContain('handler must be a function');
+  });
+});
+
 describe('#11 P4b Inc 3: fire-path flush (gated factory inside a FIRED handler)', () => {
   test('a gated factory method opened inside a fired handler reaches the host — drained by the fire-path flush', async () => {
     const s = spy();

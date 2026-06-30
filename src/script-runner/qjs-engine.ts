@@ -268,6 +268,25 @@ globalThis.__lsBuildApi = function (hostDispatch) {
   var unregisterNamedHandler = function (kind, name) {
     globalThis.__hostUnregisterHandlerNamed(kind, String(name));
   };
+  // #11 P4b Inc 3c-1 — shared GATED register-handler helper (the DOMHandle.on pattern). For
+  // per-handle callbacks that hang off a factory openAck (floatWidget.onDragEnd /
+  // drawerTab.onActivate / inputBarAction.onClick): dup the fn via __hostRegisterHandler behind
+  // the gate so the parent has the canonical handle stored before its lookup; a cancelled flag
+  // drops a still-gated registration if unsub runs before the gate resolves; a destroyed handle
+  // returns a no-op unsub (never registers). Fires via the existing kind-agnostic fireVmHandler.
+  var gatedRegisterHandler = function (kind, method, fn, meta, gateAck, destroyedRef) {
+    if (typeof fn !== 'function') throw new Error('api.' + method + ': handler must be a function.');
+    if (destroyedRef && destroyedRef.current) return function () {};
+    var handlerId = kind + ':' + globalThis.crypto.randomUUID();
+    var cancelled = false;
+    var register = function () {
+      if (cancelled) return;
+      globalThis.__hostRegisterHandler(kind, handlerId, fn, JSON.stringify(globalThis.__lsEncode(meta || {})));
+    };
+    if (gateAck === undefined) { register(); }
+    else { globalThis.__lsTrackChain(gateAck.then(register).catch(function () {})); }
+    return function () { cancelled = true; globalThis.__hostUnregisterHandler(kind, handlerId); };
+  };
   // #11 P4b Inc 1 — string-id DOM handles (mirrors api-proxy.ts buildDOMHandleProxy/inject).
   // elementId is generated UPFRONT (so the handle returns synchronously) + threaded via the
   // @internal _elementId option so the canonical adopts the SAME id; methods dispatch via
@@ -383,8 +402,10 @@ globalThis.__lsBuildApi = function (hostDispatch) {
       setVisible: function (visible) { if (destroyedRef.current) return; visibleCache.current = visible; gated('ui._floatWidget.setVisible', [widgetId, visible]); },
       isVisible: function () { return visibleCache.current; },
       destroy: function () { if (destroyedRef.current) return; destroyedRef.current = true; gated('ui._floatWidget.destroy', [widgetId]); },
-      // onDragEnd: DEFER to Inc 3 (needs the floatWidgetPosition notice -> VM bridge for its
-      // getPosition()-reflects-drag-coords contract; registering without it = a silently-wrong read).
+      // P4b Inc 3c-1 — onDragEnd: gated register-handler (kind floatWidgetDragEnd); the handler
+      // receives the drag [pos] as its arg (delivered by the fire). getPosition()-reflects-drag
+      // INSIDE the closure still needs the position-notice -> positionCache bridge (3c-2).
+      onDragEnd: function (handler) { return gatedRegisterHandler('floatWidgetDragEnd', 'floatWidget.onDragEnd', handler, { widgetId: widgetId }, openAck, destroyedRef); },
     };
   };
   var createFloatWidget = function (options) {
@@ -412,7 +433,8 @@ globalThis.__lsBuildApi = function (hostDispatch) {
       setBadge: function (text) { if (destroyedRef.current) return; gated('ui._drawerTab.setBadge', [tabId, text]); },
       activate: function () { if (destroyedRef.current) return; gated('ui._drawerTab.activate', [tabId]); },
       destroy: function () { if (destroyedRef.current) return; destroyedRef.current = true; gated('ui._drawerTab.destroy', [tabId]); },
-      // onActivate: DEFER to 3c-1 (gated register-handler kind 'drawerTabActivate').
+      // P4b Inc 3c-1 — onActivate: gated register-handler (kind drawerTabActivate), no-arg fire.
+      onActivate: function (handler) { return gatedRegisterHandler('drawerTabActivate', 'drawerTab.onActivate', handler, { tabId: tabId }, openAck, destroyedRef); },
     };
   };
   var registerDrawerTab = function (options) {
@@ -445,6 +467,45 @@ globalThis.__lsBuildApi = function (hostDispatch) {
     var openAck = globalThis.__lsTrackChain(send('ui.mountApp', [optsWithIds]).catch(function (err) { destroyedRef.current = true; throw err; }));
     return buildAppMountHandle(mountId, rootElementId, openAck, destroyedRef);
   };
+  // #11 P4b Inc 3c-1 — registerInputBarAction: a gated factory with NO .root (host reads
+  // options.id as actionId; raw options on the wire). setLabel/setSubtitle/setEnabled/destroy
+  // are gated-void; onClick is a gated register-handler (kind inputBarActionClick, no-arg fire).
+  var buildInputBarActionHandle = function (actionId, openAck, destroyedRef) {
+    var gated = function (method, args) {
+      globalThis.__lsTrackChain(openAck.then(function () { return send(method, args); }).catch(function () {}));
+    };
+    return {
+      actionId: actionId,
+      setLabel: function (label) { if (destroyedRef.current) return; gated('ui._inputBar.setLabel', [actionId, label]); },
+      setSubtitle: function (subtitle) { if (destroyedRef.current) return; gated('ui._inputBar.setSubtitle', [actionId, subtitle]); },
+      setEnabled: function (enabled) { if (destroyedRef.current) return; gated('ui._inputBar.setEnabled', [actionId, enabled]); },
+      destroy: function () { if (destroyedRef.current) return; destroyedRef.current = true; gated('ui._inputBar.destroy', [actionId]); },
+      onClick: function (handler) { return gatedRegisterHandler('inputBarActionClick', 'inputBarAction.onClick', handler, { actionId: actionId }, openAck, destroyedRef); },
+    };
+  };
+  var registerInputBarAction = function (options) {
+    if (typeof (options && options.id) !== 'string' || options.id.length === 0) throw new Error('api.ui.registerInputBarAction: options.id must be a non-empty string.');
+    var actionId = options.id;
+    var destroyedRef = { current: false };
+    var openAck = globalThis.__lsTrackChain(send('ui.registerInputBarAction', [options]).catch(function (err) { destroyedRef.current = true; throw err; }));
+    return buildInputBarActionHandle(actionId, openAck, destroyedRef);
+  };
+  // #11 P4b Inc 3b-2 — showModal: NOT the gated-void factory shape. openRequestId threads
+  // INSIDE options; the result is an EAGER Promise property (showModalAck.then(awaitResult)) the
+  // user awaits; close() returns a Promise. Both are __lsTrackChain'd so an un-awaited
+  // result/close drains at flush (parity with asyncfn auto-trackChain on proxy.dispatch) +
+  // a rejection is observed (no leak); the user await consumes the same promise. A failed
+  // open surfaces via result/close rejecting (showModalAck.catch rethrows).
+  var showModal = function (items, options) {
+    var openRequestId = globalThis.crypto.randomUUID();
+    var optsWithIds = Object.assign({}, options, { openRequestId: openRequestId });
+    var showModalAck = globalThis.__lsTrackChain(send('ui.showModal', [items, optsWithIds]).catch(function (err) { throw (err instanceof Error) ? err : new Error(String(err)); }));
+    return {
+      openRequestId: openRequestId,
+      result: globalThis.__lsTrackChain(showModalAck.then(function () { return send('ui._modal.awaitResult', [openRequestId]); })),
+      close: function () { return globalThis.__lsTrackChain(showModalAck.then(function () { return send('ui._modal.close', [openRequestId]); })); },
+    };
+  };
   var make = function (path) {
     return new Proxy(function () {}, {
       get: function (_t, prop) {
@@ -472,6 +533,8 @@ globalThis.__lsBuildApi = function (hostDispatch) {
         // P4b Inc 3b — remaining callback-free gated factories (same intercept-before-send rule).
         if (path === 'ui.registerDrawerTab') return registerDrawerTab(a[0]);
         if (path === 'ui.mountApp') return mountApp(a[0]);
+        if (path === 'ui.registerInputBarAction') return registerInputBarAction(a[0]);
+        if (path === 'ui.showModal') return showModal(a[0], a[1]);
         if (path === 'commands.onInvoked') return registerVmHandler('commandsOnInvoked', 'commands.onInvoked(handler)', a[0], {});
         if (path === 'macros.registerInterceptor') return registerInterceptor('macroInterceptor', 'macros.registerInterceptor', a[0], a[1]);
         if (path === 'chat.registerContentProcessor') return registerInterceptor('contentProcessor', 'chat.registerContentProcessor', a[0], a[1]);
