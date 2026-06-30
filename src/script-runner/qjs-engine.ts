@@ -77,6 +77,22 @@ export interface QuickJSRunOptions {
    *  not handlerId/kind). The closure still lives in the VM registry (keyed by subId). */
   dispatchBroadcastSubscribe?: (subId: string, event: string) => void;
   dispatchBroadcastUnsubscribe?: (subId: string) => void;
+  /** #11 list-methods parity — the run's sync-list snapshots, seeded into the VM so the 6
+   *  declared-SYNC list reads (tools.list / macros.list / macros.listInterceptors /
+   *  chat.getInjections / chat.listContentProcessors / worldInfo.listInterceptors) return arrays
+   *  in-VM instead of falling through to send() → Promise (`api.macros.list().forEach()` would
+   *  throw on a Promise). Mirrors the asyncfn proxy's `local*` arrays (api-proxy.ts:876-881),
+   *  seeded from the parent's RunScriptRequest. Absent → the lists read empty.
+   *  NOTE: seeded per BODY-run; a fired handler reads the last body-run's snapshot (the same
+   *  residue caveat as `data`/`script` — see the data-script-residue follow-up). */
+  listSnapshots?: {
+    tools:                 readonly unknown[];
+    macros:                readonly unknown[];
+    macroInterceptors:     readonly unknown[];
+    chatInjections:        readonly unknown[];
+    chatContentProcessors: readonly unknown[];
+    worldInfoInterceptors: readonly unknown[];
+  };
 }
 
 // In-VM bootstrap: the recursive `api` Proxy. `api.chat.getMessages(a,b)` →
@@ -531,6 +547,14 @@ globalThis.__lsBuildApi = function (hostDispatch) {
       close: function () { return globalThis.__lsTrackChain(showModalAck.then(function () { return send('ui._modal.close', [openRequestId]); })); },
     };
   };
+  // #11 list-methods parity — read a seeded sync-list snapshot (api-proxy.ts local* arrays) by key,
+  // returning a fresh array of SHALLOW-cloned entries (matches asyncfn's .map(x => ({...x}))).
+  var __lsListSnap = function (key) {
+    var snaps = globalThis.__lsListSnapshots;
+    var arr = snaps && snaps[key];
+    if (!Array.isArray(arr)) return []; // unseeded, or a script clobbered its own snapshot global
+    return arr.map(function (e) { return Object.assign({}, e); });
+  };
   var make = function (path) {
     return new Proxy(function () {}, {
       get: function (_t, prop) {
@@ -539,6 +563,14 @@ globalThis.__lsBuildApi = function (hostDispatch) {
       },
       apply: function (_t, _thisArg, args) {
         var a = args || [];
+        // #11 list-methods parity — the 6 declared-SYNC reads, served from the seeded run snapshot.
+        // Falling through to send() would yield a Promise that breaks list().forEach() on user code.
+        if (path === 'tools.list')                 return __lsListSnap('tools');
+        if (path === 'macros.list')                return __lsListSnap('macros');
+        if (path === 'macros.listInterceptors')    return __lsListSnap('macroInterceptors');
+        if (path === 'chat.getInjections')         return __lsListSnap('chatInjections');
+        if (path === 'chat.listContentProcessors') return __lsListSnap('chatContentProcessors');
+        if (path === 'worldInfo.listInterceptors') return __lsListSnap('worldInfoInterceptors');
         if (path === 'llm.generateStructured') return generateStructured(a);
         if (path === 'llm.generateWithTools') return generateWithTools(a);
         if (path === 'utils.template.compile') return templateCompile(a);
@@ -1421,9 +1453,13 @@ export async function runUserScriptInQuickJS(opts: QuickJSRunOptions): Promise<u
     // the previous run's globals (acyclic → refcount-freed, no churn).
     ctx.newString(JSON.stringify(marshalEncode(opts.data))).consume((h) => ctx.setProp(ctx.global, '__lsDataJson', h));
     ctx.newString(JSON.stringify(opts.script)).consume((h) => ctx.setProp(ctx.global, '__lsScriptJson', h));
+    // #11 list-methods parity — seed the sync-list snapshots so the in-VM list reads (intercepted
+    // in API_BOOTSTRAP) return arrays. Overwritten per body-run like data/script.
+    ctx.newString(JSON.stringify(marshalEncode(opts.listSnapshots ?? {}))).consume((h) => ctx.setProp(ctx.global, '__lsListSnapshotsJson', h));
     ctx.unwrapResult(ctx.evalCode(`
       globalThis.data = globalThis.__lsDecode(JSON.parse(globalThis.__lsDataJson));
       globalThis.script = JSON.parse(globalThis.__lsScriptJson);
+      globalThis.__lsListSnapshots = globalThis.__lsDecode(JSON.parse(globalThis.__lsListSnapshotsJson));
       globalThis.__lsRequireCache = {};
       globalThis.__lsRequireInProgress = {};
       globalThis.__lsVmHandles = {};

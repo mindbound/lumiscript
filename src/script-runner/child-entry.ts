@@ -1387,6 +1387,16 @@ async function runOne(
             // stays in the VM registry, keyed by the same handlerId). Boundary #1
             // unchanged — the parent wires the wrapper identically across engines.
             ...makeHandlerDispatchers(proc, req.runId, req.scriptId),
+            // #11 list-methods parity — seed the sync-list snapshots so the in-VM declared-SYNC
+            // list reads (tools.list / macros.list / etc.) return arrays, matching asyncfn's local*.
+            listSnapshots: {
+              tools:                 req.toolsSnapshot                 ?? [],
+              macros:                req.macrosSnapshot                ?? [],
+              macroInterceptors:     req.macroInterceptorsSnapshot     ?? [],
+              chatInjections:        req.chatInjectionsSnapshot        ?? [],
+              chatContentProcessors: req.chatContentProcessorsSnapshot ?? [],
+              worldInfoInterceptors: req.worldInfoInterceptorsSnapshot ?? [],
+            },
           }),
         ),
         req.timeoutMs,
