@@ -11,7 +11,13 @@
  */
 
 import { describe, test, expect } from 'bun:test';
-import { runUserScriptInQuickJS, type QuickJSRunOptions } from '../../src/script-runner/qjs-engine.js';
+import {
+  runUserScriptInQuickJS,
+  fireHandlerInQuickJS,
+  disposeScriptVmHandlers,
+  _vmHandlerIdsForTests,
+  type QuickJSRunOptions,
+} from '../../src/script-runner/qjs-engine.js';
 
 function makeOpts(over: Partial<QuickJSRunOptions> & { code: string }): QuickJSRunOptions {
   return {
@@ -168,5 +174,50 @@ describe('#11 P3 A2: fetch', () => {
       `,
     })) as string[];
     expect(v).toEqual(['fetch:locked', 'Response:locked', 'Headers:locked']);
+  });
+});
+
+describe('#11 fire-path fetch gating (allowdangerous-on-fire-path)', () => {
+  const noop = { log() {}, warn() {}, error() {}, info() {} };
+  const serr = (e: unknown) => ({ name: e instanceof Error ? e.name : 'Error', message: e instanceof Error ? e.message : String(e) });
+
+  test('a FIRED handler honors the fire\'s allowDangerous + hostFetch (was hardcoded false)', async () => {
+    // Register a command handler whose closure fetches. allowDangerous is NOT set at register time —
+    // the fetch happens at FIRE time, gated by the fire's allowDangerous (threaded via RunHandlerRequest
+    // -> fireVmHandler). The asyncfn engine bakes fetch into the closure at body-run time; quickjs
+    // reads run.allowDangerous per-fire, so the fire MUST carry the flag.
+    await runUserScriptInQuickJS(makeOpts({
+      script: { id: 's-firefetch', name: 'FF', type: 'trigger' },
+      code: `api.commands.onInvoked(async () => { try { globalThis.__r = 'ok:' + await (await fetch('https://x')).text(); } catch (e) { globalThis.__r = 'blocked:' + e.message; } }); return null;`,
+    }));
+    const hid = _vmHandlerIdsForTests('s-firefetch').find((i) => i.startsWith('commandsOnInvoked:'))!;
+
+    // Fire WITH allowDangerous + a stub hostFetch → the handler's fetch reaches the stub.
+    let called = false;
+    await fireHandlerInQuickJS({
+      scriptId: 's-firefetch', handlerId: hid, args: [], timeoutMs: 5_000,
+      dispatch: async () => undefined, console: noop, serializeError: serr,
+      allowDangerous: true, hostFetch: async () => { called = true; return new Response('hi'); },
+    });
+    const got1 = await runUserScriptInQuickJS(makeOpts({
+      script: { id: 's-firefetch', name: 'FF', type: 'trigger' }, code: `return globalThis.__r;`,
+    }));
+    expect(called).toBe(true);
+    expect(got1).toBe('ok:hi');
+
+    // Fire WITHOUT allowDangerous → fetch is gated off (the host stub is never invoked).
+    called = false;
+    await fireHandlerInQuickJS({
+      scriptId: 's-firefetch', handlerId: hid, args: [], timeoutMs: 5_000,
+      dispatch: async () => undefined, console: noop, serializeError: serr,
+      allowDangerous: false, hostFetch: async () => { called = true; return new Response('hi'); },
+    });
+    const got2 = await runUserScriptInQuickJS(makeOpts({
+      script: { id: 's-firefetch', name: 'FF', type: 'trigger' }, code: `return globalThis.__r;`,
+    })) as string;
+    expect(called).toBe(false);
+    expect(got2.startsWith('blocked:')).toBe(true);
+
+    disposeScriptVmHandlers('s-firefetch');
   });
 });

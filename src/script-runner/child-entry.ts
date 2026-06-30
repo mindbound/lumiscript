@@ -922,10 +922,12 @@ async function fireVmHandler(
           dispatchOnHandle:          theProxy.dispatchOnHandle,
           console:                   capturedConsole,
           serializeError,
-          // P5 inc1: fires run without the fetch capability (commands.onInvoked et al.
-          // rarely fetch; threading the script's allowDangerous onto RunHandlerRequest
-          // is a tracked follow-up).
-          allowDangerous:            false,
+          // Thread the script's allowDangerous (RunHandlerRequest now carries it) so an
+          // allowDangerous script's fired handler can fetch under quickjs, matching asyncfn (whose
+          // closure baked in the right fetch at body-run time). hostFetch is the captured host fetch,
+          // granted only when allowDangerous — same gate as the body-run (child-entry runOne).
+          allowDangerous:            req.allowDangerous,
+          hostFetch:                 req.allowDangerous ? _hostFetch : undefined,
           dispatchRegisterHandler:        dispatchers.dispatchRegisterHandler,
           dispatchUnregisterHandler:      dispatchers.dispatchUnregisterHandler,
           dispatchUnregisterHandlerNamed: dispatchers.dispatchUnregisterHandlerNamed,

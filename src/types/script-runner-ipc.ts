@@ -303,6 +303,15 @@ export interface RunHandlerRequest {
   /** Async-loop timeout for this handler invocation (mirrors RunScriptRequest.timeoutMs). */
   timeoutMs:   number;
   /**
+   * Whether the firing script has the `allowDangerous` flag (gates http/fetch), mirroring
+   * `RunScriptRequest.allowDangerous`. The asyncfn engine bakes the right `fetch` into the
+   * handler closure at body-run time, so it doesn't need this; the quickjs engine fires the
+   * closure in a FRESH run context whose in-VM `__lsFetch` reads `run.allowDangerous` per-fire,
+   * so the flag must travel on the fire IPC (else an allowDangerous script's fired handler
+   * cannot fetch under quickjs — a parity gap vs asyncfn).
+   */
+  allowDangerous:    boolean;
+  /**
    * Live activeContext snapshot taken at handler-fire time (parent-side, from
    * `binding.ts`). Used by the child to override sync getters
    * (`api.chat.getChatId()`, future symmetric `characterId` getters) for

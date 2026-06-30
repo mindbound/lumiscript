@@ -947,6 +947,10 @@ async function sendRunHandlerRequest(
     kind,
     args,
     timeoutMs,
+    // Thread the script's allowDangerous so the quickjs fire path can gate in-VM fetch per-fire
+    // (the asyncfn closure already captured the right fetch at body-run time). Mirrors the
+    // body-run RunScriptRequest's `allowDangerous: script.allowDangerous`.
+    allowDangerous:    snapshot.script.allowDangerous,
     // Live activeContext at fire time — child wraps the handler in
     // `liveContextStore.run({ chatId, characterId }, ...)` so sync
     // getters (`api.chat.getChatId()` etc.) return live values for
