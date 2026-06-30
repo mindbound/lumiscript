@@ -295,6 +295,12 @@ globalThis.__lsBuildApi = function (hostDispatch) {
         // selector/event/options ride in the register IPC (meta), the parent binds the
         // delegated listener. Returns an unsub fn.
         if (path === 'ui.dom.delegate') return registerVmHandler('domDelegate', 'ui.dom.delegate', a[2], { selector: a[0], event: a[1], options: a[3] || {} });
+        // P5 inc3d — chat.onMessageTag(tagName, handler, options?). HANDLER IS a[1]; tagName
+        // + options ride in meta (spread TOP-LEVEL by dispatchRegisterHandler, so msg.tagName /
+        // msg.options match the messageTagHandler IPC variant byte-for-byte vs asyncfn). NOT the
+        // interceptor helper (that nests under options + injects id; here the host injects id +
+        // options is carried RAW). Returns a sync unsub fn; fire arg is [MessageTagEvent].
+        if (path === 'chat.onMessageTag') return registerVmHandler('messageTagHandler', 'chat.onMessageTag', a[1], { tagName: a[0], options: a[2] });
         // P5 inc3b — broadcast.on(event, handler): separate broadcast-subscribe IPC.
         if (path === 'broadcast.on') return broadcastOn(a[0], a[1]);
         // P5 inc3c — macros/tools registration. PULL-mode macro + tools register a

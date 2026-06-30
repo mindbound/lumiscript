@@ -240,4 +240,52 @@ describe('#11 P5 e2e: quickjs commands.onInvoked', () => {
     expect(unreg).toBeDefined();
     expect(unreg!.handlerId).toBeUndefined();
   });
+
+  test('chat.onMessageTag (inc3d): register IPC carries TOP-LEVEL tagName+options (no id); fires with MessageTagEvent + awaited api round-trips', async () => {
+    const { ipc } = await setupE2E();
+    _setEngineModeForTests('quickjs');
+    const code = `
+      api.chat.onMessageTag('dice', async (ev) => {
+        await api.scriptStorage.set('tag-last', ev.tagName + ':' + ev.content);
+      }, { removeFromMessage: true });
+      return 'registered';
+    `;
+    expect((await dispatchRunScript(makeScript('tag-script', code), makeRequest())).ok).toBe(true);
+
+    const reg = ipc.parentInbox().find((m): m is RegisterHandler => {
+      if (typeof m !== 'object' || m === null) return false;
+      const r = m as RegisterHandler;
+      return r.type === 'register-handler' && r.kind === 'messageTagHandler';
+    });
+    expect(reg).toBeDefined();
+    expect(reg!.handlerId).toMatch(/^messageTagHandler:/);
+    // tagName + options reach the parent TOP-LEVEL (meta-spread), matching the asyncfn IPC.
+    expect((reg as { tagName?: string }).tagName).toBe('dice');
+    expect((reg as { options?: unknown }).options).toEqual({ removeFromMessage: true });
+    // The child must NOT inject id (the host does that on receipt).
+    expect((reg as { id?: unknown }).id).toBeUndefined();
+
+    // Fire it — args shape [MessageTagEvent]. The handler's awaited scriptStorage.set
+    // round-trips through the real proxy (the host discards the return value by contract).
+    const handlerResult = await __sendRunHandlerRequestForTests(
+      'tag-script', reg!.handlerId, 'messageTagHandler', [{ tagName: 'dice', content: '7', attrs: {} }], 5_000,
+    );
+    expect(handlerResult.ok).toBe(true);
+  });
+
+  test('chat.onMessageTag unsub (inc3d): sends a handlerId-keyed unregister-handler IPC (NOT name-keyed)', async () => {
+    const { ipc } = await setupE2E();
+    _setEngineModeForTests('quickjs');
+    expect((await dispatchRunScript(
+      makeScript('tag-unsub', `var off = api.chat.onMessageTag('dice', () => {}); off(); return null;`), makeRequest(),
+    )).ok).toBe(true);
+    const unreg = ipc.parentInbox().find((m): m is UnregisterHandler => {
+      if (typeof m !== 'object' || m === null) return false;
+      const r = m as { type?: unknown; kind?: unknown; handlerId?: unknown };
+      return r.type === 'unregister-handler' && r.kind === 'messageTagHandler' && typeof r.handlerId === 'string';
+    });
+    expect(unreg).toBeDefined();
+    expect(unreg!.handlerId).toMatch(/^messageTagHandler:/);
+    expect((unreg as { name?: unknown }).name).toBeUndefined();
+  });
 });

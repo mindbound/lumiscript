@@ -521,3 +521,59 @@ describe('#11 P5 inc3c: macros.register / tools.register (named, void, unregiste
     disposeScriptVmHandlers('s-tunreg');
   });
 });
+
+describe('#11 P5 inc3d: chat.onMessageTag (bespoke top-level tagName, returns unsub fn)', () => {
+  test('registers a messageTagHandler (unsub fn); meta carries TOP-LEVEL tagName + options (no id injected in-VM)', async () => {
+    const reg: Array<{ kind: string; handlerId: string; meta: unknown }> = [];
+    const ret = await runUserScriptInQuickJS({
+      ...runOpts({
+        script: { id: 's-tag', name: 'TAG', type: 'trigger' },
+        code: `return typeof api.chat.onMessageTag('dice', (ev) => ev.content, { removeFromMessage: true, attrs: { a: '1' } });`,
+      }),
+      dispatchRegisterHandler: (kind, handlerId, meta) => reg.push({ kind, handlerId, meta }),
+    }) as string;
+    expect(ret).toBe('function'); // bare sync unsub fn (NOT a {id, remove()} handle)
+    expect(reg.length).toBe(1);
+    expect(reg[0]!.kind).toBe('messageTagHandler');
+    expect(reg[0]!.handlerId).toMatch(/^messageTagHandler:/);
+    // tagName + options ride in meta; dispatchRegisterHandler spreads them top-level (e2e proves that).
+    expect(reg[0]!.meta).toEqual({ tagName: 'dice', options: { removeFromMessage: true, attrs: { a: '1' } } });
+    // The host injects id; the child must NOT (distinguishes from the interceptor family).
+    expect((reg[0]!.meta as { id?: unknown }).id).toBeUndefined();
+    disposeScriptVmHandlers('s-tag');
+  });
+
+  test('without options → meta omits options (asyncfn parity: options is optional)', async () => {
+    const reg: Array<{ meta: unknown }> = [];
+    await runUserScriptInQuickJS({
+      ...runOpts({ script: { id: 's-tag-noopt', name: 'NO', type: 'trigger' }, code: `api.chat.onMessageTag('dice', () => {}); return null;` }),
+      dispatchRegisterHandler: (_kind, _hid, meta) => reg.push({ meta }),
+    });
+    expect(reg[0]!.meta).toEqual({ tagName: 'dice' });
+    expect((reg[0]!.meta as { options?: unknown }).options).toBeUndefined();
+    disposeScriptVmHandlers('s-tag-noopt');
+  });
+
+  test('a fired messageTagHandler receives the MessageTagEvent as args[0]', async () => {
+    const hid = await register('s-tagfire', `api.chat.onMessageTag('dice', (ev) => ev.tagName + ':' + ev.content); return null;`);
+    expect(hid).toMatch(/^messageTagHandler:/);
+    const result = await fireHandlerInQuickJS(fireOpts({ scriptId: 's-tagfire', handlerId: hid, args: [{ tagName: 'dice', content: '7', attrs: {} }] }));
+    expect(result).toBe('dice:7'); // engine returns the value; the host discards it (void contract)
+    disposeScriptVmHandlers('s-tagfire');
+  });
+
+  test('the returned unsub disposes the VM dup (handlerId-keyed) + is idempotent (second call no-ops)', async () => {
+    const unreg: Array<{ kind: string; handlerId: string }> = [];
+    await runUserScriptInQuickJS({
+      ...runOpts({
+        script: { id: 's-tagunsub', name: 'UN', type: 'trigger' },
+        code: `var off = api.chat.onMessageTag('dice', () => {}); off(); off(); return null;`,
+      }),
+      dispatchUnregisterHandler: (kind, handlerId) => unreg.push({ kind, handlerId }),
+    });
+    expect(_vmHandlerIdsForTests('s-tagunsub')).toEqual([]); // dup disposed in-run; no throw on the 2nd off()
+    expect(unreg.length).toBeGreaterThanOrEqual(1);
+    expect(unreg[0]!.kind).toBe('messageTagHandler');
+    expect(unreg[0]!.handlerId).toMatch(/^messageTagHandler:/);
+  });
+});
