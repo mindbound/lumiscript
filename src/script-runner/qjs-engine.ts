@@ -398,6 +398,53 @@ globalThis.__lsBuildApi = function (hostDispatch) {
     var openAck = globalThis.__lsTrackChain(send('ui.createFloatWidget', [optsWithIds]).catch(function (err) { destroyedRef.current = true; throw err; }));
     return buildFloatWidgetHandle(widgetId, rootElementId, openAck, destroyedRef, positionCache, visibleCache);
   };
+  // #11 P4b Inc 3b — the remaining CALLBACK-FREE gated factories (same shape as Inc 2). The
+  // onActivate callback (drawerTab) is DEFERRED to 3c-1 (gated register-handler kind).
+  var buildDrawerTabHandle = function (tabId, rootElementId, openAck, destroyedRef) {
+    var gated = function (method, args) {
+      globalThis.__lsTrackChain(openAck.then(function () { return send(method, args); }).catch(function () {}));
+    };
+    return {
+      tabId: tabId,
+      root: buildDomHandle(rootElementId, openAck),
+      setTitle: function (title) { if (destroyedRef.current) return; gated('ui._drawerTab.setTitle', [tabId, title]); },
+      setShortName: function (shortName) { if (destroyedRef.current) return; gated('ui._drawerTab.setShortName', [tabId, shortName]); },
+      setBadge: function (text) { if (destroyedRef.current) return; gated('ui._drawerTab.setBadge', [tabId, text]); },
+      activate: function () { if (destroyedRef.current) return; gated('ui._drawerTab.activate', [tabId]); },
+      destroy: function () { if (destroyedRef.current) return; destroyedRef.current = true; gated('ui._drawerTab.destroy', [tabId]); },
+      // onActivate: DEFER to 3c-1 (gated register-handler kind 'drawerTabActivate').
+    };
+  };
+  var registerDrawerTab = function (options) {
+    if (typeof (options && options.id) !== 'string' || options.id.length === 0) throw new Error('api.ui.registerDrawerTab: options.id must be a non-empty string.');
+    if (typeof options.title !== 'string' || options.title.length === 0) throw new Error('api.ui.registerDrawerTab: options.title must be a non-empty string.');
+    var tabId = options.id;
+    var rootElementId = globalThis.crypto.randomUUID();
+    var destroyedRef = { current: false };
+    var optsWithIds = Object.assign({}, options, { _rootElementId: rootElementId });
+    var openAck = globalThis.__lsTrackChain(send('ui.registerDrawerTab', [optsWithIds]).catch(function (err) { destroyedRef.current = true; throw err; }));
+    return buildDrawerTabHandle(tabId, rootElementId, openAck, destroyedRef);
+  };
+  var buildAppMountHandle = function (mountId, rootElementId, openAck, destroyedRef) {
+    var gated = function (method, args) {
+      globalThis.__lsTrackChain(openAck.then(function () { return send(method, args); }).catch(function () {}));
+    };
+    return {
+      mountId: mountId,
+      root: buildDomHandle(rootElementId, openAck),
+      setVisible: function (visible) { if (destroyedRef.current) return; gated('ui._appMount.setVisible', [mountId, visible]); },
+      destroy: function () { if (destroyedRef.current) return; destroyedRef.current = true; gated('ui._appMount.destroy', [mountId]); },
+    };
+  };
+  var mountApp = function (options) {
+    var opts = options || {};
+    var mountId = globalThis.crypto.randomUUID();
+    var rootElementId = globalThis.crypto.randomUUID();
+    var destroyedRef = { current: false };
+    var optsWithIds = Object.assign({}, opts, { _mountId: mountId, _rootElementId: rootElementId });
+    var openAck = globalThis.__lsTrackChain(send('ui.mountApp', [optsWithIds]).catch(function (err) { destroyedRef.current = true; throw err; }));
+    return buildAppMountHandle(mountId, rootElementId, openAck, destroyedRef);
+  };
   var make = function (path) {
     return new Proxy(function () {}, {
       get: function (_t, prop) {
@@ -422,6 +469,9 @@ globalThis.__lsBuildApi = function (hostDispatch) {
         // instead of a sync plain-object handle.
         if (path === 'ui.showAdvancedModal') return showAdvancedModal(a[0]);
         if (path === 'ui.createFloatWidget') return createFloatWidget(a[0]);
+        // P4b Inc 3b — remaining callback-free gated factories (same intercept-before-send rule).
+        if (path === 'ui.registerDrawerTab') return registerDrawerTab(a[0]);
+        if (path === 'ui.mountApp') return mountApp(a[0]);
         if (path === 'commands.onInvoked') return registerVmHandler('commandsOnInvoked', 'commands.onInvoked(handler)', a[0], {});
         if (path === 'macros.registerInterceptor') return registerInterceptor('macroInterceptor', 'macros.registerInterceptor', a[0], a[1]);
         if (path === 'chat.registerContentProcessor') return registerInterceptor('contentProcessor', 'chat.registerContentProcessor', a[0], a[1]);
@@ -1394,6 +1444,9 @@ export async function fireHandlerInQuickJS(opts: QuickJSFireOptions): Promise<un
   const track = <T extends QuickJSHandle>(h: T): T => { arena.push(h); return h; };
 
   try {
+    // #11 P4b Inc 3 — fresh per-fire deferred-chain set (mirrors the body-run's reset), so the
+    // fire's flush drains ONLY this fire's chains, never a prior run's cap-exhausted leftovers.
+    ctx.unwrapResult(ctx.evalCode('globalThis.__lsOutstanding = new Set()')).dispose();
     // Marshal the args INTO the VM as a decoded array (mirror the per-run data path).
     ctx.newString(JSON.stringify(marshalEncode(opts.args))).consume((h) => ctx.setProp(ctx.global, '__lsFireArgsJson', h));
     const argsRes = ctx.evalCode('globalThis.__lsDecode(JSON.parse(globalThis.__lsFireArgsJson))');
@@ -1417,6 +1470,24 @@ export async function fireHandlerInQuickJS(opts: QuickJSFireOptions): Promise<un
     }
     return marshalDecode(JSON.parse(ctx.getString(track(settled.value))));
   } finally {
+    // #11 P4b Inc 3 — drain this fire's intra-fire deferred chains (un-awaited gated factory /
+    // push-mode dispatches issued by the fired handler) while activeRun is still live — the
+    // fire-path analogue of the body-run drain. Without it, a gated dispatch from inside a fired
+    // handler settles after activeRun=undefined → silent drop. Skipped on timeout (worker is being
+    // torn down). Best-effort: __lsFlush is allSettled in-VM; the try/catch keeps it from masking
+    // the handler outcome.
+    const wasTimedOut = timedOut();
+    if (!wasTimedOut) {
+      try {
+        const flushHandle = ctx.unwrapResult(ctx.evalCode('globalThis.__lsFlush()'));
+        const flushP = ctx.resolvePromise(flushHandle);
+        pump();
+        const flushSettled = (await flushP) as { value?: QuickJSHandle; error?: QuickJSHandle };
+        flushHandle.dispose();
+        if (flushSettled.value) flushSettled.value.dispose();
+        if (flushSettled.error) flushSettled.error.dispose();
+      } catch { /* best-effort drain — never let the flush mask the fire's outcome */ }
+    }
     currentDeadline = Number.POSITIVE_INFINITY;
     activeRun = undefined;
     for (const h of arena) {

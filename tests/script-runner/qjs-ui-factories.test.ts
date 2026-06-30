@@ -16,7 +16,11 @@
 import { describe, test, expect } from 'bun:test';
 import {
   runUserScriptInQuickJS,
+  fireHandlerInQuickJS,
+  disposeScriptVmHandlers,
+  _vmHandlerIdsForTests,
   type QuickJSRunOptions,
+  type QuickJSFireOptions,
 } from '../../src/script-runner/qjs-engine.js';
 
 const noopConsole = { log() {}, warn() {}, error() {}, info() {} };
@@ -46,6 +50,17 @@ function spy(opts: { returns?: Record<string, unknown>; rejects?: string[] } = {
   const idx = (m: string) => calls.findIndex((c) => c.method === m);
   const find = (m: string) => calls.find((c) => c.method === m);
   return { calls, dispatch, idx, find };
+}
+function fireOpts(over: Partial<QuickJSFireOptions> & { scriptId: string; handlerId: string }): QuickJSFireOptions {
+  return {
+    scriptId:       over.scriptId,
+    handlerId:      over.handlerId,
+    args:           over.args ?? [],
+    timeoutMs:      over.timeoutMs ?? 5_000,
+    dispatch:       over.dispatch ?? (async () => undefined),
+    console:        over.console ?? noopConsole,
+    serializeError: over.serializeError ?? serializeError,
+  };
 }
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -200,3 +215,107 @@ function ret_wid(s: { find: (m: string) => { args: unknown[] } | undefined }): s
   const create = s.find('ui.createFloatWidget');
   return (create!.args[0] as { _widgetId: string })._widgetId;
 }
+
+describe('#11 P4b Inc 3b: registerDrawerTab (gated, callback-free)', () => {
+  test('returns a sync handle (tabId = options.id, root.id uuid); open threads _rootElementId only', async () => {
+    const s = spy();
+    const ret = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-tab', name: 'TB', type: 'trigger' }, dispatch: s.dispatch,
+      code: `var t = api.ui.registerDrawerTab({ id: 'my-tab', title: 'My Tab' }); return { tid: t.tabId, rid: t.root.id }; `,
+    })) as { tid: string; rid: string };
+    expect(ret.tid).toBe('my-tab'); // tabId is the user-supplied id, NOT generated
+    expect(ret.rid).toMatch(UUID_RE);
+    const o = s.find('ui.registerDrawerTab')!.args[0] as { _rootElementId?: string; _tabId?: string; id?: string };
+    expect(o._rootElementId).toBe(ret.rid);
+    expect(o._tabId).toBeUndefined(); // tabId is NOT threaded (host reads options.id)
+    expect(o.id).toBe('my-tab');
+  });
+
+  test('setTitle/setShortName/setBadge/activate gate behind openAck; destroy flips + no-ops after', async () => {
+    const s = spy();
+    await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-tab2', name: 'TB2', type: 'trigger' }, dispatch: s.dispatch,
+      code: `var t = api.ui.registerDrawerTab({ id: 'x', title: 'X' }); t.setTitle('T'); t.setShortName('S'); t.setBadge('3'); t.activate(); t.destroy(); t.setTitle('after'); return null;`,
+    }));
+    expect(s.find('ui._drawerTab.setTitle')!.args).toEqual(['x', 'T']);
+    expect(s.find('ui._drawerTab.setShortName')!.args).toEqual(['x', 'S']);
+    expect(s.find('ui._drawerTab.setBadge')!.args).toEqual(['x', '3']);
+    expect(s.find('ui._drawerTab.activate')!.args).toEqual(['x']);
+    expect(s.find('ui._drawerTab.destroy')!.args).toEqual(['x']);
+    // setTitle('after') ran after destroy → no second setTitle dispatch
+    expect(s.calls.filter((c) => c.method === 'ui._drawerTab.setTitle').length).toBe(1);
+  });
+
+  test('sync validation throws on empty/missing id or title (parity)', async () => {
+    let m1 = '';
+    try { await runUserScriptInQuickJS(runOpts({ script: { id: 's-tabbad', name: 'TBB', type: 'trigger' }, code: `api.ui.registerDrawerTab({ title: 'T' }); return null;` })); }
+    catch (e) { m1 = (e as Error).message; }
+    expect(m1).toContain('options.id must be a non-empty string');
+    let m2 = '';
+    try { await runUserScriptInQuickJS(runOpts({ script: { id: 's-tabbad2', name: 'TBB2', type: 'trigger' }, code: `api.ui.registerDrawerTab({ id: 'x' }); return null;` })); }
+    catch (e) { m2 = (e as Error).message; }
+    expect(m2).toContain('options.title must be a non-empty string');
+  });
+});
+
+describe('#11 P4b Inc 3b: mountApp (gated, callback-free)', () => {
+  test('returns a sync handle (mountId + root.id uuids); open threads _mountId/_rootElementId; default {} options', async () => {
+    const s = spy();
+    const ret = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-mount', name: 'MA', type: 'trigger' }, dispatch: s.dispatch,
+      code: `var m = api.ui.mountApp(); return { mid: m.mountId, rid: m.root.id }; `,
+    })) as { mid: string; rid: string };
+    expect(ret.mid).toMatch(UUID_RE);
+    expect(ret.rid).toMatch(UUID_RE);
+    const o = s.find('ui.mountApp')!.args[0] as { _mountId?: string; _rootElementId?: string };
+    expect(o._mountId).toBe(ret.mid);
+    expect(o._rootElementId).toBe(ret.rid);
+  });
+
+  test('setVisible/destroy gate behind openAck; moveTo-less handle no-ops after destroy', async () => {
+    const s = spy();
+    const mid = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-mount2', name: 'MA2', type: 'trigger' }, dispatch: s.dispatch,
+      code: `var m = api.ui.mountApp({ title: 'A' }); m.setVisible(false); m.destroy(); m.setVisible(true); return m.mountId;`,
+    })) as string;
+    expect(s.find('ui._appMount.setVisible')!.args).toEqual([mid, false]);
+    expect(s.find('ui._appMount.destroy')!.args).toEqual([mid]);
+    expect(s.calls.filter((c) => c.method === 'ui._appMount.setVisible').length).toBe(1); // 2nd setVisible no-op'd
+  });
+});
+
+describe('#11 P4b Inc 3: fire-path flush (gated factory inside a FIRED handler)', () => {
+  test('a gated factory method opened inside a fired handler reaches the host — drained by the fire-path flush', async () => {
+    const s = spy();
+    // Register a command handler (body run) whose closure opens a gated modal + sets the title,
+    // UN-AWAITED. The factory dispatches happen at FIRE time, not register time.
+    await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-firegate', name: 'FG', type: 'trigger' }, dispatch: s.dispatch,
+      code: `api.commands.onInvoked(() => { api.ui.showAdvancedModal({}).setTitle('fired'); }); return null;`,
+    }));
+    const hid = _vmHandlerIdsForTests('s-firegate').find((i) => i.startsWith('commandsOnInvoked:'))!;
+    // Before the fire, no factory dispatch (the handler hasn't run).
+    expect(s.find('ui.showAdvancedModal')).toBeUndefined();
+    // Fire it. The fired handler opens the modal + queues the gated setTitle behind openAck; the
+    // fire-path flush (NEW) drains it before the fire completes. Without the flush it would drop.
+    await fireHandlerInQuickJS(fireOpts({ scriptId: 's-firegate', handlerId: hid, args: ['cmd', {}], dispatch: s.dispatch }));
+    expect(s.find('ui.showAdvancedModal')).toBeDefined();        // the open dispatched
+    expect(s.find('ui._advModal.setTitle')).toBeDefined();       // the GATED method landed (the fix)
+    expect(s.find('ui._advModal.setTitle')!.args[1]).toBe('fired');
+    disposeScriptVmHandlers('s-firegate');
+  });
+
+  test('an async fired handler can await a gated factory create then act on its root', async () => {
+    const s = spy();
+    await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-firegate2', name: 'FG2', type: 'trigger' }, dispatch: s.dispatch,
+      code: `api.commands.onInvoked(async () => { var w = api.ui.createFloatWidget({}); w.root.update('<b>hi</b>'); w.setVisible(false); }); return null;`,
+    }));
+    const hid = _vmHandlerIdsForTests('s-firegate2').find((i) => i.startsWith('commandsOnInvoked:'))!;
+    await fireHandlerInQuickJS(fireOpts({ scriptId: 's-firegate2', handlerId: hid, args: ['cmd', {}], dispatch: s.dispatch }));
+    expect(s.find('ui.createFloatWidget')).toBeDefined();
+    expect(s.find('ui._dom.update')).toBeDefined();              // root method (gated) landed
+    expect(s.find('ui._floatWidget.setVisible')).toBeDefined();  // widget method (gated) landed
+    disposeScriptVmHandlers('s-firegate2');
+  });
+});
