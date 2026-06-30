@@ -602,6 +602,70 @@ describe('#11 P4b Inc 3c-2b: host->VM advanced-modal-dismissed bridge', () => {
   });
 });
 
+describe('#11 P4b Inc 3c-2 hardening: cell registries are NOT user-reachable (security-containment#0)', () => {
+  test('the widget/modal cell lookup is not exposed on globalThis (no enumerate / .clear surface)', async () => {
+    const s = spy();
+    const out = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-noreg', name: 'NR', type: 'trigger' }, dispatch: s.dispatch,
+      // Create a widget + modal so cells exist, then probe for any globalThis registry surface.
+      code: `api.ui.createFloatWidget({}); api.ui.showAdvancedModal({}); return { w: typeof globalThis.__lsWidgetRegistry, m: typeof globalThis.__lsModalRegistry }; `,
+    })) as { w: string; m: string };
+    expect(out.w).toBe('undefined'); // relocated host-side — nothing to enumerate/.clear()
+    expect(out.m).toBe('undefined');
+    disposeScriptVmHandlers('s-noreg');
+  });
+
+  test('one script cannot perturb another script\'s widget position cell (no shared global Map)', async () => {
+    const s = spy();
+    // Script A creates a widget at (1,2) and stashes the handle.
+    const wid = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-cellA', name: 'A', type: 'trigger' }, dispatch: s.dispatch,
+      code: `globalThis.__w = api.ui.createFloatWidget({ initialPosition: { x: 1, y: 2 } }); return globalThis.__w.widgetId; `,
+    })) as string;
+    // Script B runs hostile code trying to wipe the (now non-existent) registries — must throw+no-op.
+    await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-cellB', name: 'B', type: 'trigger' }, dispatch: s.dispatch,
+      code: `try { globalThis.__lsWidgetRegistry.clear(); } catch (e) {} try { globalThis.__lsModalRegistry.clear(); } catch (e) {} return 1;`,
+    }));
+    // A's position notice still lands — B could not reach/clear A's host-held cell.
+    notifyVmWidgetPosition(wid, 7, 8);
+    const pos = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-cellA', name: 'A', type: 'trigger' }, dispatch: s.dispatch,
+      code: `return globalThis.__w.getPosition();`,
+    }));
+    expect(pos).toEqual({ x: 7, y: 8 });
+    disposeScriptVmHandlers('s-cellA');
+    disposeScriptVmHandlers('s-cellB');
+  });
+
+  test('a script that same-owner-replaces its own cell with a non-object cannot crash the notice handler', async () => {
+    const s = spy();
+    // Create a real widget, then sabotage its own host-held cell with a non-object via the VM-callable host fn.
+    const wid = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-sab', name: 'SAB', type: 'trigger' }, dispatch: s.dispatch,
+      code: `var w = api.ui.createFloatWidget({}); try { globalThis.__hostRegisterWidget(w.widgetId, 42); } catch (e) {} return w.widgetId;`,
+    })) as string;
+    // The host-side notice must NOT throw (setProp on the non-object cell is swallowed).
+    expect(() => notifyVmWidgetPosition(wid, 3, 4)).not.toThrow();
+    disposeScriptVmHandlers('s-sab');
+  });
+
+  test('position notice preserves fractional + negative coord fidelity (setProp number, not JSON-normalized)', async () => {
+    const s = spy();
+    const wid = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-frac', name: 'FR', type: 'trigger' }, dispatch: s.dispatch,
+      code: `globalThis.__w = api.ui.createFloatWidget({}); return globalThis.__w.widgetId;`,
+    })) as string;
+    notifyVmWidgetPosition(wid, -3.5, 2.25);
+    const pos = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-frac', name: 'FR', type: 'trigger' }, dispatch: s.dispatch,
+      code: `return globalThis.__w.getPosition();`,
+    }));
+    expect(pos).toEqual({ x: -3.5, y: 2.25 });
+    disposeScriptVmHandlers('s-frac');
+  });
+});
+
 describe('#11 P4b Inc 3: fire-path flush (gated factory inside a FIRED handler)', () => {
   test('a gated factory method opened inside a fired handler reaches the host — drained by the fire-path flush', async () => {
     const s = spy();
