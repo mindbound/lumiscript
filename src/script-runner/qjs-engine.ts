@@ -416,6 +416,10 @@ globalThis.__lsBuildApi = function (hostDispatch) {
     var ip = (options && options.initialPosition) || {};
     var positionCache = { x: (ip.x != null) ? ip.x : 0, y: (ip.y != null) ? ip.y : 0 };
     var visibleCache = { current: true };
+    // P4b Inc 3c-2a — register the positionCache cell so a float-widget-position notice can
+    // update it by widgetId (getPosition reads the same object); record the host-side owner.
+    globalThis.__lsWidgetRegistry.set(widgetId, positionCache);
+    globalThis.__hostRegisterWidget(String(widgetId));
     var openAck = globalThis.__lsTrackChain(send('ui.createFloatWidget', [optsWithIds]).catch(function (err) { destroyedRef.current = true; throw err; }));
     return buildFloatWidgetHandle(widgetId, rootElementId, openAck, destroyedRef, positionCache, visibleCache);
   };
@@ -724,6 +728,12 @@ const VM_FLUSH_BOOTSTRAP = `
       }
     })();
   };
+  // #11 P4b Inc 3c-2 — CONTEXT-LEVEL registries (persist across runs, NOT reset per run): the
+  // host->VM notice bridge finds the same cell the handle getter reads, by id. modalId/widgetId
+  // are crypto.randomUUIDs (collision-safe in the single shared context). Entries are dropped on
+  // dismiss/destroy/script-teardown by the host bridge (notifyVmModalDismissed / disposeScript*).
+  globalThis.__lsWidgetRegistry = new Map(); // widgetId -> positionCache cell {x,y}
+  globalThis.__lsModalRegistry = new Map();  // modalId  -> dismissedRef cell {current, reason}
 })();
 `;
 
@@ -737,7 +747,7 @@ const VM_FLUSH_BOOTSTRAP = `
 // deep-frozen.) Eval'd LAST in getContext, after all scaffolding is built.
 const VM_FREEZE_BOOTSTRAP = `
 (function () {
-  var locked = ['__lsEncode', '__lsDecode', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', 'fetch', 'Headers', 'Response', '__hostHandleDispatch', '__lsVmHandleProxy', '__hostRegisterHandler', '__hostUnregisterHandler', '__hostUnregisterHandlerNamed', '__lsCallHandler', '__hostBroadcastSubscribe', '__hostBroadcastUnsubscribe', '__lsTrackChain', '__lsFlush', '__hostAllocElementId'];
+  var locked = ['__lsEncode', '__lsDecode', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', 'fetch', 'Headers', 'Response', '__hostHandleDispatch', '__lsVmHandleProxy', '__hostRegisterHandler', '__hostUnregisterHandler', '__hostUnregisterHandlerNamed', '__lsCallHandler', '__hostBroadcastSubscribe', '__hostBroadcastUnsubscribe', '__lsTrackChain', '__lsFlush', '__hostAllocElementId', '__hostRegisterWidget', '__lsWidgetRegistry', '__lsModalRegistry'];
   for (var i = 0; i < locked.length; i++) {
     var name = locked[i];
     if (Object.prototype.hasOwnProperty.call(globalThis, name)) {
@@ -882,6 +892,14 @@ const vmBroadcastHandles = new Map<string, Map<string, QuickJSHandle>>();
  *  candidate uuid in-VM and __hostAllocElementId returns the cached one for a known
  *  stableId. Cleared on full script teardown (disposeScriptVmHandlers). */
 const vmDomStableIds = new Map<string, Map<string, string>>();
+/** #11 P4b Inc 3c-2 — host-side OWNER maps for the gated factory handles whose host->VM notices
+ *  (float-widget-position / advanced-modal-dismissed) carry NO scriptId. Recorded at create-time
+ *  (__hostRegisterWidget / __hostRegisterModal under the host-stamped activeRun.scriptId) so the
+ *  child-entry notice bifurcation can (a) test membership [VM vs asyncfn], (b) recover the owner
+ *  scriptId for fireHandlerInQuickJS [modal onDismiss], and (c) sweep on script teardown. */
+const vmWidgetOwner = new Map<string, string>(); // widgetId -> scriptId
+const vmModalOwner = new Map<string, string>();  // modalId  -> scriptId
+const vmModalListeners = new Map<string, Set<string>>(); // modalId -> onDismiss handlerIds
 /** Cached context build — promise-based so concurrent first calls share ONE
  *  context (a plain `if (context)` check races two builds). Cleared on failure
  *  so a transient build error doesn't poison every later run. */
@@ -1105,6 +1123,16 @@ async function createContext(): Promise<QuickJSContext> {
   });
   ctx.setProp(ctx.global, '__hostAllocElementId', hostAllocElementId);
   hostAllocElementId.dispose();
+
+  // ── P4b Inc 3c-2: record the owner scriptId of a gated factory handle (widget/modal) so the
+  // scriptId-less host->VM notices (float-widget-position / advanced-modal-dismissed) can be
+  // bifurcated + routed child-side. activeRun.scriptId is host-stamped (never VM-forgeable). ──
+  const hostRegisterWidget = ctx.newFunction('__hostRegisterWidget', (idHandle) => {
+    const run = activeRun;
+    if (run?.scriptId) vmWidgetOwner.set(ctx.getString(idHandle), run.scriptId);
+  });
+  ctx.setProp(ctx.global, '__hostRegisterWidget', hostRegisterWidget);
+  hostRegisterWidget.dispose();
 
   // ── P5 inc3b: broadcast subscription. Same dup-the-VM-fn pattern as
   // __hostRegisterHandler, but the closure is keyed by subId and lives in the SEPARATE
@@ -1424,7 +1452,42 @@ export function disposeScriptVmHandlers(scriptId: string): number {
   // #11 P4b Inc 1 — full teardown also drops the DOM stable-id map (mirrors asyncfn's
   // clearScriptDomStableIds on unregister; a fresh script re-injects with new elementIds).
   vmDomStableIds.delete(scriptId);
+  // #11 P4b Inc 3c-2 — drop this script's gated-factory notice state: the host-side owner maps
+  // (widget/modal) + the in-VM registry cells. onDismiss listener dups were swept above (they
+  // live in vmHandlerHandles). Without this, dismissed/destroyed handles leak across teardown.
+  const widgetIds: string[] = [];
+  for (const [wid, sid] of vmWidgetOwner) if (sid === scriptId) widgetIds.push(wid);
+  const modalIds: string[] = [];
+  for (const [mid, sid] of vmModalOwner) if (sid === scriptId) modalIds.push(mid);
+  for (const wid of widgetIds) vmWidgetOwner.delete(wid);
+  for (const mid of modalIds) { vmModalOwner.delete(mid); vmModalListeners.delete(mid); }
+  if (context && (widgetIds.length || modalIds.length)) {
+    try {
+      context.newString(JSON.stringify({ w: widgetIds, m: modalIds })).consume((h) => context!.setProp(context!.global, '__lsNoticeArgsJson', h));
+      const r = context.evalCode('(function(){var a=JSON.parse(globalThis.__lsNoticeArgsJson); a.w.forEach(function(id){globalThis.__lsWidgetRegistry.delete(id);}); a.m.forEach(function(id){globalThis.__lsModalRegistry.delete(id);});})()') as { value?: QuickJSHandle; error?: QuickJSHandle };
+      if (r.value) r.value.dispose();
+      if (r.error) r.error.dispose();
+    } catch { /* swallow — teardown */ }
+  }
   return n;
+}
+
+/** #11 P4b Inc 3c-2a — true iff widgetId is a quickjs-engine float widget. child-entry routes the
+ *  scriptId-less float-widget-position notice to this VM bridge vs the asyncfn notify by this. */
+export function hasVmWidget(widgetId: string): boolean {
+  return vmWidgetOwner.has(widgetId);
+}
+
+/** #11 P4b Inc 3c-2a — apply a float-widget-position notice to the in-VM positionCache cell (the
+ *  same object getPosition() reads) for a quickjs widget. Pure sync cell write, no run/activeRun
+ *  context (the notice arrives between runs). Args cross via a JSON global (no string-concat). */
+export function notifyVmWidgetPosition(widgetId: string, x: number, y: number): void {
+  const ctx = context;
+  if (!ctx || !vmWidgetOwner.has(widgetId)) return;
+  ctx.newString(JSON.stringify({ widgetId, x, y })).consume((h) => ctx.setProp(ctx.global, '__lsNoticeArgsJson', h));
+  const r = ctx.evalCode('(function(){var a=JSON.parse(globalThis.__lsNoticeArgsJson); var c=globalThis.__lsWidgetRegistry.get(a.widgetId); if(c){c.x=a.x; c.y=a.y;}})()') as { value?: QuickJSHandle; error?: QuickJSHandle };
+  if (r.value) r.value.dispose();
+  if (r.error) r.error.dispose();
 }
 
 /** Options for firing a stored in-VM handler (see fireHandlerInQuickJS). */

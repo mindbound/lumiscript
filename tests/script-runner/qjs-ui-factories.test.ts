@@ -18,6 +18,8 @@ import {
   runUserScriptInQuickJS,
   fireHandlerInQuickJS,
   disposeScriptVmHandlers,
+  hasVmWidget,
+  notifyVmWidgetPosition,
   _vmHandlerIdsForTests,
   type QuickJSRunOptions,
   type QuickJSFireOptions,
@@ -411,6 +413,41 @@ describe('#11 P4b Inc 3c-1: gated register-handler callbacks (onDragEnd / onActi
     try { await runUserScriptInQuickJS(runOpts({ script: { id: 's-cbbad', name: 'CB', type: 'trigger' }, code: `api.ui.createFloatWidget({}).onDragEnd(42); return null;` })); }
     catch (e) { m = (e as Error).message; }
     expect(m).toContain('handler must be a function');
+  });
+});
+
+describe('#11 P4b Inc 3c-2a: host->VM float-widget-position notice bridge', () => {
+  test('a position notice updates the in-VM positionCache (getPosition reflects FE-driven coords across runs)', async () => {
+    const s = spy();
+    // Run 1: create the widget, stash the handle on the shared context, return widgetId.
+    const wid = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-poscell', name: 'PC', type: 'trigger' }, dispatch: s.dispatch,
+      code: `globalThis.__w = api.ui.createFloatWidget({ initialPosition: { x: 1, y: 2 } }); return globalThis.__w.widgetId; `,
+    })) as string;
+    // The host bridge applies a position notice — no run/activeRun context (arrives between runs).
+    notifyVmWidgetPosition(wid, 5, 6);
+    // Run 2 (same script): getPosition reads the SAME cell the notice updated.
+    const pos = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-poscell', name: 'PC', type: 'trigger' }, dispatch: s.dispatch,
+      code: `return globalThis.__w.getPosition();`,
+    }));
+    expect(pos).toEqual({ x: 5, y: 6 });
+    disposeScriptVmHandlers('s-poscell');
+  });
+
+  test('hasVmWidget tracks ownership; disposeScriptVmHandlers sweeps the owner + registry', async () => {
+    const s = spy();
+    const wid = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-wown', name: 'WO', type: 'trigger' }, dispatch: s.dispatch,
+      code: `return api.ui.createFloatWidget({}).widgetId;`,
+    })) as string;
+    expect(hasVmWidget(wid)).toBe(true);
+    disposeScriptVmHandlers('s-wown');
+    expect(hasVmWidget(wid)).toBe(false); // owner swept on teardown
+  });
+
+  test('a position notice for an unknown widget is a safe no-op', () => {
+    expect(() => notifyVmWidgetPosition('not-a-widget', 1, 2)).not.toThrow();
   });
 });
 

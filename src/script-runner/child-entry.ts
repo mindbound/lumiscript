@@ -78,6 +78,8 @@ import {
   fireHandlerInQuickJS,
   hasVmHandler,
   hasVmBroadcast,
+  hasVmWidget,
+  notifyVmWidgetPosition,
   disposeScriptVmHandlers,
   disposeScriptVmBroadcast,
 } from './qjs-engine.js';
@@ -634,6 +636,9 @@ function handleAdvancedModalDismissed(msg: AdvancedModalDismissedNotice): void {
  * storage layout.
  */
 function handleFloatWidgetPosition(msg: FloatWidgetPositionNotice): void {
+  // #11 P4b Inc 3c-2a — a quickjs float widget's positionCache lives in the VM, not in api-proxy
+  // module scope. The notice carries no engineMode, so route by owner-registry membership.
+  if (hasVmWidget(msg.widgetId)) { notifyVmWidgetPosition(msg.widgetId, msg.x, msg.y); return; }
   notifyFloatWidgetPosition(msg.widgetId, msg.x, msg.y);
 }
 
