@@ -80,6 +80,9 @@ import {
   hasVmBroadcast,
   hasVmWidget,
   notifyVmWidgetPosition,
+  hasVmModal,
+  notifyVmModalDismissed,
+  dropVmModal,
   disposeScriptVmHandlers,
   disposeScriptVmBroadcast,
 } from './qjs-engine.js';
@@ -621,8 +624,70 @@ function handleBroadcastClear(msg: BroadcastClearMessage): void {
  * X dismissed for reason Y"; the api-proxy module owns storage layout
  * + listener fan-out semantics.
  */
-function handleAdvancedModalDismissed(msg: AdvancedModalDismissedNotice): void {
+function handleAdvancedModalDismissed(proc: SpindleBackendProcessContext, msg: AdvancedModalDismissedNotice): void {
+  // #11 P4b Inc 3c-2b — a quickjs modal's dismissedRef + onDismiss listeners live in the VM, not in
+  // api-proxy module scope. The notice carries no engineMode, so route by owner-registry membership.
+  if (hasVmModal(msg.modalId)) { fireVmModalDismiss(proc, msg); return; }
   notifyAdvancedModalDismissed(msg.modalId, msg.reason);
+}
+
+/**
+ * #11 P4b Inc 3c-2b — fan an advanced-modal-dismissed notice out to a quickjs modal's onDismiss
+ * listeners. Mirrors `fireVmBroadcast`: find the script's proxy, fire each listener via
+ * `fireHandlerInQuickJS` (runChain-serialized, errors swallowed so one bad listener can't break
+ * dismissal, async-hang -> proc.fail). `notifyVmModalDismissed` first flips the in-VM dismissedRef
+ * EAGERLY (so `handle.dismissed` reads true immediately + a late onDismiss takes the fast-path) and
+ * returns the listener snapshot. The modal is dropped (dups disposed, registries cleared) only once
+ * ALL fires settle — the dups must stay alive in vmHandlerHandles across the serialized fires.
+ */
+function fireVmModalDismiss(proc: SpindleBackendProcessContext, msg: AdvancedModalDismissedNotice): void {
+  const info = notifyVmModalDismissed(msg.modalId, msg.reason);
+  if (!info) return; // unknown / already-dropped modal — fires-once (notify cleared the owner)
+  const { scriptId, handlerIds } = info;
+  // notifyVmModalDismissed already removed the owner/listener membership (synchronous fires-once), so
+  // dropVmModal must dispose the dups by the captured scriptId + handlerIds (the maps are now empty).
+  if (handlerIds.length === 0) { dropVmModal(msg.modalId, scriptId, handlerIds); return; }
+  let proxy: ProxyHandle | undefined;
+  for (const entry of activeProxies.values()) {
+    if (entry.scriptId === scriptId) { proxy = entry.proxy; break; }
+  }
+  if (!proxy) { dropVmModal(msg.modalId, scriptId, handlerIds); return; } // no proxy — can't fire; still drop the dups
+  const theProxy = proxy;
+  proc.heartbeat();
+  const synthRunId = `advModalDismiss:${msg.modalId}`;
+  const capturedConsole = buildChildCapturedConsole(proc, synthRunId, scriptId);
+  const dispatchers = makeHandlerDispatchers(proc, synthRunId, scriptId);
+  const fires = handlerIds.map((handlerId) =>
+    raceWithTimeout(
+      fireHandlerInQuickJS({
+        scriptId,
+        handlerId,
+        args:                         [msg.reason],
+        timeoutMs:                    BROADCAST_HANDLER_TIMEOUT_MS,
+        dispatch:                     theProxy.dispatch,
+        dispatchOnHandle:             theProxy.dispatchOnHandle,
+        console:                      capturedConsole,
+        serializeError,
+        allowDangerous:               false,
+        dispatchRegisterHandler:        dispatchers.dispatchRegisterHandler,
+        dispatchUnregisterHandler:      dispatchers.dispatchUnregisterHandler,
+        dispatchUnregisterHandlerNamed: dispatchers.dispatchUnregisterHandlerNamed,
+        dispatchBroadcastSubscribe:     dispatchers.dispatchBroadcastSubscribe,
+        dispatchBroadcastUnsubscribe: dispatchers.dispatchBroadcastUnsubscribe,
+      }),
+      BROADCAST_HANDLER_TIMEOUT_MS,
+      () => new ScriptTimeoutError(`advanced-modal onDismiss handler ${handlerId} (modal ${msg.modalId}) exceeded ${BROADCAST_HANDLER_TIMEOUT_MS / 1000}s timeout`),
+    ).catch((err: unknown) => {
+      // Swallow listener errors (dismissal parity). On the async-hang ScriptTimeoutError, kill the
+      // worker so the wedged runChain slot is cleared by respawn.
+      if (err instanceof Error && err.name === 'ScriptTimeoutError') {
+        proc.fail(`script-runner: async-timeout firing advanced-modal onDismiss handler ${handlerId} (scriptId=${scriptId}); terminating to clear the wedged engine runChain`);
+      }
+    }),
+  );
+  // Drop the modal once ALL listeners have settled — fireHandlerInQuickJS re-fetches the dup AFTER
+  // its runChain await, so the dups must outlive every (serialized) fire.
+  void Promise.allSettled(fires).then(() => { dropVmModal(msg.modalId, scriptId, handlerIds); });
 }
 
 /**
@@ -1849,7 +1914,7 @@ export default function (proc: SpindleBackendProcessContext): () => void {
         break;
 
       case 'advanced-modal-dismissed':
-        handleAdvancedModalDismissed(msg);
+        handleAdvancedModalDismissed(proc, msg);
         break;
 
       case 'float-widget-position':

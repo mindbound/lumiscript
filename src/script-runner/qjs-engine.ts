@@ -365,10 +365,11 @@ globalThis.__lsBuildApi = function (hostDispatch) {
   // has mounted+bound. .root = buildDomHandle(rootElementId, openAck) (gated). Each void method
   // queues behind openAck via gated() (__lsTrackChain(openAck.then(send).catch())) — the in-VM
   // send is NOT auto-tracked (unlike asyncfn proxy.dispatch), so we MUST trackChain the openAck
-  // AND each method, else the run-loop flush can't drain them. Callback-free SCOPE: onDismiss /
-  // onDragEnd + the FE-driven dismissed/position notices DEFER to Inc 3 (they need a host->VM
-  // notice bridge that does not exist yet). dismissed/destroyedRef flip on the openAck-reject
-  // path only (the path the VM owns); dismiss() matches asyncfn = does NOT flip locally.
+  // AND each method, else the run-loop flush can't drain them. Inc 2 was callback-free; the
+  // callbacks + FE-driven notices landed in Inc 3c (onDismiss/onDragEnd via gated register-handler
+  // dups; the dismissed/position notices via the host->VM bridge -- notifyVmModalDismissed /
+  // notifyVmWidgetPosition). dismissed/destroyedRef flip on the openAck-reject path (the path the
+  // VM owns) AND on the notice bridge; dismiss() matches asyncfn = does NOT flip locally.
   var buildAdvancedModalHandle = function (modalId, rootElementId, openAck, dismissedRef) {
     var gated = function (method, args) {
       globalThis.__lsTrackChain(openAck.then(function () { return send(method, args); }).catch(function () {}));
@@ -379,15 +380,35 @@ globalThis.__lsBuildApi = function (hostDispatch) {
       get dismissed() { return dismissedRef.current; },
       setTitle: function (title) { if (dismissedRef.current) return; gated('ui._advModal.setTitle', [modalId, title]); },
       dismiss: function () { if (dismissedRef.current) return; gated('ui._advModal.dismiss', [modalId]); },
-      // onDismiss: DEFER to Inc 3 (needs the advanced-modal-dismissed notice -> VM bridge).
+      // P4b Inc 3c-2b — onDismiss: already-dismissed fast-path fires on the next microtask with the
+      // recorded reason; else dup the fn host-side (synth handlerId, NO register IPC -- it is a
+      // local listener, parity with the asyncfn listeners Set) so the dismiss bridge can fire it
+      // via fireHandlerInQuickJS. unsub drops the dup + the per-modal listener record.
+      onDismiss: function (fn) {
+        if (typeof fn !== 'function') throw new Error('api.ui.showAdvancedModal(...).onDismiss(fn): handler must be a function.');
+        if (dismissedRef.current) {
+          var reason = dismissedRef.reason;
+          globalThis.queueMicrotask(function () { try { fn(reason); } catch (e) {} });
+          return function () {};
+        }
+        var handlerId = 'advancedModalDismiss:' + globalThis.crypto.randomUUID();
+        globalThis.__hostRegisterModalDismiss(String(modalId), handlerId, fn);
+        return function () { globalThis.__hostUnregisterModalDismiss(String(modalId), handlerId); };
+      },
     };
   };
   var showAdvancedModal = function (options) {
     var modalId = globalThis.crypto.randomUUID();
     var rootElementId = globalThis.crypto.randomUUID();
     var optsWithIds = Object.assign({}, options, { _modalId: modalId, _rootElementId: rootElementId });
-    var dismissedRef = { current: false };
-    var openAck = globalThis.__lsTrackChain(send('ui.showAdvancedModal', [optsWithIds]).catch(function (err) { dismissedRef.current = true; throw err; }));
+    var dismissedRef = { current: false, reason: 'user' };
+    // P4b Inc 3c-2b — register the dismissedRef cell so an advanced-modal-dismissed notice can
+    // flip it + record the reason by modalId (onDismiss reads the same object); record the owner.
+    globalThis.__lsModalRegistry.set(modalId, dismissedRef);
+    globalThis.__hostRegisterModal(String(modalId));
+    // first-writer-wins on reason (asyncfn parity, api-proxy.ts:2384-2399): if a host dismiss notice
+    // already flipped the cell with the real reason, the openAck-reject must NOT clobber it with 'teardown'.
+    var openAck = globalThis.__lsTrackChain(send('ui.showAdvancedModal', [optsWithIds]).catch(function (err) { if (!dismissedRef.current) { dismissedRef.current = true; dismissedRef.reason = 'teardown'; } throw err; }));
     return buildAdvancedModalHandle(modalId, rootElementId, openAck, dismissedRef);
   };
   var buildFloatWidgetHandle = function (widgetId, rootElementId, openAck, destroyedRef, positionCache, visibleCache) {
@@ -565,10 +586,10 @@ globalThis.__lsBuildApi = function (hostDispatch) {
         // def} and unregister is BY NAME. PUSH-mode macro (no handler) + updateValue are
         // fire-and-forget passthroughs (sync void, swallowed rejection — asyncfn parity).
         if (path === 'macros.register') {
-          if (a[2] === undefined) { send(path, a).catch(function () {}); return; } // push-mode (handler===undefined)
+          if (a[2] === undefined) { globalThis.__lsTrackChain(send(path, a).catch(function () {})); return; } // push-mode (handler===undefined); trackChain so the run-loop flush drains it (asyncfn parity)
           return registerNamedHandler('macro', 'macros.register', a[0], a[1], a[2]);  // pull (validates fn)
         }
-        if (path === 'macros.updateValue') { send(path, a).catch(function () {}); return; }
+        if (path === 'macros.updateValue') { globalThis.__lsTrackChain(send(path, a).catch(function () {})); return; }
         if (path === 'macros.unregister') { unregisterNamedHandler('macro', a[0]); return; }
         if (path === 'tools.register') {
           var __toolFn = a[2];
@@ -747,7 +768,7 @@ const VM_FLUSH_BOOTSTRAP = `
 // deep-frozen.) Eval'd LAST in getContext, after all scaffolding is built.
 const VM_FREEZE_BOOTSTRAP = `
 (function () {
-  var locked = ['__lsEncode', '__lsDecode', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', 'fetch', 'Headers', 'Response', '__hostHandleDispatch', '__lsVmHandleProxy', '__hostRegisterHandler', '__hostUnregisterHandler', '__hostUnregisterHandlerNamed', '__lsCallHandler', '__hostBroadcastSubscribe', '__hostBroadcastUnsubscribe', '__lsTrackChain', '__lsFlush', '__hostAllocElementId', '__hostRegisterWidget', '__lsWidgetRegistry', '__lsModalRegistry'];
+  var locked = ['__lsEncode', '__lsDecode', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', 'fetch', 'Headers', 'Response', '__hostHandleDispatch', '__lsVmHandleProxy', '__hostRegisterHandler', '__hostUnregisterHandler', '__hostUnregisterHandlerNamed', '__lsCallHandler', '__hostBroadcastSubscribe', '__hostBroadcastUnsubscribe', '__lsTrackChain', '__lsFlush', '__hostAllocElementId', '__hostRegisterWidget', '__hostRegisterModal', '__hostRegisterModalDismiss', '__hostUnregisterModalDismiss', '__lsWidgetRegistry', '__lsModalRegistry'];
   for (var i = 0; i < locked.length; i++) {
     var name = locked[i];
     if (Object.prototype.hasOwnProperty.call(globalThis, name)) {
@@ -1126,13 +1147,74 @@ async function createContext(): Promise<QuickJSContext> {
 
   // ── P4b Inc 3c-2: record the owner scriptId of a gated factory handle (widget/modal) so the
   // scriptId-less host->VM notices (float-widget-position / advanced-modal-dismissed) can be
-  // bifurcated + routed child-side. activeRun.scriptId is host-stamped (never VM-forgeable). ──
+  // bifurcated + routed child-side. activeRun.scriptId is host-stamped (never VM-forgeable).
+  // OWNER-TAKEOVER GUARD (audit security-containment#1): these globals are VM-callable, so reject
+  // re-pointing an id already owned by a DIFFERENT script — a leaked uuid can't hijack the dismiss/
+  // position routing. First registration + idempotent same-owner re-register still pass. ──
   const hostRegisterWidget = ctx.newFunction('__hostRegisterWidget', (idHandle) => {
     const run = activeRun;
-    if (run?.scriptId) vmWidgetOwner.set(ctx.getString(idHandle), run.scriptId);
+    if (!run?.scriptId) return;
+    const id = ctx.getString(idHandle);
+    const cur = vmWidgetOwner.get(id);
+    if (cur !== undefined && cur !== run.scriptId) return; // owned by another script — refuse takeover
+    vmWidgetOwner.set(id, run.scriptId);
   });
   ctx.setProp(ctx.global, '__hostRegisterWidget', hostRegisterWidget);
   hostRegisterWidget.dispose();
+  const hostRegisterModal = ctx.newFunction('__hostRegisterModal', (idHandle) => {
+    const run = activeRun;
+    if (!run?.scriptId) return;
+    const id = ctx.getString(idHandle);
+    const cur = vmModalOwner.get(id);
+    if (cur !== undefined && cur !== run.scriptId) return; // owned by another script — refuse takeover
+    vmModalOwner.set(id, run.scriptId);
+  });
+  ctx.setProp(ctx.global, '__hostRegisterModal', hostRegisterModal);
+  hostRegisterModal.dispose();
+
+  // ── P4b Inc 3c-2b: advanced-modal onDismiss listener registration. Dups the user fn into the
+  // per-script vmHandlerHandles registry under a synthetic handlerId (so the dismiss bridge fires
+  // it via fireHandlerInQuickJS's dual-lookup) + records the handlerId under the modal. NO register
+  // IPC: onDismiss is a LOCAL listener (parity with the asyncfn listeners Set), fired only by the
+  // host->VM dismiss notice, never the parent event bus. ──
+  const hostRegisterModalDismiss = ctx.newFunction('__hostRegisterModalDismiss', (modalIdHandle, handlerIdHandle, fnHandle) => {
+    const run = activeRun;
+    if (!run?.scriptId) return;
+    const modalId = ctx.getString(modalIdHandle);
+    // OWNER GUARD (audit security-containment#2): only the modal's owning script may attach onDismiss
+    // listeners, so a cross-script registration can't mis-scope the dup (dup under caller, listener
+    // under owner) and leak. Matches __hostUnregisterModalDismiss's owner resolution.
+    if (vmModalOwner.get(modalId) !== run.scriptId) return;
+    const handlerId = ctx.getString(handlerIdHandle);
+    const dup = fnHandle.dup(); // survives run-end; disposed on unsub / dismiss-drop / teardown
+    let perScript = vmHandlerHandles.get(run.scriptId);
+    if (!perScript) { perScript = new Map(); vmHandlerHandles.set(run.scriptId, perScript); }
+    const prev = perScript.get(handlerId);
+    if (prev?.alive) { try { prev.dispose(); } catch { /* re-register replaces */ } }
+    perScript.set(handlerId, dup);
+    let listeners = vmModalListeners.get(modalId);
+    if (!listeners) { listeners = new Set(); vmModalListeners.set(modalId, listeners); }
+    listeners.add(handlerId);
+  });
+  ctx.setProp(ctx.global, '__hostRegisterModalDismiss', hostRegisterModalDismiss);
+  hostRegisterModalDismiss.dispose();
+
+  const hostUnregisterModalDismiss = ctx.newFunction('__hostUnregisterModalDismiss', (modalIdHandle, handlerIdHandle) => {
+    const modalId = ctx.getString(modalIdHandle);
+    const handlerId = ctx.getString(handlerIdHandle);
+    // Resolve the owner from vmModalOwner (set at create) rather than activeRun, so an unsub from
+    // any context disposes the right dup. The owner === the scriptId the dup was stored under.
+    const scriptId = vmModalOwner.get(modalId);
+    if (scriptId !== undefined) {
+      const perScript = vmHandlerHandles.get(scriptId);
+      const h = perScript?.get(handlerId);
+      if (h?.alive) { try { h.dispose(); } catch { /* */ } }
+      perScript?.delete(handlerId);
+    }
+    vmModalListeners.get(modalId)?.delete(handlerId);
+  });
+  ctx.setProp(ctx.global, '__hostUnregisterModalDismiss', hostUnregisterModalDismiss);
+  hostUnregisterModalDismiss.dispose();
 
   // ── P5 inc3b: broadcast subscription. Same dup-the-VM-fn pattern as
   // __hostRegisterHandler, but the closure is keyed by subId and lives in the SEPARATE
@@ -1488,6 +1570,65 @@ export function notifyVmWidgetPosition(widgetId: string, x: number, y: number): 
   const r = ctx.evalCode('(function(){var a=JSON.parse(globalThis.__lsNoticeArgsJson); var c=globalThis.__lsWidgetRegistry.get(a.widgetId); if(c){c.x=a.x; c.y=a.y;}})()') as { value?: QuickJSHandle; error?: QuickJSHandle };
   if (r.value) r.value.dispose();
   if (r.error) r.error.dispose();
+}
+
+/** #11 P4b Inc 3c-2b — true iff modalId is a quickjs-engine advanced modal. child-entry routes the
+ *  scriptId-less advanced-modal-dismissed notice to this VM bridge vs the asyncfn notify by this. */
+export function hasVmModal(modalId: string): boolean {
+  return vmModalOwner.has(modalId);
+}
+
+/** #11 P4b Inc 3c-2b — apply an advanced-modal-dismissed notice to the VM: EAGERLY flip the in-VM
+ *  dismissedRef cell (+reason) so handle.dismissed reads true immediately and a later onDismiss
+ *  takes the already-dismissed fast-path. Returns the owner scriptId + the onDismiss handlerIds so
+ *  child-entry can fire them via fireHandlerInQuickJS; null for an unknown/already-dropped modal
+ *  (late or duplicate notice -> fires-once). The caller MUST call dropVmModal AFTER firing — the
+ *  listener dups must stay alive in vmHandlerHandles during the fire. */
+export function notifyVmModalDismissed(modalId: string, reason: string): { scriptId: string; handlerIds: string[] } | null {
+  const ctx = context;
+  const scriptId = vmModalOwner.get(modalId);
+  if (!ctx || scriptId === undefined) return null;
+  ctx.newString(JSON.stringify({ modalId, reason })).consume((h) => ctx.setProp(ctx.global, '__lsNoticeArgsJson', h));
+  const r = ctx.evalCode('(function(){var a=JSON.parse(globalThis.__lsNoticeArgsJson); var c=globalThis.__lsModalRegistry.get(a.modalId); if(c){c.current=true; c.reason=a.reason;}})()') as { value?: QuickJSHandle; error?: QuickJSHandle };
+  if (r.value) r.value.dispose();
+  if (r.error) r.error.dispose();
+  // SYNCHRONOUS fires-once (audit lifecycle-races#0 / notice-bridge#0, asyncfn parity api-proxy.ts:509):
+  // claim the modal NOW — remove owner + listener membership before returning the snapshot — so a
+  // SECOND dismiss notice arriving during the (async) onDismiss fan-out re-enters and hits the
+  // unknown-modal return-null path instead of re-firing every listener. The dups stay alive in
+  // vmHandlerHandles (NOT cleared here) so the fan-out's fireHandlerInQuickJS still finds them; the
+  // caller disposes them via dropVmModal(modalId, scriptId, handlerIds) after Promise.allSettled.
+  const handlerIds = [...(vmModalListeners.get(modalId) ?? [])];
+  vmModalOwner.delete(modalId);
+  vmModalListeners.delete(modalId);
+  return { scriptId, handlerIds };
+}
+
+/** #11 P4b Inc 3c-2b — drop a dismissed modal's residual state AFTER its onDismiss listeners have
+ *  fired: dispose the listener dups (by the scriptId + handlerIds captured at notify time, since
+ *  notifyVmModalDismissed already cleared the owner/listener maps for synchronous fires-once) and
+ *  delete the in-VM dismissedRef cell. Idempotent — disposing an already-disposed dup is a no-op,
+ *  and the cell delete is harmless if absent. scriptId/handlerIds are optional (a bare
+ *  dropVmModal(modalId) just deletes the cell — the dups are then reaped at script teardown). */
+export function dropVmModal(modalId: string, scriptId?: string, handlerIds?: readonly string[]): void {
+  const ctx = context;
+  if (scriptId !== undefined && handlerIds) {
+    const perScript = vmHandlerHandles.get(scriptId);
+    for (const hid of handlerIds) {
+      const h = perScript?.get(hid);
+      if (h?.alive) { try { h.dispose(); } catch { /* */ } }
+      perScript?.delete(hid);
+    }
+  }
+  // Defensive: if notify did NOT run (e.g. a direct dropVmModal in a test), still clear membership.
+  vmModalListeners.delete(modalId);
+  vmModalOwner.delete(modalId);
+  if (ctx) {
+    ctx.newString(JSON.stringify({ modalId })).consume((h) => ctx.setProp(ctx.global, '__lsNoticeArgsJson', h));
+    const r = ctx.evalCode('(function(){var a=JSON.parse(globalThis.__lsNoticeArgsJson); globalThis.__lsModalRegistry.delete(a.modalId);})()') as { value?: QuickJSHandle; error?: QuickJSHandle };
+    if (r.value) r.value.dispose();
+    if (r.error) r.error.dispose();
+  }
 }
 
 /** Options for firing a stored in-VM handler (see fireHandlerInQuickJS). */

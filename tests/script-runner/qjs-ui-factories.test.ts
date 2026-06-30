@@ -20,6 +20,9 @@ import {
   disposeScriptVmHandlers,
   hasVmWidget,
   notifyVmWidgetPosition,
+  hasVmModal,
+  notifyVmModalDismissed,
+  dropVmModal,
   _vmHandlerIdsForTests,
   type QuickJSRunOptions,
   type QuickJSFireOptions,
@@ -448,6 +451,154 @@ describe('#11 P4b Inc 3c-2a: host->VM float-widget-position notice bridge', () =
 
   test('a position notice for an unknown widget is a safe no-op', () => {
     expect(() => notifyVmWidgetPosition('not-a-widget', 1, 2)).not.toThrow();
+  });
+});
+
+describe('#11 P4b Inc 3c-2b: host->VM advanced-modal-dismissed bridge', () => {
+  test('the dismiss bridge flips dismissed EAGER + fires onDismiss listeners with the reason', async () => {
+    const s = spy();
+    // Run 1: create modal, register onDismiss -> push the reason into a VM-global sink.
+    const modalId = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-moddis', name: 'MD', type: 'trigger' }, dispatch: s.dispatch,
+      code: `globalThis.__sink = []; globalThis.__m = api.ui.showAdvancedModal({ title: 'X' }); globalThis.__m.onDismiss(function (r) { globalThis.__sink.push(r); }); return globalThis.__m.modalId; `,
+    })) as string;
+    // Host bridge: flip the dismissedRef EAGER + snapshot the listeners (what child-entry receives).
+    const info = notifyVmModalDismissed(modalId, 'user');
+    expect(info).not.toBeNull();
+    expect(info!.scriptId).toBe('s-moddis');
+    expect(info!.handlerIds.length).toBe(1);
+    // SYNCHRONOUS fires-once: notify claims the modal immediately (a 2nd notice during fan-out no-ops).
+    expect(hasVmModal(modalId)).toBe(false);
+    // dismissed reads true immediately — before any listener fires.
+    const dismissed = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-moddis', name: 'MD', type: 'trigger' }, dispatch: s.dispatch,
+      code: `return globalThis.__m.dismissed;`,
+    }));
+    expect(dismissed).toBe(true);
+    // child-entry fires each listener via fireHandlerInQuickJS, THEN drops the modal (by the captured ids).
+    for (const hid of info!.handlerIds) {
+      await fireHandlerInQuickJS(fireOpts({ scriptId: 's-moddis', handlerId: hid, args: ['user'] }));
+    }
+    dropVmModal(modalId, info!.scriptId, info!.handlerIds);
+    const sink = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-moddis', name: 'MD', type: 'trigger' }, dispatch: s.dispatch,
+      code: `return globalThis.__sink;`,
+    }));
+    expect(sink).toEqual(['user']);
+    disposeScriptVmHandlers('s-moddis');
+  });
+
+  test('onDismiss on an ALREADY-dismissed handle fires on the next microtask with the recorded reason', async () => {
+    const s = spy();
+    const modalId = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-modfast', name: 'MF', type: 'trigger' }, dispatch: s.dispatch,
+      code: `globalThis.__m = api.ui.showAdvancedModal({}); return globalThis.__m.modalId;`,
+    })) as string;
+    notifyVmModalDismissed(modalId, 'navigation'); // dismissed BEFORE onDismiss is registered
+    const out = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-modfast', name: 'MF', type: 'trigger' }, dispatch: s.dispatch,
+      code: `var out = []; globalThis.__m.onDismiss(function (r) { out.push(r); }); return new Promise(function (res) { globalThis.queueMicrotask(function () { res(out); }); }); `,
+    }));
+    expect(out).toEqual(['navigation']); // fast-path fired with the cached reason
+    dropVmModal(modalId);
+    disposeScriptVmHandlers('s-modfast');
+  });
+
+  test('an onDismiss unsub drops the listener (the bridge snapshot is empty)', async () => {
+    const s = spy();
+    const modalId = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-munsub', name: 'MU', type: 'trigger' }, dispatch: s.dispatch,
+      code: `globalThis.__m = api.ui.showAdvancedModal({}); var off = globalThis.__m.onDismiss(function () {}); off(); return globalThis.__m.modalId;`,
+    })) as string;
+    const info = notifyVmModalDismissed(modalId, 'user');
+    expect(info!.handlerIds).toEqual([]); // unsubbed -> no listeners to fire
+    dropVmModal(modalId);
+    disposeScriptVmHandlers('s-munsub');
+  });
+
+  test('hasVmModal tracks ownership; disposeScriptVmHandlers sweeps the owner', async () => {
+    const s = spy();
+    const modalId = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-mown', name: 'MO', type: 'trigger' }, dispatch: s.dispatch,
+      code: `var m = api.ui.showAdvancedModal({}); m.onDismiss(function () {}); return m.modalId;`,
+    })) as string;
+    expect(hasVmModal(modalId)).toBe(true);
+    disposeScriptVmHandlers('s-mown');
+    expect(hasVmModal(modalId)).toBe(false);
+  });
+
+  test('fires-once: a SECOND notice during the fan-out (before dropVmModal) returns null + does not re-yield listeners', async () => {
+    // audit lifecycle-races#0 — the asyncfn baseline deletes state BEFORE firing, so a duplicate
+    // notice is a hard no-op. The VM bridge must match: notifyVmModalDismissed claims the modal
+    // synchronously so a re-entrant notice arriving WHILE the async onDismiss fan-out is in flight
+    // (dropVmModal not yet called) cannot re-fire every listener.
+    const s = spy();
+    const modalId = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-modonce', name: 'MO1', type: 'trigger' }, dispatch: s.dispatch,
+      code: `globalThis.__n = 0; globalThis.__m = api.ui.showAdvancedModal({}); globalThis.__m.onDismiss(function () { globalThis.__n++; }); return globalThis.__m.modalId;`,
+    })) as string;
+    const info = notifyVmModalDismissed(modalId, 'user');
+    expect(info).not.toBeNull();
+    expect(info!.handlerIds.length).toBe(1);
+    // SECOND notice BEFORE dropVmModal — must be a no-op (owner already claimed by the first notify).
+    expect(notifyVmModalDismissed(modalId, 'user')).toBeNull();
+    expect(hasVmModal(modalId)).toBe(false);
+    // Fire the FIRST snapshot's listeners, then drop. The listener must have fired exactly once.
+    for (const hid of info!.handlerIds) {
+      await fireHandlerInQuickJS(fireOpts({ scriptId: 's-modonce', handlerId: hid, args: ['user'] }));
+    }
+    dropVmModal(modalId, info!.scriptId, info!.handlerIds);
+    const n = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-modonce', name: 'MO1', type: 'trigger' }, dispatch: s.dispatch,
+      code: `return globalThis.__n;`,
+    }));
+    expect(n).toBe(1); // fired once, not twice
+    expect(() => dropVmModal(modalId)).not.toThrow(); // idempotent
+    disposeScriptVmHandlers('s-modonce');
+  });
+
+  test('notifyVmModalDismissed for an unknown modal returns null', () => {
+    expect(notifyVmModalDismissed('not-a-modal', 'user')).toBeNull();
+  });
+
+  test('owner-takeover guard: another script cannot re-point a modal owner (security-containment#1)', async () => {
+    const s = spy();
+    // Script A owns the modal.
+    const modalId = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-ownerA', name: 'A', type: 'trigger' }, dispatch: s.dispatch,
+      code: `globalThis.__m = api.ui.showAdvancedModal({}); globalThis.__m.onDismiss(function () {}); return globalThis.__m.modalId;`,
+    })) as string;
+    // Script B calls the (VM-reachable) host fn directly with A's id to try to hijack the owner.
+    await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-ownerB', name: 'B', type: 'trigger' }, dispatch: s.dispatch,
+      code: `try { globalThis.__hostRegisterModal(${JSON.stringify(modalId)}); } catch (e) {} return 1;`,
+    }));
+    // The dismiss notice still routes to A — the guard refused the takeover.
+    const info = notifyVmModalDismissed(modalId, 'user');
+    expect(info).not.toBeNull();
+    expect(info!.scriptId).toBe('s-ownerA');
+    dropVmModal(modalId, info!.scriptId, info!.handlerIds);
+    disposeScriptVmHandlers('s-ownerA');
+    disposeScriptVmHandlers('s-ownerB');
+  });
+
+  test('onDismiss owner guard: another script cannot attach a listener to a foreign modal (security-containment#2)', async () => {
+    const s = spy();
+    const modalId = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-dlistenA', name: 'A', type: 'trigger' }, dispatch: s.dispatch,
+      code: `globalThis.__m = api.ui.showAdvancedModal({}); return globalThis.__m.modalId;`,
+    })) as string;
+    // Script B tries to register a dismiss listener on A's modal directly.
+    await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-dlistenB', name: 'B', type: 'trigger' }, dispatch: s.dispatch,
+      code: `try { globalThis.__hostRegisterModalDismiss(${JSON.stringify(modalId)}, 'advancedModalDismiss:evil', function () {}); } catch (e) {} return 1;`,
+    }));
+    // A's modal has NO listeners — B's cross-owner registration was rejected.
+    const info = notifyVmModalDismissed(modalId, 'user');
+    expect(info!.handlerIds).toEqual([]);
+    dropVmModal(modalId, info!.scriptId, info!.handlerIds);
+    disposeScriptVmHandlers('s-dlistenA');
+    disposeScriptVmHandlers('s-dlistenB');
   });
 });
 
