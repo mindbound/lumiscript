@@ -438,7 +438,7 @@ globalThis.__lsBuildApi = function (hostDispatch) {
       getPosition: function () { return { x: positionCache.x, y: positionCache.y }; },
       setVisible: function (visible) { if (destroyedRef.current) return; visibleCache.current = visible; gated('ui._floatWidget.setVisible', [widgetId, visible]); },
       isVisible: function () { return visibleCache.current; },
-      destroy: function () { if (destroyedRef.current) return; destroyedRef.current = true; gated('ui._floatWidget.destroy', [widgetId]); },
+      destroy: function () { if (destroyedRef.current) return; destroyedRef.current = true; globalThis.__hostDropWidget(String(widgetId)); gated('ui._floatWidget.destroy', [widgetId]); },
       // P4b Inc 3c-1 — onDragEnd: gated register-handler (kind floatWidgetDragEnd); the handler
       // receives the drag [pos] as its arg (delivered by the fire). getPosition()-reflects-drag
       // INSIDE the closure still needs the position-notice -> positionCache bridge (3c-2).
@@ -633,6 +633,14 @@ globalThis.__lsBuildApi = function (hostDispatch) {
           });
         }
         if (path === 'tools.unregister') { unregisterNamedHandler('tool', a[0]); return; }
+        // flush#1 — asyncfn-classified sync-VOID methods (mkSyncVoidFireForget): swallow the
+        // rejection AND __lsTrackChain the fire-and-forget dispatch so the run-loop flush drains it,
+        // then return void. Falling through to the catch-all would return an un-tracked, un-caught
+        // Promise (weaker ordering + a silent in-VM unhandled rejection on host-dispatch failure).
+        if (path === 'ui.toast' || path === 'ui.dom.cleanup' || path === 'commands.register' || path === 'commands.unregister') {
+          globalThis.__lsTrackChain(send(path, a).catch(function () {}));
+          return;
+        }
         return send(path, a);
       },
     });
@@ -799,7 +807,7 @@ const VM_FLUSH_BOOTSTRAP = `
 // deep-frozen.) Eval'd LAST in getContext, after all scaffolding is built.
 const VM_FREEZE_BOOTSTRAP = `
 (function () {
-  var locked = ['__lsEncode', '__lsDecode', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', '__lsFetchAbort', 'fetch', 'Headers', 'Response', 'AbortController', 'AbortSignal', '__hostHandleDispatch', '__lsVmHandleProxy', '__hostRegisterHandler', '__hostUnregisterHandler', '__hostUnregisterHandlerNamed', '__lsCallHandler', '__hostBroadcastSubscribe', '__hostBroadcastUnsubscribe', '__lsTrackChain', '__lsFlush', '__hostAllocElementId', '__hostRegisterWidget', '__hostRegisterModal', '__hostRegisterModalDismiss', '__hostUnregisterModalDismiss'];
+  var locked = ['__lsEncode', '__lsDecode', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', '__lsFetchAbort', 'fetch', 'Headers', 'Response', 'AbortController', 'AbortSignal', '__hostHandleDispatch', '__lsVmHandleProxy', '__hostRegisterHandler', '__hostUnregisterHandler', '__hostUnregisterHandlerNamed', '__lsCallHandler', '__hostBroadcastSubscribe', '__hostBroadcastUnsubscribe', '__lsTrackChain', '__lsFlush', '__hostAllocElementId', '__hostRegisterWidget', '__hostDropWidget', '__hostRegisterModal', '__hostRegisterModalDismiss', '__hostUnregisterModalDismiss'];
   for (var i = 0; i < locked.length; i++) {
     var name = locked[i];
     if (Object.prototype.hasOwnProperty.call(globalThis, name)) {
@@ -1273,6 +1281,20 @@ async function createContext(): Promise<QuickJSContext> {
   });
   ctx.setProp(ctx.global, '__hostRegisterModal', hostRegisterModal);
   hostRegisterModal.dispose();
+  // widget-destroy-leak — a float widget's destroy() drops its host-held cell + owner eagerly
+  // (asyncfn parity: floatWidgetState.delete on destroy). Owner-scoped so a script can only drop its
+  // OWN widget; a late position notice then no-ops (hasVmWidget false) instead of mutating a dead cell.
+  const hostDropWidget = ctx.newFunction('__hostDropWidget', (idHandle) => {
+    const run = activeRun;
+    const id = ctx.getString(idHandle);
+    const rec = vmWidgetOwner.get(id);
+    if (rec && run?.scriptId === rec.scriptId) {
+      try { if (rec.cell.alive) rec.cell.dispose(); } catch { /* */ }
+      vmWidgetOwner.delete(id);
+    }
+  });
+  ctx.setProp(ctx.global, '__hostDropWidget', hostDropWidget);
+  hostDropWidget.dispose();
 
   // ── P4b Inc 3c-2b: advanced-modal onDismiss listener registration. Dups the user fn into the
   // per-script vmHandlerHandles registry under a synthetic handlerId (so the dismiss bridge fires

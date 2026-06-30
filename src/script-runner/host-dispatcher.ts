@@ -4637,6 +4637,25 @@ async function handleShowAdvancedModalRequest(
       value:     handle.modalId,
     };
   } catch (err) {
+    // open-failure-teardown (audit parity#2) — a SYNCHRONOUS throw from the canonical
+    // showAdvancedModal (e.g. the per-script modal stack-limit) happens BEFORE
+    // storePendingAdvancedModal + the host onDismiss wiring, so the inner `await openPromise`
+    // teardown-notice path above never runs and no notice reaches the child. Send one for the
+    // VM-supplied modalId so a synchronously-registered onDismiss fires 'teardown' + the modal
+    // state drops — matching asyncfn's defensive openAck-reject fan-out. Idempotent / fires-once
+    // on both engines (FIFO IPC delivers this notice before the ok:false api-response, so the
+    // child's dismiss path runs before the proxy's openAck rejects).
+    const failedModalId = (req.args[0] as { _modalId?: unknown } | undefined)?._modalId;
+    if (typeof failedModalId === 'string' && failedModalId.length > 0) {
+      const notice: AdvancedModalDismissedNotice = {
+        type:    'advanced-modal-dismissed',
+        modalId: failedModalId,
+        reason:  'teardown',
+      };
+      bumpWorkerActivity(active.workerKey);
+      try { getChildHandle(active.workerKey)?.send(notice); }
+      catch { /* channel down */ }
+    }
     return {
       type:      'api-response',
       requestId,

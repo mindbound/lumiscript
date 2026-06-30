@@ -701,3 +701,34 @@ describe('#11 P4b Inc 3: fire-path flush (gated factory inside a FIRED handler)'
     disposeScriptVmHandlers('s-firegate2');
   });
 });
+
+describe('#11 P4b factory-tail cleanups', () => {
+  test('widget-destroy-leak: destroy() drops the owner + cell; a late position notice no-ops', async () => {
+    const s = spy();
+    const wid = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-wdrop', name: 'WD', type: 'trigger' }, dispatch: s.dispatch,
+      code: `globalThis.__w = api.ui.createFloatWidget({ initialPosition: { x: 5, y: 6 } }); globalThis.__w.destroy(); return globalThis.__w.widgetId;`,
+    })) as string;
+    expect(hasVmWidget(wid)).toBe(false);   // owner + cell dropped eagerly on destroy (asyncfn parity)
+    notifyVmWidgetPosition(wid, 99, 99);     // a late FE position notice must no-op (no owner)
+    const pos = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-wdrop', name: 'WD', type: 'trigger' }, dispatch: s.dispatch,
+      code: `return globalThis.__w.getPosition();`,
+    }));
+    expect(pos).toEqual({ x: 5, y: 6 });     // frozen at last value — the notice did not land
+    disposeScriptVmHandlers('s-wdrop');
+  });
+
+  test('flush#1: sync-void methods (ui.toast etc.) return void + swallow a rejecting dispatch', async () => {
+    // A dispatch that REJECTS for ui.toast must NOT produce an unhandled rejection or fail the run.
+    const s = spy({ rejects: ['ui.toast', 'commands.register'] });
+    const out = await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-syncvoid', name: 'SV', type: 'trigger' }, dispatch: s.dispatch,
+      code: `var a = api.ui.toast('hi'); api.commands.register({ id: 'c' }); api.ui.dom.cleanup(); return { toastVoid: a === undefined };`,
+    })) as { toastVoid: boolean };
+    expect(out.toastVoid).toBe(true);                    // returns void, not a Promise
+    expect(s.find('ui.toast')).toBeDefined();            // still dispatched (tracked + swallowed)
+    expect(s.find('commands.register')).toBeDefined();
+    expect(s.find('ui.dom.cleanup')).toBeDefined();
+  });
+});
