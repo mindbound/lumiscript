@@ -339,6 +339,65 @@ globalThis.__lsBuildApi = function (hostDispatch) {
     globalThis.__lsTrackChain(send(method, [target, html, fullOptions]).catch(function () {}));
     return buildDomHandle(elementId);
   };
+  // #11 P4b Inc 2 — GATED factory handles (showAdvancedModal / createFloatWidget). The first
+  // consumers of buildDomHandle's gateAck path. ids are generated UPFRONT + threaded via the
+  // @internal _modalId/_widgetId/_rootElementId so the canonical adopts them; openAck =
+  // send('ui.showAdvancedModal' | 'ui.createFloatWidget', [optsWithIds]) resolves when the FE
+  // has mounted+bound. .root = buildDomHandle(rootElementId, openAck) (gated). Each void method
+  // queues behind openAck via gated() (__lsTrackChain(openAck.then(send).catch())) — the in-VM
+  // send is NOT auto-tracked (unlike asyncfn proxy.dispatch), so we MUST trackChain the openAck
+  // AND each method, else the run-loop flush can't drain them. Callback-free SCOPE: onDismiss /
+  // onDragEnd + the FE-driven dismissed/position notices DEFER to Inc 3 (they need a host->VM
+  // notice bridge that does not exist yet). dismissed/destroyedRef flip on the openAck-reject
+  // path only (the path the VM owns); dismiss() matches asyncfn = does NOT flip locally.
+  var buildAdvancedModalHandle = function (modalId, rootElementId, openAck, dismissedRef) {
+    var gated = function (method, args) {
+      globalThis.__lsTrackChain(openAck.then(function () { return send(method, args); }).catch(function () {}));
+    };
+    return {
+      modalId: modalId,
+      root: buildDomHandle(rootElementId, openAck),
+      get dismissed() { return dismissedRef.current; },
+      setTitle: function (title) { if (dismissedRef.current) return; gated('ui._advModal.setTitle', [modalId, title]); },
+      dismiss: function () { if (dismissedRef.current) return; gated('ui._advModal.dismiss', [modalId]); },
+      // onDismiss: DEFER to Inc 3 (needs the advanced-modal-dismissed notice -> VM bridge).
+    };
+  };
+  var showAdvancedModal = function (options) {
+    var modalId = globalThis.crypto.randomUUID();
+    var rootElementId = globalThis.crypto.randomUUID();
+    var optsWithIds = Object.assign({}, options, { _modalId: modalId, _rootElementId: rootElementId });
+    var dismissedRef = { current: false };
+    var openAck = globalThis.__lsTrackChain(send('ui.showAdvancedModal', [optsWithIds]).catch(function (err) { dismissedRef.current = true; throw err; }));
+    return buildAdvancedModalHandle(modalId, rootElementId, openAck, dismissedRef);
+  };
+  var buildFloatWidgetHandle = function (widgetId, rootElementId, openAck, destroyedRef, positionCache, visibleCache) {
+    var gated = function (method, args) {
+      globalThis.__lsTrackChain(openAck.then(function () { return send(method, args); }).catch(function () {}));
+    };
+    return {
+      widgetId: widgetId,
+      root: buildDomHandle(rootElementId, openAck),
+      moveTo: function (x, y) { if (destroyedRef.current) return; positionCache.x = x; positionCache.y = y; gated('ui._floatWidget.moveTo', [widgetId, x, y]); },
+      getPosition: function () { return { x: positionCache.x, y: positionCache.y }; },
+      setVisible: function (visible) { if (destroyedRef.current) return; visibleCache.current = visible; gated('ui._floatWidget.setVisible', [widgetId, visible]); },
+      isVisible: function () { return visibleCache.current; },
+      destroy: function () { if (destroyedRef.current) return; destroyedRef.current = true; gated('ui._floatWidget.destroy', [widgetId]); },
+      // onDragEnd: DEFER to Inc 3 (needs the floatWidgetPosition notice -> VM bridge for its
+      // getPosition()-reflects-drag-coords contract; registering without it = a silently-wrong read).
+    };
+  };
+  var createFloatWidget = function (options) {
+    var widgetId = globalThis.crypto.randomUUID();
+    var rootElementId = globalThis.crypto.randomUUID();
+    var optsWithIds = Object.assign({}, options, { _widgetId: widgetId, _rootElementId: rootElementId });
+    var destroyedRef = { current: false };
+    var ip = (options && options.initialPosition) || {};
+    var positionCache = { x: (ip.x != null) ? ip.x : 0, y: (ip.y != null) ? ip.y : 0 };
+    var visibleCache = { current: true };
+    var openAck = globalThis.__lsTrackChain(send('ui.createFloatWidget', [optsWithIds]).catch(function (err) { destroyedRef.current = true; throw err; }));
+    return buildFloatWidgetHandle(widgetId, rootElementId, openAck, destroyedRef, positionCache, visibleCache);
+  };
   var make = function (path) {
     return new Proxy(function () {}, {
       get: function (_t, prop) {
@@ -358,6 +417,11 @@ globalThis.__lsBuildApi = function (hostDispatch) {
         // injectChild/read). injectAtMessage's a[0] is a messageId (positional, same shape).
         if (path === 'ui.dom.inject') return injectDom('ui.dom.inject', a[0], a[1], a[2]);
         if (path === 'ui.dom.injectAtMessage') return injectDom('ui.dom.injectAtMessage', a[0], a[1], a[2]);
+        // P4b Inc 2 — gated factory handles. MUST intercept before the generic send() below,
+        // else they fall through to the host handle-OUT path ({$:'h'} async reflective proxy)
+        // instead of a sync plain-object handle.
+        if (path === 'ui.showAdvancedModal') return showAdvancedModal(a[0]);
+        if (path === 'ui.createFloatWidget') return createFloatWidget(a[0]);
         if (path === 'commands.onInvoked') return registerVmHandler('commandsOnInvoked', 'commands.onInvoked(handler)', a[0], {});
         if (path === 'macros.registerInterceptor') return registerInterceptor('macroInterceptor', 'macros.registerInterceptor', a[0], a[1]);
         if (path === 'chat.registerContentProcessor') return registerInterceptor('contentProcessor', 'chat.registerContentProcessor', a[0], a[1]);
