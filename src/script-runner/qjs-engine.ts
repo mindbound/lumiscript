@@ -957,11 +957,11 @@ const VM_FETCH_BOOTSTRAP = `
 `;
 
 let modulePromise: Promise<QuickJSWASMModule> | undefined;
-/** Module alias = the shared record's ctx. Kept for the (untouched) notice bridges
- *  (notifyVmWidgetPosition / notifyVmModalDismissed / dropVmModal), disposeScriptVmHandlers,
- *  and the leak oracle (_vmObjectCountForTests), which read this directly. Set in
- *  createContext alongside the record's `sc.ctx`. */
-let context: QuickJSContext | undefined;
+/** #11 P7-1 — the sync-resolved shared ScriptContext record. The notice bridges + leak oracle
+ *  need a script's ctx SYNCHRONOUSLY (the notice arrives between runs, off the async build path),
+ *  so they resolve it via resolveScriptContext(scriptId). Under contextModel='shared' one record
+ *  backs every script (this var, set in createContext); P7-2 makes resolveScriptContext pool-aware. */
+let sharedSc: ScriptContext | undefined;
 
 /**
  * The currently-executing run's host bindings. The STABLE in-VM scaffolding —
@@ -1070,6 +1070,15 @@ function getContextForScript(_scriptId: string): Promise<ScriptContext> {
     sharedScPromise.catch(() => { sharedScPromise = undefined; });
   }
   return sharedScPromise;
+}
+
+/** #11 P7-1 — SYNCHRONOUS resolver of a script's already-built context record, for the
+ *  between-runs callers that can't await (the notice bridges + leak oracle). Under
+ *  contextModel='shared' the single shared record backs every scriptId; P7-2 returns the
+ *  per-script pool entry (scriptContexts.get(scriptId)). Returns undefined if no context
+ *  has been built yet (the notice/oracle then no-ops). */
+function resolveScriptContext(_scriptId: string): ScriptContext | undefined {
+  return sharedSc;
 }
 
 /** Create the module (once per process) + the reusable context (once per child,
@@ -1536,7 +1545,7 @@ async function createContext(): Promise<ScriptContext> {
 
   // Keep the module alias = the shared record's ctx (the untouched notice bridges /
   // dispose / leak oracle read it directly). Return the record (#11 P7-0).
-  context = ctx;
+  sharedSc = sc; // #11 P7-1 — the sync-resolved shared record (contextModel='shared')
   return sc;
   } catch (err) {
     // L3 — never leak the half-built native context on a setup failure.
@@ -1777,9 +1786,10 @@ export function hasVmWidget(widgetId: string): boolean {
  *  via setProp. Pure sync cell write, no run/activeRun (the notice arrives between runs), no in-VM
  *  eval / global (audit#0 — the cell is never exposed on globalThis). */
 export function notifyVmWidgetPosition(widgetId: string, x: number, y: number): void {
-  const ctx = context;
   const rec = vmWidgetOwner.get(widgetId);
-  if (!ctx || !rec || !rec.cell.alive) return;
+  if (!rec) return;
+  const ctx = resolveScriptContext(rec.scriptId)?.ctx; // #11 P7-1 — the owning script's context
+  if (!ctx || !rec.cell.alive) return;
   // setProp is wrapped: __hostRegisterWidget is VM-callable, so a script could same-owner-replace its
   // OWN cell with a non-object (setProp would throw). A sabotaged own handle must not crash the host.
   try {
@@ -1801,9 +1811,10 @@ export function hasVmModal(modalId: string): boolean {
  *  (late or duplicate notice -> fires-once). The caller MUST call dropVmModal AFTER firing — the
  *  listener dups must stay alive in vmHandlerHandles during the fire. */
 export function notifyVmModalDismissed(modalId: string, reason: string): { scriptId: string; handlerIds: string[] } | null {
-  const ctx = context;
   const rec = vmModalOwner.get(modalId);
-  if (!ctx || !rec) return null;
+  if (!rec) return null;
+  const ctx = resolveScriptContext(rec.scriptId)?.ctx; // #11 P7-1 — the owning script's context
+  if (!ctx) return null;
   // EAGER flip the dismissedRef cell via the host-held handle: current=true, reason=<notice reason>.
   // ctx.true is a constant handle — never disposed; setProp does not consume the value. No in-VM eval
   // / global (audit#0). The cell handle is disposed now (the VM closure keeps the object alive for the
@@ -1994,11 +2005,15 @@ export async function fireHandlerInQuickJS(opts: QuickJSFireOptions): Promise<un
  * qjs-engine-marshal/hardening tests to assert the handle arena leaves nothing
  * behind. Reads runtime.computeMemoryUsage() and disposes its own probe handle.
  */
-export function _vmObjectCountForTests(): number | null {
-  if (!context) return null;
-  const usage = context.runtime.computeMemoryUsage();
+export function _vmObjectCountForTests(scriptId?: string): number | null {
+  // #11 P7-1 — optional scriptId selects a specific script's context (P7-2 per-script pool);
+  // omitted resolves the shared record. Null if that context hasn't been built.
+  const sc = scriptId !== undefined ? resolveScriptContext(scriptId) : sharedSc;
+  if (!sc) return null;
+  const ctx = sc.ctx;
+  const usage = ctx.runtime.computeMemoryUsage();
   try {
-    const stats = context.dump(usage) as Record<string, unknown>;
+    const stats = ctx.dump(usage) as Record<string, unknown>;
     const n = stats.obj_count;
     return typeof n === 'number' ? n : null;
   } finally {
