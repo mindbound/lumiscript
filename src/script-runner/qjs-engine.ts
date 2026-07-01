@@ -804,10 +804,10 @@ const VM_FLUSH_BOOTSTRAP = `
 // frozen `__hbsBuiltins*` snapshots are the reset SOURCES so they can't be
 // tampered. (Third-party z/Handlebars internal-property mutation remains a
 // residual until per-run contexts land in P7 — bindings are locked, objects not
-// deep-frozen.) Eval'd LAST in getContext, after all scaffolding is built.
+// deep-frozen.) Eval'd LAST in createContext, after all scaffolding is built.
 const VM_FREEZE_BOOTSTRAP = `
 (function () {
-  var locked = ['__lsEncode', '__lsDecode', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', '__lsFetchAbort', 'fetch', 'Headers', 'Response', 'AbortController', 'AbortSignal', '__hostHandleDispatch', '__lsVmHandleProxy', '__hostRegisterHandler', '__hostUnregisterHandler', '__hostUnregisterHandlerNamed', '__lsCallHandler', '__hostBroadcastSubscribe', '__hostBroadcastUnsubscribe', '__lsTrackChain', '__lsFlush', '__hostAllocElementId', '__hostRegisterWidget', '__hostDropWidget', '__hostRegisterModal', '__hostRegisterModalDismiss', '__hostUnregisterModalDismiss'];
+  var locked = ['__lsEncode', '__lsDecode', '__lsErrInfo', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', '__lsFetchAbort', 'fetch', 'Headers', 'Response', 'AbortController', 'AbortSignal', '__hostHandleDispatch', '__lsVmHandleProxy', '__hostRegisterHandler', '__hostUnregisterHandler', '__hostUnregisterHandlerNamed', '__lsCallHandler', '__hostBroadcastSubscribe', '__hostBroadcastUnsubscribe', '__lsTrackChain', '__lsFlush', '__hostAllocElementId', '__hostRegisterWidget', '__hostDropWidget', '__hostRegisterModal', '__hostRegisterModalDismiss', '__hostUnregisterModalDismiss'];
   for (var i = 0; i < locked.length; i++) {
     var name = locked[i];
     if (Object.prototype.hasOwnProperty.call(globalThis, name)) {
@@ -957,9 +957,11 @@ const VM_FETCH_BOOTSTRAP = `
 `;
 
 let modulePromise: Promise<QuickJSWASMModule> | undefined;
+/** Module alias = the shared record's ctx. Kept for the (untouched) notice bridges
+ *  (notifyVmWidgetPosition / notifyVmModalDismissed / dropVmModal), disposeScriptVmHandlers,
+ *  and the leak oracle (_vmObjectCountForTests), which read this directly. Set in
+ *  createContext alongside the record's `sc.ctx`. */
 let context: QuickJSContext | undefined;
-/** Per-run wall-clock deadline read by the (sync-loop) interrupt handler. */
-let currentDeadline = Number.POSITIVE_INFINITY;
 
 /**
  * The currently-executing run's host bindings. The STABLE in-VM scaffolding —
@@ -996,7 +998,21 @@ interface ActiveRun {
   dispatchBroadcastSubscribe?: (subId: string, event: string) => void;
   dispatchBroadcastUnsubscribe?: (subId: string) => void;
 }
-let activeRun: ActiveRun | undefined;
+
+/**
+ * #11 P7-0 — per-context run-state record. Each QuickJSContext carries its OWN
+ * `activeRun` / `currentDeadline` / `runChain` (the foundation for per-script
+ * contexts in P7-2). For now a SINGLE shared record is used (contextModel='shared',
+ * via getContextForScript's sharedScPromise), so behavior is identical to the prior
+ * module-global model — the run-state simply lives on the record instead of in
+ * module-level `let`s.
+ */
+interface ScriptContext {
+  ctx:             QuickJSContext;
+  runChain:        Promise<void>;
+  activeRun:       ActiveRun | undefined;
+  currentDeadline: number;
+}
 /** #11 P5 — per-script registry of DUP'd in-VM handler fn handles. Keyed (scriptId,
  *  handlerId). The dup keeps the VM fn alive across runs (it is NOT in any run's
  *  arena); disposed on unregister / script teardown. The parent fires a stored
@@ -1031,40 +1047,50 @@ const vmWidgetOwner = new Map<string, VmFactoryRecord>(); // widgetId -> {script
 const vmModalOwner = new Map<string, VmFactoryRecord>();  // modalId  -> {scriptId, dismissedRef handle}
 const vmModalListeners = new Map<string, Set<string>>(); // modalId -> onDismiss handlerIds
 /** Cached context build — promise-based so concurrent first calls share ONE
- *  context (a plain `if (context)` check races two builds). Cleared on failure
- *  so a transient build error doesn't poison every later run. */
-let contextPromise: Promise<QuickJSContext> | undefined;
-/** #11 P2/H1 — run serializer. The api/console scaffolding, globalThis.data, and
- *  activeRun/currentDeadline all live on ONE process-global context, so two runs
- *  cannot interleave without corrupting each other. Each run chains behind the
- *  previous, ENFORCING the (previously only-asserted) sequential premise. True
- *  concurrency would need a context-per-run pool — tracked for P7. */
-let runChain: Promise<void> = Promise.resolve();
+ *  record (a plain `if (context)` check races two builds). Cleared on failure
+ *  so a transient build error doesn't poison every later run.
+ *
+ *  #11 P7-0: the run serializer (runChain) and the per-run state (activeRun /
+ *  currentDeadline) now live ON the ScriptContext record, not in module-level
+ *  `let`s. For now a single shared record backs every script (contextModel='shared');
+ *  per-script records land in P7-2. The api/console scaffolding, globalThis.data, and
+ *  the record's activeRun/currentDeadline all live on ONE process-global context, so
+ *  two runs cannot interleave without corrupting each other — each run chains behind the
+ *  previous via the record's runChain, ENFORCING the (previously only-asserted) sequential
+ *  premise. True concurrency would need a context-per-run pool — still tracked for P7. */
+let sharedScPromise: Promise<ScriptContext> | undefined;
 
-/** Race-safe, retry-on-failure accessor for the singleton context. */
-function getContext(): Promise<QuickJSContext> {
-  if (!contextPromise) {
-    contextPromise = createContext();
+/** Race-safe, retry-on-failure accessor for the script's context record.
+ *  #11 P7-0: single shared record (contextModel='shared'); per-script comes in P7-2. */
+function getContextForScript(_scriptId: string): Promise<ScriptContext> {
+  if (!sharedScPromise) {
+    sharedScPromise = createContext();
     // On a failed build, clear the cache so a later run retries instead of
     // getting the same rejected promise forever.
-    contextPromise.catch(() => { contextPromise = undefined; });
+    sharedScPromise.catch(() => { sharedScPromise = undefined; });
   }
-  return contextPromise;
+  return sharedScPromise;
 }
 
 /** Create the module (once per process) + the reusable context (once per child,
- *  mirroring the shared-child model) + the stable VM scaffolding. The interrupt
- *  handler reads the module-level `currentDeadline`, updated per-run. */
-async function createContext(): Promise<QuickJSContext> {
+ *  mirroring the shared-child model) + the stable VM scaffolding. Returns the
+ *  per-context ScriptContext record (#11 P7-0). The interrupt handler and every
+ *  host-fn closure read the run-state OFF the record (`sc.currentDeadline` /
+ *  `sc.activeRun`), updated per-run by runUserScriptInQuickJS / fireHandlerInQuickJS. */
+async function createContext(): Promise<ScriptContext> {
   modulePromise ??= newQuickJSWASMModuleFromVariant(variant);
   const mod = await modulePromise;
   const ctx = mod.newContext();
   try {
+  // #11 P7-0 — the per-context run-state record. The interrupt handler + every
+  // host-fn closure below read activeRun/currentDeadline off THIS record (in scope
+  // for the whole createContext closure), not module globals.
+  const sc: ScriptContext = { ctx, runChain: Promise.resolve(), activeRun: undefined, currentDeadline: Number.POSITIVE_INFINITY };
   const pump = () => ctx.runtime.executePendingJobs();
 
   // Ring-0 sync-loop guard (P7 formalizes the supervision rings): aborts a sync
   // `while(true){}` the host heartbeat would otherwise SIGKILL the whole child for.
-  ctx.runtime.setInterruptHandler(() => Date.now() > currentDeadline);
+  ctx.runtime.setInterruptHandler(() => Date.now() > sc.currentDeadline);
   ctx.runtime.setMemoryLimit(512 * 1024 * 1024); // generous backstop; P7 tunes
 
   // Order matters: the marshaler twin defines __lsEncode/__lsDecode, which the
@@ -1110,7 +1136,7 @@ async function createContext(): Promise<QuickJSContext> {
       ctx.newString(s).consume((h) => deferred.resolve(h));
       pump();
     };
-    const run = activeRun;
+    const run = sc.activeRun;
     if (!run) {
       settle('e', { name: 'Error', message: `LumiScript QuickJS: no active run for ${method}().` }, 'no active run');
     } else {
@@ -1151,7 +1177,7 @@ async function createContext(): Promise<QuickJSContext> {
       ctx.newString(s).consume((h) => deferred.resolve(h));
       pump();
     };
-    const run = activeRun;
+    const run = sc.activeRun;
     if (!run) {
       settle('e', { name: 'Error', message: `LumiScript QuickJS: no active run for handle ${handleKind}.${method}().` }, 'no active run');
     } else if (!run.dispatchOnHandle) {
@@ -1178,7 +1204,7 @@ async function createContext(): Promise<QuickJSContext> {
   // fireHandlerInQuickJS. The function-less register IPC reaches the parent via
   // activeRun.dispatchRegisterHandler (so the parent knows to route the event here). ──
   const hostRegisterHandler = ctx.newFunction('__hostRegisterHandler', (kindHandle, handlerIdHandle, fnHandle, metaHandle) => {
-    const run = activeRun;
+    const run = sc.activeRun;
     const handlerId = ctx.getString(handlerIdHandle);
     if (run?.scriptId) {
       const kind = ctx.getString(kindHandle);
@@ -1200,7 +1226,7 @@ async function createContext(): Promise<QuickJSContext> {
   ctx.setProp(ctx.global, '__hostRegisterHandler', hostRegisterHandler);
   hostRegisterHandler.dispose();
   const hostUnregisterHandler = ctx.newFunction('__hostUnregisterHandler', (kindHandle, handlerIdHandle) => {
-    const run = activeRun;
+    const run = sc.activeRun;
     const kind = ctx.getString(kindHandle);
     const handlerId = ctx.getString(handlerIdHandle);
     if (run?.scriptId) {
@@ -1223,7 +1249,7 @@ async function createContext(): Promise<QuickJSContext> {
   // here — it is reaped at teardown (asyncfn parity: the closure outlives unregister(name),
   // and a stale dup never fires once the host drops the name from its store). ──
   const hostUnregisterHandlerNamed = ctx.newFunction('__hostUnregisterHandlerNamed', (kindHandle, nameHandle) => {
-    const run = activeRun;
+    const run = sc.activeRun;
     if (run?.scriptId) {
       const kind = ctx.getString(kindHandle);
       const name = ctx.getString(nameHandle);
@@ -1240,7 +1266,7 @@ async function createContext(): Promise<QuickJSContext> {
   // across runs, else we store + return the candidate. scriptId is host-stamped (activeRun),
   // so two scripts' same stable id never collide. ──
   const hostAllocElementId = ctx.newFunction('__hostAllocElementId', (stableIdHandle, candidateHandle) => {
-    const run = activeRun;
+    const run = sc.activeRun;
     const stableId = ctx.getString(stableIdHandle);
     const candidate = ctx.getString(candidateHandle);
     if (!stableId || !run?.scriptId) return ctx.newString(candidate);
@@ -1263,7 +1289,7 @@ async function createContext(): Promise<QuickJSContext> {
   // leaked uuid can't hijack the dismiss/position routing. The cell handle is dup'd so it survives
   // the run arena; it shares the underlying object with the VM closure the handle getter reads. ──
   const registerFactoryCell = (owner: Map<string, VmFactoryRecord>, idHandle: QuickJSHandle, cellHandle: QuickJSHandle): void => {
-    const run = activeRun;
+    const run = sc.activeRun;
     if (!run?.scriptId) return;
     const id = ctx.getString(idHandle);
     const cur = owner.get(id);
@@ -1285,7 +1311,7 @@ async function createContext(): Promise<QuickJSContext> {
   // (asyncfn parity: floatWidgetState.delete on destroy). Owner-scoped so a script can only drop its
   // OWN widget; a late position notice then no-ops (hasVmWidget false) instead of mutating a dead cell.
   const hostDropWidget = ctx.newFunction('__hostDropWidget', (idHandle) => {
-    const run = activeRun;
+    const run = sc.activeRun;
     const id = ctx.getString(idHandle);
     const rec = vmWidgetOwner.get(id);
     if (rec && run?.scriptId === rec.scriptId) {
@@ -1302,7 +1328,7 @@ async function createContext(): Promise<QuickJSContext> {
   // IPC: onDismiss is a LOCAL listener (parity with the asyncfn listeners Set), fired only by the
   // host->VM dismiss notice, never the parent event bus. ──
   const hostRegisterModalDismiss = ctx.newFunction('__hostRegisterModalDismiss', (modalIdHandle, handlerIdHandle, fnHandle) => {
-    const run = activeRun;
+    const run = sc.activeRun;
     if (!run?.scriptId) return;
     const modalId = ctx.getString(modalIdHandle);
     // OWNER GUARD (audit security-containment#2): only the modal's owning script may attach onDismiss
@@ -1346,7 +1372,7 @@ async function createContext(): Promise<QuickJSContext> {
   // BroadcastClearMessage, unlike persistent handlers). The parent IPC is
   // broadcast-subscribe (not register-handler). ──
   const hostBroadcastSubscribe = ctx.newFunction('__hostBroadcastSubscribe', (subIdHandle, fnHandle, eventHandle) => {
-    const run = activeRun;
+    const run = sc.activeRun;
     const subId = ctx.getString(subIdHandle);
     if (run?.scriptId) {
       const event = ctx.getString(eventHandle);
@@ -1363,7 +1389,7 @@ async function createContext(): Promise<QuickJSContext> {
   ctx.setProp(ctx.global, '__hostBroadcastSubscribe', hostBroadcastSubscribe);
   hostBroadcastSubscribe.dispose();
   const hostBroadcastUnsubscribe = ctx.newFunction('__hostBroadcastUnsubscribe', (subIdHandle) => {
-    const run = activeRun;
+    const run = sc.activeRun;
     const subId = ctx.getString(subIdHandle);
     if (run?.scriptId) {
       const perScript = vmBroadcastHandles.get(run.scriptId);
@@ -1386,7 +1412,7 @@ async function createContext(): Promise<QuickJSContext> {
   const consoleObj = ctx.newObject();
   for (const level of ['log', 'warn', 'error', 'info'] as const) {
     const fn = ctx.newFunction(level, (...argHandles) => {
-      const handler = activeRun?.console[level];
+      const handler = sc.activeRun?.console[level];
       if (typeof handler === 'function') handler(...argHandles.map((h) => ctx.dump(h)));
     });
     ctx.setProp(consoleObj, level, fn);
@@ -1424,7 +1450,7 @@ async function createContext(): Promise<QuickJSContext> {
       ctx.newString(s).consume((h) => deferred.resolve(h));
       pump();
     };
-    const run = activeRun;
+    const run = sc.activeRun;
     if (!run) {
       settle('e', { name: 'Error', message: 'LumiScript QuickJS: no active run for fetch().' }, 'no active run');
     } else if (!run.allowDangerous) {
@@ -1495,12 +1521,23 @@ async function createContext(): Promise<QuickJSContext> {
   fetchAbortFn.dispose();
   ctx.unwrapResult(ctx.evalCode(VM_FETCH_BOOTSTRAP)).dispose();
 
+  // toHostError parity pin — discriminate a thrown value IN-VM (instanceof Error + String(e)), since
+  // ctx.dump loses the instanceof info. A real Error -> {isError, name, message, stack}; any other
+  // thrown value -> {isError:false, str:String(e)} so the host surfaces new Error(String(value)),
+  // matching asyncfn's serializeError else-branch (a thrown plain object becomes '[object Object]',
+  // NOT its .message). Frozen below so a script can't spoof the discrimination.
+  ctx.unwrapResult(ctx.evalCode(
+    'globalThis.__lsErrInfo = function (e) { if (e instanceof Error) return { isError: true, name: String(e.name || "Error"), message: String(e.message), stack: e.stack ? String(e.stack) : undefined }; return { isError: false, str: String(e) }; };',
+  )).dispose();
+
   // P3 audit H1 — lock the trusted scaffolding bindings. MUST be the last eval,
   // after api / __hostDispatch / __console / crypto / fetch are built, so frozen.
   ctx.unwrapResult(ctx.evalCode(VM_FREEZE_BOOTSTRAP)).dispose();
 
+  // Keep the module alias = the shared record's ctx (the untouched notice bridges /
+  // dispose / leak oracle read it directly). Return the record (#11 P7-0).
   context = ctx;
-  return ctx;
+  return sc;
   } catch (err) {
     // L3 — never leak the half-built native context on a setup failure.
     try { ctx.dispose(); } catch { /* already dead */ }
@@ -1508,15 +1545,31 @@ async function createContext(): Promise<QuickJSContext> {
   }
 }
 
-function toHostError(dumped: unknown): Error {
-  if (dumped && typeof dumped === 'object' && 'message' in dumped) {
-    const d = dumped as { name?: unknown; message?: unknown; stack?: unknown };
-    const err = new Error(String(d.message));
-    if (d.name)  err.name  = String(d.name);
-    if (d.stack) err.stack = String(d.stack);
+function toHostError(ctx: QuickJSContext, errorHandle: QuickJSHandle): Error {
+  // Discriminate `instanceof Error` IN-VM (parity with asyncfn's serializeError) — ctx.dump alone
+  // loses it, so a thrown plain object `{message:'x'}` would otherwise be upgraded to Error('x')
+  // here while asyncfn surfaces String(value) = '[object Object]'. __lsErrInfo returns either
+  // {isError:true, name, message, stack} or {isError:false, str:String(e)} (String runs in-VM).
+  let info: { isError?: boolean; name?: unknown; message?: unknown; stack?: unknown; str?: unknown } | undefined;
+  try {
+    const fn = ctx.getProp(ctx.global, '__lsErrInfo');
+    const res = ctx.callFunction(fn, ctx.undefined, errorHandle);
+    fn.dispose();
+    if (res.error) { res.error.dispose(); }
+    else { info = ctx.dump(res.value) as typeof info; res.value.dispose(); }
+  } catch { /* helper missing/clobbered — fall back to the raw dump below */ }
+  if (info?.isError) {
+    const err = new Error(String(info.message ?? ''));
+    if (info.name)  err.name  = String(info.name);
+    if (info.stack) err.stack = String(info.stack);
     return err;
   }
-  return new Error(String(dumped));
+  if (info && info.isError === false) {
+    return new Error(String(info.str ?? '')); // non-Error thrown value → String() parity
+  }
+  // Helper unavailable: best-effort raw dump (objects → '[object Object]' like asyncfn's String()).
+  const dumped = ctx.dump(errorHandle);
+  return new Error(typeof dumped === 'object' && dumped !== null ? '[object Object]' : String(dumped));
 }
 
 /**
@@ -1526,19 +1579,20 @@ function toHostError(dumped: unknown): Error {
  * identical.
  */
 export async function runUserScriptInQuickJS(opts: QuickJSRunOptions): Promise<unknown> {
-  const ctx = await getContext();
+  const sc = await getContextForScript(opts.script.id);
+  const ctx = sc.ctx;
 
   // #11 P2/H1 — acquire the run lock BEFORE touching any shared per-run state.
   // The link is established synchronously (no await between reading and replacing
-  // runChain) so concurrent callers queue deterministically; then await the prior
+  // sc.runChain) so concurrent callers queue deterministically; then await the prior
   // run before claiming activeRun / currentDeadline / the in-VM data.
-  const prior = runChain;
+  const prior = sc.runChain;
   let releaseRun!: () => void;
-  runChain = new Promise<void>((resolve) => { releaseRun = resolve; });
+  sc.runChain = new Promise<void>((resolve) => { releaseRun = resolve; });
   await prior;
 
-  currentDeadline = Date.now() + opts.timeoutMs;
-  activeRun = { dispatch: opts.dispatch, console: opts.console, serializeError: opts.serializeError, allowDangerous: opts.allowDangerous ?? false, hostFetch: opts.hostFetch, dispatchOnHandle: opts.dispatchOnHandle, scriptId: opts.script.id, dispatchRegisterHandler: opts.dispatchRegisterHandler, dispatchUnregisterHandler: opts.dispatchUnregisterHandler, dispatchUnregisterHandlerNamed: opts.dispatchUnregisterHandlerNamed, dispatchBroadcastSubscribe: opts.dispatchBroadcastSubscribe, dispatchBroadcastUnsubscribe: opts.dispatchBroadcastUnsubscribe };
+  sc.currentDeadline = Date.now() + opts.timeoutMs;
+  sc.activeRun = { dispatch: opts.dispatch, console: opts.console, serializeError: opts.serializeError, allowDangerous: opts.allowDangerous ?? false, hostFetch: opts.hostFetch, dispatchOnHandle: opts.dispatchOnHandle, scriptId: opts.script.id, dispatchRegisterHandler: opts.dispatchRegisterHandler, dispatchUnregisterHandler: opts.dispatchUnregisterHandler, dispatchUnregisterHandlerNamed: opts.dispatchUnregisterHandlerNamed, dispatchBroadcastSubscribe: opts.dispatchBroadcastSubscribe, dispatchBroadcastUnsubscribe: opts.dispatchBroadcastUnsubscribe };
   const pump = () => ctx.runtime.executePendingJobs();
 
   // #11 fix (d) — a synchronous `while(true){}` blocks the host event loop, so
@@ -1550,7 +1604,7 @@ export async function runUserScriptInQuickJS(opts: QuickJSRunOptions): Promise<u
   // AND runOne's `error.name === 'ScriptTimeoutError'` gate fires proc.fail() —
   // killing the child so the interrupted body can't leave residual state in the
   // reused context for the next run.
-  const timedOut = () => Date.now() > currentDeadline;
+  const timedOut = () => Date.now() > sc.currentDeadline;
   const timeoutError = () => {
     const err = new Error(
       `Script "${opts.script.name}" exceeded the ${opts.timeoutMs / 1000}s execution timeout ` +
@@ -1603,15 +1657,15 @@ const console = globalThis.__console;
 ${opts.code}
 })().then(function (r) { return JSON.stringify(globalThis.__lsEncode(r)); })`);
     if (evalRes.error) {
-      const e = ctx.dump(track(evalRes.error));
-      throw timedOut() ? timeoutError() : toHostError(e);
+      const eh = track(evalRes.error);
+      throw timedOut() ? timeoutError() : toHostError(ctx, eh);
     }
     const settledP = ctx.resolvePromise(track(evalRes.value));
     pump();
     const settled = await settledP;
     if (settled.error) {
-      const e = ctx.dump(track(settled.error));
-      throw timedOut() ? timeoutError() : toHostError(e);
+      const eh = track(settled.error);
+      throw timedOut() ? timeoutError() : toHostError(ctx, eh);
     }
     return marshalDecode(JSON.parse(ctx.getString(track(settled.value))));
   } finally {
@@ -1637,8 +1691,8 @@ ${opts.code}
         if (flushSettled.error) flushSettled.error.dispose();
       } catch { /* best-effort drain — never let the flush mask the run's outcome */ }
     }
-    currentDeadline = Number.POSITIVE_INFINITY;
-    activeRun = undefined;
+    sc.currentDeadline = Number.POSITIVE_INFINITY;
+    sc.activeRun = undefined;
     // Dispose every handle this run allocated, even on the throw paths. `.alive`
     // guards against a handle disposed elsewhere; cleanup must never throw.
     for (const h of arena) {
@@ -1831,7 +1885,8 @@ export interface QuickJSFireOptions {
  * registry until unregister/teardown.
  */
 export async function fireHandlerInQuickJS(opts: QuickJSFireOptions): Promise<unknown> {
-  const ctx = await getContext();
+  const sc = await getContextForScript(opts.scriptId);
+  const ctx = sc.ctx;
   // The fire id may be a RunHandlerRequest handlerId OR a broadcast subId — they share
   // this fire path but live in separate registries (different clear lifecycles).
   const lookup = (): QuickJSHandle | undefined =>
@@ -1841,9 +1896,9 @@ export async function fireHandlerInQuickJS(opts: QuickJSFireOptions): Promise<un
   }
 
   // Serialize against body-runs + other fires on the shared context.
-  const prior = runChain;
+  const prior = sc.runChain;
   let releaseRun: () => void = () => {};
-  runChain = new Promise<void>((resolve) => { releaseRun = resolve; });
+  sc.runChain = new Promise<void>((resolve) => { releaseRun = resolve; });
   await prior;
 
   // RE-FETCH after the await — an unregister/teardown (which runs off the message
@@ -1856,8 +1911,8 @@ export async function fireHandlerInQuickJS(opts: QuickJSFireOptions): Promise<un
     throw new Error(`LumiScript QuickJS: handler ${opts.handlerId} was unregistered before its fire ran (script ${opts.scriptId}).`);
   }
 
-  currentDeadline = Date.now() + opts.timeoutMs;
-  activeRun = {
+  sc.currentDeadline = Date.now() + opts.timeoutMs;
+  sc.activeRun = {
     dispatch: opts.dispatch, console: opts.console, serializeError: opts.serializeError,
     allowDangerous: opts.allowDangerous ?? false, hostFetch: opts.hostFetch,
     dispatchOnHandle: opts.dispatchOnHandle, scriptId: opts.scriptId,
@@ -1868,7 +1923,7 @@ export async function fireHandlerInQuickJS(opts: QuickJSFireOptions): Promise<un
     dispatchBroadcastUnsubscribe: opts.dispatchBroadcastUnsubscribe,
   };
   const pump = () => ctx.runtime.executePendingJobs();
-  const timedOut = () => Date.now() > currentDeadline;
+  const timedOut = () => Date.now() > sc.currentDeadline;
   const timeoutError = () => {
     const err = new Error(`Handler ${opts.handlerId} exceeded the ${opts.timeoutMs / 1000}s timeout (a synchronous loop was interrupted by the QuickJS engine).`);
     err.name = 'ScriptTimeoutError';
@@ -1884,23 +1939,23 @@ export async function fireHandlerInQuickJS(opts: QuickJSFireOptions): Promise<un
     // Marshal the args INTO the VM as a decoded array (mirror the per-run data path).
     ctx.newString(JSON.stringify(marshalEncode(opts.args))).consume((h) => ctx.setProp(ctx.global, '__lsFireArgsJson', h));
     const argsRes = ctx.evalCode('globalThis.__lsDecode(JSON.parse(globalThis.__lsFireArgsJson))');
-    if (argsRes.error) throw toHostError(ctx.dump(track(argsRes.error)));
+    if (argsRes.error) throw toHostError(ctx, track(argsRes.error));
     const argsArray = track(argsRes.value);
 
     // Call the handler via the in-VM trampoline (applies fn + encodes the result).
     const callHandler = track(ctx.getProp(ctx.global, '__lsCallHandler'));
     const callRes = ctx.callFunction(callHandler, ctx.undefined, fnHandle, argsArray);
     if (callRes.error) {
-      const e = ctx.dump(track(callRes.error));
-      throw timedOut() ? timeoutError() : toHostError(e);
+      const eh = track(callRes.error);
+      throw timedOut() ? timeoutError() : toHostError(ctx, eh);
     }
     // Bridge the (possibly async) VM result back — same as the body-run.
     const settledP = ctx.resolvePromise(track(callRes.value));
     pump();
     const settled = await settledP;
     if (settled.error) {
-      const e = ctx.dump(track(settled.error));
-      throw timedOut() ? timeoutError() : toHostError(e);
+      const eh = track(settled.error);
+      throw timedOut() ? timeoutError() : toHostError(ctx, eh);
     }
     return marshalDecode(JSON.parse(ctx.getString(track(settled.value))));
   } finally {
@@ -1922,8 +1977,8 @@ export async function fireHandlerInQuickJS(opts: QuickJSFireOptions): Promise<un
         if (flushSettled.error) flushSettled.error.dispose();
       } catch { /* best-effort drain — never let the flush mask the fire's outcome */ }
     }
-    currentDeadline = Number.POSITIVE_INFINITY;
-    activeRun = undefined;
+    sc.currentDeadline = Number.POSITIVE_INFINITY;
+    sc.activeRun = undefined;
     for (const h of arena) {
       try { if (h.alive) h.dispose(); } catch { /* swallow — fire is over */ }
     }

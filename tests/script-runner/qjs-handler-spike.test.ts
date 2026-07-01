@@ -130,6 +130,32 @@ describe('#11 P5: commands.onInvoked registration + fire', () => {
     expect(msg).toContain('no handler');
   });
 
+  // ── P5-inc1 isolation pins ────────────────────────────────────────────────
+  test('cross-script isolation: a handler registered under script A cannot be fired under script B', async () => {
+    const hidA = await register('s-iso-A', `api.commands.onInvoked(() => 'A-fired'); return null;`);
+    // B owns no handler with that id — the fire must NOT route to A's dup (scriptId-keyed lookup).
+    let msg = '';
+    try { await fireHandlerInQuickJS(fireOpts({ scriptId: 's-iso-B', handlerId: hidA })); }
+    catch (e) { msg = (e as Error).message; }
+    expect(msg).toContain('no handler');               // not-found under B
+    expect(hasVmHandler('s-iso-B', hidA)).toBe(false);  // B never owned it
+    expect(hasVmHandler('s-iso-A', hidA)).toBe(true);   // A's handler is untouched by the cross-fire
+    disposeScriptVmHandlers('s-iso-A');
+  });
+
+  test('hasVmHandler returns false for a script with no registry entry at all', () => {
+    expect(hasVmHandler('s-never-registered', 'commandsOnInvoked:x')).toBe(false);
+  });
+
+  test('fire-path wedge: a sync-looping fired handler is interrupted with ScriptTimeoutError', async () => {
+    const hid = await register('s-wedge', `api.commands.onInvoked(() => { while (true) {} }); return null;`);
+    let err: Error | undefined;
+    try { await fireHandlerInQuickJS(fireOpts({ scriptId: 's-wedge', handlerId: hid, timeoutMs: 150 })); }
+    catch (e) { err = e as Error; }
+    expect(err?.name).toBe('ScriptTimeoutError');       // engine interrupt enforces the per-fire deadline
+    disposeScriptVmHandlers('s-wedge');
+  });
+
   test('the handler can fire repeatedly (the dup survives across fires)', async () => {
     const hid = await register('s-rep', `api.commands.onInvoked(async (commandId, ctx) => { const v = await api.echo(ctx.n); return v * 2; }); return null;`, echo);
     for (let i = 0; i < 5; i++) {
