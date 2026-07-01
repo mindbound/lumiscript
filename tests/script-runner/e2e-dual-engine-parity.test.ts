@@ -27,11 +27,21 @@ import {
   dispatchRunScript,
   __sendRunHandlerRequestForTests,
   __resetForTests,
+  // #11 parity sweep — Option-B FE-echo resolvers so gated-factory runs finish fast.
+  notifyAdvancedModalOpened,
+  notifyFloatWidgetCreated,
+  notifyDrawerTabRegistered,
+  notifyAppMountCreated,
+  __getPendingAdvancedModalOpenIdsForTests,
+  __getPendingFloatWidgetCreateIdsForTests,
+  __getPendingDrawerTabRegisterKeysForTests,
+  __getPendingAppMountCreateIdsForTests,
 } from '../../src/script-runner/host-dispatcher.js';
 import { _setEngineModeForTests } from '../../src/script-runner/child-entry.js';
 import { setupE2E } from '../_infra/script-runner-fixture.js';
 import type { Script } from '../../src/types/script.js';
-import type { RegisterHandler, BroadcastSubscribeMessage, HandlerKind } from '../../src/types/script-runner-ipc.js';
+import type { MockSpindle } from '../_infra/mock-spindle.js';
+import type { RegisterHandler, BroadcastSubscribeMessage, HandlerKind, ApiProxyRequest } from '../../src/types/script-runner-ipc.js';
 
 type EngineMode = 'quickjs' | undefined; // undefined = asyncfn
 
@@ -182,4 +192,107 @@ describe('#11 P5 dual-engine parity: broadcast.on subscribe IPC', () => {
     const quickjs = await observeBroadcast('quickjs');
     expect(quickjs).toEqual(asyncfn);
   });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// #11 parity sweep — gated FACTORY / DOM-handle CREATE dispatch (the sequences
+// the register-handler harness above omits). Each factory's CREATE api-request
+// is produced by the SAME api-proxy `dispatch` under both engines (quickjs's
+// in-VM factory intercepts call the identical dispatch), so the child→parent
+// `api-request` must be byte-identical modulo the per-run uuids. This is the
+// durable regression net for the P8 default-flip: the host cannot tell which
+// engine produced a factory call. (addStyle: CREATE only — its `.remove()` is an
+// accepted async/HandleRef divergence, out of scope.)
+// ───────────────────────────────────────────────────────────────────────────
+
+function makeFactoryRequest() {
+  // Factories permission-gate; without these the canonical throws before dispatch.
+  return { data: {}, timeoutMs: 5_000, grantedPermissions: new Set<string>(['ui_panels', 'app_manipulation']), userId: 'test-user' };
+}
+function getSpindle(): MockSpindle {
+  return (globalThis as unknown as { spindle: MockSpindle }).spindle;
+}
+/** Install a parent-side watcher that fires `cb` when the matching factory api-request lands. */
+function watchApiRequest(spindle: MockSpindle, method: string, cb: (req: ApiProxyRequest) => void): () => void {
+  return spindle.backendProcesses.onMessage((event) => {
+    const m = event.payload as { type?: unknown; method?: unknown };
+    if (m && typeof m === 'object' && m.type === 'api-request' && m.method === method) cb(event.payload as ApiProxyRequest);
+  });
+}
+/** Poll the pending-awaiter table until the open-await is registered, THEN echo (platform-race-safe). */
+async function echoWhenAwaiterReady(isReady: () => boolean, echo: () => void): Promise<void> {
+  for (let i = 0; i < 2000 && !isReady(); i++) await new Promise<void>((r) => setTimeout(r, 0));
+  echo();
+}
+
+interface FactoryScenario {
+  name: string;
+  body: string;
+  method: string;
+  /** The generated-uuid values in the found api-request to normalize away before comparison. */
+  ids: (req: ApiProxyRequest) => Array<string | undefined>;
+  /** Gated factories block the run on an FE-echo; resolve it so the run finishes fast. */
+  echo?: (req: ApiProxyRequest) => void;
+}
+const opts0 = (req: ApiProxyRequest) => req.args[0] as Record<string, unknown>;
+
+const FACTORY_SCENARIOS: FactoryScenario[] = [
+  { name: 'ui.dom.inject', method: 'ui.dom.inject',
+    body: `api.ui.dom.inject('#target', '<p>x</p>');`,
+    ids: (req) => [(req.args[2] as Record<string, unknown> | undefined)?._elementId as string] },
+  { name: 'ui.dom.addStyle', method: 'ui.dom.addStyle',
+    body: `api.ui.dom.addStyle('.x { color: red }');`,
+    ids: () => [] }, // CREATE carries no id
+  { name: 'ui.createFloatWidget', method: 'ui.createFloatWidget',
+    body: `api.ui.createFloatWidget({ width: 200, height: 100 });`,
+    ids: (req) => [opts0(req)._widgetId as string, opts0(req)._rootElementId as string],
+    echo: (req) => { const id = opts0(req)._widgetId as string; void echoWhenAwaiterReady(() => __getPendingFloatWidgetCreateIdsForTests().includes(id), () => notifyFloatWidgetCreated(id)); } },
+  { name: 'ui.showAdvancedModal', method: 'ui.showAdvancedModal',
+    body: `api.ui.showAdvancedModal({ title: 'Hi' });`,
+    ids: (req) => [opts0(req)._modalId as string, opts0(req)._rootElementId as string],
+    echo: (req) => { const id = opts0(req)._modalId as string; void echoWhenAwaiterReady(() => __getPendingAdvancedModalOpenIdsForTests().includes(id), () => notifyAdvancedModalOpened(id)); } },
+  { name: 'ui.registerDrawerTab', method: 'ui.registerDrawerTab',
+    body: `api.ui.registerDrawerTab({ id: 'my-tab', title: 'My Tab' });`,
+    ids: (req) => [opts0(req)._rootElementId as string], // tabId 'my-tab' is a user literal — do NOT normalize
+    echo: (req) => { const tabId = opts0(req).id as string; void echoWhenAwaiterReady(() => __getPendingDrawerTabRegisterKeysForTests().includes(`${req.scriptId}:${tabId}`), () => notifyDrawerTabRegistered(req.scriptId, tabId)); } },
+  { name: 'ui.mountApp', method: 'ui.mountApp',
+    body: `api.ui.mountApp({ title: 'A' });`,
+    ids: (req) => [opts0(req)._mountId as string, opts0(req)._rootElementId as string],
+    echo: (req) => { const id = opts0(req)._mountId as string; void echoWhenAwaiterReady(() => __getPendingAppMountCreateIdsForTests().includes(id), () => notifyAppMountCreated(id)); } },
+];
+
+async function observeFactory(engine: EngineMode, sc: FactoryScenario): Promise<unknown> {
+  __resetForTests();
+  _setEngineModeForTests(engine);
+  const sid = `parity-fac-${engine ?? 'asyncfn'}`;
+  const { ipc, childCleanup } = await setupE2E();
+  const unsub = sc.echo ? watchApiRequest(getSpindle(), sc.method, sc.echo) : () => {};
+  try {
+    const runRes = await dispatchRunScript(makeScript(sid, sc.body + ' return null;'), makeFactoryRequest());
+    if (!runRes.ok) throw new Error(`[${engine ?? 'asyncfn'}] ${sc.name}: run failed`);
+    const req = ipc.parentInbox().find((m): m is ApiProxyRequest => {
+      if (typeof m !== 'object' || m === null) return false;
+      const r = m as { type?: unknown; method?: unknown };
+      return r.type === 'api-request' && r.method === sc.method;
+    });
+    if (!req) throw new Error(`[${engine ?? 'asyncfn'}] ${sc.name}: no api-request for ${sc.method}`);
+    // Normalize the per-run uuids (requestId + the fire runId + the per-engine scriptId + the generated
+    // handle ids) so the STRUCTURAL create dispatch compares equal across engines.
+    const idMap: Record<string, string | undefined> = { '<REQID>': req.requestId, '<RID>': req.runId, '<SID>': sid };
+    sc.ids(req).forEach((v, i) => { if (v) idMap[`<ID${i}>`] = v; });
+    return normalizeIds(req, idMap);
+  } finally {
+    unsub();
+    childCleanup();
+  }
+}
+
+describe('#11 parity sweep: gated-factory CREATE dispatch (asyncfn vs quickjs)', () => {
+  for (const sc of FACTORY_SCENARIOS) {
+    test(`${sc.name}: identical CREATE api-request across engines`, async () => {
+      const asyncfn = await observeFactory(undefined, sc);
+      const quickjs = await observeFactory('quickjs', sc);
+      expect(quickjs).toEqual(asyncfn);
+    });
+  }
 });

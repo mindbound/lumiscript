@@ -7576,6 +7576,13 @@ export function __getPendingDrawerTabRegisterKeysForTests(): string[] {
   return Array.from(pendingDrawerTabRegisters.keys());
 }
 
+/** @internal — #11 parity sweep: mirrors the widget/modal/drawer-tab awaiter getters
+ *  (the only Option-B create-awaiter that lacked one) so a test can poll the app-mount
+ *  create-await table and echo `notifyAppMountCreated` without racing the async register. */
+export function __getPendingAppMountCreateIdsForTests(): string[] {
+  return Array.from(pendingAppMountCreates.keys());
+}
+
 // ─── Test-only restart-logic overrides + inspectors (Phase 11.B.3) ──────────
 
 /**
