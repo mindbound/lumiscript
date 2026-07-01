@@ -1086,8 +1086,14 @@ function getContextForScript(scriptId: string): Promise<ScriptContext> {
     // build when we resolve, DON'T publish a torn-down/superseded context into scriptContexts (a
     // use-after-free / resurrection hazard) — dispose the orphan instead.
     const build: Promise<ScriptContext> = createContext().then((sc) => {
-      if (scriptContextPromises.get(scriptId) === build) scriptContexts.set(scriptId, sc);
-      else { try { sc.ctx.dispose(); } catch { /* orphaned by a concurrent teardown/rebuild */ } }
+      if (scriptContextPromises.get(scriptId) === build) {
+        // #11 P7-3.1 — a publish is a USE: re-stamp recency to NOW (the build-time stamp is ~46ms
+        // stale, so a sibling that ran during the build could otherwise look fresher and make this
+        // just-built, about-to-be-run context the LRU victim of its own cap-check — critic gap #4).
+        sc.lastUsedAt = Date.now();
+        scriptContexts.set(scriptId, sc);
+        enforcePoolCap(scriptId); // evict LRU evictable if over cap — but EXEMPT this just-built, about-to-run context
+      } else { try { sc.ctx.dispose(); } catch { /* orphaned by a concurrent teardown/rebuild */ } }
       return sc;
     });
     build.catch(() => {
@@ -1110,6 +1116,101 @@ function getContextForScript(scriptId: string): Promise<ScriptContext> {
  *  (the notice/oracle then no-ops). */
 function resolveScriptContext(scriptId: string): ScriptContext | undefined {
   return contextModel === 'shared' ? sharedSc : scriptContexts.get(scriptId);
+}
+
+/** #11 P7-3.1 — bounded-pool knobs (module-level so the test seams can override; prod uses the
+ *  constants). POOL_CAP is the HARD bound on live per-script contexts (coupled to P7-3.2's per-context
+ *  memory limit — perCtxLimit × POOL_CAP is the child's WASM-heap budget; since there is no host RSS
+ *  kill the pool must self-bound). idleTimeoutMs reaps contexts idle longer than this — generous
+ *  because a rebuild is cheap (~46ms, P7-3.3 bench) and handler/broadcast-holding contexts are pinned
+ *  (never reaped), so only an idle BODY-run script ever re-pays it, before its next run's deadline. */
+let POOL_CAP = 8;
+let idleTimeoutMs = 5 * 60_000;
+
+/** #11 P7-3.1 (audit hardening) — scriptIds with an in-flight body-run ACQUISITION. runUserScriptInQuickJS
+ *  captures `const ctx = sc.ctx` then `await prior` (the runChain serialization) BEFORE setting
+ *  sc.activeRun, so for that span sc.activeRun is undefined and, if the script is unpinned, the context
+ *  would be isEvictable — a concurrent build's enforcePoolCap or the sweep could dispose the very ctx the
+ *  parked run is about to use (a use-after-free on the captured local; the P7-3.1 audit's microtask race).
+ *  A reservation set SYNCHRONOUSLY before the acquisition awaits + cleared in the run's finally keeps the
+ *  context non-evictable across the whole acquire→run span. Counter-valued (concurrent queued runs of one
+ *  script each reserve). The FIRE path needs no reservation: a fired handler has an alive dup, so
+ *  isContextPinned is already true for its whole fire. */
+const contextReservations = new Map<string, number>();
+function reserveContext(scriptId: string): void {
+  contextReservations.set(scriptId, (contextReservations.get(scriptId) ?? 0) + 1);
+}
+function releaseContext(scriptId: string): void {
+  const n = (contextReservations.get(scriptId) ?? 0) - 1;
+  if (n <= 0) contextReservations.delete(scriptId);
+  else contextReservations.set(scriptId, n);
+}
+function isContextReserved(scriptId: string): boolean {
+  return (contextReservations.get(scriptId) ?? 0) > 0;
+}
+
+/** A pooled context is an eviction CANDIDATE iff it is not mid-run (a run/fire captures `sc.ctx` after
+ *  its await, so disposing mid-run is a use-after-free), not RESERVED (a body-run is mid-acquisition,
+ *  before activeRun is set — same UAF), and not pinned (a live cross-run handler dup a fire would reach
+ *  — un-rebuildable). evictIdleContext re-checks all three; this is the selection filter. */
+function isEvictable(scriptId: string, sc: ScriptContext): boolean {
+  return sc.activeRun === undefined && !isContextReserved(scriptId) && !isContextPinned(scriptId);
+}
+
+/** The least-recently-used EVICTABLE scriptId (oldest lastUsedAt), or undefined if none are evictable
+ *  (all pinned / mid-run / exempt). Ties resolve to the first-iterated (oldest-inserted). `exempt`
+ *  protects a scriptId from selection — used for the just-built context at its own insert-time
+ *  cap-check (see enforcePoolCap). */
+function lruEvictable(exempt?: string): string | undefined {
+  let victim: string | undefined;
+  let oldestAt = Infinity;
+  for (const [scriptId, sc] of scriptContexts) {
+    if (scriptId === exempt) continue;
+    if (!isEvictable(scriptId, sc)) continue;
+    if (sc.lastUsedAt < oldestAt) { oldestAt = sc.lastUsedAt; victim = scriptId; }
+  }
+  return victim;
+}
+
+/** #11 P7-3.1 — enforce POOL_CAP after an insert: while over cap, evict the LRU evictable context. If
+ *  NONE are evictable (every remaining context is pinned / mid-run / exempt), stop and accept over-cap
+ *  — we NEVER force-evict a pinned context (that silently loses its handlers; the fully-pinned-pool
+ *  decision = accept + retain). `exempt` = the just-inserted scriptId, protected from its OWN cap-check:
+ *  its run has not started (activeRun still undefined) and its handler (if any) registers DURING the
+ *  imminent body-run, so it is neither mid-run-guarded nor pinned yet — without the exemption a pool of
+ *  otherwise-pinned contexts would make the just-built context the only evictable candidate and evict
+ *  the very context the caller is about to run (critic gap #4 / use-after-free). No-op under 'shared'. */
+function enforcePoolCap(exempt?: string): void {
+  if (contextModel !== 'per-script') return;
+  while (scriptContexts.size > POOL_CAP) {
+    const victim = lruEvictable(exempt);
+    if (victim === undefined) break; // all remaining are pinned/mid-run/exempt — accept over-cap
+    if (!evictIdleContext(victim)) break; // defensive: shouldn't fail (victim was evictable), avoid a spin
+  }
+}
+
+/** #11 P7-3.1 — periodic idle reaper, ticked off child-entry's IDLE_HEARTBEAT interval (the engine owns
+ *  no timer). Evicts every EVICTABLE context idle longer than idleMs, then enforces POOL_CAP as a
+ *  backstop (a context tolerated over-cap while pinned becomes reclaimable once it unpins). Pinned +
+ *  mid-run contexts are skipped (never reaped). Returns the count evicted. No-op under 'shared'. Tests
+ *  drive it directly with an explicit (now, idleMs); prod calls it arg-less every heartbeat. */
+export function sweepIdleContexts(now: number = Date.now(), idleMs: number = idleTimeoutMs): number {
+  if (contextModel !== 'per-script') return 0;
+  let evicted = 0;
+  // Snapshot the entries first — evictIdleContext mutates scriptContexts during the loop.
+  for (const [scriptId, sc] of [...scriptContexts]) {
+    if (sc.activeRun !== undefined) continue;          // mid-run — never reap
+    if (isContextReserved(scriptId)) continue;         // body-run mid-acquisition — never reap (UAF window)
+    if (isContextPinned(scriptId)) continue;           // pinned — never reap (a fire would find a dead ctx)
+    if (now - sc.lastUsedAt > idleMs && evictIdleContext(scriptId)) evicted++;
+  }
+  // Cap backstop: an insert may have been forced over-cap by an all-pinned pool; reclaim now.
+  while (scriptContexts.size > POOL_CAP) {
+    const victim = lruEvictable();
+    if (victim === undefined || !evictIdleContext(victim)) break;
+    evicted++;
+  }
+  return evicted;
 }
 
 /** Create the module (once per process) + the reusable context (once per child,
@@ -1620,7 +1721,20 @@ function toHostError(ctx: QuickJSContext, errorHandle: QuickJSHandle): Error {
  * identical.
  */
 export async function runUserScriptInQuickJS(opts: QuickJSRunOptions): Promise<unknown> {
-  const sc = await getContextForScript(opts.script.id);
+  // #11 P7-3.1 (audit) — RESERVE this script's context before the acquisition awaits (getContextForScript
+  // + `await prior`), during which sc.activeRun is not yet set and an unpinned context would be
+  // isEvictable: a concurrent build's enforcePoolCap or the sweep could dispose the ctx this parked run
+  // is about to use (the audit's microtask-race UAF). Released in the finally; on a getContextForScript
+  // rejection (build failure) the finally is never entered, so release on that path explicitly.
+  const scriptId = opts.script.id;
+  reserveContext(scriptId);
+  let sc: ScriptContext;
+  try {
+    sc = await getContextForScript(scriptId);
+  } catch (err) {
+    releaseContext(scriptId);
+    throw err;
+  }
   const ctx = sc.ctx;
 
   // #11 P2/H1 — acquire the run lock BEFORE touching any shared per-run state.
@@ -1741,6 +1855,7 @@ ${opts.code}
       try { if (h.alive) h.dispose(); } catch { /* swallow — run is over */ }
     }
     releaseRun(); // release the run lock so the next queued run can proceed
+    releaseContext(scriptId); // #11 P7-3.1 — drop the eviction reservation now the run is fully done
   }
 }
 
@@ -1884,6 +1999,7 @@ export function evictIdleContext(scriptId: string): boolean {
   // pre-filters mid-run candidates (+ LRU recency covers the about-to-run window), but self-guarding
   // here makes the primitive safe to call unconditionally.
   if (sc && sc.activeRun !== undefined) return false;
+  if (isContextReserved(scriptId)) return false; // a body-run is mid-acquisition (before activeRun is set) — same UAF
   if (isContextPinned(scriptId)) return false; // never evict a pinned context (use-after-free on next fire)
   scriptContexts.delete(scriptId);
   scriptContextPromises.delete(scriptId);
@@ -2178,6 +2294,21 @@ export function _lastUsedAtForTests(scriptId: string): number | null {
   return resolveScriptContext(scriptId)?.lastUsedAt ?? null;
 }
 
+/** #11 P7-3.1 test seam — override the bounded-pool knobs so a test can force cap-eviction (small cap)
+ *  or idle-reaping (tiny idleMs via sweepIdleContexts' arg) without building 8+ contexts. Reset to the
+ *  prod defaults by _disposeContextForTests. */
+export function _setPoolCapForTests(cap: number): void { POOL_CAP = cap; }
+export function _setIdleTimeoutForTests(ms: number): void { idleTimeoutMs = ms; }
+
+/** #11 P7-3.1 test seam — reserve a script's context (as a body-run acquisition does) so the eviction
+ *  gates (evictIdleContext / lruEvictable / sweep) can be tested against the reservation deterministically
+ *  without reproducing the microtask race. Returns the matching release fn. */
+export function _reserveContextForTests(scriptId: string): () => void {
+  reserveContext(scriptId);
+  let released = false;
+  return () => { if (!released) { released = true; releaseContext(scriptId); } };
+}
+
 /** #11 P7-2 test seam — dispose the PER-SCRIPT context pool + reset the model to 'shared', so a
  *  per-script-context test can't leak a context into another test file (the CI-readdir flake class).
  *  Each pooled script's held VM handles are swept first (disposeScriptVmHandlers) so ctx.dispose()
@@ -2202,5 +2333,8 @@ export function _disposeContextForTests(): void {
   for (const rec of vmWidgetOwner.values()) dirty.add(rec.scriptId);
   for (const rec of vmModalOwner.values()) dirty.add(rec.scriptId);
   for (const scriptId of dirty) { try { disposeScriptVmHandlers(scriptId); } catch { /* teardown */ } }
+  contextReservations.clear(); // #11 P7-3.1 — drop any dangling run reservations
   contextModel = 'shared';
+  POOL_CAP = 8;              // #11 P7-3.1 — restore the pool-bound defaults (a test may have shrunk them)
+  idleTimeoutMs = 5 * 60_000;
 }

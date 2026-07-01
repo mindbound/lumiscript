@@ -85,6 +85,7 @@ import {
   dropVmModal,
   disposeContextForScript,
   disposeScriptVmBroadcast,
+  sweepIdleContexts,
 } from './qjs-engine.js';
 
 // ─── Error classes ──────────────────────────────────────────────────────────
@@ -1846,6 +1847,10 @@ export default function (proc: SpindleBackendProcessContext): () => void {
 
   let heartbeatTimer: ReturnType<typeof setInterval> | null = setInterval(() => {
     proc.heartbeat();
+    // #11 P7-3.1 — piggyback the quickjs per-script context idle-sweep on the existing heartbeat (the
+    // engine owns no timer). No-op under contextModel='shared' (the default today) — reaps idle,
+    // unpinned, non-mid-run per-script contexts + enforces POOL_CAP once per-script is the default.
+    sweepIdleContexts();
   }, IDLE_HEARTBEAT_INTERVAL_MS);
 
   const cleanup = (): void => {

@@ -21,7 +21,10 @@ import {
   disposeContextForScript,
   evictIdleContext,
   isContextPinned,
+  sweepIdleContexts,
   _setContextModelForTests,
+  _setPoolCapForTests,
+  _reserveContextForTests,
   _vmHandlerIdsForTests,
   _scriptContextCountForTests,
   _lastUsedAtForTests,
@@ -146,5 +149,113 @@ describe('#11 P7-3.0 pool groundwork: evictIdleContext primitive', () => {
     // 'shared' is the default after beforeEach; a run builds the ONE shared context.
     await runUserScriptInQuickJS(runOpts('ev-shared', `return null;`));
     expect(evictIdleContext('ev-shared')).toBe(false);
+  });
+});
+
+describe('#11 P7-3.1 bounded pool: cap enforcement (enforcePoolCap on insert)', () => {
+  test('over-cap insert evicts the LRU context and keeps the just-inserted one', async () => {
+    _setContextModelForTests('per-script');
+    _setPoolCapForTests(1);
+    await runUserScriptInQuickJS(runOpts('cap-A', `return null;`));
+    await sleep(5);
+    await runUserScriptInQuickJS(runOpts('cap-B', `return null;`)); // insert B → over cap → evict LRU (A)
+    expect(_scriptContextCountForTests()).toBe(1);
+    expect(_lastUsedAtForTests('cap-A')).toBeNull();  // A (older) evicted
+    expect(_lastUsedAtForTests('cap-B')).not.toBeNull(); // B (just-inserted, freshest) survives — critic gap #4
+    disposeContextForScript('cap-B', true);
+  });
+
+  test('cap NEVER evicts a pinned context — it evicts the oldest EVICTABLE instead', async () => {
+    _setContextModelForTests('per-script');
+    _setPoolCapForTests(2);
+    // A is the OLDEST but PINNED (live handler); B is the oldest EVICTABLE; C forces the over-cap evict.
+    await runUserScriptInQuickJS(runOpts('cap-pA', `api.commands.onInvoked(() => 'x'); return null;`));
+    await sleep(5);
+    await runUserScriptInQuickJS(runOpts('cap-pB', `return null;`));
+    await sleep(5);
+    await runUserScriptInQuickJS(runOpts('cap-pC', `return null;`)); // size 3 > 2 → evict oldest evictable
+    expect(_scriptContextCountForTests()).toBe(2);
+    expect(isContextPinned('cap-pA')).toBe(true);
+    expect(_lastUsedAtForTests('cap-pA')).not.toBeNull(); // pinned A survives despite being oldest
+    expect(_lastUsedAtForTests('cap-pB')).toBeNull();     // oldest EVICTABLE (B) evicted
+    expect(_lastUsedAtForTests('cap-pC')).not.toBeNull();
+    disposeScriptVmHandlers('cap-pA');
+    disposeContextForScript('cap-pA', true);
+    disposeContextForScript('cap-pC', true);
+  });
+});
+
+describe('#11 P7-3.1 bounded pool: idle sweep (sweepIdleContexts)', () => {
+  test('reaps an idle unpinned context, keeps a fresh one and a pinned one', async () => {
+    _setContextModelForTests('per-script');
+    await runUserScriptInQuickJS(runOpts('sw-idle', `return null;`)); // will be the IDLE one
+    await sleep(5);
+    await runUserScriptInQuickJS(runOpts('sw-pin', `api.commands.onInvoked(() => 'x'); return null;`)); // pinned
+    await sleep(5);
+    await runUserScriptInQuickJS(runOpts('sw-fresh', `return null;`)); // freshest
+    const idleAt = _lastUsedAtForTests('sw-idle')!;
+    const freshAt = _lastUsedAtForTests('sw-fresh')!;
+    // Choose (now, idleMs) so ONLY sw-idle exceeds idleMs: now=freshAt makes sw-fresh's age 0.
+    const reaped = sweepIdleContexts(freshAt, freshAt - idleAt - 1);
+    expect(reaped).toBe(1);
+    expect(_lastUsedAtForTests('sw-idle')).toBeNull();      // idle + unpinned → reaped
+    expect(_lastUsedAtForTests('sw-fresh')).not.toBeNull(); // fresh → kept
+    expect(_lastUsedAtForTests('sw-pin')).not.toBeNull();   // pinned → never reaped even if idle
+    disposeScriptVmHandlers('sw-pin');
+    disposeContextForScript('sw-pin', true);
+    disposeContextForScript('sw-fresh', true);
+  });
+
+  test('is a no-op under contextModel="shared"', async () => {
+    await runUserScriptInQuickJS(runOpts('sw-shared', `return null;`));
+    expect(sweepIdleContexts(Date.now(), 0)).toBe(0);
+  });
+
+  test('cap backstop: an over-cap pool tolerated while all-pinned is reclaimed once a context unpins', async () => {
+    _setContextModelForTests('per-script');
+    _setPoolCapForTests(1);
+    // Two PINNED contexts: the insert of B can't evict (both pinned) → over-cap tolerated (accept + retain).
+    await runUserScriptInQuickJS(runOpts('bs-A', `api.commands.onInvoked(() => 'x'); return null;`));
+    await sleep(5);
+    await runUserScriptInQuickJS(runOpts('bs-B', `api.commands.onInvoked(() => 'x'); return null;`));
+    expect(_scriptContextCountForTests()).toBe(2); // over cap=1, both pinned → retained
+    // Unpin A; a large idleMs disables idle-reaping so ONLY the cap backstop acts.
+    disposeScriptVmHandlers('bs-A');
+    const reaped = sweepIdleContexts(Date.now(), 10 * 60_000);
+    expect(reaped).toBe(1);
+    expect(_lastUsedAtForTests('bs-A')).toBeNull();     // now-evictable + oldest → reclaimed by the backstop
+    expect(_lastUsedAtForTests('bs-B')).not.toBeNull(); // still pinned → retained (still over... no: size now 1)
+    expect(_scriptContextCountForTests()).toBe(1);
+    disposeScriptVmHandlers('bs-B');
+    disposeContextForScript('bs-B', true);
+  });
+});
+
+describe('#11 P7-3.1 audit: acquisition-window reservation (microtask-race UAF guard)', () => {
+  test('a RESERVED context is evicted by neither evictIdleContext nor the sweep, even when idle+unpinned', async () => {
+    _setContextModelForTests('per-script');
+    await runUserScriptInQuickJS(runOpts('resv-A', `return null;`));
+    expect(isContextPinned('resv-A')).toBe(false); // unpinned — normally evictable
+    const release = _reserveContextForTests('resv-A'); // simulate a body-run mid-acquisition (activeRun not yet set)
+    expect(evictIdleContext('resv-A')).toBe(false);                  // reserved → refused
+    expect(sweepIdleContexts(Date.now() + 10 * 60_000, 0)).toBe(0);  // idle but reserved → not reaped
+    expect(_scriptContextCountForTests()).toBe(1);
+    release();
+    expect(evictIdleContext('resv-A')).toBe(true); // released → evictable again
+  });
+
+  test('cap-check will NOT evict a reserved sole-evictable context (the audit UAF scenario)', async () => {
+    _setContextModelForTests('per-script');
+    _setPoolCapForTests(1);
+    await runUserScriptInQuickJS(runOpts('resv-sole', `return null;`)); // unpinned
+    const release = _reserveContextForTests('resv-sole');              // it is mid-acquisition for its own run
+    // Insert another context → over cap → enforcePoolCap. resv-sole is the ONLY non-exempt context, but it
+    // is RESERVED → not evictable; without the reservation it would be disposed under its parked run (UAF).
+    await runUserScriptInQuickJS(runOpts('resv-other', `return null;`));
+    expect(_lastUsedAtForTests('resv-sole')).not.toBeNull(); // survived (reserved), not UAF-evicted
+    expect(_scriptContextCountForTests()).toBe(2);           // over-cap tolerated instead of a bad evict
+    release();
+    disposeContextForScript('resv-sole', true);
+    disposeContextForScript('resv-other', true);
   });
 });
