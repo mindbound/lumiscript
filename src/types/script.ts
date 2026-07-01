@@ -6459,6 +6459,13 @@ export interface ToolInvocationContext {
    * option.
    */
   contextMessages?: LLMMessage[];
+  /**
+   * @internal #11 P7-F4 — the invoking script's id, stamped by `api.tools.invoke` so the quickjs fire
+   * path can fast-reject a self-reentrant invoke. The host tool wrapper EXTRACTS and STRIPS this before
+   * the child handler's ctx is built, so a user tool handler never receives it (ctx stays `undefined`
+   * for `api.tools.invoke`, as documented). Not part of the public contract — do not read it.
+   */
+  __lsCallerScriptId?: string;
 }
 
 /**

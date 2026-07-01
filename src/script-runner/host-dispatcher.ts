@@ -898,6 +898,9 @@ async function sendRunHandlerRequest(
   kind:      RunHandlerRequest['kind'],
   args:      unknown[],
   timeoutMs: number,
+  // #11 P7-F4 — the caller run's scriptId, populated ONLY on the api.tools.invoke path so the quickjs
+  // fire can fast-reject a self-reentrant invoke. Undefined for host/FE-initiated fires.
+  callerScriptId?: string,
 ): Promise<HandlerResult> {
   // Phase C1 — route to the worker that hosts this script. C1 always
   // resolves to DEFAULT_WORKER_KEY; C2 distributes per-script.
@@ -960,6 +963,8 @@ async function sendRunHandlerRequest(
     // long-lived registered handlers, not the script-load snapshot.
     chatIdAtFire:      getActiveChatId(),
     characterIdAtFire: getActiveCharacterId(),
+    // #11 P7-F4 — only present on the api.tools.invoke self-fire path; JSON.stringify drops undefined.
+    ...(callerScriptId !== undefined ? { callerScriptId } : {}),
   };
 
   return new Promise<HandlerResult>((resolve, reject) => {
@@ -2581,14 +2586,26 @@ function handleRegisterHandler(msg: RegisterHandler): void {
             ? Math.max(1_000, deadlineHint - Date.now())
             : 60_000;
 
+        // #11 P7-F4 (Tier 0) — api.tools.invoke stamps the caller's scriptId via the internal
+        // __lsCallerScriptId marker on ctx. Extract it for the self-reentrant-invoke fast-reject, and
+        // STRIP it so the child handler's ctx is exactly what it would have been (undefined for a plain
+        // api.tools.invoke; the real Council ctx otherwise). callerScriptId travels on the fire IPC.
+        let callerScriptId: string | undefined;
+        let forwardCtx: ToolInvocationContext | undefined = ctxArg;
+        if (ctxArg?.__lsCallerScriptId !== undefined) {
+          callerScriptId = ctxArg.__lsCallerScriptId;
+          const { __lsCallerScriptId: _drop, ...rest } = ctxArg;
+          forwardCtx = Object.keys(rest).length > 0 ? rest : undefined;
+        }
         return sendRunHandlerRequest(
           msg.scriptId,
           msg.handlerId,
           'tool',
           // Pass undefined explicitly when no ctx — JSON.stringify drops
           // it from the wire, child-side `handlerArgs[1]` is undefined.
-          ctxArg !== undefined ? [args, ctxArg] : [args],
+          forwardCtx !== undefined ? [args, forwardCtx] : [args],
           handlerTimeoutMs,
+          callerScriptId,
         ).then((result) => {
           if (!result.ok) {
             throw new Error(result.error?.message ?? 'tool handler failed');

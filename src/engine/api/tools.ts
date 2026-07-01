@@ -110,7 +110,12 @@ export function buildToolsAPI(
       // Script-to-script invocation — no Council context applies. We emit
       // `councilMember: undefined` for payload-shape parity with the
       // dispatchToolInvocation emit, so listeners get a consistent key set.
-      return Promise.resolve(entry.handler(args)).then(result => {
+      // #11 P7-F4 (Tier 0) — stamp the CALLER's scriptId (this run's script) via an internal ctx marker
+      // so the quickjs fire path can fast-reject a self-reentrant invoke (a script awaiting its OWN tool
+      // would deadlock on its runChain). The host tool wrapper strips the marker before the child handler
+      // sees ctx (stays undefined for api.tools.invoke). No effect under asyncfn (its fire never checks it).
+      const invokeCtx: ToolInvocationContext = { __lsCallerScriptId: script.id };
+      return Promise.resolve(entry.handler(args, invokeCtx)).then(result => {
         busEmit('ls:tool:invoked', {
           name,
           args,

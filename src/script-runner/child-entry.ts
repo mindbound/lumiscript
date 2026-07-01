@@ -932,6 +932,9 @@ async function fireVmHandler(
           // granted only when allowDangerous — same gate as the body-run (child-entry runOne).
           allowDangerous:            req.allowDangerous,
           hostFetch:                 req.allowDangerous ? _hostFetch : undefined,
+          // #11 P7-F4 (Tier 0) — the invoking script (api.tools.invoke path only) so the fire can
+          // fast-reject a self-reentrant invoke instead of deadlocking on the caller's runChain.
+          callerScriptId:            req.callerScriptId,
           dispatchRegisterHandler:        dispatchers.dispatchRegisterHandler,
           dispatchUnregisterHandler:      dispatchers.dispatchUnregisterHandler,
           dispatchUnregisterHandlerNamed: dispatchers.dispatchUnregisterHandlerNamed,

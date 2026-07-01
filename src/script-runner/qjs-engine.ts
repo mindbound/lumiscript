@@ -2130,6 +2130,10 @@ export interface QuickJSFireOptions {
   script?:        { id: string; name: string; type: string };
   allowDangerous?: boolean;
   hostFetch?:      (url: string, init?: RequestInit) => Promise<Response>;
+  /** #11 P7-F4 (Tier 0) — the scriptId of the run that triggered this fire via api.tools.invoke (only
+   *  that path sets it). When it equals the owner AND the owner's own run holds the runChain, the fire
+   *  is a SELF-reentrant invoke that would deadlock; reject it fast instead. */
+  callerScriptId?: string;
   dispatchOnHandle?: (targetHandle: HandleRef, method: string, args: unknown[]) => Promise<unknown>;
   dispatchRegisterHandler?: (kind: string, handlerId: string, meta: unknown) => void;
   dispatchUnregisterHandler?: (kind: string, handlerId: string) => void;
@@ -2160,6 +2164,34 @@ export async function fireHandlerInQuickJS(opts: QuickJSFireOptions): Promise<un
     vmHandlerHandles.get(opts.scriptId)?.get(opts.handlerId) ?? vmBroadcastHandles.get(opts.scriptId)?.get(opts.handlerId);
   if (!lookup()?.alive) {
     throw new Error(`LumiScript QuickJS: no handler ${opts.handlerId} registered for script ${opts.scriptId}.`);
+  }
+
+  // #11 P7-F4 (Tier 0) — fast-reject a SELF-reentrant api.tools.invoke. If the OWNER's own run holds the
+  // runChain (sc.activeRun.scriptId === owner) AND the invoke came from that same owner
+  // (callerScriptId === owner), `await prior` below would block forever: the caller run is parked
+  // awaiting this very fire's result, so it never releases the lock the fire needs → deadlock → run
+  // timeout → proc.fail → whole-child respawn (co-tenant runs killed). Reject BEFORE claiming the lock;
+  // fireVmHandler serializes this throw into HandlerResult.error → the tool wrapper surfaces it as a
+  // rejected promise on the caller's `await api.tools.invoke(...)` — catchable, no deadlock, no respawn.
+  // A benign cross-script invoke (B invokes A's tool) fails callerScriptId===owner and serializes as
+  // before; the shared-context case is guarded by sc.activeRun.scriptId===owner (a DIFFERENT script
+  // holding the shared lock is not this owner's self-invoke). Full parity (returning the value) awaits
+  // per-run isolation (P7-H1); this is the strictly-better failure mode until then. asyncfn never
+  // reaches this path (its fires call the handler directly, no runChain).
+  if (
+    opts.callerScriptId !== undefined &&
+    opts.callerScriptId === opts.scriptId &&
+    sc.activeRun !== undefined &&
+    sc.activeRun.scriptId === opts.scriptId
+  ) {
+    const err = new Error(
+      `api.tools.invoke: a script cannot invoke its OWN tool while one of its runs is still in ` +
+      `progress — the tool handler is serialized behind the current run, which is itself awaiting this ` +
+      `invoke (a self-reentrant deadlock). Invoke the tool from a separate run/event, or call the ` +
+      `underlying logic directly instead of through api.tools.invoke.`,
+    );
+    err.name = 'ReentrantToolInvokeError';
+    throw err;
   }
 
   // Serialize against body-runs + other fires on the shared context.

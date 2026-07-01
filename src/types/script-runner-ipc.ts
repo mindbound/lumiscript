@@ -338,6 +338,16 @@ export interface RunHandlerRequest {
    */
   chatIdAtFire:      string | null;
   characterIdAtFire: string | null;
+  /**
+   * #11 P7-F4 (Tier 0) — the scriptId of the run that CAUSED this fire, when the fire is a
+   * script-initiated `api.tools.invoke`. Populated only on that path (undefined for host/FE-initiated
+   * fires — Council tool calls, events, broadcasts, DOM). The quickjs fire path uses it to fast-reject
+   * a SELF-reentrant invoke (a script awaiting its OWN tool): that fire would block on the runChain the
+   * caller run still holds → deadlock → timeout → whole-child respawn. When `callerScriptId === scriptId`
+   * AND the owner's own run holds the lock, the fire rejects with a catchable error instead. asyncfn is
+   * unaffected (its fires call the handler directly, no runChain).
+   */
+  callerScriptId?:   string;
 }
 
 /**
