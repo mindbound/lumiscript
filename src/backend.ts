@@ -144,6 +144,7 @@ import {
   setScriptResolver,
   setSendToFrontend,
   setWorkerCountReader,
+  setEngineModeReader,
   setEvictionConfigReader,
   startEvictionSweep,
   rebalanceWorkerPool,
@@ -422,6 +423,12 @@ setSendToFrontend((msg) => send(msg as import('./types/messages.js').BackendToFr
 // 1 keeps single-worker behaviour if `settingsStore.get()` returns an
 // older settings shape (pre-Phase-C1 persisted JSON without workerCount).
 setWorkerCountReader(() => settingsStore.get().workerCount ?? 1);
+
+// #11 engine-toggle-wiring — wire the engineMode reader so the dispatcher pins the
+// live-selected engine onto each RunScriptRequest. Default 'asyncfn' if an older
+// persisted settings shape has no engineMode. update_settings fire-reloads scripts
+// on an engineMode change so handlers re-register under the new engine (below).
+setEngineModeReader(() => settingsStore.get().engineMode ?? 'asyncfn');
 
 // Phase E (v1.0 runtime-isolation) — wire the eviction config reader so
 // the dispatcher's sweep reads live thresholds. Fallback defaults match
@@ -865,6 +872,36 @@ const hotReloadTimers = new Map<string, ReturnType<typeof setTimeout>>();
  */
 function shortCodeHash(code: string): string {
   return createHash('sha256').update(code).digest('hex').slice(0, 16);
+}
+
+/**
+ * #11 engine-toggle-wiring — on an `engineMode` change, fire-reload every ENABLED
+ * trigger script so its handlers re-register under the NEW engine. Required because
+ * fires route by REGISTRY PRESENCE (`hasVmHandler` [quickjs] vs `handlerClosures`
+ * [asyncfn]), NOT by any wire engineMode: a bare settings flip would leave old
+ * handlers firing on the previous engine while new runs register into the new one —
+ * a correct-but-inconsistent split-brain that is NOT self-healing. `fireReload`
+ * (reason 'manual') wipes both engines' per-script state then re-runs the body under
+ * the new engine; it QUEUES + polls if a run is in-flight (drain-safe), and the
+ * worker subprocess survives (spawn is idempotent). Fire-and-forget per script.
+ */
+function reloadAllEnabledScriptsForEngineChange(): void {
+  for (const script of scriptStorage.getEnabledTriggerScripts()) {
+    const codeHash = shortCodeHash(script.code); // code is unchanged — only the engine
+    const payload: LsReloadPayload = {
+      reason:           'manual',
+      previousCodeHash: codeHash,
+      currentCodeHash:  codeHash,
+      previousLength:   script.code.length,
+      currentLength:    script.code.length,
+    };
+    void triggerRegistry.fireReload(script, payload).catch((err) => {
+      spindle.log.error(
+        `[LumiScript] engine-change reload failed for "${script.name}": ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  }
 }
 
 /**
@@ -3773,6 +3810,10 @@ spindle.onFrontendMessage(async (raw, userId) => {
 
       // ── Settings ─────────────────────────────────────────────────────────
       case 'update_settings': {
+        // #11 — capture engineMode BEFORE the merge so we can react only to a REAL
+        // change (the workerCount branch below uses presence-of-key because rebalance
+        // is idempotent; an engineMode reload is disruptive, so gate on prev !== next).
+        const prevEngineMode = settingsStore.get().engineMode ?? 'asyncfn';
         await settingsStore.update(msg.patch);
         pushSettings();
         void syncTriggers(); // handles the master enabled/disabled toggle
@@ -3785,6 +3826,16 @@ spindle.onFrontendMessage(async (raw, userId) => {
         // self-contained and any failure surfaces via the spindle log.
         if (msg.patch && Object.prototype.hasOwnProperty.call(msg.patch, 'workerCount')) {
           void rebalanceWorkerPool();
+        }
+        // #11 engine-toggle-wiring — on a REAL engineMode change, fire-reload enabled
+        // scripts so handlers re-register under the new engine (avoids split-brain).
+        const nextEngineMode = settingsStore.get().engineMode ?? 'asyncfn';
+        if (
+          msg.patch &&
+          Object.prototype.hasOwnProperty.call(msg.patch, 'engineMode') &&
+          nextEngineMode !== prevEngineMode
+        ) {
+          reloadAllEnabledScriptsForEngineChange();
         }
         break;
       }

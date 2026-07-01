@@ -457,6 +457,20 @@ export function setWorkerCountReader(fn: WorkerCountReader): void {
   workerCountReader = fn;
 }
 
+// #11 — `engineMode` setting reader. Mirrors the workerCount reader: wired by
+// `backend.ts` cold-start init (`setEngineModeReader`) to pull the live value from
+// the settings store, and READ per-dispatch when building the RunScriptRequest so a
+// settings change takes effect on the next run (no respawn). Default 'asyncfn' keeps
+// the shipped engine as the safe fallback if backend forgets to wire.
+type EngineModeReader = () => 'asyncfn' | 'quickjs';
+let engineModeReader: EngineModeReader = () => 'asyncfn';
+
+/** Wire the engineMode reader. Called once during `backend.ts` cold-start init
+ *  alongside `setWorkerCountReader`. Idempotent: re-calling replaces the reader. */
+export function setEngineModeReader(fn: EngineModeReader): void {
+  engineModeReader = fn;
+}
+
 /**
  * Returns the workerKey hosting `scriptId`. Assigns lazily on first lookup
  * via least-loaded distribution across the configured pool. Sticky:
@@ -6437,9 +6451,12 @@ export async function dispatchRunScript(
     timeoutMs:          request.timeoutMs,
     grantedPermissions: Array.from(request.grantedPermissions),
     allowDangerous:     script.allowDangerous,
-    // #11 — pinned to the AsyncFunction engine until the QuickJS path is wired
-    // (P1 increment 2). Becomes LumiScriptSettings-driven at rollout (Gate 1+).
-    engineMode:         'asyncfn',
+    // #11 — LumiScriptSettings-driven per-dispatch (engine-toggle-wiring). Reads the
+    // live `engineMode` setting; a settings change takes effect on the NEXT run (the
+    // engine is chosen per-run, both executors are in the child bundle). Default
+    // 'asyncfn' via the reader's fallback. The child may still DEGRADE quickjs→asyncfn
+    // if the WASM module won't instantiate (cold-start-fallback, child-entry runOne).
+    engineMode:         engineModeReader(),
     chatIdAtStart:      getActiveChatId(),
     characterIdAtStart: getActiveCharacterId(),
     // Phase 9d.X — sync-array-read snapshots at dispatch time. The proxy
@@ -8025,6 +8042,9 @@ export function __resetForTests(): void {
   // this, a test that sets `setWorkerCountReader(() => N)` would leak the
   // configured N into other test files that just call `__resetForTests`.
   workerCountReader = () => 1;
+  // #11 — restore the engineMode reader default so a test's setEngineModeReader
+  // doesn't leak the selected engine into another test file.
+  engineModeReader = () => 'asyncfn';
   // Phase E — eviction state. Clear last-activity timestamps + restore
   // the eviction-config reader's safe default; stop any in-flight sweep
   // timer so tests don't see surprise eviction during their own setup.

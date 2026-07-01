@@ -42,6 +42,22 @@ Every on-disk surface loads through a **permissive path that tolerates both unkn
 - **`api.db` on-disk path templates + the collection-name regex are frozen invariants** — `db/{scope}/…/{name}.json` shapes are hard-coded in both the writer and the admin reader; changing them post-lock would orphan existing collections.
 - **The parent→child IPC envelope is not Zod-guarded** (only child→parent is). Accepted: both sides ship in one bundle and the parent is the trusted host; the threat model is a hostile *child*, which is the validated direction.
 
+## Engine divergence — QuickJS isolate (opt-in)
+
+Scripts run under the **AsyncFunction** engine by default. A second, opt-in **QuickJS-WASM isolate** engine is behaviorally faithful to it across the observable surface (proven by the dual-engine parity harness — register-IPC and handler-fire behavior are identical), with **one permanent divergence** worth knowing:
+
+- **`api.tools.invoke('X')` where the *calling* script itself registered tool `X`** returns the handler's value under AsyncFunction, but throws a catchable `ReentrantToolInvokeError` under QuickJS. Under QuickJS a script's runs and handler-fires serialize on a single per-script lock, so a script awaiting its **own** tool mid-run would deadlock — the engine rejects it cleanly instead. This is architectural (there is no in-engine fix on the shared-module design), but narrow: it is the **only** re-entrancy divergence, and the common cases are unaffected — registering, listing, the **LLM/Council invoking your tool**, and **another script invoking your tool** are all identical across engines. It's also strictly safer than the alternative it replaced (a hang that would take down the whole child process).
+
+  **Portable pattern** — extract the logic into a function and call it directly instead of self-invoking (this also skips an unnecessary dispatch round-trip, so it's better code on either engine):
+
+  ```js
+  // Instead of a script invoking its OWN tool (throws under QuickJS):
+  //   const r = await api.tools.invoke('summarize', { text });
+  const summarize = async (args) => await api.llm.generate(/* … */);
+  api.tools.register('summarize', toolDef, summarize); // thin wrapper still exposed to the LLM
+  const r = await summarize({ text });                 // call the function directly — works on both engines
+  ```
+
 ## Known drift risk
 
 `src/types/editor-lib.ts` is a **hand-maintained string copy** of the `api.*` surface for Monaco — not generated. It is spot-checked in sync today, but the manual model means the editor's type hints can silently diverge from the frozen contract. Keep it updated alongside `script.ts`; a generated artifact is a post-1.0 candidate.

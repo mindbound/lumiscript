@@ -127,6 +127,18 @@ export interface LumiScriptSettings {
    */
   scriptTimeoutMs: number;
   /**
+   * Which sandbox engine runs script bodies + handler fires.
+   *   - 'asyncfn'  (default): the shipped `new AsyncFunction` engine.
+   *   - 'quickjs'  (experimental): the QuickJS-WASM isolate — stronger sandbox
+   *      isolation. Behaviorally faithful to asyncfn (dual-engine parity harness)
+   *      bar one documented divergence (self-`api.tools.invoke` — see
+   *      docs/api-stability.md). Switching engines fire-reloads active scripts so
+   *      their handlers re-register under the new engine (see `update_settings`).
+   * Read live per-dispatch (`engineModeReader` in host-dispatcher); persisted GLOBAL
+   * (not per-script). Default: 'asyncfn'.
+   */
+  engineMode: 'asyncfn' | 'quickjs';
+  /**
    * Number of concurrent script-runner worker subprocesses to spawn.
    * Larger values distribute scripts across more processes for better fault
    * isolation (one bad script no longer affects others) at the cost of
@@ -288,6 +300,9 @@ module.exports = {
 export const DEFAULT_SETTINGS: LumiScriptSettings = {
   enabled: true,
   scriptTimeoutMs: 60_000,
+  // #11 — the AsyncFunction engine is the default; the QuickJS isolate is opt-in.
+  // Flipping this default to 'quickjs' is the P8 "make it default" one-liner.
+  engineMode: 'asyncfn',
   // v1.0 — multi-worker default. Phases A–F shipped; Sections 1–8 of
   // the manual test pass came back green; the disable-mid-flight bug
   // cluster closed; tracker pair migrated to the broadcast pattern as
