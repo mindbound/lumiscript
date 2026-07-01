@@ -56,6 +56,10 @@ import {
   _resetUnhandledRejectionRateStateForTests,
   _setEngineModeForTests,
 } from '../../src/script-runner/child-entry.js';
+// #11 P7-2 — dispose the per-script QuickJS context pool + reset contextModel to 'shared' between
+// tests, so a per-script-context test can't leak a context (or a pinned contextModel) into the next
+// file (the CI-readdir flake class). Cheap under 'shared' (empty pool; the shared record is reused).
+import { _disposeContextForTests } from '../../src/script-runner/qjs-engine.js';
 
 // `dom-handler.ts` imports DOMPurify at module load — before any per-file DOM env
 // (`useDOM()`) registers a window — so its DOMPurify has no DOM and `.sanitize` is
@@ -107,6 +111,8 @@ beforeEach(() => {
   // #11 — clear the per-process engine-mode override so a parity test that
   // pins engineMode='quickjs' can't leak into the next file's runs.
   _setEngineModeForTests(undefined);
+  // #11 P7-2 — dispose any per-script quickjs contexts + reset contextModel to 'shared'.
+  _disposeContextForTests();
   // api.db collection cache (module-global) — clear so a cached collection from
   // one test can't leak into the next.
   _clearDbCache();

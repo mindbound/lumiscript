@@ -6540,7 +6540,13 @@ export async function dispatchRunScript(
  * Called from backend.ts's `update_script` (on disable) and
  * `delete_script` cases — the same teardown path that runs the canonical
  * `clearByScriptId` for tools / macros / interceptors / etc. This call
- * is the parallel cleanup for the child-process side of LumiScript.
+ * is the parallel cleanup for the child-process side of LumiScript. Also
+ * called from `wipeScriptStateForReload` with `reason='reload'`.
+ *
+ * `reason` (#11 P7-2) rides on the IPC to govern the quickjs per-script
+ * context lifecycle: the default 'disable' (also delete) disposes the
+ * context; 'reload' preserves it (sweeps stale handlers only). No effect
+ * under contextModel='shared'. See `ScriptUnregisterMessage.reason`.
  *
  * Performs in order:
  *   1. Sends `'script-unregister'` IPC to the child. Child's
@@ -6559,7 +6565,7 @@ export async function dispatchRunScript(
  * Idempotent on missing scriptId — safe to call multiple times or for a
  * script that never registered anything in the script runner.
  */
-export function unregisterScriptFromChild(scriptId: string): void {
+export function unregisterScriptFromChild(scriptId: string, reason: 'disable' | 'reload' = 'disable'): void {
   // Send IPC first so the child can process its own cleanup before any
   // late api-requests it might still have queued reach the parent and
   // hit our about-to-be-cleared lookup tables.
@@ -6575,6 +6581,9 @@ export function unregisterScriptFromChild(scriptId: string): void {
     const msg: ScriptUnregisterMessage = {
       type: 'script-unregister',
       scriptId,
+      // #11 P7-2 — 'reload' tells the child to keep the quickjs per-script context
+      // (sweep handlers only); 'disable'/'delete' disposes it. See ScriptUnregisterMessage.
+      reason,
     };
     try { handle.send(msg); }
     catch (err) {

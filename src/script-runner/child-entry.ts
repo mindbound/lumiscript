@@ -83,7 +83,7 @@ import {
   hasVmModal,
   notifyVmModalDismissed,
   dropVmModal,
-  disposeScriptVmHandlers,
+  disposeContextForScript,
   disposeScriptVmBroadcast,
 } from './qjs-engine.js';
 
@@ -1033,7 +1033,12 @@ function handleScriptUnregister(msg: ScriptUnregisterMessage): void {
   handlerClosures.delete(msg.scriptId);
   broadcastHandlers.delete(msg.scriptId);
   // #11 P5 — dispose this script's dup'd in-VM handler fn handles (quickjs engine).
-  disposeScriptVmHandlers(msg.scriptId);
+  // #11 P7-2 — under contextModel='per-script', ALSO dispose the script's whole
+  // QuickJSContext, UNLESS this is a reload (reason='reload' keeps the context so
+  // globalThis + module captures survive — see ScriptUnregisterMessage.reason). The
+  // default (disable / delete / omitted reason) disposes it, preventing an unbounded
+  // context leak across create/delete churn. No-op beyond the handle sweep under 'shared'.
+  disposeContextForScript(msg.scriptId, msg.reason !== 'reload');
   // audit C8-03 + C8-04 — prune the per-script rate-limit buckets so they don't
   // accumulate one entry per ever-seen scriptId across the child's lifetime.
   consoleRateState.delete(msg.scriptId);

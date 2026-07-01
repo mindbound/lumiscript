@@ -363,6 +363,21 @@ export interface HandlerResult {
 export interface ScriptUnregisterMessage {
   type:     'script-unregister';
   scriptId: string;
+  /**
+   * #11 P7-2 — why the script is being unregistered. Governs the quickjs
+   * engine's per-script context lifecycle (contextModel='per-script'):
+   *   - 'disable' / 'delete' (the default when omitted) is a full teardown —
+   *     the child disposes the script's whole QuickJSContext, so the pool
+   *     can't grow unbounded across create/delete churn.
+   *   - 'reload' is NOT a teardown (the script keeps running with new code —
+   *     see `wipeScriptStateForReload`: "reload is not a disable"). The child
+   *     sweeps the stale handler dups but PRESERVES the context, matching
+   *     asyncfn's reload (arbitrary `globalThis` + module captures survive)
+   *     and skipping a ~95ms context rebuild.
+   * Ignored under contextModel='shared' (the single context is reused across
+   * every script and is never disposed per-script).
+   */
+  reason?:  'disable' | 'reload';
 }
 
 /**

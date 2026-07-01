@@ -1180,7 +1180,12 @@ async function wipeScriptStateForReload(scriptId: string): Promise<void> {
   // module-init captures + module-level imports for any libraries
   // `script.require()`'d during the previous run — those re-execute
   // anyway if the body re-loads them).
-  unregisterScriptFromChild(scriptId);
+  //
+  // #11 P7-2 — reason='reload' so the quickjs engine PRESERVES this script's
+  // per-script context (arbitrary `globalThis` + module captures survive the
+  // reload, matching asyncfn, and it skips a ~95ms rebuild). Disable/delete
+  // (the default) disposes the context. "reload is not a disable."
+  unregisterScriptFromChild(scriptId, 'reload');
 }
 
 /**

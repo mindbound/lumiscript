@@ -1046,39 +1046,60 @@ interface VmFactoryRecord { scriptId: string; cell: QuickJSHandle }
 const vmWidgetOwner = new Map<string, VmFactoryRecord>(); // widgetId -> {scriptId, positionCache handle}
 const vmModalOwner = new Map<string, VmFactoryRecord>();  // modalId  -> {scriptId, dismissedRef handle}
 const vmModalListeners = new Map<string, Set<string>>(); // modalId -> onDismiss handlerIds
-/** Cached context build — promise-based so concurrent first calls share ONE
- *  record (a plain `if (context)` check races two builds). Cleared on failure
- *  so a transient build error doesn't poison every later run.
- *
- *  #11 P7-0: the run serializer (runChain) and the per-run state (activeRun /
- *  currentDeadline) now live ON the ScriptContext record, not in module-level
- *  `let`s. For now a single shared record backs every script (contextModel='shared');
- *  per-script records land in P7-2. The api/console scaffolding, globalThis.data, and
- *  the record's activeRun/currentDeadline all live on ONE process-global context, so
- *  two runs cannot interleave without corrupting each other — each run chains behind the
- *  previous via the record's runChain, ENFORCING the (previously only-asserted) sequential
- *  premise. True concurrency would need a context-per-run pool — still tracked for P7. */
-let sharedScPromise: Promise<ScriptContext> | undefined;
+/** #11 P7-2 — the context model. 'shared' (default) = ONE process-global context backs every script
+ *  (the P7-0/P7-1 behavior — runs serialize on one runChain). 'per-script' = each scriptId gets its
+ *  OWN QuickJSContext (its own globalThis + zod/Handlebars/api bundle + runChain/activeRun/
+ *  currentDeadline), so cross-script poisoning (z.object=evil, globalThis bleed) + cross-script run
+ *  serialization are eliminated. Set via _setContextModelForTests; prod stays 'shared' until the
+ *  rollout flip. The WASM module (modulePromise) stays process-global — only newContext()+the
+ *  ~95ms bootstrap chain is paid per script, not WASM compile. */
+let contextModel: 'shared' | 'per-script' = 'shared';
 
-/** Race-safe, retry-on-failure accessor for the script's context record.
- *  #11 P7-0: single shared record (contextModel='shared'); per-script comes in P7-2. */
-function getContextForScript(_scriptId: string): Promise<ScriptContext> {
-  if (!sharedScPromise) {
-    sharedScPromise = createContext();
-    // On a failed build, clear the cache so a later run retries instead of
-    // getting the same rejected promise forever.
-    sharedScPromise.catch(() => { sharedScPromise = undefined; });
+/** Under 'shared': one cached record (sharedScPromise → sharedSc, the sync-resolved handle). Under
+ *  'per-script': a per-scriptId pool — the *Promises map dedups concurrent first-builds; scriptContexts
+ *  holds the RESOLVED records for the sync resolver. Cleared on build failure so a transient error
+ *  doesn't poison later runs. */
+let sharedScPromise: Promise<ScriptContext> | undefined;
+const scriptContextPromises = new Map<string, Promise<ScriptContext>>();
+const scriptContexts = new Map<string, ScriptContext>();
+
+/** Race-safe, retry-on-failure accessor for a script's context record (#11 P7-0/P7-2). Under 'shared'
+ *  every scriptId shares one record; under 'per-script' each scriptId lazily builds + caches its own.
+ *  The resolved record is stored (sharedSc / scriptContexts) so the sync resolveScriptContext can read it. */
+function getContextForScript(scriptId: string): Promise<ScriptContext> {
+  if (contextModel === 'shared') {
+    if (!sharedScPromise) {
+      sharedScPromise = createContext().then((sc) => { sharedSc = sc; return sc; });
+      sharedScPromise.catch(() => { sharedScPromise = undefined; sharedSc = undefined; });
+    }
+    return sharedScPromise;
   }
-  return sharedScPromise;
+  let p = scriptContextPromises.get(scriptId);
+  if (!p) {
+    // #11 P7-2 — identity-guard the publish. A teardown (disposeContextForScript) or a rebuild
+    // during this in-flight build deletes/replaces the promise entry; if we're no longer the CURRENT
+    // build when we resolve, DON'T publish a torn-down/superseded context into scriptContexts (a
+    // use-after-free / resurrection hazard) — dispose the orphan instead.
+    const build: Promise<ScriptContext> = createContext().then((sc) => {
+      if (scriptContextPromises.get(scriptId) === build) scriptContexts.set(scriptId, sc);
+      else { try { sc.ctx.dispose(); } catch { /* orphaned by a concurrent teardown/rebuild */ } }
+      return sc;
+    });
+    build.catch(() => {
+      if (scriptContextPromises.get(scriptId) === build) { scriptContextPromises.delete(scriptId); scriptContexts.delete(scriptId); }
+    });
+    p = build;
+    scriptContextPromises.set(scriptId, p);
+  }
+  return p;
 }
 
-/** #11 P7-1 — SYNCHRONOUS resolver of a script's already-built context record, for the
- *  between-runs callers that can't await (the notice bridges + leak oracle). Under
- *  contextModel='shared' the single shared record backs every scriptId; P7-2 returns the
- *  per-script pool entry (scriptContexts.get(scriptId)). Returns undefined if no context
- *  has been built yet (the notice/oracle then no-ops). */
-function resolveScriptContext(_scriptId: string): ScriptContext | undefined {
-  return sharedSc;
+/** #11 P7-1/P7-2 — SYNCHRONOUS resolver of a script's already-built context record, for the
+ *  between-runs callers that can't await (the notice bridges + leak oracle). 'shared' → the single
+ *  shared record; 'per-script' → the pool entry. undefined if that context hasn't been built yet
+ *  (the notice/oracle then no-ops). */
+function resolveScriptContext(scriptId: string): ScriptContext | undefined {
+  return contextModel === 'shared' ? sharedSc : scriptContexts.get(scriptId);
 }
 
 /** Create the module (once per process) + the reusable context (once per child,
@@ -1545,7 +1566,8 @@ async function createContext(): Promise<ScriptContext> {
 
   // Keep the module alias = the shared record's ctx (the untouched notice bridges /
   // dispose / leak oracle read it directly). Return the record (#11 P7-0).
-  sharedSc = sc; // #11 P7-1 — the sync-resolved shared record (contextModel='shared')
+  // #11 P7-2 — getContextForScript stores the resolved record (sharedSc / scriptContexts) so this
+  // stays model-agnostic; createContext just builds + returns a fresh record.
   return sc;
   } catch (err) {
     // L3 — never leak the half-built native context on a setup failure.
@@ -1771,6 +1793,34 @@ export function disposeScriptVmHandlers(scriptId: string): number {
   }
   for (const [mid, rec] of vmModalOwner) {
     if (rec.scriptId === scriptId) { try { if (rec.cell.alive) rec.cell.dispose(); } catch { /* teardown */ } vmModalOwner.delete(mid); vmModalListeners.delete(mid); }
+  }
+  return n;
+}
+
+/** #11 P7-2 — production teardown of a script from the quickjs engine (disable / delete / reload).
+ *  ALWAYS sweeps the script's dup'd VM handles via disposeScriptVmHandlers. The sweep-before-dispose
+ *  ORDER is LOAD-BEARING: the release-sync WASM build's ctx.dispose() ABORTS the runtime (JS_FreeRuntime
+ *  asserts list_empty(&rt->gc_obj_list)) if ANY handle owned by the context is still alive — so every
+ *  new per-context handle source MUST be registered in disposeScriptVmHandlers or a future dispose here
+ *  will abort. `disposeContext` gates the context teardown itself:
+ *    - true  (disable / delete): under contextModel='per-script', dispose the script's QuickJSContext
+ *      and drop its pool entries. WITHOUT this the pool grows unbounded across create/delete churn
+ *      (each scriptId is a fresh UUID → a fresh ~tens-of-MB context orphaned forever) — the P7-2 audit
+ *      must-fix (handle-lifecycle-dispose#0), gating the eventual contextModel default-flip.
+ *    - false (reload): keep the context — asyncfn parity (arbitrary `globalThis` + module captures
+ *      survive a reload; "reload is not a disable") and it skips a ~95ms rebuild. Only the stale
+ *      handler dups are swept so the re-run re-registers cleanly.
+ *  Under 'shared' the single record is reused across every script, so the context is NEVER disposed
+ *  here regardless of `disposeContext` (only the handle sweep runs) — identical to the prior behavior. */
+export function disposeContextForScript(scriptId: string, disposeContext: boolean): number {
+  const n = disposeScriptVmHandlers(scriptId);
+  if (disposeContext && contextModel === 'per-script') {
+    const sc = scriptContexts.get(scriptId);
+    scriptContexts.delete(scriptId);
+    // Drop the in-flight build too: getContextForScript's identity-guard makes a still-resolving
+    // build dispose its own orphan instead of publishing into the now-cleared pool.
+    scriptContextPromises.delete(scriptId);
+    if (sc) { try { if (sc.ctx.alive) sc.ctx.dispose(); } catch { /* teardown */ } }
   }
   return n;
 }
@@ -2039,4 +2089,44 @@ export function _vmObjectCountForTests(scriptId?: string): number | null {
   } finally {
     usage.dispose();
   }
+}
+
+/** #11 P7-2 test seam — force the context model per-process (default 'shared'). Reset via
+ *  _disposeContextForTests in setup.ts beforeEach; prod never sets it. */
+export function _setContextModelForTests(mode: 'shared' | 'per-script'): void {
+  contextModel = mode;
+}
+
+/** #11 P7-2 test seam — current size of the per-script context pool (0 under 'shared'; the count of
+ *  live per-script contexts under 'per-script'). Lets the isolation suite assert disposeContextForScript
+ *  frees pool entries (the handle-lifecycle-dispose#0 leak regression). */
+export function _scriptContextCountForTests(): number {
+  return scriptContexts.size;
+}
+
+/** #11 P7-2 test seam — dispose the PER-SCRIPT context pool + reset the model to 'shared', so a
+ *  per-script-context test can't leak a context into another test file (the CI-readdir flake class).
+ *  Each pooled script's held VM handles are swept first (disposeScriptVmHandlers) so ctx.dispose()
+ *  sees no leaked handles. Cheap under 'shared' (empty pool); the shared record is reused across
+ *  tests (NOT disposed here — that would force a ~95ms rebuild per test + break the leak oracle's
+ *  reused-context premise). Wired into tests/_infra/setup.ts beforeEach. */
+export function _disposeContextForTests(): void {
+  for (const [scriptId, sc] of scriptContexts) {
+    try { disposeScriptVmHandlers(scriptId); } catch { /* teardown */ }
+    try { sc.ctx.dispose(); } catch { /* teardown */ }
+  }
+  scriptContexts.clear();
+  scriptContextPromises.clear();
+  // #11 P7-2 audit (sync-resolver-and-isolation#0) — the loop above only sweeps POOLED scriptIds;
+  // under the 'shared' default (essentially the whole suite) the pool is empty, so a shared-mode test
+  // that registered a handler / broadcast / widget / modal and never tore it down would leave a live
+  // dup in the module registries (the shared context is intentionally NOT disposed — it's reused).
+  // Sweep those too so a later per-script test can't collide on a scriptId a prior shared-mode test
+  // left a live handle under (a wrong-context fire on scriptId+handlerId reuse). Disposes only the
+  // dups held in the shared context, never the shared context itself.
+  const dirty = new Set<string>([...vmHandlerHandles.keys(), ...vmBroadcastHandles.keys(), ...vmDomStableIds.keys()]);
+  for (const rec of vmWidgetOwner.values()) dirty.add(rec.scriptId);
+  for (const rec of vmModalOwner.values()) dirty.add(rec.scriptId);
+  for (const scriptId of dirty) { try { disposeScriptVmHandlers(scriptId); } catch { /* teardown */ } }
+  contextModel = 'shared';
 }
