@@ -1127,6 +1127,24 @@ function resolveScriptContext(scriptId: string): ScriptContext | undefined {
 let POOL_CAP = 8;
 let idleTimeoutMs = 5 * 60_000;
 
+/** #11 P7-3.2 — aggregate WASM-heap budget for the ONE script-runner child. There is NO host RSS kill
+ *  (the child heartbeat is time-based only), so the per-script pool must self-bound: each per-script
+ *  context caps its runtime at CHILD_WASM_BUDGET / POOL_CAP, so POOL_CAP live contexts stay within the
+ *  budget. Total child RSS ≈ ~112MB baseline + the process-global WASM module code + POOL_CAP × perCtx
+ *  + marshaling buffers. `let` for the _setChildWasmBudgetForTests seam. */
+let CHILD_WASM_BUDGET = 512 * 1024 * 1024;
+
+/** Per-context WASM memory limit (bytes). Under 'per-script' the pool holds up to POOL_CAP live contexts
+ *  inside one child, so cap each at CHILD_WASM_BUDGET / POOL_CAP (= 64MB at 512MB/8) — the aggregate never
+ *  exceeds the budget. Under 'shared' (a single reused context, never pooled) keep the whole budget, so
+ *  prod behaviour is unchanged (was a flat 512MB). NOTE: the runtime's C-stack cap is left at QuickJS's
+ *  256KB default (mod.newContext applies it when maxStackSizeBytes is unset), which already throws a
+ *  catchable in-VM stack-overflow on runaway recursion — an explicit setMaxStackSize would be redundant
+ *  and risks breaking legitimate deep-but-bounded recursion, so it is intentionally omitted. */
+function perContextMemoryLimit(): number {
+  return contextModel === 'per-script' ? Math.floor(CHILD_WASM_BUDGET / POOL_CAP) : CHILD_WASM_BUDGET;
+}
+
 /** #11 P7-3.1 (audit hardening) — scriptIds with an in-flight body-run ACQUISITION. runUserScriptInQuickJS
  *  captures `const ctx = sc.ctx` then `await prior` (the runChain serialization) BEFORE setting
  *  sc.activeRun, so for that span sc.activeRun is undefined and, if the script is unpinned, the context
@@ -1232,7 +1250,9 @@ async function createContext(): Promise<ScriptContext> {
   // Ring-0 sync-loop guard (P7 formalizes the supervision rings): aborts a sync
   // `while(true){}` the host heartbeat would otherwise SIGKILL the whole child for.
   ctx.runtime.setInterruptHandler(() => Date.now() > sc.currentDeadline);
-  ctx.runtime.setMemoryLimit(512 * 1024 * 1024); // generous backstop; P7 tunes
+  // #11 P7-3.2 — per-script contexts cap at CHILD_WASM_BUDGET/POOL_CAP (64MB) so the pool's aggregate
+  // WASM heap stays bounded (no host RSS kill); 'shared' keeps the full budget (prod behaviour unchanged).
+  ctx.runtime.setMemoryLimit(perContextMemoryLimit());
 
   // Order matters: the marshaler twin defines __lsEncode/__lsDecode, which the
   // api proxy (API_BOOTSTRAP's __lsBuildApi) references at call time.
@@ -2299,6 +2319,10 @@ export function _lastUsedAtForTests(scriptId: string): number | null {
  *  prod defaults by _disposeContextForTests. */
 export function _setPoolCapForTests(cap: number): void { POOL_CAP = cap; }
 export function _setIdleTimeoutForTests(ms: number): void { idleTimeoutMs = ms; }
+/** #11 P7-3.2 test seam — override the aggregate child WASM budget so a test can drive a low per-context
+ *  memory ceiling (perCtxLimit = budget / POOL_CAP) + assert an over-limit alloc surfaces as an in-VM OOM
+ *  rather than a child crash. Reset by _disposeContextForTests. */
+export function _setChildWasmBudgetForTests(bytes: number): void { CHILD_WASM_BUDGET = bytes; }
 
 /** #11 P7-3.1 test seam — reserve a script's context (as a body-run acquisition does) so the eviction
  *  gates (evictIdleContext / lruEvictable / sweep) can be tested against the reservation deterministically
@@ -2337,4 +2361,5 @@ export function _disposeContextForTests(): void {
   contextModel = 'shared';
   POOL_CAP = 8;              // #11 P7-3.1 — restore the pool-bound defaults (a test may have shrunk them)
   idleTimeoutMs = 5 * 60_000;
+  CHILD_WASM_BUDGET = 512 * 1024 * 1024; // #11 P7-3.2 — restore the memory budget
 }
