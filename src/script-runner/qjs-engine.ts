@@ -1012,6 +1012,11 @@ interface ScriptContext {
   runChain:        Promise<void>;
   activeRun:       ActiveRun | undefined;
   currentDeadline: number;
+  /** #11 P7-3 — recency marker (Date.now()) for the bounded-pool LRU. Bumped on every USE of this
+   *  script's context: a getContextForScript cache-hit, a body-run start, a handler-fire start. The
+   *  idle sweep evicts the oldest UNPINNED context; a frequently-run/fired script keeps a fresh stamp
+   *  and is never chosen. Unused under contextModel='shared' (one record, never evicted). */
+  lastUsedAt:      number;
 }
 /** #11 P5 — per-script registry of DUP'd in-VM handler fn handles. Keyed (scriptId,
  *  handlerId). The dup keeps the VM fn alive across runs (it is NOT in any run's
@@ -1090,6 +1095,11 @@ function getContextForScript(scriptId: string): Promise<ScriptContext> {
     });
     p = build;
     scriptContextPromises.set(scriptId, p);
+  } else {
+    // #11 P7-3 — cache HIT: bump recency so an awaited-but-not-yet-run reuse still counts as use and
+    // the LRU sweep won't reap a soon-to-run context. resolveScriptContext (sync) reads the same record.
+    const sc = scriptContexts.get(scriptId);
+    if (sc) sc.lastUsedAt = Date.now();
   }
   return p;
 }
@@ -1115,7 +1125,7 @@ async function createContext(): Promise<ScriptContext> {
   // #11 P7-0 — the per-context run-state record. The interrupt handler + every
   // host-fn closure below read activeRun/currentDeadline off THIS record (in scope
   // for the whole createContext closure), not module globals.
-  const sc: ScriptContext = { ctx, runChain: Promise.resolve(), activeRun: undefined, currentDeadline: Number.POSITIVE_INFINITY };
+  const sc: ScriptContext = { ctx, runChain: Promise.resolve(), activeRun: undefined, currentDeadline: Number.POSITIVE_INFINITY, lastUsedAt: Date.now() };
   const pump = () => ctx.runtime.executePendingJobs();
 
   // Ring-0 sync-loop guard (P7 formalizes the supervision rings): aborts a sync
@@ -1623,6 +1633,7 @@ export async function runUserScriptInQuickJS(opts: QuickJSRunOptions): Promise<u
   await prior;
 
   sc.currentDeadline = Date.now() + opts.timeoutMs;
+  sc.lastUsedAt = Date.now(); // #11 P7-3 — a run/fire start counts as use (LRU recency; keeps a hot script's context fresh)
   sc.activeRun = { dispatch: opts.dispatch, console: opts.console, serializeError: opts.serializeError, allowDangerous: opts.allowDangerous ?? false, hostFetch: opts.hostFetch, dispatchOnHandle: opts.dispatchOnHandle, scriptId: opts.script.id, dispatchRegisterHandler: opts.dispatchRegisterHandler, dispatchUnregisterHandler: opts.dispatchUnregisterHandler, dispatchUnregisterHandlerNamed: opts.dispatchUnregisterHandlerNamed, dispatchBroadcastSubscribe: opts.dispatchBroadcastSubscribe, dispatchBroadcastUnsubscribe: opts.dispatchBroadcastUnsubscribe };
   const pump = () => ctx.runtime.executePendingJobs();
 
@@ -1746,6 +1757,35 @@ export function hasVmBroadcast(scriptId: string, subId: string): boolean {
   return vmBroadcastHandles.get(scriptId)?.get(subId)?.alive ?? false;
 }
 
+/** #11 P7-3 — true iff the inner (handlerId|subId)->handle map has ANY still-alive handle. A single
+ *  unregister deletes its entry, but an EMPTIED inner map lingers (size 0), and a teardown off the
+ *  message loop can dispose without deleting — so pin liveness is by `.alive`, matching hasVmHandler,
+ *  not by `.size`. */
+function mapHasAliveHandle(m: Map<string, QuickJSHandle> | undefined): boolean {
+  if (!m) return false;
+  for (const h of m.values()) if (h.alive) return true;
+  return false;
+}
+
+/** #11 P7-3 — true iff this script's per-script context holds LIVE cross-run VM state a later fire or
+ *  notice would reach, making it UN-EVICTABLE: an alive handler dup (vmHandlerHandles — commands /
+ *  interceptors / modal-onDismiss), an alive broadcast sub (vmBroadcastHandles), or a live gated-factory
+ *  owner record (vmWidgetOwner / vmModalOwner). Evicting such a context disposes those handles, and a
+ *  subsequent fire would find a rebuilt EMPTY context — the fire path has no source to re-register
+ *  (QuickJSFireOptions carries none), so the handler is permanently LOST. The idle sweep (P7-3.1) never
+ *  evicts a pinned context; this is the load-bearing correctness gate. Reads LIVE occupancy every call
+ *  (broadcast pins are transient — cleared at each run-start via BroadcastClearMessage — so a context
+ *  legitimately transitions pinned->unpinned; never cache an 'ever-registered' flag). EXCLUDES
+ *  vmDomStableIds (plain strings, re-injected fresh) + vmModalListeners (handlerId strings whose actual
+ *  fn dups live in vmHandlerHandles, which pins for them). */
+export function isContextPinned(scriptId: string): boolean {
+  if (mapHasAliveHandle(vmHandlerHandles.get(scriptId))) return true;
+  if (mapHasAliveHandle(vmBroadcastHandles.get(scriptId))) return true;
+  for (const rec of vmWidgetOwner.values()) if (rec.scriptId === scriptId) return true;
+  for (const rec of vmModalOwner.values()) if (rec.scriptId === scriptId) return true;
+  return false;
+}
+
 /** #11 P5 inc3b — dispose this script's broadcast handler dups (broadcast-clear at
  *  run-start, or full teardown). Returns the count disposed. */
 export function disposeScriptVmBroadcast(scriptId: string): number {
@@ -1823,6 +1863,32 @@ export function disposeContextForScript(scriptId: string, disposeContext: boolea
     if (sc) { try { if (sc.ctx.alive) sc.ctx.dispose(); } catch { /* teardown */ } }
   }
   return n;
+}
+
+/** #11 P7-3 — IDLE EVICTION primitive (distinct from disposeContextForScript). Drops an idle script's
+ *  QuickJSContext to reclaim WASM heap; the next getContextForScript rebuilds it lazily + transparently
+ *  (a body-run/fire just re-pays the ~95ms bootstrap). Unlike disposeContextForScript it does NOT call
+ *  disposeScriptVmHandlers — an evictable context is by definition UNPINNED (no live cross-run handler /
+ *  broadcast / factory state), so there is nothing to sweep; skipping the destructive sweep encodes the
+ *  invariant "we only ever evict handler-less contexts" and prevents a future change from silently
+ *  destroying live handlers if the pin gate regressed. GUARDED: no-op unless contextModel='per-script'
+ *  AND the context is not pinned (the caller — the P7-3.1 sweep — filters pinned + mid-run, but the
+ *  pin re-check here is the load-bearing last line of defense against a stale candidate snapshot).
+ *  Deletes BOTH pool maps so a concurrent in-flight build self-disposes its orphan (identity-guard
+ *  discipline, mirroring disposeContextForScript). Returns true iff a context was actually disposed. */
+export function evictIdleContext(scriptId: string): boolean {
+  if (contextModel !== 'per-script') return false;
+  const sc = scriptContexts.get(scriptId);
+  // Never evict a context mid-run: a body-run/fire captures `const ctx = sc.ctx` AFTER its await, so
+  // disposing between that capture and a later ctx call is a use-after-free. The P7-3.1 sweep also
+  // pre-filters mid-run candidates (+ LRU recency covers the about-to-run window), but self-guarding
+  // here makes the primitive safe to call unconditionally.
+  if (sc && sc.activeRun !== undefined) return false;
+  if (isContextPinned(scriptId)) return false; // never evict a pinned context (use-after-free on next fire)
+  scriptContexts.delete(scriptId);
+  scriptContextPromises.delete(scriptId);
+  if (sc) { try { if (sc.ctx.alive) sc.ctx.dispose(); } catch { /* eviction — best effort */ } return true; }
+  return false;
 }
 
 /** #11 P4b Inc 3c-2a — true iff widgetId is a quickjs-engine float widget. child-entry routes the
@@ -1977,6 +2043,7 @@ export async function fireHandlerInQuickJS(opts: QuickJSFireOptions): Promise<un
   }
 
   sc.currentDeadline = Date.now() + opts.timeoutMs;
+  sc.lastUsedAt = Date.now(); // #11 P7-3 — a run/fire start counts as use (LRU recency; keeps a hot script's context fresh)
   sc.activeRun = {
     dispatch: opts.dispatch, console: opts.console, serializeError: opts.serializeError,
     allowDangerous: opts.allowDangerous ?? false, hostFetch: opts.hostFetch,
@@ -2102,6 +2169,13 @@ export function _setContextModelForTests(mode: 'shared' | 'per-script'): void {
  *  frees pool entries (the handle-lifecycle-dispose#0 leak regression). */
 export function _scriptContextCountForTests(): number {
   return scriptContexts.size;
+}
+
+/** #11 P7-3 test seam — read a per-script context's LRU recency marker (Date.now() of its last use),
+ *  or null if that scriptId has no built context. Lets the pool tests assert lastUsedAt advances on a
+ *  cache-hit / run / fire. Resolves via the same sync path resolveScriptContext uses. */
+export function _lastUsedAtForTests(scriptId: string): number | null {
+  return resolveScriptContext(scriptId)?.lastUsedAt ?? null;
 }
 
 /** #11 P7-2 test seam — dispose the PER-SCRIPT context pool + reset the model to 'shared', so a
