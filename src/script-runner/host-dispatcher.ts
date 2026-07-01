@@ -951,6 +951,9 @@ async function sendRunHandlerRequest(
     // (the asyncfn closure already captured the right fetch at body-run time). Mirrors the
     // body-run RunScriptRequest's `allowDangerous: script.allowDangerous`.
     allowDangerous:    snapshot.script.allowDangerous,
+    // #11 P7-F3 — the script identity, so the quickjs fire re-seeds globalThis.script (no residue).
+    scriptName:        snapshot.script.name,
+    scriptType:        snapshot.script.type,
     // Live activeContext at fire time — child wraps the handler in
     // `liveContextStore.run({ chatId, characterId }, ...)` so sync
     // getters (`api.chat.getChatId()` etc.) return live values for

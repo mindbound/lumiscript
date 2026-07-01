@@ -49,6 +49,7 @@ function fireOpts(over: Partial<QuickJSFireOptions> & { scriptId: string; handle
     dispatch:       over.dispatch ?? (async () => undefined),
     console:        over.console ?? noopConsole,
     serializeError: over.serializeError ?? serializeError,
+    script:         over.script,
   };
 }
 
@@ -154,6 +155,24 @@ describe('#11 P5: commands.onInvoked registration + fire', () => {
     catch (e) { err = e as Error; }
     expect(err?.name).toBe('ScriptTimeoutError');       // engine interrupt enforces the per-fire deadline
     disposeScriptVmHandlers('s-wedge');
+  });
+
+  test('P7-F3 data-script-residue: a fired handler sees ITS OWN script + clean data, not a prior run residue', async () => {
+    // Register B's handler (runs B's body → globalThis.script = B).
+    const hidB = await register('s-resB', `api.commands.onInvoked(() => ({ sid: script.id, sname: script.name, dataKeys: Object.keys(data || {}) })); return null;`);
+    // Then run script A's body, so the SHARED-context residue is now A (script = A, data = {marker}).
+    await runUserScriptInQuickJS(runOpts({
+      script: { id: 's-resA', name: 'Alpha', type: 'trigger' }, data: { marker: 'A' }, code: `return null;`,
+    }));
+    // Fire B's handler — the fire must re-seed globalThis.script to B (NOT the A residue) + clear data.
+    const out = await fireHandlerInQuickJS(fireOpts({
+      scriptId: 's-resB', handlerId: hidB, args: ['cmd', {}],
+      script: { id: 's-resB', name: 'Beta', type: 'trigger' },
+    })) as { sid: string; sname: string; dataKeys: string[] };
+    expect(out.sid).toBe('s-resB');    // re-seeded to the fired script, NOT the 's-resA' residue
+    expect(out.sname).toBe('Beta');
+    expect(out.dataKeys).toEqual([]);  // data reset to {} for the fire, NOT A's { marker }
+    disposeScriptVmHandlers('s-resB');
   });
 
   test('the handler can fire repeatedly (the dup survives across fires)', async () => {

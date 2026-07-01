@@ -251,6 +251,8 @@ describe('child-entry: script-unregister routing', () => {
       args:              [],
       timeoutMs:         1_000,
       allowDangerous:    false,
+      scriptName:        'Script A',
+      scriptType:        'trigger',
       chatIdAtFire:      null,
       characterIdAtFire: null,
     });

@@ -922,6 +922,9 @@ async function fireVmHandler(
           dispatchOnHandle:          theProxy.dispatchOnHandle,
           console:                   capturedConsole,
           serializeError,
+          // #11 P7-F3 — the fired script's identity, so the quickjs fire re-seeds globalThis.script
+          // (no residue). RunHandlerRequest now carries scriptName/scriptType.
+          script:                    { id: req.scriptId, name: req.scriptName, type: req.scriptType },
           // Thread the script's allowDangerous (RunHandlerRequest now carries it) so an
           // allowDangerous script's fired handler can fetch under quickjs, matching asyncfn (whose
           // closure baked in the right fetch at body-run time). hostFetch is the captured host fetch,

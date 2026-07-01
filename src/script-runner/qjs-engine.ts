@@ -1872,6 +1872,10 @@ export interface QuickJSFireOptions {
   dispatch:       (method: string, args: unknown[]) => Promise<unknown>;
   console:        QuickJSConsole;
   serializeError: (err: unknown) => { name: string; message: string; stack?: string };
+  /** #11 P7-F3 — the firing script's identity, re-seeded into globalThis.script at fire-start so a
+   *  fired handler reads ITS OWN script (not the last body-run's residue). Absent (broadcast /
+   *  onDismiss fires that carry only scriptId) → reconstructed as {id: scriptId, name:'', type:''}. */
+  script?:        { id: string; name: string; type: string };
   allowDangerous?: boolean;
   hostFetch?:      (url: string, init?: RequestInit) => Promise<Response>;
   dispatchOnHandle?: (targetHandle: HandleRef, method: string, args: unknown[]) => Promise<unknown>;
@@ -1947,6 +1951,22 @@ export async function fireHandlerInQuickJS(opts: QuickJSFireOptions): Promise<un
     // #11 P4b Inc 3 — fresh per-fire deferred-chain set (mirrors the body-run's reset), so the
     // fire's flush drains ONLY this fire's chains, never a prior run's cap-exhausted leftovers.
     ctx.unwrapResult(ctx.evalCode('globalThis.__lsOutstanding = new Set()')).dispose();
+    // #11 P7-F3 data-script-residue — re-seed globalThis.script/data/__lsListSnapshots so a fired
+    // handler never reads the last body-run's residue (which under a shared context could be ANOTHER
+    // script's). `script` is the fired script's identity (constant) — reconstructed from scriptId when
+    // the fire path (broadcast/onDismiss) didn't carry name/type. data + lists are reset to EMPTY: a
+    // fire is an event, not a body-run, so there is no trigger `data`. This diverges from asyncfn's
+    // lexical capture of the REGISTRATION run's data/lists (a fired handler there sees the registering
+    // run's `data` + tools/macros snapshot) — full parity needs per-handler env snapshots and is a
+    // tracked follow-up (fire-handler-env-lexical-capture); the residue it replaces was strictly worse.
+    const fireScript = opts.script ?? { id: opts.scriptId, name: '', type: '' };
+    ctx.newString(JSON.stringify(fireScript)).consume((h) => ctx.setProp(ctx.global, '__lsFireScriptJson', h));
+    ctx.unwrapResult(ctx.evalCode(
+      'globalThis.script = JSON.parse(globalThis.__lsFireScriptJson);' +
+      'globalThis.script.require = globalThis.__lsRequire;' +
+      'globalThis.data = {};' +
+      'globalThis.__lsListSnapshots = {};',
+    )).dispose();
     // Marshal the args INTO the VM as a decoded array (mirror the per-run data path).
     ctx.newString(JSON.stringify(marshalEncode(opts.args))).consume((h) => ctx.setProp(ctx.global, '__lsFireArgsJson', h));
     const argsRes = ctx.evalCode('globalThis.__lsDecode(JSON.parse(globalThis.__lsFireArgsJson))');

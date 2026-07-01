@@ -312,6 +312,16 @@ export interface RunHandlerRequest {
    */
   allowDangerous:    boolean;
   /**
+   * The firing script's identity (id/name/type). The quickjs engine re-seeds `globalThis.script`
+   * at fire-start from these so a fired handler reading `script.id/name/type` sees ITS OWN script,
+   * not the last body-run's residue (which under a shared context could be ANOTHER script) —
+   * #11 P7-F3 data-script-residue. The asyncfn engine gets this via the handler closure's lexical
+   * capture of its registration run, so it doesn't need the fields on the wire. `scriptId` above
+   * is the same id (kept for the existing registry/routing lookups).
+   */
+  scriptName:        string;
+  scriptType:        string;
+  /**
    * Live activeContext snapshot taken at handler-fire time (parent-side, from
    * `binding.ts`). Used by the child to override sync getters
    * (`api.chat.getChatId()`, future symmetric `characterId` getters) for
