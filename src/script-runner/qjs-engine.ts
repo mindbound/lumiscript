@@ -957,6 +957,50 @@ const VM_FETCH_BOOTSTRAP = `
 `;
 
 let modulePromise: Promise<QuickJSWASMModule> | undefined;
+
+/** #11 cold-start-fallback — cached instantiability verdict for the WASM module on THIS platform
+ *  (deterministic once known). undefined until warmupQuickJS runs. */
+let quickjsAvailability: Promise<boolean> | undefined;
+
+/**
+ * #11 cold-start-fallback — instantiate the WASM module (the once-per-process ~106ms compile — P7-3.3
+ * bench) and report whether quickjs is USABLE on this platform. Two jobs:
+ *  1. PRE-WARM: called fire-and-forget at CHILD STARTUP so the module compile happens OUTSIDE any run's
+ *     timeout budget (the first quickjs run would otherwise pay it inside its own raceWithTimeout).
+ *  2. DEGRADE PROBE: awaited at engine-selection (runOne, outside the run's raceWithTimeout). A `false`
+ *     lets runOne fall back to the AsyncFunction engine for the run instead of HARD-FAILING every
+ *     quickjs run — the failure mode on a platform where the WASM variant won't instantiate (there is
+ *     no other isolation layer, so we degrade gracefully rather than break all scripts).
+ * Cached (a platform failure is deterministic); on failure modulePromise is cleared so a later call may
+ * retry. Never throws — returns false on any instantiation error.
+ */
+export function warmupQuickJS(): Promise<boolean> {
+  quickjsAvailability ??= (async () => {
+    try {
+      modulePromise ??= newQuickJSWASMModuleFromVariant(variant);
+      await modulePromise;
+      return true;
+    } catch (err) {
+      modulePromise = undefined;
+      try {
+        console.error(
+          `[script-runner] QuickJS WASM module failed to instantiate on this platform — degrading to ` +
+          `the AsyncFunction engine for all quickjs runs on this child. ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+        );
+      } catch { /* console may be locked down */ }
+      return false;
+    }
+  })();
+  return quickjsAvailability;
+}
+
+/** #11 cold-start-fallback test seam — force warmupQuickJS's cached verdict (true = available,
+ *  false = degrade-to-asyncfn) without an un-instantiable platform; undefined re-arms the real probe.
+ *  Reset in tests/_infra/setup.ts beforeEach. */
+export function _setQuickJSAvailabilityForTests(v: boolean | undefined): void {
+  quickjsAvailability = v === undefined ? undefined : Promise.resolve(v);
+}
 /** #11 P7-1 — the sync-resolved shared ScriptContext record. The notice bridges + leak oracle
  *  need a script's ctx SYNCHRONOUSLY (the notice arrives between runs, off the async build path),
  *  so they resolve it via resolveScriptContext(scriptId). Under contextModel='shared' one record

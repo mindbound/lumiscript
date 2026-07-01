@@ -86,6 +86,7 @@ import {
   disposeContextForScript,
   disposeScriptVmBroadcast,
   sweepIdleContexts,
+  warmupQuickJS,
 } from './qjs-engine.js';
 
 // ─── Error classes ──────────────────────────────────────────────────────────
@@ -1363,7 +1364,16 @@ async function runOne(
     // Per-run via RunScriptRequest.engineMode; the test seam overrides per-process
     // for the parity harness. Branch sits inside the try so a quickjs failure is
     // surfaced as RunScriptResult { ok:false } like any other body error.
-    const engineMode: 'asyncfn' | 'quickjs' = testEngineMode ?? req.engineMode ?? 'asyncfn';
+    let engineMode: 'asyncfn' | 'quickjs' = testEngineMode ?? req.engineMode ?? 'asyncfn';
+    // #11 cold-start-fallback — if quickjs is requested but the WASM module can't instantiate on this
+    // platform, DEGRADE this run to the AsyncFunction engine instead of hard-failing (there is no other
+    // isolation layer, so degrade gracefully). warmupQuickJS is cached + this `await` sits OUTSIDE the
+    // run's raceWithTimeout below, so the module compile is never charged against the script's deadline
+    // (a first quickjs run pays ~106ms here, once per process, off-budget). No cost under the asyncfn
+    // default (the guard skips it). When available, warmupQuickJS resolves ~instantly.
+    if (engineMode === 'quickjs' && !(await warmupQuickJS())) {
+      engineMode = 'asyncfn';
+    }
     if (engineMode === 'quickjs') {
       // #11 — QuickJS-WASM isolate. The harness reuses proxy.dispatch / the
       // pending-map / api-response routing / flush / activeProxies verbatim;
@@ -1847,6 +1857,13 @@ export default function (proc: SpindleBackendProcessContext): () => void {
   // Module-init captures (`_processOn` / `_hostFetch` / etc.) are already
   // bound — see the "Sandbox lockdown" section above.
   installSandboxLockdown();
+
+  // #11 cold-start-fallback — NOTE: no unconditional module pre-warm here. Instantiating the WASM module
+  // in EVERY child would waste ~106ms + tens of MB in asyncfn-only children (quickjs is default-off), so
+  // the module is warmed LAZILY by `warmupQuickJS()` at engine-selection in runOne — outside the run's
+  // timeout budget, and only when a run actually selects quickjs (zero cost under the asyncfn default).
+  // When engine-toggle-wiring makes quickjs the configured engine, THAT increment should add a startup
+  // pre-warm gated on the setting so the first quickjs run doesn't wait on the compile.
 
   let heartbeatTimer: ReturnType<typeof setInterval> | null = setInterval(() => {
     proc.heartbeat();
