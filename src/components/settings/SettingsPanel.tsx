@@ -7,6 +7,7 @@ import { DiagnosticsModal } from '../diagnostics/DiagnosticsModal.js';
 import { AssistantModal } from '../assistant/AssistantModal.js';
 import { LS_OPEN_ASSISTANT_EVENT } from '../assistant/openAssistant.js';
 import { HostSelect } from '../common/HostSelect.js';
+import { ConfirmDialog } from '../common/ConfirmDialog.js';
 
 // Connection rows as pushed by the backend's `assistant_connections` reply —
 // derived from the message contract so the shape can't drift.
@@ -33,6 +34,9 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
   // v1.0.0-rc.9 — LLM connections for the "Default connection" picker below.
   // null = not yet loaded (picker disabled); [] = loaded, none configured.
   const [assistantConnections, setAssistantConnections] = useState<AssistantConnRow[] | null>(null);
+  // #11 engine-toggle — the engine the user picked but hasn't confirmed yet. Switching engines
+  // reloads all active scripts, so the dropdown stashes the choice here and only dispatches on confirm.
+  const [pendingEngineMode, setPendingEngineMode] = useState<'asyncfn' | 'quickjs' | null>(null);
 
   useEffect(() => {
     const unsub = onBackendMessage((raw) => {
@@ -77,6 +81,15 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
       })),
     ],
     [assistantConnections],
+  );
+
+  // #11 engine-toggle — the two sandbox engines. Stable identity for HostSelect.
+  const engineModeOptions = useMemo(
+    () => [
+      { value: 'asyncfn', label: 'AsyncFunction',                 sublabel: 'Default engine' },
+      { value: 'quickjs', label: 'QuickJS (experimental isolate)', sublabel: 'Stronger WASM sandbox isolation' },
+    ],
+    [],
   );
 
   const handleToggleEnabled = (enabled: boolean) => {
@@ -125,6 +138,23 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
         <div className="ls-settings-section-label">
           <Timer size={11} />
           Script Execution
+        </div>
+
+        {/* #11 engine-toggle — sandbox engine. QuickJS is the experimental WASM isolate.
+            Changing it confirms first (switching reloads all active scripts). */}
+        <div className="ls-settings-field">
+          <label className="ls-settings-field-label" title="Which sandbox engine runs script bodies + handler fires. AsyncFunction is the default. QuickJS is an experimental WASM isolate with stronger sandboxing — behaviourally faithful to AsyncFunction bar one documented divergence (a script invoking its OWN tool). Switching engines reloads all active scripts so their handlers re-register under the new engine.">
+            Engine
+          </label>
+          <HostSelect
+            options={engineModeOptions}
+            value={settings.engineMode ?? 'asyncfn'}
+            onChange={(v) => {
+              const next = v === 'quickjs' ? 'quickjs' : 'asyncfn';
+              if (next !== (settings.engineMode ?? 'asyncfn')) setPendingEngineMode(next);
+            }}
+            ariaLabel="Script engine"
+          />
         </div>
 
         {/* Execution timeout */}
@@ -567,6 +597,23 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
           onBackendMessage={onBackendMessage}
           sendToBackend={sendToBackend}
         />
+      )}
+      {/* #11 engine-toggle — confirm before switching engines (reloads active scripts). */}
+      {pendingEngineMode && (
+        <ConfirmDialog
+          title="Switch script engine?"
+          confirmLabel="Switch & reload"
+          variant="danger"
+          onConfirm={() => {
+            sendToBackend({ type: 'update_settings', patch: { engineMode: pendingEngineMode } });
+            setPendingEngineMode(null);
+          }}
+          onCancel={() => setPendingEngineMode(null)}
+        >
+          Switching to {pendingEngineMode === 'quickjs' ? 'the QuickJS isolate' : 'AsyncFunction'} reloads
+          all active scripts so their handlers re-register under the new engine. In-flight runs finish on
+          their current engine first, and any in-memory (non-persisted) script state is reset.
+        </ConfirmDialog>
       )}
     </div>
   );
