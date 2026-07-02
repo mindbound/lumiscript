@@ -70,6 +70,12 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
   // #11 engine-toggle — the engine the user picked but hasn't confirmed yet. Switching engines
   // reloads all active scripts, so the dropdown stashes the choice here and only dispatches on confirm.
   const [pendingEngineMode, setPendingEngineMode] = useState<'asyncfn' | 'quickjs' | null>(null);
+  // The host <select> commits its display optimistically on selection, but we don't change
+  // settings.engineMode until the user confirms — so on Cancel the dropdown would keep showing the
+  // un-chosen engine (and, worse, a re-pick of the real value would no-op the guard below). Bumping this
+  // key on Cancel remounts the dropdown so it re-reads the true value. (Confirm needs no remount: the
+  // display already shows the new value, and settings catches up via the settings_updated round-trip.)
+  const [engineSelectResetKey, setEngineSelectResetKey] = useState(0);
 
   useEffect(() => {
     const unsub = onBackendMessage((raw) => {
@@ -191,6 +197,7 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
             Engine
           </label>
           <HostSelect
+            key={engineSelectResetKey}
             options={engineModeOptions}
             value={settings.engineMode ?? 'asyncfn'}
             onChange={(v) => {
@@ -670,7 +677,7 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
             sendToBackend({ type: 'update_settings', patch: { engineMode: pendingEngineMode } });
             setPendingEngineMode(null);
           }}
-          onCancel={() => setPendingEngineMode(null)}
+          onCancel={() => { setPendingEngineMode(null); setEngineSelectResetKey((k) => k + 1); }}
         >
           <p style={esNote}>
             Switching to {pendingEngineMode === 'quickjs' ? 'the QuickJS isolate' : 'AsyncFunction'} changes
