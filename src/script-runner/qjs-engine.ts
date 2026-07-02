@@ -2111,6 +2111,20 @@ export async function runUserScriptInQuickJS(opts: QuickJSRunOptions): Promise<u
   sc.runChain = new Promise<void>((resolve) => { releaseRun = resolve; });
   await prior;
 
+  // #11 audit follow-up — teardown-UAF guard. The context can be disposed (disposeContextForScript, on
+  // a script-unregister that runs synchronously off the message loop while this run was parked at
+  // `await getContextForScript` / `await prior` — activeRun not yet set, so only the reservation guards
+  // it, and the teardown path ignores the reservation; tracked as a per-script-rollout must-fix). No VM
+  // handles are held yet at this point, so the dispose itself doesn't abort; but resuming onto the dead
+  // `ctx` local would. Re-check `ctx.alive` and bail cleanly (release the lock + reservation) — the run
+  // was for a script that got unregistered mid-flight, so aborting it is correct. mirrors the handler
+  // re-fetch guard fireHandlerInQuickJS already has. No-op under 'shared' (context never disposed here).
+  if (!ctx.alive) {
+    releaseRun();
+    releaseContext(scriptId);
+    throw new Error(`LumiScript QuickJS: script context was disposed mid-acquisition (script ${scriptId} unregistered during its run).`);
+  }
+
   sc.currentDeadline = Date.now() + opts.timeoutMs;
   sc.lastUsedAt = Date.now(); // #11 P7-3 — a run/fire start counts as use (LRU recency; keeps a hot script's context fresh)
   sc.activeRun = { dispatch: opts.dispatch, console: opts.console, serializeError: opts.serializeError, allowDangerous: opts.allowDangerous ?? false, hostFetch: opts.hostFetch, dispatchOnHandle: opts.dispatchOnHandle, scriptId: opts.script.id, dispatchRegisterHandler: opts.dispatchRegisterHandler, dispatchUnregisterHandler: opts.dispatchUnregisterHandler, dispatchUnregisterHandlerNamed: opts.dispatchUnregisterHandlerNamed, dispatchBroadcastSubscribe: opts.dispatchBroadcastSubscribe, dispatchBroadcastUnsubscribe: opts.dispatchBroadcastUnsubscribe };
@@ -2221,6 +2235,7 @@ ${opts.code}
     }
     releaseRun(); // release the run lock so the next queued run can proceed
     releaseContext(scriptId); // #11 P7-3.1 — drop the eviction reservation now the run is fully done
+    maybeDisposePendingContext(scriptId); // #11 audit — dispose a teardown-deferred context now we're idle
   }
 }
 
@@ -2350,7 +2365,22 @@ export function disposeContextForScript(scriptId: string, disposeContext: boolea
     // Drop the in-flight build too: getContextForScript's identity-guard makes a still-resolving
     // build dispose its own orphan instead of publishing into the now-cleared pool.
     scriptContextPromises.delete(scriptId);
-    if (sc) { try { if (sc.ctx.alive) sc.ctx.dispose(); } catch { /* teardown */ } }
+    if (sc) {
+      // #11 audit follow-up — DEFER disposal if a run holds this context. script-unregister runs
+      // synchronously off the message loop, so it can fire while a run is parked at acquisition
+      // (reserved, no VM handles yet) OR mid-execution (activeRun set, holding live arena handles).
+      // Disposing now would UAF the parked run OR — worse — abort the release-sync WASM runtime on the
+      // mid-run's live handles (JS_FreeRuntime asserts an empty gc_obj_list). Mirror evictIdleContext's
+      // reserved/activeRun guard: stash the context; the run's finally (maybeDisposePendingContext, after
+      // it drops activeRun + the reservation) disposes it once fully idle. Removing it from the pool maps
+      // above already prevents NEW acquisitions. No-op-safe: a rebuilt context for the same scriptId gets
+      // a fresh pool entry, and the stale one here disposes when its holding run finishes.
+      if (isContextReserved(scriptId) || sc.activeRun !== undefined) {
+        pendingContextDisposal.set(scriptId, sc);
+      } else {
+        try { if (sc.ctx.alive) sc.ctx.dispose(); } catch { /* teardown */ }
+      }
+    }
     // #11 observability (audit follow-up) — this disable/delete removal shrinks the pool too, so re-arm
     // the over-cap WARN latch when it brings us back within cap. Without this, a pinned script leaving
     // via disable/delete (not idle-eviction) leaves overCapLogged stuck true, silently suppressing the
@@ -2358,6 +2388,23 @@ export function disposeContextForScript(scriptId: string, disposeContext: boolea
     if (scriptContexts.size <= POOL_CAP) overCapLogged = false;
   }
   return n;
+}
+
+/** #11 audit follow-up — contexts whose disposal was DEFERRED by disposeContextForScript because a run
+ *  held them at teardown time. Keyed by the (now pool-removed) scriptId; disposed by the holding run's
+ *  finally via maybeDisposePendingContext once it's idle. Kept OUT of scriptContexts so no new run
+ *  acquires it. Cleared in _disposeContextForTests. */
+const pendingContextDisposal = new Map<string, ScriptContext>();
+
+/** Dispose a context whose teardown was deferred, IF its holding run has now released it (no reservation,
+ *  no activeRun). Called from the run/fire finally after activeRun is nulled + the reservation dropped.
+ *  No-op if nothing pending for the scriptId, or if another run still holds it (a queued run resolves it). */
+function maybeDisposePendingContext(scriptId: string): void {
+  const sc = pendingContextDisposal.get(scriptId);
+  if (!sc) return;
+  if (isContextReserved(scriptId) || sc.activeRun !== undefined) return; // still in use — a later release retries
+  pendingContextDisposal.delete(scriptId);
+  try { if (sc.ctx.alive) sc.ctx.dispose(); } catch { /* teardown */ }
 }
 
 /** #11 P7-3 — IDLE EVICTION primitive (distinct from disposeContextForScript). Drops an idle script's
@@ -2666,6 +2713,7 @@ export async function fireHandlerInQuickJS(opts: QuickJSFireOptions): Promise<un
       try { if (h.alive) h.dispose(); } catch { /* swallow — fire is over */ }
     }
     releaseRun();
+    maybeDisposePendingContext(opts.scriptId); // #11 audit — dispose a teardown-deferred context now this fire is done
   }
 }
 
@@ -2704,6 +2752,12 @@ export function _setContextModelForTests(mode: 'shared' | 'per-script'): void {
  *  frees pool entries (the handle-lifecycle-dispose#0 leak regression). */
 export function _scriptContextCountForTests(): number {
   return scriptContexts.size;
+}
+
+/** #11 audit follow-up test seam — count of contexts whose disposal was DEFERRED (a run held them at
+ *  teardown time). Should return to 0 once the holding run's finally runs maybeDisposePendingContext. */
+export function _pendingContextCountForTests(): number {
+  return pendingContextDisposal.size;
 }
 
 /** #11 P7-3 test seam — read a per-script context's LRU recency marker (Date.now() of its last use),
@@ -2745,6 +2799,10 @@ export function _disposeContextForTests(): void {
   }
   scriptContexts.clear();
   scriptContextPromises.clear();
+  // #11 audit — dispose any teardown-deferred contexts a test left pending (a run held one at dispose
+  // time + never released), so they don't leak into the next file.
+  for (const sc of pendingContextDisposal.values()) { try { if (sc.ctx.alive) sc.ctx.dispose(); } catch { /* teardown */ } }
+  pendingContextDisposal.clear();
   // #11 P7-2 audit (sync-resolver-and-isolation#0) — the loop above only sweeps POOLED scriptIds;
   // under the 'shared' default (essentially the whole suite) the pool is empty, so a shared-mode test
   // that registered a handler / broadcast / widget / modal and never tore it down would leave a live

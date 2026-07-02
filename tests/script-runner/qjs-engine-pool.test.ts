@@ -27,6 +27,7 @@ import {
   _reserveContextForTests,
   _vmHandlerIdsForTests,
   _scriptContextCountForTests,
+  _pendingContextCountForTests,
   _lastUsedAtForTests,
   _vmObjectCountForTests,
   type QuickJSRunOptions,
@@ -257,5 +258,43 @@ describe('#11 P7-3.1 audit: acquisition-window reservation (microtask-race UAF g
     release();
     disposeContextForScript('resv-sole', true);
     disposeContextForScript('resv-other', true);
+  });
+});
+
+describe('#11 audit follow-up: teardown DEFERS disposal of an in-use context (no UAF / WASM abort)', () => {
+  test('disposeContextForScript during a mid-run defers; the run completes normally + then disposes', async () => {
+    _setContextModelForTests('per-script');
+    // Park run A MID-EXECUTION (holding live arena handles) on a never-resolving dispatch.
+    let unpark: () => void = () => {};
+    const parkDispatch = (): Promise<unknown> => new Promise((res) => { unpark = () => res(undefined); });
+    const runA = runUserScriptInQuickJS(runOpts('td-mid', `await api.chat.getMessages(); return 'done';`, parkDispatch));
+    await sleep(30); // A has claimed activeRun + is parked inside the VM with arena handles live
+    expect(_scriptContextCountForTests()).toBe(1);
+    // Unregister (disable) while A is mid-run. Disposing now would abort the WASM runtime on A's live
+    // handles — instead it must DEFER (removed from the pool, disposal pending).
+    disposeContextForScript('td-mid', true);
+    expect(_scriptContextCountForTests()).toBe(0);       // removed from the pool (no new acquisitions)
+    expect(_pendingContextCountForTests()).toBe(1);      // disposal deferred (A still holds it)
+    // Release A → it completes on the still-alive context, then its finally disposes the pending context.
+    unpark();
+    expect(await runA).toBe('done');                     // ran to completion — no UAF, no abort
+    expect(_pendingContextCountForTests()).toBe(0);      // disposed once A went idle
+  });
+
+  test('disposeContextForScript during a run parked at ACQUISITION defers (reservation guard)', async () => {
+    _setContextModelForTests('per-script');
+    // Hold the runChain with a parked run A so run B parks at `await prior` (reserved, no VM handles yet).
+    let unparkA: () => void = () => {};
+    const parkA = (): Promise<unknown> => new Promise((res) => { unparkA = () => res(undefined); });
+    const runA = runUserScriptInQuickJS(runOpts('td-acq', `await api.chat.getMessages(); return 'a';`, parkA));
+    await sleep(20);
+    const runB = runUserScriptInQuickJS(runOpts('td-acq', `return 'b';`)); // parks at await-prior (reserved)
+    await sleep(20);
+    disposeContextForScript('td-acq', true);             // both A (mid-run) + B (reserved) hold it → defer
+    expect(_pendingContextCountForTests()).toBe(1);
+    unparkA();
+    expect(await runA).toBe('a');
+    expect(await runB).toBe('b');                        // B also completes on the live (deferred) context
+    expect(_pendingContextCountForTests()).toBe(0);      // disposed once BOTH went idle
   });
 });

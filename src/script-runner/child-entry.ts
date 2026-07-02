@@ -414,7 +414,12 @@ export function installSandboxLockdown(): void {
 
   // setTimeout / setInterval can accept a string in some runtimes (the
   // string compiles to Function under the hood — a vector if our Function
-  // lock fails). Monkey-patch to require a callable first arg.
+  // lock fails). Monkey-patch to require a callable first arg. #11 P5-3 —
+  // ALSO track each timer per owning script (currentUserScriptId) so a leaked
+  // interval can't outlive its script (Finding-4). A one-shot untracks itself
+  // after firing (so repeated setTimeouts don't accumulate); intervals stay
+  // tracked until clear/teardown. Internal timers (no active user run → no
+  // scriptId) pass through untracked.
   const _setTimeout  = globalThis.setTimeout;
   const _setInterval = globalThis.setInterval;
   globalThis.setTimeout = ((cb: unknown, ms?: unknown, ...args: unknown[]): ReturnType<typeof setTimeout> => {
@@ -423,7 +428,15 @@ export function installSandboxLockdown(): void {
         'setTimeout requires a function callback (string form is not supported in the LumiScript sandbox)',
       );
     }
-    return _setTimeout(cb as (...a: unknown[]) => void, ms as number, ...(args as unknown[]));
+    const sid = currentUserScriptId();
+    if (sid === undefined) return _setTimeout(cb as (...a: unknown[]) => void, ms as number, ...(args as unknown[]));
+    let id: ReturnType<typeof setTimeout>;
+    id = _setTimeout((...cbArgs: unknown[]) => {
+      untrackAsyncfnTimer(sid, id); // fired → drop from the set (bounds repeated-setTimeout accumulation)
+      (cb as (...a: unknown[]) => void)(...cbArgs);
+    }, ms as number, ...(args as unknown[]));
+    trackAsyncfnTimer(sid, id);
+    return id;
   }) as typeof setTimeout;
   globalThis.setInterval = ((cb: unknown, ms?: unknown, ...args: unknown[]): ReturnType<typeof setInterval> => {
     if (typeof cb !== 'function') {
@@ -431,7 +444,10 @@ export function installSandboxLockdown(): void {
         'setInterval requires a function callback (string form is not supported in the LumiScript sandbox)',
       );
     }
-    return _setInterval(cb as (...a: unknown[]) => void, ms as number, ...(args as unknown[]));
+    const sid = currentUserScriptId();
+    const id = _setInterval(cb as (...a: unknown[]) => void, ms as number, ...(args as unknown[]));
+    if (sid !== undefined) trackAsyncfnTimer(sid, id); // intervals persist until clearInterval/teardown
+    return id;
   }) as typeof setInterval;
 }
 
@@ -1139,6 +1155,43 @@ function fireVmTimer(proc: SpindleBackendProcessContext, scriptId: string, timer
   }).finally(() => { if (oneShot) disposeVmHandler(scriptId, timerId); });
 }
 
+// ─── #11 P5-3: asyncfn user-timer tracking (the Finding-4 leak fix for the AsyncFunction engine) ──────
+//
+// The asyncfn engine runs user code in the child's own global scope, so a user setTimeout/setInterval
+// goes through the monkeypatched globalThis.setTimeout/setInterval (installSandboxLockdown). Pre-P5-3
+// those wrappers tracked NOTHING, so a leaked interval survived reload/disable and kept firing the old
+// closure (the exact field-test Finding-4). Track each user timer per-script + cancel them all on
+// unregister. Attribution = the run active when the timer is created, resolved from runIdContext (the
+// body-run ALS) via activeProxies. Timers created OUTSIDE a user run (LumiScript's own heartbeat /
+// raceWithTimeout) resolve to no scriptId → NOT tracked (correct — not user timers). Timers set inside a
+// handler-fire / broadcast handler (a synthetic runId not in activeProxies) also resolve to no scriptId
+// → not tracked (a documented minor gap; long-lived timers live in body/trigger runs, which ARE covered).
+// The quickjs half of this fix is clearAllTimersForScript above.
+const asyncfnTimerStore = new Map<string, Set<ReturnType<typeof setTimeout>>>();
+/** The scriptId of the user run currently executing (body/trigger run), or undefined outside one. */
+function currentUserScriptId(): string | undefined {
+  const runId = runIdContext.getStore();
+  return runId === undefined ? undefined : activeProxies.get(runId)?.scriptId;
+}
+function trackAsyncfnTimer(scriptId: string, id: ReturnType<typeof setTimeout>): void {
+  let set = asyncfnTimerStore.get(scriptId);
+  if (!set) { set = new Set(); asyncfnTimerStore.set(scriptId, set); }
+  set.add(id);
+}
+function untrackAsyncfnTimer(scriptId: string, id: ReturnType<typeof setTimeout>): void {
+  const set = asyncfnTimerStore.get(scriptId);
+  if (!set) return;
+  set.delete(id);
+  if (set.size === 0) asyncfnTimerStore.delete(scriptId);
+}
+/** Cancel every tracked asyncfn user timer for a script (teardown / reload / disable / delete). */
+function clearAllAsyncfnTimersForScript(scriptId: string): void {
+  const set = asyncfnTimerStore.get(scriptId);
+  if (!set) return;
+  for (const id of set) { clearTimeout(id); clearInterval(id); }
+  asyncfnTimerStore.delete(scriptId);
+}
+
 /**
  * Phase 9d.3 — drop all per-script state when a script is unregistered
  * (extension disable, script delete, etc.). Mirrors the existing
@@ -1163,6 +1216,9 @@ function handleScriptUnregister(msg: ScriptUnregisterMessage): void {
   // above swept the callback DUPS (via disposeScriptVmHandlers); this stops the armed Bun timers so a
   // leaked interval can't keep firing after disable/delete/reload — the quickjs half of the Finding-4 fix.
   clearAllTimersForScript(msg.scriptId);
+  // #11 P5-3 — the asyncfn half: cancel this script's tracked user setTimeout/setInterval. Together with
+  // clearAllTimersForScript this closes Finding-4 on BOTH engines (a leaked interval surviving a reload).
+  clearAllAsyncfnTimersForScript(msg.scriptId);
   // audit C8-03 + C8-04 — prune the per-script rate-limit buckets so they don't
   // accumulate one entry per ever-seen scriptId across the child's lifetime.
   consoleRateState.delete(msg.scriptId);
