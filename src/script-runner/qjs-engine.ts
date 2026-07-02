@@ -77,6 +77,10 @@ export interface QuickJSRunOptions {
    *  not handlerId/kind). The closure still lives in the VM registry (keyed by subId). */
   dispatchBroadcastSubscribe?: (subId: string, event: string) => void;
   dispatchBroadcastUnsubscribe?: (subId: string) => void;
+  /** generateStream — send the StreamRequest / StreamCancel IPC to the parent. The in-VM generator owns
+   *  the chunk queue (vmStreams); only these two envelopes cross to the host. */
+  dispatchStreamStart?: (requestId: string, method: string, args: unknown[], hasSignal: boolean) => void;
+  dispatchStreamCancel?: (requestId: string) => void;
   /** #11 list-methods parity — the run's sync-list snapshots, seeded into the VM so the 6
    *  declared-SYNC list reads (tools.list / macros.list / macros.listInterceptors /
    *  chat.getInjections / chat.listContentProcessors / worldInfo.listInterceptors) return arrays
@@ -136,6 +140,35 @@ globalThis.__lsBuildApi = function (hostDispatch) {
     return send('llm.generateStructured', dispatchArgs).then(function (parsed) {
       return zodSchema ? zodSchema.parse(parsed) : parsed;
     });
+  };
+  // api.llm.generateStream — an async generator that pulls host-pushed chunks. It is returned
+  // SYNCHRONOUSLY (no await before the return) so it can be stored on globalThis and iterated in a LATER
+  // run/handler. __lsStreamStart sends the request + returns the requestId; each __lsStreamPull settles
+  // with the next event (a JSON string) once a chunk/end arrives; the finally cancels the upstream on an
+  // early break. A user-supplied AbortSignal in options is not yet supported (a later phase); passing one
+  // fails loud at marshaling. Break the for-await (or let it finish) to end the stream.
+  var generateStream = function (args) {
+    var messages = args[0], options = args[1];
+    var wireArgs = (options !== undefined) ? [messages, options] : [messages];
+    var requestId = globalThis.__lsStreamStart(JSON.stringify(globalThis.__lsEncode(wireArgs)), false);
+    // Create + return the generator SYNCHRONOUSLY (the IIFE call returns the generator object, not a
+    // promise) so it is storable + iterable in a later run.
+    return (async function* () {
+      try {
+        while (true) {
+          var ev = JSON.parse(await globalThis.__lsStreamPull(requestId));
+          if (ev.end) return;
+          if (ev.error) {
+            var err = new Error((ev.error && ev.error.message) || 'stream error');
+            if (ev.error && ev.error.name) err.name = ev.error.name;
+            throw err;
+          }
+          yield globalThis.__lsDecode(ev.chunk);
+        }
+      } finally {
+        globalThis.__lsStreamCancel(requestId);
+      }
+    })();
   };
   var generateWithTools = function (args) {
     var messages = args[0], tools = args[1], options = args[2], schema = args[3];
@@ -642,6 +675,7 @@ globalThis.__lsBuildApi = function (hostDispatch) {
         if (path === 'chat.listContentProcessors') return __lsListSnap('chatContentProcessors');
         if (path === 'worldInfo.listInterceptors') return __lsListSnap('worldInfoInterceptors');
         if (path === 'llm.generateStructured') return generateStructured(a);
+        if (path === 'llm.generateStream') return generateStream(a);
         if (path === 'llm.generateWithTools') return generateWithTools(a);
         if (path === 'utils.template.compile') return templateCompile(a);
         if (path === 'utils.template.registerHelper') return templateRegisterHelper(a);
@@ -881,7 +915,7 @@ const VM_FLUSH_BOOTSTRAP = `
 // deep-frozen.) Eval'd LAST in createContext, after all scaffolding is built.
 const VM_FREEZE_BOOTSTRAP = `
 (function () {
-  var locked = ['__lsEncode', '__lsDecode', '__lsErrInfo', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', '__lsFetchAbort', 'fetch', 'Headers', 'Response', 'AbortController', 'AbortSignal', '__hostHandleDispatch', '__lsVmHandleProxy', '__hostRegisterHandler', '__hostUnregisterHandler', '__hostUnregisterHandlerNamed', '__hostRegisterComponentCallback', '__hostUnregisterComponentCallback', '__hostScheduleTimer', '__hostClearTimer', '__lsCallHandler', '__hostBroadcastSubscribe', '__hostBroadcastUnsubscribe', '__lsTrackChain', '__lsFlush', '__hostAllocElementId', '__hostRegisterWidget', '__hostDropWidget', '__hostRegisterModal', '__hostRegisterModalDismiss', '__hostUnregisterModalDismiss'];
+  var locked = ['__lsEncode', '__lsDecode', '__lsErrInfo', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', '__lsFetchAbort', 'fetch', 'Headers', 'Response', 'AbortController', 'AbortSignal', '__hostHandleDispatch', '__lsVmHandleProxy', '__hostRegisterHandler', '__hostUnregisterHandler', '__hostUnregisterHandlerNamed', '__hostRegisterComponentCallback', '__hostUnregisterComponentCallback', '__hostScheduleTimer', '__hostClearTimer', '__lsStreamStart', '__lsStreamPull', '__lsStreamCancel', '__lsCallHandler', '__hostBroadcastSubscribe', '__hostBroadcastUnsubscribe', '__lsTrackChain', '__lsFlush', '__hostAllocElementId', '__hostRegisterWidget', '__hostDropWidget', '__hostRegisterModal', '__hostRegisterModalDismiss', '__hostUnregisterModalDismiss'];
   for (var i = 0; i < locked.length; i++) {
     var name = locked[i];
     if (Object.prototype.hasOwnProperty.call(globalThis, name)) {
@@ -1236,6 +1270,8 @@ interface ActiveRun {
   /** P5 inc3b — broadcast subscribe/unsubscribe IPC (see QuickJSRunOptions). */
   dispatchBroadcastSubscribe?: (subId: string, event: string) => void;
   dispatchBroadcastUnsubscribe?: (subId: string) => void;
+  dispatchStreamStart?: (requestId: string, method: string, args: unknown[], hasSignal: boolean) => void;
+  dispatchStreamCancel?: (requestId: string) => void;
 }
 
 /**
@@ -1290,6 +1326,101 @@ interface VmFactoryRecord { scriptId: string; cell: QuickJSHandle }
 const vmWidgetOwner = new Map<string, VmFactoryRecord>(); // widgetId -> {scriptId, positionCache handle}
 const vmModalOwner = new Map<string, VmFactoryRecord>();  // modalId  -> {scriptId, dismissedRef handle}
 const vmModalListeners = new Map<string, Set<string>>(); // modalId -> onDismiss handlerIds
+
+// ─── api.llm.generateStream — in-VM stream state ─────────────────────────────
+//
+// A quickjs generateStream is an in-VM async generator that pulls host-pushed chunks. The chunk queue
+// lives HERE (host side, keyed by requestId), NOT in the VM and NOT on any run — so a stream opened in
+// one run survives that run's end and can be drained by a LATER run/handler (the queue is fed by the
+// child's stream routers regardless of which run, if any, is active). Each pull (__lsStreamPull) either
+// takes a queued event or parks a resolver in `waiters`; a chunk/end arrival wakes one waiter (settling
+// its in-VM promise) or enqueues. `queueCap` bounds an opened-but-never-drained stream (the queue can't
+// grow unbounded across runs); overflow ends the stream with an error + signals the caller to cancel the
+// upstream. Cells are reaped on drain / cancel / script teardown — NEVER at the opening run's end.
+type VmStreamEvent =
+  | { kind: 'chunk'; chunk: unknown }
+  | { kind: 'end'; ok: boolean; error?: { name: string; message: string } };
+interface VmStreamCell {
+  queue:   VmStreamEvent[];
+  waiters: Array<(ev: VmStreamEvent) => void>;
+  ended:   boolean;
+  scriptId: string;
+  queueCap: number;
+}
+const vmStreams = new Map<string, VmStreamCell>();
+/** scriptId → its open stream requestIds, for the teardown sweep (disposeScriptVmHandlers). */
+const vmStreamsByScript = new Map<string, Set<string>>();
+/** Bound on undrained queued events per stream (an opened-but-not-consumed stream can't grow forever,
+ *  especially cross-run). Module-level `let` for the test seam; a later increment threads the setting. */
+let streamQueueCap = 512;
+let vmStreamSeq = 0;
+
+/** True iff requestId is a quickjs (in-VM) stream — the child routers check this to feed vmStreams
+ *  instead of the asyncfn proxy broadcast. */
+export function hasVmStream(requestId: string): boolean { return vmStreams.has(requestId); }
+
+function openVmStream(requestId: string, scriptId: string): void {
+  vmStreams.set(requestId, { queue: [], waiters: [], ended: false, scriptId, queueCap: streamQueueCap });
+  let set = vmStreamsByScript.get(scriptId);
+  if (!set) { set = new Set(); vmStreamsByScript.set(scriptId, set); }
+  set.add(requestId);
+}
+/** Deliver an event to a parked waiter if one exists, else enqueue it. */
+function deliverVmStreamEvent(cell: VmStreamCell, ev: VmStreamEvent): void {
+  const w = cell.waiters.shift();
+  if (w) w(ev);
+  else cell.queue.push(ev);
+}
+/** Feed a chunk. Returns true if the undrained queue hit the cap — the caller (child router) should send
+ *  a StreamCancelRequest to stop the host upstream; the stream is ended with an overflow error. */
+export function pushVmStreamChunk(requestId: string, chunk: unknown): boolean {
+  const cell = vmStreams.get(requestId);
+  if (!cell || cell.ended) return false;
+  if (cell.waiters.length === 0 && cell.queue.length >= cell.queueCap) {
+    cell.ended = true;
+    deliverVmStreamEvent(cell, { kind: 'end', ok: false, error: { name: 'StreamOverflowError', message: `generateStream: ${cell.queueCap} chunks queued without being consumed — cancelling the stream (drain it faster, or store + iterate it sooner).` } });
+    return true;
+  }
+  deliverVmStreamEvent(cell, { kind: 'chunk', chunk });
+  return false;
+}
+/** Signal the terminal event (ok=true normal end, ok=false + error for a failure). */
+export function pushVmStreamEnd(requestId: string, ok: boolean, error?: { name: string; message: string }): void {
+  const cell = vmStreams.get(requestId);
+  if (!cell || cell.ended) return;
+  cell.ended = true;
+  deliverVmStreamEvent(cell, { kind: 'end', ok, error });
+}
+/** Drop a stream cell (the generator's finally / cancel / teardown). Wakes any parked waiter with a
+ *  synthetic closed-end so an in-flight pull can't hang. Returns the owning scriptId, or undefined. */
+function dropVmStream(requestId: string): string | undefined {
+  const cell = vmStreams.get(requestId);
+  if (!cell) return undefined;
+  vmStreams.delete(requestId);
+  vmStreamsByScript.get(cell.scriptId)?.delete(requestId);
+  const w = cell.waiters.shift();
+  if (w) w({ kind: 'end', ok: false, error: { name: 'StreamClosedError', message: 'stream closed' } });
+  return cell.scriptId;
+}
+
+/** Close every open stream a script owns (script unregister / disable / delete / reload). Wakes any
+ *  parked consumer with an aborted-end (so its generator's finally runs) and drops the cells. Returns the
+ *  requestIds so the caller can send a StreamCancelRequest per stream (stop the host's upstream). */
+export function sweepVmStreamsForScript(scriptId: string): string[] {
+  const set = vmStreamsByScript.get(scriptId);
+  if (!set) return [];
+  const requestIds = [...set];
+  for (const requestId of requestIds) {
+    const cell = vmStreams.get(requestId);
+    if (cell && !cell.ended) {
+      cell.ended = true;
+      deliverVmStreamEvent(cell, { kind: 'end', ok: false, error: { name: 'AbortError', message: 'script unregistered' } });
+    }
+    dropVmStream(requestId);
+  }
+  vmStreamsByScript.delete(scriptId);
+  return requestIds;
+}
 /** #11 P7-2 — the context model. 'shared' (default) = ONE process-global context backs every script
  *  (the P7-0/P7-1 behavior — runs serialize on one runChain). 'per-script' = each scriptId gets its
  *  OWN QuickJSContext (its own globalThis + zod/Handlebars/api bundle + runChain/activeRun/
@@ -1743,6 +1874,61 @@ async function createContext(): Promise<ScriptContext> {
   ctx.setProp(ctx.global, '__hostClearTimer', hostClearTimer);
   hostClearTimer.dispose();
 
+  // ── api.llm.generateStream — the three host functions the in-VM generator drives. Start opens a
+  // stream cell + sends the StreamRequest; pull returns a promise settled by the next queued/pushed event
+  // (chunk / end / error), marshaled into the VM as a JSON string the generator parses; cancel drops the
+  // cell + (if the stream had not ended) tells the host to tear down the upstream. Same deferred/pump
+  // idiom as __hostDispatch, so an in-VM `await __lsStreamPull()` never hangs. ──
+  const hostStreamStart = ctx.newFunction('__lsStreamStart', (argsJsonHandle, hasSignalHandle) => {
+    const run = sc.activeRun;
+    if (!run?.scriptId) return ctx.newString(''); // generateStream is called from user code — a run is active
+    const args = marshalDecode(JSON.parse(ctx.getString(argsJsonHandle))) as unknown[];
+    const hasSignal = ctx.dump(hasSignalHandle) === true;
+    const requestId = `vmstream:${run.scriptId}:${++vmStreamSeq}`;
+    openVmStream(requestId, run.scriptId);
+    run.dispatchStreamStart?.(requestId, 'llm.generateStream', args, hasSignal);
+    return ctx.newString(requestId);
+  });
+  ctx.setProp(ctx.global, '__lsStreamStart', hostStreamStart);
+  hostStreamStart.dispose();
+  const hostStreamPull = ctx.newFunction('__lsStreamPull', (requestIdHandle) => {
+    const requestId = ctx.getString(requestIdHandle);
+    const deferred = ctx.newPromise();
+    const settle = (ev: VmStreamEvent): void => {
+      let s: string;
+      try {
+        if (ev.kind === 'chunk') s = JSON.stringify({ chunk: marshalEncode(ev.chunk) });
+        else if (ev.ok) s = JSON.stringify({ end: true });
+        else s = JSON.stringify({ error: ev.error ?? { name: 'Error', message: 'stream error' } });
+      } catch {
+        s = JSON.stringify({ error: { name: 'QuickJSMarshalError', message: 'A stream chunk could not be marshaled to the QuickJS engine.' } });
+      }
+      ctx.newString(s).consume((h) => deferred.resolve(h));
+      pump();
+    };
+    const cell = vmStreams.get(requestId);
+    if (!cell) {
+      settle({ kind: 'end', ok: false, error: { name: 'StreamClosedError', message: 'stream not open' } });
+    } else {
+      const queued = cell.queue.shift();
+      if (queued) settle(queued);
+      else cell.waiters.push(settle); // parked; a later pushVmStream* / dropVmStream wakes it
+    }
+    void deferred.settled.then(pump);
+    return deferred.handle;
+  });
+  ctx.setProp(ctx.global, '__lsStreamPull', hostStreamPull);
+  hostStreamPull.dispose();
+  const hostStreamCancel = ctx.newFunction('__lsStreamCancel', (requestIdHandle) => {
+    const requestId = ctx.getString(requestIdHandle);
+    const cell = vmStreams.get(requestId);
+    const wasEnded = cell?.ended ?? true; // no cell or already ended → the host upstream is already gone
+    dropVmStream(requestId);
+    if (!wasEnded) sc.activeRun?.dispatchStreamCancel?.(requestId); // consumer broke early — stop the upstream
+  });
+  ctx.setProp(ctx.global, '__lsStreamCancel', hostStreamCancel);
+  hostStreamCancel.dispose();
+
   // ── P5 inc3c: macro/tool unregister BY NAME. macro/tool stores resolve by (scriptId,
   // name), NOT handlerId, so this sends a name-keyed unregister IPC (distinct from
   // __hostUnregisterHandler's handlerId-keyed one). The VM dup (pull-mode) is NOT disposed
@@ -2127,7 +2313,7 @@ export async function runUserScriptInQuickJS(opts: QuickJSRunOptions): Promise<u
 
   sc.currentDeadline = Date.now() + opts.timeoutMs;
   sc.lastUsedAt = Date.now(); // #11 P7-3 — a run/fire start counts as use (LRU recency; keeps a hot script's context fresh)
-  sc.activeRun = { dispatch: opts.dispatch, console: opts.console, serializeError: opts.serializeError, allowDangerous: opts.allowDangerous ?? false, hostFetch: opts.hostFetch, dispatchOnHandle: opts.dispatchOnHandle, scriptId: opts.script.id, dispatchRegisterHandler: opts.dispatchRegisterHandler, dispatchUnregisterHandler: opts.dispatchUnregisterHandler, dispatchUnregisterHandlerNamed: opts.dispatchUnregisterHandlerNamed, dispatchBroadcastSubscribe: opts.dispatchBroadcastSubscribe, dispatchBroadcastUnsubscribe: opts.dispatchBroadcastUnsubscribe };
+  sc.activeRun = { dispatch: opts.dispatch, console: opts.console, serializeError: opts.serializeError, allowDangerous: opts.allowDangerous ?? false, hostFetch: opts.hostFetch, dispatchOnHandle: opts.dispatchOnHandle, scriptId: opts.script.id, dispatchRegisterHandler: opts.dispatchRegisterHandler, dispatchUnregisterHandler: opts.dispatchUnregisterHandler, dispatchUnregisterHandlerNamed: opts.dispatchUnregisterHandlerNamed, dispatchBroadcastSubscribe: opts.dispatchBroadcastSubscribe, dispatchBroadcastUnsubscribe: opts.dispatchBroadcastUnsubscribe, dispatchStreamStart: opts.dispatchStreamStart, dispatchStreamCancel: opts.dispatchStreamCancel };
   const pump = () => ctx.runtime.executePendingJobs();
 
   // #11 fix (d) — a synchronous `while(true){}` blocks the host event loop, so
@@ -2553,6 +2739,8 @@ export interface QuickJSFireOptions {
   dispatchUnregisterHandlerNamed?: (kind: string, name: string) => void;
   dispatchBroadcastSubscribe?: (subId: string, event: string) => void;
   dispatchBroadcastUnsubscribe?: (subId: string) => void;
+  dispatchStreamStart?: (requestId: string, method: string, args: unknown[], hasSignal: boolean) => void;
+  dispatchStreamCancel?: (requestId: string) => void;
 }
 
 /**
@@ -2635,6 +2823,8 @@ export async function fireHandlerInQuickJS(opts: QuickJSFireOptions): Promise<un
     dispatchUnregisterHandlerNamed: opts.dispatchUnregisterHandlerNamed,
     dispatchBroadcastSubscribe: opts.dispatchBroadcastSubscribe,
     dispatchBroadcastUnsubscribe: opts.dispatchBroadcastUnsubscribe,
+    dispatchStreamStart: opts.dispatchStreamStart,
+    dispatchStreamCancel: opts.dispatchStreamCancel,
   };
   const pump = () => ctx.runtime.executePendingJobs();
   const timedOut = () => Date.now() > sc.currentDeadline;

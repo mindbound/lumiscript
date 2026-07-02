@@ -51,6 +51,8 @@ import type {
   FloatWidgetPositionNotice,
   StreamChunkMessage,
   StreamEndMessage,
+  StreamRequest,
+  StreamCancelRequest,
 } from '../types/script-runner-ipc.js';
 import type { ConsoleEntry, ConsoleEntryType } from '../types/script.js';
 import {
@@ -86,6 +88,10 @@ import {
   disposeContextForScript,
   disposeScriptVmBroadcast,
   disposeVmHandler,
+  hasVmStream,
+  pushVmStreamChunk,
+  pushVmStreamEnd,
+  sweepVmStreamsForScript,
   sweepIdleContexts,
   warmupQuickJS,
   // #11 observability — engine telemetry note* bumpers (counters live in qjs-engine.ts) +
@@ -868,6 +874,8 @@ function makeHandlerDispatchers(
   dispatchUnregisterHandlerNamed: (kind: string, name: string) => void;
   dispatchBroadcastSubscribe: (subId: string, event: string) => void;
   dispatchBroadcastUnsubscribe: (subId: string) => void;
+  dispatchStreamStart: (requestId: string, method: string, args: unknown[], hasSignal: boolean) => void;
+  dispatchStreamCancel: (requestId: string) => void;
 } {
   return {
     dispatchRegisterHandler: (kind, handlerId, meta) => {
@@ -900,6 +908,14 @@ function makeHandlerDispatchers(
     },
     dispatchBroadcastUnsubscribe: (subId) => {
       proc.send({ type: 'broadcast-unsubscribe', scriptId, subId } as BroadcastUnsubscribeMessage);
+    },
+    // generateStream — the in-VM generator owns the chunk queue (vmStreams); only the request + cancel
+    // envelopes cross to the host, carrying this run's runId/scriptId.
+    dispatchStreamStart: (requestId, method, args, hasSignal) => {
+      proc.send({ type: 'stream-request', requestId, runId, scriptId, method, args, hasSignal } as StreamRequest);
+    },
+    dispatchStreamCancel: (requestId) => {
+      proc.send({ type: 'stream-cancel', requestId } as StreamCancelRequest);
     },
   };
 }
@@ -1202,7 +1218,7 @@ function clearAllAsyncfnTimersForScript(scriptId: string): void {
  * Handlebars state, pending request maps, etc. — dropping them releases
  * memory accumulated across runs.
  */
-function handleScriptUnregister(msg: ScriptUnregisterMessage): void {
+function handleScriptUnregister(proc: SpindleBackendProcessContext, msg: ScriptUnregisterMessage): void {
   handlerClosures.delete(msg.scriptId);
   broadcastHandlers.delete(msg.scriptId);
   // #11 P5 — dispose this script's dup'd in-VM handler fn handles (quickjs engine).
@@ -1219,6 +1235,12 @@ function handleScriptUnregister(msg: ScriptUnregisterMessage): void {
   // #11 P5-3 — the asyncfn half: cancel this script's tracked user setTimeout/setInterval. Together with
   // clearAllTimersForScript this closes Finding-4 on BOTH engines (a leaked interval surviving a reload).
   clearAllAsyncfnTimersForScript(msg.scriptId);
+  // #11 P5-4 — close this script's open in-VM generateStream streams: the engine wakes any parked
+  // consumer with an aborted-end + drops the cells; we tell the host to tear down each upstream so a
+  // disable/delete/reload can't leak a stream cell + an in-flight generate request.
+  for (const requestId of sweepVmStreamsForScript(msg.scriptId)) {
+    proc.send({ type: 'stream-cancel', requestId } as StreamCancelRequest);
+  }
   // audit C8-03 + C8-04 — prune the per-script rate-limit buckets so they don't
   // accumulate one entry per ever-seen scriptId across the child's lifetime.
   consoleRateState.delete(msg.scriptId);
@@ -1399,12 +1421,25 @@ function routeApiResponse(msg: ApiProxyResponse): void {
  * `handleStreamChunk` / `handleStreamEnd` silently drops requestIds it
  * doesn't own; the right one wins.
  */
-function routeStreamChunk(msg: StreamChunkMessage): void {
+function routeStreamChunk(proc: SpindleBackendProcessContext, msg: StreamChunkMessage): void {
+  // A quickjs (in-VM) stream owns its chunk queue in the engine; feed it there and stop. If the undrained
+  // queue hit the cap, the engine ended the stream with an overflow error — tell the host to stop the
+  // upstream. Non-quickjs requestIds fall through to the asyncfn proxy broadcast unchanged.
+  if (hasVmStream(msg.requestId)) {
+    if (pushVmStreamChunk(msg.requestId, msg.chunk)) {
+      proc.send({ type: 'stream-cancel', requestId: msg.requestId } as StreamCancelRequest);
+    }
+    return;
+  }
   for (const entry of activeProxies.values()) {
     entry.proxy.handleStreamChunk(msg);
   }
 }
 function routeStreamEnd(msg: StreamEndMessage): void {
+  if (hasVmStream(msg.requestId)) {
+    pushVmStreamEnd(msg.requestId, msg.ok, msg.error);
+    return;
+  }
   for (const entry of activeProxies.values()) {
     entry.proxy.handleStreamEnd(msg);
   }
@@ -2127,7 +2162,7 @@ export default function (proc: SpindleBackendProcessContext): () => void {
         break;
 
       case 'stream-chunk':
-        routeStreamChunk(msg);
+        routeStreamChunk(proc, msg);
         break;
 
       case 'stream-end':
@@ -2150,7 +2185,7 @@ export default function (proc: SpindleBackendProcessContext): () => void {
         break;
 
       case 'script-unregister':
-        handleScriptUnregister(msg);
+        handleScriptUnregister(proc, msg);
         break;
 
       case 'script-state-sync':
