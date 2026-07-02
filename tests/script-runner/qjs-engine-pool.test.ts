@@ -297,4 +297,48 @@ describe('#11 audit follow-up: teardown DEFERS disposal of an in-use context (no
     expect(await runB).toBe('b');                        // B also completes on the live (deferred) context
     expect(_pendingContextCountForTests()).toBe(0);      // disposed once BOTH went idle
   });
+
+  test('a queued run that ARMS A TIMER on the deferred context does not orphan a handle (no WASM abort)', async () => {
+    _setContextModelForTests('per-script');
+    let unparkA: () => void = () => {};
+    const parkA = (): Promise<unknown> => new Promise((res) => { unparkA = () => res(undefined); });
+    const runA = runUserScriptInQuickJS(runOpts('td-reg', `await api.chat.getMessages(); return 'a';`, parkA));
+    await sleep(20);
+    // Run B parks at acquisition; on resume (AFTER disposeContextForScript's teardown sweep) it arms a timer,
+    // dup'ing a fresh VM handle into vmHandlerHandles that the initial sweep never saw. Without the
+    // maybeDisposePendingContext re-sweep this dup outlives ctx.dispose() → JS_FreeRuntime aborts the child.
+    const runB = runUserScriptInQuickJS(runOpts('td-reg', `setTimeout(() => {}, 100000); return 'b';`));
+    await sleep(20);
+    disposeContextForScript('td-reg', true);             // defers (A mid-run + B reserved)
+    expect(_pendingContextCountForTests()).toBe(1);
+    unparkA();
+    expect(await runA).toBe('a');
+    expect(await runB).toBe('b');                        // B ran + armed a timer on the deferred context
+    expect(_pendingContextCountForTests()).toBe(0);      // disposed — re-sweep dropped B's late dup, no abort
+    expect(_vmHandlerIdsForTests('td-reg')).toEqual([]); // HARD guard: the late timer dup was actually swept
+    const after = await runUserScriptInQuickJS(runOpts('td-reg-after', `return 6 * 7;`));
+    expect(after).toBe(42);                              // the WASM runtime survived
+    disposeContextForScript('td-reg-after', true);
+  });
+
+  test('a queued run that OPENS A STREAM on the deferred context does not orphan a live pull deferred (no WASM abort)', async () => {
+    _setContextModelForTests('per-script');
+    let unparkA: () => void = () => {};
+    const parkA = (): Promise<unknown> => new Promise((res) => { unparkA = () => res(undefined); });
+    const runA = runUserScriptInQuickJS(runOpts('td-strm', `await api.chat.getMessages(); return 'a';`, parkA));
+    await sleep(20);
+    // Run B opens a stream and parks a pull (a live in-VM deferred promise) on the deferred context — after
+    // the teardown sweep. The maybeDisposePendingContext re-sweep must settle that parked pull before dispose.
+    const runB = runUserScriptInQuickJS(runOpts('td-strm', `globalThis.__g = api.llm.generateStream([{ role: 'user', content: 'hi' }]); globalThis.__g.next().catch(() => {}); return 'b';`));
+    await sleep(20);
+    disposeContextForScript('td-strm', true);
+    expect(_pendingContextCountForTests()).toBe(1);
+    unparkA();
+    expect(await runA).toBe('a');
+    expect(await runB).toBe('b');
+    expect(_pendingContextCountForTests()).toBe(0);      // disposed — re-sweep settled B's parked pull, no abort
+    const after = await runUserScriptInQuickJS(runOpts('td-strm-after', `return 5 + 5;`));
+    expect(after).toBe(10);                              // the WASM runtime survived
+    disposeContextForScript('td-strm-after', true);
+  });
 });

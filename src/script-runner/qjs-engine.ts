@@ -141,25 +141,28 @@ globalThis.__lsBuildApi = function (hostDispatch) {
       return zodSchema ? zodSchema.parse(parsed) : parsed;
     });
   };
-  // api.llm.generateStream — an async generator that pulls host-pushed chunks. It is returned
-  // SYNCHRONOUSLY (no await before the return) so it can be stored on globalThis and iterated in a LATER
-  // run/handler. __lsStreamStart sends the request + returns the requestId; each __lsStreamPull settles
-  // with the next event (a JSON string) once a chunk/end arrives; the finally cancels the upstream on an
-  // early break. Break the for-await (or let it finish) to end the stream. A user-supplied AbortSignal in
-  // options is not yet supported here (a later phase). It does NOT fail at marshaling — a signal has no
-  // own-enumerable keys, so the encoder would quietly drop it and the stream would ignore it — so reject
-  // it up front with a clear error rather than silently diverging from the AsyncFunction engine (which
-  // honours the signal).
+  // api.llm.generateStream — an async generator that pulls host-pushed chunks. The generator object is
+  // returned SYNCHRONOUSLY (the IIFE returns the generator, not a promise) so it can be stored on globalThis
+  // and iterated in a LATER run/handler. The stream is opened LAZILY on the FIRST iteration (__lsStreamStart
+  // is inside the generator body), matching the AsyncFunction engine: a generator that is created but never
+  // iterated opens nothing — no leaked stream cell, no wasted upstream generation. Each __lsStreamPull
+  // settles with the next event (a JSON string) once a chunk/end arrives; the finally cancels the upstream
+  // on an early break. Break the for-await (or let it finish) to end the stream. A user-supplied AbortSignal
+  // in options is not yet supported here (a later phase). It does NOT fail at marshaling — a signal has no
+  // own-enumerable keys, so the encoder would quietly drop it and the stream would ignore it — so reject it
+  // up front with a clear error rather than silently diverging from the AsyncFunction engine (which honours
+  // the signal).
   var generateStream = function (args) {
     var messages = args[0], options = args[1];
     if (options && options.signal !== undefined) {
       throw new Error('api.llm.generateStream: AbortSignal is not yet supported in the QuickJS engine (a later phase). Break the for-await (or let it finish) to end the stream.');
     }
     var wireArgs = (options !== undefined) ? [messages, options] : [messages];
-    var requestId = globalThis.__lsStreamStart(JSON.stringify(globalThis.__lsEncode(wireArgs)), false);
-    // Create + return the generator SYNCHRONOUSLY (the IIFE call returns the generator object, not a
-    // promise) so it is storable + iterable in a later run.
     return (async function* () {
+      // Lazy open: the request goes out on the FIRST pull, not at creation. __lsStreamStart returns '' when
+      // no run is active (a generator iterated outside any run) — nothing to stream, so just end.
+      var requestId = globalThis.__lsStreamStart(JSON.stringify(globalThis.__lsEncode(wireArgs)), false);
+      if (!requestId) return;
       try {
         while (true) {
           var ev = JSON.parse(await globalThis.__lsStreamPull(requestId));
@@ -1933,7 +1936,11 @@ async function createContext(): Promise<ScriptContext> {
       pump();
     };
     const cell = vmStreams.get(requestId);
-    if (!cell) {
+    // Ownership: only the stream's OWNING script may pull it. The requestId is VM-supplied and its format
+    // (vmstream:<scriptId>:<seq>) is enumerable, so under the shared context model another script could try
+    // to drain a foreign stream's tokens — treat a missing OR non-owned cell as not-open. A same-script
+    // cross-run drain still passes (cell.scriptId === the draining run's scriptId).
+    if (!cell || cell.scriptId !== sc.activeRun?.scriptId) {
       settle({ kind: 'end', ok: false, error: { name: 'StreamClosedError', message: 'stream not open' } });
     } else {
       const queued = cell.queue.shift();
@@ -1948,7 +1955,10 @@ async function createContext(): Promise<ScriptContext> {
   const hostStreamCancel = ctx.newFunction('__lsStreamCancel', (requestIdHandle) => {
     const requestId = ctx.getString(requestIdHandle);
     const cell = vmStreams.get(requestId);
-    const wasEnded = cell?.ended ?? true; // no cell or already ended → the host upstream is already gone
+    // Ownership: only the owning script may cancel its stream (the requestId is VM-supplied + enumerable).
+    // A missing or non-owned cell is a no-op — a foreign script can't tear down another's stream/upstream.
+    if (!cell || cell.scriptId !== sc.activeRun?.scriptId) return;
+    const wasEnded = cell.ended; // owned cell; already-ended → the host upstream is already gone
     dropVmStream(requestId);
     if (!wasEnded) {
       engineCounters.streamsCancelled++; // consumer broke before the stream ended
@@ -2629,6 +2639,16 @@ function maybeDisposePendingContext(scriptId: string): void {
   if (!sc) return;
   if (isContextReserved(scriptId) || sc.activeRun !== undefined) return; // still in use — a later release retries
   pendingContextDisposal.delete(scriptId);
+  // Re-sweep before disposing. disposeContextForScript swept this script's handler dups + open streams at
+  // unregister, but a run/handler that executed on this deferred (still-alive) context AFTERWARD — a queued
+  // run resuming, or the holding run past an await — could have registered NEW handler/timer/component dups
+  // or opened NEW streams. Disposing the context with any of those live would leave a per-context handle
+  // outliving ctx.dispose() → JS_FreeRuntime aborts the whole WASM child. The context is idle here (no
+  // reservation, no activeRun) so this is safe; both calls are no-ops in the normal case (nothing
+  // re-registered). sweepVmStreamsForScript settles any parked pull (freeing its deferred) while the context
+  // is still alive.
+  disposeScriptVmHandlers(scriptId);
+  sweepVmStreamsForScript(scriptId);
   try { if (sc.ctx.alive) sc.ctx.dispose(); } catch { /* teardown */ }
 }
 

@@ -11,7 +11,10 @@
  */
 import { describe, test, expect } from 'bun:test';
 import { dispatchRunScript, unregisterScriptFromChild, __resetForTests } from '../../src/script-runner/host-dispatcher.js';
-import { _setEngineModeForTests, _asyncfnTimerCountForTests, _vmTimerCountForTests } from '../../src/script-runner/child-entry.js';
+import {
+  _setEngineModeForTests, _asyncfnTimerCountForTests, _vmTimerCountForTests,
+  _runInScriptContextForTests, _runInRunContextForTests,
+} from '../../src/script-runner/child-entry.js';
 import { on as busOn, emit as busEmit, clearAll as clearBroadcast } from '../../src/engine/broadcast-bus.js';
 import { setupE2E } from '../_infra/script-runner-fixture.js';
 import type { Script } from '../../src/types/script.js';
@@ -147,6 +150,46 @@ describe('asyncfn timer tracking untracks on clear (bounded set growth)', () => 
       expect(_asyncfnTimerCountForTests(sid)).toBe(1);   // still tracked
       unregisterScriptFromChild(sid, 'disable');         // teardown cancels it (and clears the set)
       expect(_asyncfnTimerCountForTests(sid)).toBe(0);
+    } finally {
+      childCleanup(); _setEngineModeForTests(undefined);
+    }
+  });
+
+  test('a detached continuation of an UNREGISTERED script cannot arm a fresh (leaking) timer — handler/ALS path', async () => {
+    __resetForTests();
+    _setEngineModeForTests('asyncfn');
+    const { childCleanup } = await setupE2E();
+    try {
+      const sid = 'asyncfn-detached-als';
+      // Register + arm a normal timer so attribution is proven live pre-unregister.
+      await dispatchRunScript(makeScript(sid, `setInterval(() => {}, 100000); return null;`), makeRequest());
+      expect(_asyncfnTimerCountForTests(sid)).toBe(1);
+      unregisterScriptFromChild(sid, 'disable');       // teardown cancels the interval + marks recentlyUnregistered
+      expect(_asyncfnTimerCountForTests(sid)).toBe(0);
+      // Now simulate a detached continuation of the torn-down script (its scriptId still resolvable via the
+      // executing ALS context) arming a fresh interval. It must be REFUSED — nothing would ever cancel it.
+      let fired = false;
+      _runInScriptContextForTests(sid, () => { setInterval(() => { fired = true; }, 5); });
+      expect(_asyncfnTimerCountForTests(sid)).toBe(0); // not tracked (refused)
+      await sleep(40);
+      expect(fired).toBe(false);                        // never armed — no post-teardown leak
+    } finally {
+      childCleanup(); _setEngineModeForTests(undefined);
+    }
+  });
+
+  test('a detached continuation of an orphaned body run (proxy already dropped) cannot arm a timer — runId path', async () => {
+    __resetForTests();
+    _setEngineModeForTests('asyncfn');
+    const { childCleanup } = await setupE2E();
+    try {
+      // No proxy is seeded for 'ghost-run', so the runId resolves to NO script — exactly the state after
+      // unregister dropped a body run's proxy while a detached async was still in flight. A truly internal
+      // timer (no runId at all) still passes through; this one must be refused.
+      let fired = false;
+      _runInRunContextForTests('ghost-run', () => { setInterval(() => { fired = true; }, 5); });
+      await sleep(40);
+      expect(fired).toBe(false); // refused — orphan runId never arms a leaking timer
     } finally {
       childCleanup(); _setEngineModeForTests(undefined);
     }

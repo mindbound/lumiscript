@@ -428,8 +428,14 @@ export function installSandboxLockdown(): void {
   // after firing (so repeated setTimeouts don't accumulate); intervals stay
   // tracked until clear/teardown. Internal timers (no active user run → no
   // scriptId) pass through untracked.
-  const _setTimeout  = globalThis.setTimeout;
-  const _setInterval = globalThis.setInterval;
+  const _setTimeout    = globalThis.setTimeout;
+  const _setInterval   = globalThis.setInterval;
+  const _clearTimeout  = globalThis.clearTimeout;
+  const _clearInterval = globalThis.clearInterval;
+  // A valid, already-cancelled timer id. Returned when the patches refuse to arm a timer for a script that
+  // was torn down while async work was still in flight (see recentlyUnregistered): the callback must never
+  // run, and an armed timer would leak — teardown already ran, so nothing is left to cancel it.
+  const deadTimer = (): ReturnType<typeof setTimeout> => { const t = _setTimeout(() => {}, 0); _clearTimeout(t); return t; };
   globalThis.setTimeout = ((cb: unknown, ms?: unknown, ...args: unknown[]): ReturnType<typeof setTimeout> => {
     if (typeof cb !== 'function') {
       throw new LumiScriptSecurityError(
@@ -437,7 +443,15 @@ export function installSandboxLockdown(): void {
       );
     }
     const sid = currentUserScriptId();
-    if (sid === undefined) return _setTimeout(cb as (...a: unknown[]) => void, ms as number, ...(args as unknown[]));
+    if (sid === undefined) {
+      // A live body run always has an activeProxies entry, so a runId in context that resolves to NO script
+      // means the owning run's script was unregistered while this async work was mid-flight — refuse, or the
+      // armed timer would leak. A genuinely internal timer (heartbeat, raceWithTimeout — no runId at all)
+      // still passes through untracked.
+      if (runIdContext.getStore() !== undefined) return deadTimer();
+      return _setTimeout(cb as (...a: unknown[]) => void, ms as number, ...(args as unknown[]));
+    }
+    if (recentlyUnregistered.has(sid)) return deadTimer(); // owner torn down mid-async (scriptId resolved via ALS)
     let id: ReturnType<typeof setTimeout>;
     id = _setTimeout((...cbArgs: unknown[]) => {
       untrackAsyncfnTimer(sid, id); // fired → drop from the set (bounds repeated-setTimeout accumulation)
@@ -454,7 +468,11 @@ export function installSandboxLockdown(): void {
       );
     }
     const sid = currentUserScriptId();
-    if (sid === undefined) return _setInterval(cb as (...a: unknown[]) => void, ms as number, ...(args as unknown[]));
+    if (sid === undefined) {
+      if (runIdContext.getStore() !== undefined) return deadTimer(); // owning body run's script was unregistered
+      return _setInterval(cb as (...a: unknown[]) => void, ms as number, ...(args as unknown[]));
+    }
+    if (recentlyUnregistered.has(sid)) return deadTimer();
     // Run each tick under the owning scriptId so a timer the callback arms is attributed + cancelled on teardown.
     const id = _setInterval(
       (...cbArgs: unknown[]) => currentScriptIdContext.run(sid, () => (cb as (...a: unknown[]) => void)(...cbArgs)),
@@ -468,8 +486,6 @@ export function installSandboxLockdown(): void {
   // only a one-shot FIRE untracks — so a script that repeatedly creates+clears timers accumulates dead
   // ids until it is unregistered. Untrack is attributed to the clearing run (mirroring creation); the
   // native clear always runs first so clearing works even outside a user run.
-  const _clearTimeout  = globalThis.clearTimeout;
-  const _clearInterval = globalThis.clearInterval;
   globalThis.clearTimeout = ((id?: unknown): void => {
     _clearTimeout(id as Parameters<typeof clearTimeout>[0]);
     const sid = currentUserScriptId();
@@ -504,6 +520,25 @@ interface ActiveProxyEntry {
   proxy:    ProxyHandle;
 }
 const activeProxies = new Map<string, ActiveProxyEntry>();
+
+/**
+ * Secondary index: scriptId → its most-recent proxy entry (last run wins). The `fire*` paths only need
+ * ANY live proxy for a script (they share a scriptId; the runId is overridden per-fire), so an O(1) lookup
+ * here replaces an O(n) scan of `activeProxies` on every handler / broadcast / timer / modal-dismiss fire.
+ * Kept in lockstep with `activeProxies`: set on each run start, dropped when the script is unregistered
+ * (which drops ALL of that script's proxies at once, so a single delete suffices).
+ */
+const proxyByScriptId = new Map<string, ActiveProxyEntry>();
+
+/**
+ * Scripts unregistered (disable / delete / master-toggle-off) while async work may still be in flight.
+ * A detached continuation of an already-torn-down script can still reach the patched setTimeout/setInterval
+ * — its scriptId stays resolvable through the executing AsyncLocalStorage context — and arming a timer there
+ * would leak: teardown already cancelled the script's timers, so nothing is left to cancel a new one. The
+ * timer patches refuse to arm for a scriptId in this set. Cleared when the script next starts a run
+ * (re-registration), so a disable→enable cycle resumes arming timers normally.
+ */
+const recentlyUnregistered = new Set<string>();
 
 /**
  * Phase 6: broadcast handler closures, scoped per-script (NOT per-run).
@@ -709,10 +744,7 @@ function fireVmModalDismiss(proc: SpindleBackendProcessContext, msg: AdvancedMod
   // notifyVmModalDismissed already removed the owner/listener membership (synchronous fires-once), so
   // dropVmModal must dispose the dups by the captured scriptId + handlerIds (the maps are now empty).
   if (handlerIds.length === 0) { dropVmModal(msg.modalId, scriptId, handlerIds); return; }
-  let proxy: ProxyHandle | undefined;
-  for (const entry of activeProxies.values()) {
-    if (entry.scriptId === scriptId) { proxy = entry.proxy; break; }
-  }
+  const proxy = proxyByScriptId.get(scriptId)?.proxy;
   if (!proxy) { dropVmModal(msg.modalId, scriptId, handlerIds); return; } // no proxy — can't fire; still drop the dups
   const theProxy = proxy;
   proc.heartbeat();
@@ -972,10 +1004,7 @@ async function fireVmHandler(
   // A persisted proxy for this script provides dispatch/dispatchOnHandle. Proxies are
   // kept across runs for fires (see runOne's activeProxies note); any one for this
   // script works — they share scriptId and the runId is overridden per-fire.
-  let proxy: ProxyHandle | undefined;
-  for (const entry of activeProxies.values()) {
-    if (entry.scriptId === req.scriptId) { proxy = entry.proxy; break; }
-  }
+  const proxy = proxyByScriptId.get(req.scriptId)?.proxy;
 
   proc.heartbeat();
   let value: unknown = undefined;
@@ -1071,10 +1100,7 @@ async function fireVmHandler(
  * broadcast handler are rare; their IPC runId is synthetic (no originating run here).
  */
 function fireVmBroadcast(proc: SpindleBackendProcessContext, msg: BroadcastFireMessage): void {
-  let proxy: ProxyHandle | undefined;
-  for (const entry of activeProxies.values()) {
-    if (entry.scriptId === msg.scriptId) { proxy = entry.proxy; break; }
-  }
+  const proxy = proxyByScriptId.get(msg.scriptId)?.proxy;
   if (!proxy) return; // no proxy for the script — drop (like the broadcastHandlers miss)
   const theProxy = proxy;
   proc.heartbeat();
@@ -1171,10 +1197,7 @@ function clearAllTimersForScript(scriptId: string): void {
  * linger in vmHandlerHandles (pinning the context) until teardown.
  */
 function fireVmTimer(proc: SpindleBackendProcessContext, scriptId: string, timerId: string, oneShot: boolean): void {
-  let proxy: ProxyHandle | undefined;
-  for (const entry of activeProxies.values()) {
-    if (entry.scriptId === scriptId) { proxy = entry.proxy; break; }
-  }
+  const proxy = proxyByScriptId.get(scriptId)?.proxy;
   if (!proxy) { if (oneShot) disposeVmHandler(scriptId, timerId); return; } // torn down between arm + fire
   const theProxy = proxy;
   proc.heartbeat();
@@ -1303,6 +1326,11 @@ function handleScriptUnregister(proc: SpindleBackendProcessContext, msg: ScriptU
       activeProxies.delete(runId);
     }
   }
+  proxyByScriptId.delete(msg.scriptId); // all of this script's proxies just went, so drop its index entry
+  // Mark the script recently-unregistered so a detached async continuation (from an already-running body or
+  // handler) can't arm a fresh timer that would outlive it — its timers were just cancelled above and there
+  // is nothing left to cancel a new one. A subsequent run for this scriptId clears the mark.
+  recentlyUnregistered.add(msg.scriptId);
   // Phase 9f-1 — drop module-scope per-script state in api-proxy
   // (advancedModalState, floatWidgetState, domStableIdToElementId).
   // Without this, those tables would accumulate entries across the
@@ -1590,7 +1618,11 @@ async function runOne(
     chatContentProcessorsSnapshot: req.chatContentProcessorsSnapshot ?? [],
     worldInfoInterceptorsSnapshot: req.worldInfoInterceptorsSnapshot ?? [],
   });
-  activeProxies.set(req.runId, { scriptId: req.scriptId, proxy });
+  const proxyEntry: ActiveProxyEntry = { scriptId: req.scriptId, proxy };
+  activeProxies.set(req.runId, proxyEntry);
+  proxyByScriptId.set(req.scriptId, proxyEntry); // last-run-wins index for the O(1) fire lookups
+  // This run re-registers the script, so a prior disable/delete no longer applies — resume arming its timers.
+  recentlyUnregistered.delete(req.scriptId);
 
   try {
     // Phase 9a sandbox: `api` + `data` + `script` + `__console`.
@@ -2095,12 +2127,16 @@ export function _setActiveProxyForTests(runId: string, scriptId: string): void {
     handleStreamEnd:   () => {},
     cleanup:           () => {},
   } as unknown as ProxyHandle;
-  activeProxies.set(runId, { scriptId, proxy: stubProxy });
+  const entry: ActiveProxyEntry = { scriptId, proxy: stubProxy };
+  activeProxies.set(runId, entry);
+  proxyByScriptId.set(scriptId, entry); // keep the fire-lookup index in lockstep with activeProxies
 }
 
 /** @internal Test seam — clear all activeProxies entries. */
 export function _clearActiveProxiesForTests(): void {
   activeProxies.clear();
+  proxyByScriptId.clear();
+  recentlyUnregistered.clear();
 }
 
 /**
@@ -2123,6 +2159,20 @@ export function _activeProxyCountForTests(): number {
  *  measurement: a create+clear cycle must return to 0, not accumulate). */
 export function _asyncfnTimerCountForTests(scriptId: string): number {
   return asyncfnTimerStore.get(scriptId)?.size ?? 0;
+}
+
+/** @internal Test seam — run `fn` inside a script's handler-fire AsyncLocalStorage context, so the patched
+ *  timers attribute to it. Exercises the post-unregister timer-refuse guard for the handler/timer-callback
+ *  path (scriptId resolved via ALS) without a full detached-async e2e. */
+export function _runInScriptContextForTests<T>(scriptId: string, fn: () => T): T {
+  return currentScriptIdContext.run(scriptId, fn);
+}
+
+/** @internal Test seam — run `fn` inside a body-run runId ALS context. With no matching activeProxies entry
+ *  this reproduces an orphaned body run (its proxy dropped on unregister while a detached async is pending),
+ *  exercising the orphan-runId timer-refuse guard. */
+export function _runInRunContextForTests<T>(runId: string, fn: () => T): T {
+  return runIdContext.run(runId, fn);
 }
 
 /** @internal Test seam — how many quickjs in-VM user timers are currently armed for a script (the

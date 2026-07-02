@@ -746,6 +746,11 @@ export class TriggerRegistry {
       // (the script is going away; the deferred reload is moot).
       this.pendingReload.delete(scriptId);
       this.clearPendingReloadPoll(scriptId);
+      // The script is going away, so a deferred engine-switch state-wipe queued
+      // for it is moot too — drop it, else a stale entry could fire against a
+      // later re-registration of the same id. Its poll timer (shared with the
+      // pending-reload poll) was just cleared above.
+      this.pendingEngineSwitchWipe.delete(scriptId);
     }
   }
 
@@ -794,6 +799,9 @@ export class TriggerRegistry {
       this.pendingReload.clear();
       for (const t of this.pendingReloadPollTimers.values()) clearInterval(t);
       this.pendingReloadPollTimers.clear();
+      // Drop any deferred engine-switch state-wipes too (their poll timers live
+      // in the pending-reload timer map cleared just above).
+      this.pendingEngineSwitchWipe.clear();
     }
   }
 

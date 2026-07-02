@@ -212,4 +212,38 @@ describe('TriggerRegistry.fireEngineSwitchWipe', () => {
     await h.registry.fireEngineSwitchWipe(h.seeded); // must not throw
     expect(h.callOrder).toEqual([]);                 // no runner; partial wipe has no recorder
   });
+
+  test('unregister CLEARS a queued wipe — no stale wipe fires when the in-flight run later drains', async () => {
+    const h = await setupWipeHarness();
+    await h.registry.register(h.seeded);
+    const onMock = (globalThis as unknown as {
+      spindle: { on: { mock: { calls: unknown[][] } } };
+    }).spindle.on;
+    const handler = onMock.mock.calls.slice(-1)[0]![1] as (p: unknown) => Promise<void>;
+
+    const runP = handler({ messageId: 'm1' });
+    await Promise.resolve();
+    expect(h.callOrder).toEqual(['runner']);         // real run in flight
+
+    await h.registry.fireEngineSwitchWipe(h.seeded); // in-flight → queued (deferred)
+    expect(h.callOrder).toEqual(['runner']);
+
+    // Teardown WHILE the wipe is queued + the run in flight. The script stays ENABLED in storage (as on a
+    // master-toggle-off / rebuild teardown), so the run-completion drain's enabled guard would NOT stop a
+    // stale wipe — only clearing the queued-wipe set does.
+    h.registry.unregister(h.seeded.id, { clearLifecycleSubs: true });
+
+    // Drain the in-flight run. runningCounts hits 0 before the drain, so a surviving queued wipe WOULD fire
+    // here (the script is still enabled) — the cleared set is what keeps it from happening.
+    h.unblockRun();
+    await runP;
+    await Promise.resolve();
+    await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(h.callOrder).toEqual(['runner']);         // NO stale 'wipe'
+
+    // And the idle poll must not deliver one later either.
+    await new Promise((r) => setTimeout(r, 1_200));
+    expect(h.callOrder).toEqual(['runner']);
+  });
 });

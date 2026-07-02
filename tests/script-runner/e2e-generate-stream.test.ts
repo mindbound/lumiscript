@@ -151,8 +151,9 @@ describe('e2e generateStream (real host↔child stream IPC)', () => {
       spindle.generate.rawStream.mockImplementation(() => (async function* () { yield { token: 'x' }; })());
       const res = await dispatchRunScript(
         // The timer fire's runId is synthetic (never registered host-side); opening a stream from it would
-        // hit the host late-request path and fail unless the request carries runIdSource=latest.
-        makeScript('e2e-strm-fire', `setTimeout(() => { api.llm.generateStream([{ role: 'user', content: 'hi' }]); }, 10); return 'scheduled';`),
+        // hit the host late-request path and fail unless the request carries runIdSource=latest. The stream
+        // opens LAZILY on first iteration, so the fire calls .next() to actually send the stream-request.
+        makeScript('e2e-strm-fire', `setTimeout(() => { const g = api.llm.generateStream([{ role: 'user', content: 'hi' }]); g.next(); }, 10); return 'scheduled';`),
         makeRequest(),
       );
       expect(res.value).toBe('scheduled');

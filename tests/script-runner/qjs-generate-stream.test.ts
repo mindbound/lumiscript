@@ -114,28 +114,45 @@ describe('QuickJS generateStream', () => {
     disposeContextForScript('strm-err', true);
   });
 
-  test('CROSS-RUN: a stream opened in one run is drained in a LATER run (incl. chunks queued between)', async () => {
+  test('CROSS-RUN: a stream STORED in one run opens + drains in a LATER run (lazy open)', async () => {
     _setContextModelForTests('per-script');
     let rid: string | undefined;
-    // Run A: open the stream + store the generator on globalThis; return without consuming.
+    // Run A: create + store the generator, don't iterate. Lazy open → NOTHING opens yet (nothing leaks if
+    // the stored generator is never drained).
     await runUserScriptInQuickJS(streamOpts({
       scriptId: 'strm-crossrun',
-      code: `globalThis.__stored = api.llm.generateStream([{ role: 'user', content: 'hi' }]); return 'opened';`,
+      code: `globalThis.__stored = api.llm.generateStream([{ role: 'user', content: 'hi' }]); return 'stored';`,
       dispatchStreamStart: (requestId: string) => { rid = requestId; },
     }));
-    expect(hasVmStream(rid!)).toBe(true); // survives run A's end (the cell is module-scoped, not per-run)
-    // Feed chunks + end while NO run is active — they queue in the cell.
-    pushVmStreamChunk(rid!, { token: 'x' });
-    pushVmStreamChunk(rid!, { token: 'y' });
-    pushVmStreamEnd(rid!, true);
-    // Run B (same script → same context/globalThis): retrieve the stored generator + drain it.
+    expect(rid).toBeUndefined(); // lazy: no open, no dispatch in run A
+    // Run B (same script → same context/globalThis): drain the stored generator. The stream OPENS on the
+    // first pull here; its dispatchStreamStart feeds the chunks synchronously into the fresh cell.
     const out = await runUserScriptInQuickJS(streamOpts({
       scriptId: 'strm-crossrun',
       code: `const out = []; for await (const c of globalThis.__stored) { out.push(c.token); } return out;`,
+      dispatchStreamStart: (requestId: string) => {
+        rid = requestId;
+        pushVmStreamChunk(requestId, { token: 'x' });
+        pushVmStreamChunk(requestId, { token: 'y' });
+        pushVmStreamEnd(requestId, true);
+      },
     }));
-    expect(out).toEqual(['x', 'y']); // drained in run B, including the between-runs backlog
+    expect(out).toEqual(['x', 'y']);       // drained in run B
     expect(hasVmStream(rid!)).toBe(false); // reaped on drain
     disposeScriptVmHandlers('strm-crossrun'); disposeContextForScript('strm-crossrun', true);
+  });
+
+  test('a created-but-never-iterated generateStream opens NOTHING (lazy — no leaked cell, no wasted upstream)', async () => {
+    _setContextModelForTests('per-script');
+    let opened = false;
+    const r = await runUserScriptInQuickJS(streamOpts({
+      scriptId: 'strm-noiter',
+      code: `const g = api.llm.generateStream([{ role: 'user', content: 'hi' }]); return 'created';`, // never iterated
+      dispatchStreamStart: () => { opened = true; },
+    }));
+    expect(r).toBe('created');
+    expect(opened).toBe(false); // lazy: no __lsStreamStart → no cell, no upstream generation dispatched
+    disposeContextForScript('strm-noiter', true);
   });
 
   test('script teardown closes an open (never-drained) stream + returns its requestId for the host cancel', async () => {
@@ -143,7 +160,9 @@ describe('QuickJS generateStream', () => {
     let rid: string | undefined;
     await runUserScriptInQuickJS(streamOpts({
       scriptId: 'strm-teardown',
-      code: `globalThis.__s = api.llm.generateStream([{ role: 'user', content: 'hi' }]); return null;`,
+      // Lazy open: iterate once (.next()) to actually open the stream; the pull parks (nothing pushed) so it
+      // stays open + never-drained past the run's end.
+      code: `globalThis.__s = api.llm.generateStream([{ role: 'user', content: 'hi' }]); globalThis.__s.next().catch(() => {}); return null;`,
       dispatchStreamStart: (requestId: string) => { rid = requestId; },
     }));
     expect(hasVmStream(rid!)).toBe(true);
@@ -159,7 +178,8 @@ describe('QuickJS generateStream', () => {
     let rid: string | undefined;
     await runUserScriptInQuickJS(streamOpts({
       scriptId: 'strm-pin',
-      code: `globalThis.__s = api.llm.generateStream([{ role: 'user', content: 'hi' }]); return null;`,
+      // Lazy open: iterate once (.next()) to actually open the stream.
+      code: `globalThis.__s = api.llm.generateStream([{ role: 'user', content: 'hi' }]); globalThis.__s.next().catch(() => {}); return null;`,
       dispatchStreamStart: (requestId: string) => { rid = requestId; },
     }));
     expect(hasVmStream(rid!)).toBe(true);
@@ -175,9 +195,13 @@ describe('QuickJS generateStream', () => {
     let rid: string | undefined;
     await runUserScriptInQuickJS(streamOpts({
       scriptId: 'strm-cap',
-      code: `globalThis.__s = api.llm.generateStream([{ role: 'user', content: 'hi' }]); return null;`,
+      // Lazy open: iterate once (.next()) to open the stream; that parks a single pull.
+      code: `globalThis.__s = api.llm.generateStream([{ role: 'user', content: 'hi' }]); globalThis.__s.next().catch(() => {}); return null;`,
       dispatchStreamStart: (requestId: string) => { rid = requestId; },
     }));
+    // The first push satisfies the parked pull (primes the generator, consumed by the priming .next()); after
+    // that the cell has no waiter, so further pushes queue against the cap.
+    expect(pushVmStreamChunk(rid!, 0)).toBe(false); // primes the parked pull
     expect(pushVmStreamChunk(rid!, 1)).toBe(false);
     expect(pushVmStreamChunk(rid!, 2)).toBe(false);
     expect(pushVmStreamChunk(rid!, 3)).toBe(false);
@@ -186,7 +210,7 @@ describe('QuickJS generateStream', () => {
       scriptId: 'strm-cap',
       code: `const out = []; try { for await (const c of globalThis.__s) out.push(c); return { out, err: 'none' }; } catch (e) { return { out, err: e.name }; }`,
     })) as { out: number[]; err: string };
-    expect(drained.out).toEqual([1, 2, 3]);        // the queued chunks still deliver
+    expect(drained.out).toEqual([1, 2, 3]);        // the queued chunks still deliver (chunk 0 primed the .next())
     expect(drained.err).toBe('StreamOverflowError'); // then the overflow error terminates the stream
     disposeScriptVmHandlers('strm-cap'); disposeContextForScript('strm-cap', true);
   });
@@ -224,5 +248,31 @@ describe('QuickJS generateStream', () => {
     }));
     expect(String(r)).toContain('AbortSignal is not yet supported'); // loud error, not a silent no-op divergence from asyncfn
     disposeContextForScript('strm-signal', true);
+  });
+
+  test('one script CANNOT pull or cancel another script\'s stream (ownership check blocks cross-script access)', async () => {
+    // Shared context model (the default): every script shares one VM globalThis carrying the __lsStream*
+    // host fns, and requestIds (vmstream:<scriptId>:<seq>) are enumerable — so without an owner check a
+    // second script could drain or tear down a foreign stream.
+    let ridA: string | undefined;
+    await runUserScriptInQuickJS(streamOpts({
+      scriptId: 'owner-A',
+      // Lazy open: iterate once (.next()) to open A's stream (parks a single pull).
+      code: `globalThis.__a = api.llm.generateStream([{ role: 'user', content: 'hi' }]); globalThis.__a.next().catch(() => {}); return null;`,
+      dispatchStreamStart: (requestId: string) => { ridA = requestId; },
+    }));
+    expect(hasVmStream(ridA!)).toBe(true);
+    pushVmStreamChunk(ridA!, { prime: 1 });          // satisfies A's parked pull (consumed by A's own .next())
+    pushVmStreamChunk(ridA!, { secret: 'A-token' }); // now genuinely QUEUED in A's cell, with no waiter
+    // Attacker B (same shared VM) tries to cancel + pull A's stream by its enumerable requestId.
+    const bGot = await runUserScriptInQuickJS(streamOpts({
+      scriptId: 'attacker-B',
+      code: `globalThis.__lsStreamCancel(${JSON.stringify(ridA)}); return JSON.parse(await globalThis.__lsStreamPull(${JSON.stringify(ridA)}));`,
+    })) as { error?: { name?: string } };
+    expect(hasVmStream(ridA!)).toBe(true);                   // B's cancel was a NO-OP — A's stream survives
+    expect(bGot.error?.name).toBe('StreamClosedError');      // B's pull is refused, not fed A's chunk
+    expect(JSON.stringify(bGot)).not.toContain('A-token');   // no cross-script exfiltration
+    disposeScriptVmHandlers('attacker-B'); disposeContextForScript('attacker-B', true);
+    sweepVmStreamsForScript('owner-A'); disposeScriptVmHandlers('owner-A'); disposeContextForScript('owner-A', true);
   });
 });
