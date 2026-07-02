@@ -190,4 +190,39 @@ describe('QuickJS generateStream', () => {
     expect(drained.err).toBe('StreamOverflowError'); // then the overflow error terminates the stream
     disposeScriptVmHandlers('strm-cap'); disposeContextForScript('strm-cap', true);
   });
+
+  test('teardown of a PARKED pull is abort-safe: the sweep settles the deferred BEFORE the context is disposed', async () => {
+    _setContextModelForTests('per-script');
+    let rid: string | undefined;
+    // Park a pull WITHOUT delivering a chunk: create the generator + call .next() (runs it to the awaited
+    // __lsStreamPull, which parks a live in-VM deferred), then return. dispatchStreamStart pushes nothing,
+    // so the pull stays parked past the run's end.
+    await runUserScriptInQuickJS(streamOpts({
+      scriptId: 'strm-parked',
+      code: `globalThis.__g = api.llm.generateStream([{ role: 'user', content: 'hi' }]); globalThis.__p = globalThis.__g.next(); return 'parked';`,
+      dispatchStreamStart: (requestId: string) => { rid = requestId; },
+    }));
+    expect(hasVmStream(rid!)).toBe(true);
+    // handleScriptUnregister's order: sweep (settles the parked pull's deferred + drops the cell) BEFORE
+    // disposing the context. Disposing a context that still holds a live UNSETTLED stream promise aborts
+    // the WASM runtime — this asserts the safe order does not.
+    sweepVmStreamsForScript('strm-parked');
+    expect(hasVmStream(rid!)).toBe(false);
+    disposeScriptVmHandlers('strm-parked');
+    disposeContextForScript('strm-parked', true); // must NOT abort
+    // The runtime survived: a fresh run still executes.
+    const after = await runUserScriptInQuickJS(streamOpts({ scriptId: 'strm-after', code: `return 6 * 7;` }));
+    expect(after).toBe(42);
+    disposeContextForScript('strm-after', true);
+  });
+
+  test('a user-supplied AbortSignal is rejected up front (not yet supported on this engine), not silently dropped', async () => {
+    _setContextModelForTests('per-script');
+    const r = await runUserScriptInQuickJS(streamOpts({
+      scriptId: 'strm-signal',
+      code: `try { api.llm.generateStream([{ role: 'user', content: 'hi' }], { signal: {} }); return 'NO-THROW'; } catch (e) { return e.message; }`,
+    }));
+    expect(String(r)).toContain('AbortSignal is not yet supported'); // loud error, not a silent no-op divergence from asyncfn
+    disposeContextForScript('strm-signal', true);
+  });
 });

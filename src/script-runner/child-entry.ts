@@ -1248,26 +1248,29 @@ function clearAllAsyncfnTimersForScript(scriptId: string): void {
 function handleScriptUnregister(proc: SpindleBackendProcessContext, msg: ScriptUnregisterMessage): void {
   handlerClosures.delete(msg.scriptId);
   broadcastHandlers.delete(msg.scriptId);
-  // #11 P5 — dispose this script's dup'd in-VM handler fn handles (quickjs engine).
-  // #11 P7-2 — under contextModel='per-script', ALSO dispose the script's whole
-  // QuickJSContext, UNLESS this is a reload (reason='reload' keeps the context so
-  // globalThis + module captures survive — see ScriptUnregisterMessage.reason). The
-  // default (disable / delete / omitted reason) disposes it, preventing an unbounded
-  // context leak across create/delete churn. No-op beyond the handle sweep under 'shared'.
-  disposeContextForScript(msg.scriptId, msg.reason !== 'reload');
-  // #11 P5-2 — cancel this script's child-side Bun timers (setTimeout/setInterval). disposeContextForScript
-  // above swept the callback DUPS (via disposeScriptVmHandlers); this stops the armed Bun timers so a
-  // leaked interval can't keep firing after disable/delete/reload — the quickjs half of the Finding-4 fix.
-  clearAllTimersForScript(msg.scriptId);
-  // #11 P5-3 — the asyncfn half: cancel this script's tracked user setTimeout/setInterval. Together with
-  // clearAllTimersForScript this closes Finding-4 on BOTH engines (a leaked interval surviving a reload).
-  clearAllAsyncfnTimersForScript(msg.scriptId);
-  // #11 P5-4 — close this script's open in-VM generateStream streams: the engine wakes any parked
-  // consumer with an aborted-end + drops the cells; we tell the host to tear down each upstream so a
-  // disable/delete/reload can't leak a stream cell + an in-flight generate request.
+  // Close this script's open in-VM generateStream streams FIRST, while its QuickJS context is still alive.
+  // Sweeping wakes any parked stream consumer (which settles that pull's in-VM promise) and drops the
+  // cells; we tell the host to tear down each upstream generate. This MUST precede disposeContextForScript:
+  // a parked pull holds a live, unsettled promise INSIDE the context, and disposing a context that still
+  // holds one aborts the whole WASM runtime. (Handler and timer callback dups ARE swept by
+  // disposeContextForScript itself, but stream cells live outside that map, so they need this explicit
+  // pre-dispose sweep.) Only the per-script context model actually disposes, but the ordering is harmless
+  // under the shared model too.
   for (const requestId of sweepVmStreamsForScript(msg.scriptId)) {
     proc.send({ type: 'stream-cancel', requestId } as StreamCancelRequest);
   }
+  // Dispose this script's dup'd in-VM handler fn handles, and — under contextModel='per-script' — the
+  // whole QuickJSContext, UNLESS this is a reload (reason='reload' keeps the context so globalThis +
+  // module captures survive; see ScriptUnregisterMessage.reason). The default (disable / delete / omitted
+  // reason) disposes it, preventing an unbounded context leak across create/delete churn. No-op beyond the
+  // handle sweep under 'shared'.
+  disposeContextForScript(msg.scriptId, msg.reason !== 'reload');
+  // Cancel this script's child-side Bun timers (setTimeout/setInterval) on both engines, so a leaked
+  // interval can't keep firing after disable/delete/reload. clearAllTimersForScript stops the quickjs VM
+  // timers (their callback dups were already swept above); clearAllAsyncfnTimersForScript stops the
+  // tracked asyncfn user timers.
+  clearAllTimersForScript(msg.scriptId);
+  clearAllAsyncfnTimersForScript(msg.scriptId);
   // audit C8-03 + C8-04 — prune the per-script rate-limit buckets so they don't
   // accumulate one entry per ever-seen scriptId across the child's lifetime.
   consoleRateState.delete(msg.scriptId);

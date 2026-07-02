@@ -145,10 +145,16 @@ globalThis.__lsBuildApi = function (hostDispatch) {
   // SYNCHRONOUSLY (no await before the return) so it can be stored on globalThis and iterated in a LATER
   // run/handler. __lsStreamStart sends the request + returns the requestId; each __lsStreamPull settles
   // with the next event (a JSON string) once a chunk/end arrives; the finally cancels the upstream on an
-  // early break. A user-supplied AbortSignal in options is not yet supported (a later phase); passing one
-  // fails loud at marshaling. Break the for-await (or let it finish) to end the stream.
+  // early break. Break the for-await (or let it finish) to end the stream. A user-supplied AbortSignal in
+  // options is not yet supported here (a later phase). It does NOT fail at marshaling — a signal has no
+  // own-enumerable keys, so the encoder would quietly drop it and the stream would ignore it — so reject
+  // it up front with a clear error rather than silently diverging from the AsyncFunction engine (which
+  // honours the signal).
   var generateStream = function (args) {
     var messages = args[0], options = args[1];
+    if (options && options.signal !== undefined) {
+      throw new Error('api.llm.generateStream: AbortSignal is not yet supported in the QuickJS engine (a later phase). Break the for-await (or let it finish) to end the stream.');
+    }
     var wireArgs = (options !== undefined) ? [messages, options] : [messages];
     var requestId = globalThis.__lsStreamStart(JSON.stringify(globalThis.__lsEncode(wireArgs)), false);
     // Create + return the generator SYNCHRONOUSLY (the IIFE call returns the generator object, not a
@@ -1660,7 +1666,10 @@ async function createContext(): Promise<ScriptContext> {
   // host-fn closure below read activeRun/currentDeadline off THIS record (in scope
   // for the whole createContext closure), not module globals.
   const sc: ScriptContext = { ctx, runChain: Promise.resolve(), activeRun: undefined, currentDeadline: Number.POSITIVE_INFINITY, lastUsedAt: Date.now() };
-  const pump = () => ctx.runtime.executePendingJobs();
+  // Guard against a disposed context: a settle's `deferred.settled.then(pump)` microtask can fire AFTER
+  // the context was disposed (e.g. a parked stream pull settled by the teardown sweep, then the context
+  // disposed on the same tick). executePendingJobs on a freed runtime throws "Lifetime not alive"; skip it.
+  const pump = () => { if (ctx.alive) ctx.runtime.executePendingJobs(); };
 
   // Ring-0 sync-loop guard (P7 formalizes the supervision rings): aborts a sync
   // `while(true){}` the host heartbeat would otherwise SIGKILL the whole child for.
@@ -2334,7 +2343,10 @@ export async function runUserScriptInQuickJS(opts: QuickJSRunOptions): Promise<u
   sc.currentDeadline = Date.now() + opts.timeoutMs;
   sc.lastUsedAt = Date.now(); // #11 P7-3 — a run/fire start counts as use (LRU recency; keeps a hot script's context fresh)
   sc.activeRun = { dispatch: opts.dispatch, console: opts.console, serializeError: opts.serializeError, allowDangerous: opts.allowDangerous ?? false, hostFetch: opts.hostFetch, dispatchOnHandle: opts.dispatchOnHandle, scriptId: opts.script.id, dispatchRegisterHandler: opts.dispatchRegisterHandler, dispatchUnregisterHandler: opts.dispatchUnregisterHandler, dispatchUnregisterHandlerNamed: opts.dispatchUnregisterHandlerNamed, dispatchBroadcastSubscribe: opts.dispatchBroadcastSubscribe, dispatchBroadcastUnsubscribe: opts.dispatchBroadcastUnsubscribe, dispatchStreamStart: opts.dispatchStreamStart, dispatchStreamCancel: opts.dispatchStreamCancel };
-  const pump = () => ctx.runtime.executePendingJobs();
+  // Guard against a disposed context: a settle's `deferred.settled.then(pump)` microtask can fire AFTER
+  // the context was disposed (e.g. a parked stream pull settled by the teardown sweep, then the context
+  // disposed on the same tick). executePendingJobs on a freed runtime throws "Lifetime not alive"; skip it.
+  const pump = () => { if (ctx.alive) ctx.runtime.executePendingJobs(); };
 
   // #11 fix (d) — a synchronous `while(true){}` blocks the host event loop, so
   // runOne's raceWithTimeout can't fire; the QuickJS interrupt handler aborts
@@ -2853,7 +2865,10 @@ export async function fireHandlerInQuickJS(opts: QuickJSFireOptions): Promise<un
     dispatchStreamStart: opts.dispatchStreamStart,
     dispatchStreamCancel: opts.dispatchStreamCancel,
   };
-  const pump = () => ctx.runtime.executePendingJobs();
+  // Guard against a disposed context: a settle's `deferred.settled.then(pump)` microtask can fire AFTER
+  // the context was disposed (e.g. a parked stream pull settled by the teardown sweep, then the context
+  // disposed on the same tick). executePendingJobs on a freed runtime throws "Lifetime not alive"; skip it.
+  const pump = () => { if (ctx.alive) ctx.runtime.executePendingJobs(); };
   const timedOut = () => Date.now() > sc.currentDeadline;
   const timeoutError = () => {
     const err = new Error(`Handler ${opts.handlerId} exceeded the ${opts.timeoutMs / 1000}s timeout (a synchronous loop was interrupted by the QuickJS engine).`);
