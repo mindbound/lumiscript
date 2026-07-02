@@ -885,8 +885,14 @@ function shortCodeHash(code: string): string {
  * the new engine; it QUEUES + polls if a run is in-flight (drain-safe), and the
  * worker subprocess survives (spawn is idempotent). Fire-and-forget per script.
  */
-function reloadAllEnabledScriptsForEngineChange(): void {
-  for (const script of scriptStorage.getEnabledTriggerScripts()) {
+function reloadAllEnabledScriptsForEngineChange(prevMode: string, nextMode: string): void {
+  const enabled = scriptStorage.getEnabledTriggerScripts();
+  // #11 observability — lifecycle milestone: a user toggled the execution engine. Low-frequency
+  // (a settings flip), so no rate-limit; the per-script failure error stays at the catch below.
+  spindle.log.info(
+    `[LumiScript] engineMode changed ${prevMode}→${nextMode}; reloading ${enabled.length} enabled script(s)`,
+  );
+  for (const script of enabled) {
     const codeHash = shortCodeHash(script.code); // code is unchanged — only the engine
     const payload: LsReloadPayload = {
       reason:           'manual',
@@ -1682,6 +1688,9 @@ async function runDiagnostics(userId: string | undefined): Promise<DiagnosticsRe
     storageProbe,
     scriptRunner,
     assistantProbe,
+    // #11 observability — the aggregated QuickJS-engine telemetry (folded into runnerStats by
+    // queryRunnerStats). undefined when no worker reported it → the panel shows "Not probed".
+    ...(runnerStats?.engine !== undefined ? { engineProbe: runnerStats.engine } : {}),
   });
 }
 
@@ -3835,7 +3844,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
           Object.prototype.hasOwnProperty.call(msg.patch, 'engineMode') &&
           nextEngineMode !== prevEngineMode
         ) {
-          reloadAllEnabledScriptsForEngineChange();
+          reloadAllEnabledScriptsForEngineChange(prevEngineMode, nextEngineMode);
         }
         break;
       }

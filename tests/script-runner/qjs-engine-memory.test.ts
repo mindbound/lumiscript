@@ -11,6 +11,7 @@
 import { describe, test, expect } from 'bun:test';
 import {
   runUserScriptInQuickJS,
+  getEngineTelemetry,
   _setContextModelForTests,
   _setChildWasmBudgetForTests,
   type QuickJSRunOptions,
@@ -36,6 +37,9 @@ describe('#11 P7-3.2 per-context memory ceiling', () => {
   test('per-script caps at budget/POOL_CAP (64MB): an over-limit alloc is an in-VM OOM, NOT a child crash', async () => {
     _setContextModelForTests('per-script'); // perCtxLimit = 512MB / 8 = 64MB
     expect(await rejects(runUserScriptInQuickJS(runOpts('mem-oom', ALLOC_100MB)))).toBe(true);
+    // #11 observability — the OOM is counted (shape-pinned: QuickJS surfaces it as InternalError('out of
+    // memory'); a drift in that shape would silently zero the counter, so this assertion guards it).
+    expect(getEngineTelemetry().inVmOom).toBe(1);
     // The child survives the in-VM OOM — a different script's context builds + runs fine afterward.
     const ok = await runUserScriptInQuickJS(runOpts('mem-ok', `return 1 + 1;`));
     expect(ok).toBe(2);
@@ -58,6 +62,9 @@ describe('#11 P7-3.2 per-context memory ceiling', () => {
     _setContextModelForTests('per-script');
     // Non-tail recursion (the `+ 1` prevents any TCO) → grows the C stack → QuickJS stack-overflow throw.
     expect(await rejects(runUserScriptInQuickJS(runOpts('mem-rec', `function f(n) { return f(n + 1) + 1; } return f(0);`)))).toBe(true);
+    // #11 observability — a stack-overflow (RangeError) must NOT be miscounted as an OOM (guards the
+    // inVmOom detector against over-matching a non-OOM error shape).
+    expect(getEngineTelemetry().inVmOom).toBe(0);
     const ok = await runUserScriptInQuickJS(runOpts('mem-ok2', `return 3;`)); // child survived
     expect(ok).toBe(3);
   });

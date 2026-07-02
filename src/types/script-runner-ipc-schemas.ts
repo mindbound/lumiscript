@@ -215,6 +215,35 @@ const UnregisterHandlerSchema = z.object({
   name:       z.string().optional(),
 }).strict();
 
+/**
+ * #11 observability — the QuickJS-engine telemetry a child folds into its diagnostic-stats response.
+ * MUST stay in lockstep with `EngineTelemetry` in script-runner-ipc.ts: the parent's ChildToParentMessage
+ * validation is `.strict()`, so an un-declared field here silently REJECTS the whole stats response
+ * (dropping the memory/CPU stats too). Numbers + bools only — a plain-data snapshot.
+ */
+const EngineTelemetrySchema = z.object({
+  coldStartProbed:   z.boolean(),
+  coldStartOk:       z.boolean(),
+  coldStartMs:       z.number(),
+  quickjsRuns:       z.number(),
+  asyncfnRuns:       z.number(),
+  degradedRuns:      z.number(),
+  quickjsRunErrors:  z.number(),
+  quickjsFireErrors: z.number(),
+  quickjsTimeouts:   z.number(),
+  reentrantRejects:  z.number(),
+  inVmOom:           z.number(),
+  contextEvictions:  z.number(),
+  overCapTolerated:  z.number(),
+  lastEvictionAt:    z.number(),
+  contextModel:      z.enum(['shared', 'per-script']),
+  liveContexts:      z.number(),
+  poolCap:           z.number(),
+  pinnedContexts:    z.number(),
+  reservedContexts:  z.number(),
+  perCtxLimitBytes:  z.number(),
+}).strict();
+
 const DiagnosticStatsResponseSchema = z.object({
   type:        z.literal('diagnostic-stats-response'),
   requestId:   z.string(),
@@ -225,6 +254,9 @@ const DiagnosticStatsResponseSchema = z.object({
   cpuUserUs:   z.number(),
   cpuSystemUs: z.number(),
   uptimeSec:   z.number(),
+  // #11 observability — optional so an older child (or one that never imported the engine) still
+  // validates; a current child always supplies it (getEngineTelemetry() never returns undefined).
+  engine:      EngineTelemetrySchema.optional(),
 }).strict();
 
 const HandlerResultSchema = z.object({

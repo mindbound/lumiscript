@@ -127,6 +127,27 @@ export const VM_WEBGLOBALS_BOOTSTRAP = `
   // Date.now(); documented as wall-clock-derived, not strictly monotonic.
   globalThis.performance = { now: function () { return Date.now(); } };
 
+  // ── timers — NOT YET SUPPORTED (host-scheduled callbacks land in a later phase) ──
+  // setTimeout/setInterval need host-scheduled callback re-entry into the VM (the P5 callback
+  // machinery), which is not built yet. Define THROWING stubs so a script that reaches for a timer
+  // gets a clear 'not yet supported — a later phase' message (parity with the marshaler's fail-loud)
+  // instead of the bare 'setTimeout is not defined' ReferenceError a missing global gives — that reads
+  // like a LumiScript bug rather than an unbuilt feature. clearTimeout/clearInterval are safe NO-OPs:
+  // set* always throws so no timer id can exist, and throwing in a teardown/cleanup path (where clear*
+  // is typically called) would itself break cleanup.
+  var unsupportedTimer = function (name) {
+    return function () {
+      throw new Error(
+        'LumiScript QuickJS engine: ' + name + ' is not yet supported (timers land in a later phase). ' +
+        'Restructure to avoid timers for now, or run this script under the AsyncFunction engine.',
+      );
+    };
+  };
+  globalThis.setTimeout = unsupportedTimer('setTimeout');
+  globalThis.setInterval = unsupportedTimer('setInterval');
+  globalThis.clearTimeout = function () {};
+  globalThis.clearInterval = function () {};
+
   // structuredClone via the marshaler twin — same type fidelity (Date/Map/Set/
   // typed-arrays/etc.) and the same fail-loud on functions/symbols/cycles (real
   // structuredClone throws DataCloneError on functions too; it differs only by

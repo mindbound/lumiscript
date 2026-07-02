@@ -78,11 +78,12 @@ beforeEach(() => {
 // ─── Top-level shape ────────────────────────────────────────────────────────
 
 describe('collectBackendDiagnostics — shape', () => {
-  test('returns six sections in stable order', () => {
+  test('returns seven sections in stable order', () => {
     const report = collectBackendDiagnostics(makeDeps());
-    expect(report.sections).toHaveLength(6);
+    expect(report.sections).toHaveLength(7);
+    // #11 observability — the "Engine (QuickJS-WASM)" section slots in after script-runner.
     expect(report.sections.map(s => s.id)).toEqual([
-      'lumiscript', 'scriptRunner', 'activeContext', 'registrations', 'storage', 'assistant',
+      'lumiscript', 'scriptRunner', 'engine', 'activeContext', 'registrations', 'storage', 'assistant',
     ]);
   });
 
@@ -101,6 +102,89 @@ describe('collectBackendDiagnostics — shape', () => {
       report.summary.failures + report.summary.warnings +
       report.summary.passes   + report.summary.info;
     expect(totalSummed).toBe(totalChecks);
+  });
+});
+
+// ─── Section B2 — Engine (QuickJS-WASM) ─────────────────────────────────────
+
+/** #11 observability — a zeroed EngineTelemetry (the stock 'shared', never-probed state a child
+ *  reports before any quickjs run), overridable per field. */
+function makeEngine(overrides?: Partial<import('../../src/types/script-runner-ipc.js').EngineTelemetry>):
+  import('../../src/types/script-runner-ipc.js').EngineTelemetry {
+  return {
+    coldStartProbed: false, coldStartOk: false, coldStartMs: 0,
+    quickjsRuns: 0, asyncfnRuns: 0, degradedRuns: 0,
+    quickjsRunErrors: 0, quickjsFireErrors: 0, quickjsTimeouts: 0,
+    reentrantRejects: 0, inVmOom: 0, contextEvictions: 0, overCapTolerated: 0, lastEvictionAt: 0,
+    contextModel: 'shared', liveContexts: 0, poolCap: 8, pinnedContexts: 0, reservedContexts: 0,
+    perCtxLimitBytes: 512 * 1024 * 1024,
+    ...overrides,
+  };
+}
+const engineSection = (report: DiagnosticsReport) => report.sections.find(s => s.id === 'engine')!;
+const engineCheck = (report: DiagnosticsReport, label: string) =>
+  engineSection(report).checks.find(c => c.label === label)!;
+
+describe('collectBackendDiagnostics — Section B2 (Engine)', () => {
+  test('renders a single "Not probed" info row when engineProbe is absent', () => {
+    const report = collectBackendDiagnostics(makeDeps()); // no engineProbe
+    const section = engineSection(report);
+    expect(section.name).toBe('Engine (QuickJS-WASM)');
+    expect(section.checks).toHaveLength(1);
+    expect(section.checks[0]!.status).toBe('info');
+    expect(section.checks[0]!.message).toContain('Not probed');
+  });
+
+  test('stock shared/never-probed telemetry reads honest-but-quiet (no false warns)', () => {
+    const report = collectBackendDiagnostics(makeDeps({ engineProbe: makeEngine({ asyncfnRuns: 12 }) }));
+    // Availability: not probed → info, not a warn.
+    expect(engineCheck(report, 'WASM availability').status).toBe('info');
+    // Runs by engine shows the asyncfn denominator.
+    expect(engineCheck(report, 'Runs by engine').message).toContain('0 quickjs / 12 asyncfn');
+    // Pool branch: shared → explicit n/a, never a bare '0/8'.
+    const pool = engineCheck(report, 'Context pool');
+    expect(pool.status).toBe('info');
+    expect(pool.message).toContain('n/a (shared context model');
+    // No warn statuses on a healthy idle engine.
+    expect(engineSection(report).checks.some(c => c.status === 'warn')).toBe(false);
+  });
+
+  test('cold-start success promotes availability to pass with the timing', () => {
+    const report = collectBackendDiagnostics(makeDeps({
+      engineProbe: makeEngine({ coldStartProbed: true, coldStartOk: true, coldStartMs: 106, quickjsRuns: 3 }),
+    }));
+    const avail = engineCheck(report, 'WASM availability');
+    expect(avail.status).toBe('pass');
+    expect(avail.message).toContain('106ms');
+  });
+
+  test('cold-start failure + degraded runs + timeouts + OOM all surface as warn', () => {
+    const report = collectBackendDiagnostics(makeDeps({
+      engineProbe: makeEngine({
+        coldStartProbed: true, coldStartOk: false,
+        degradedRuns: 4, quickjsTimeouts: 2, inVmOom: 1,
+      }),
+    }));
+    expect(engineCheck(report, 'WASM availability').status).toBe('warn');
+    expect(engineCheck(report, 'Degraded runs').status).toBe('warn');
+    expect(engineCheck(report, 'Timeouts (→ respawn)').status).toBe('warn');
+    expect(engineCheck(report, 'In-VM out-of-memory').status).toBe('warn');
+  });
+
+  test('per-script model surfaces the live pool + an evictions row; over-cap flips the pool to warn', () => {
+    const report = collectBackendDiagnostics(makeDeps({
+      engineProbe: makeEngine({
+        contextModel: 'per-script', liveContexts: 9, poolCap: 8, pinnedContexts: 9,
+        reservedContexts: 1, overCapTolerated: 1, contextEvictions: 3, lastEvictionAt: Date.now() - 2000,
+        perCtxLimitBytes: 64 * 1024 * 1024,
+      }),
+    }));
+    const pool = engineCheck(report, 'Context pool');
+    expect(pool.status).toBe('warn'); // overCapTolerated > 0
+    expect(pool.message).toContain('9/8 live');
+    expect(pool.message).toContain('over-cap');
+    // The evictions row only exists under the per-script model.
+    expect(engineCheck(report, 'Context evictions').message).toContain('3 eviction');
   });
 });
 

@@ -1055,6 +1055,63 @@ export type BroadcastHandlerLifecycleNotice =
     };
 
 /**
+ * #11 observability — the QuickJS-engine telemetry snapshot a child folds into its
+ * `DiagnosticStatsResponse` (the flag-gated isolate engine's field-diagnostics). Produced by
+ * `qjs-engine.ts`'s `getEngineTelemetry()`; aggregated across workers by host-dispatcher's
+ * `queryRunnerStats`; rendered in the diagnostics panel's "Engine (QuickJS-WASM)" section.
+ *
+ * Two field classes with DIFFERENT cross-worker aggregation rules (see queryRunnerStats):
+ *  - COUNTERS (cumulative-since-spawn, SUMMABLE integers): every `*Runs` / `*Errors` / `*Timeouts` /
+ *    `reentrantRejects` / `inVmOom` / `contextEvictions` / `overCapTolerated`, plus the live
+ *    `liveContexts` / `pinnedContexts` / `reservedContexts` gauges (a total across workers is meaningful).
+ *  - REPRESENTATIVE (per-child config / probe result, NOT summed): `contextModel` / `poolCap` /
+ *    `perCtxLimitBytes` (identical per child) and the cold-start fields / `lastEvictionAt`.
+ * Keep this a plain-data shape (no methods) so it crosses the IPC boundary intact.
+ */
+export interface EngineTelemetry {
+  /** True once the child's warmup probe has resolved (distinguishes "not probed" from ok=false). */
+  coldStartProbed:   boolean;
+  /** Did the WASM module instantiate on this child's platform. */
+  coldStartOk:       boolean;
+  /** WASM instantiate wall-time (ms); 0 until probed / on failure. */
+  coldStartMs:       number;
+  /** Body-runs dispatched on the quickjs engine (resolved engine, post-degrade). SUM. */
+  quickjsRuns:       number;
+  /** Body-runs dispatched on the asyncfn engine. SUM. */
+  asyncfnRuns:       number;
+  /** quickjs-requested runs that degraded to asyncfn (WASM uninstantiable). SUM. */
+  degradedRuns:      number;
+  /** quickjs body-runs that threw a non-timeout error. SUM. */
+  quickjsRunErrors:  number;
+  /** quickjs handler-fires that threw a non-timeout, non-reentrant error. SUM. */
+  quickjsFireErrors: number;
+  /** quickjs run/fire timeouts (each → child respawn). SUM. */
+  quickjsTimeouts:   number;
+  /** F4 self-`api.tools.invoke` fast-rejects. SUM. */
+  reentrantRejects:  number;
+  /** In-VM out-of-memory errors (per-context memory-limit hits). SUM. */
+  inVmOom:           number;
+  /** Per-script contexts evicted (idle-TTL + cap). SUM. */
+  contextEvictions:  number;
+  /** Over-cap inserts accepted because every other context was pinned/mid-run. SUM. */
+  overCapTolerated:  number;
+  /** Date.now() of the last eviction (0 = none). REPRESENTATIVE (max across workers). */
+  lastEvictionAt:    number;
+  /** Active context model ('shared' = prod default). REPRESENTATIVE. */
+  contextModel:      'shared' | 'per-script';
+  /** Live per-script contexts (0 under 'shared'). SUM. */
+  liveContexts:      number;
+  /** POOL_CAP — the per-child hard bound on live per-script contexts. REPRESENTATIVE. */
+  poolCap:           number;
+  /** Live per-script contexts currently pinned. SUM. */
+  pinnedContexts:    number;
+  /** In-flight body-run context acquisitions. SUM. */
+  reservedContexts:  number;
+  /** Per-context WASM memory ceiling (bytes). REPRESENTATIVE. */
+  perCtxLimitBytes:  number;
+}
+
+/**
  * Child's response to a `DiagnosticStatsRequest`. Carries a snapshot of
  * the child process's resource usage at the moment of receipt. Numbers
  * map to standard Node-compat `process.memoryUsage()` /
@@ -1080,6 +1137,13 @@ export interface DiagnosticStatsResponse {
   cpuSystemUs: number;
   /** Process uptime in seconds. */
   uptimeSec: number;
+  /**
+   * #11 observability — QuickJS-engine telemetry snapshot. Optional: a child built before this
+   * field existed (or one that never imported the engine) omits it, so consumers must treat
+   * `undefined` as "not probed" (the panel renders a single info row). The aggregate response
+   * from `queryRunnerStats` also omits it when NO worker reported engine stats.
+   */
+  engine?: EngineTelemetry;
 }
 
 export type ChildToParentMessage =

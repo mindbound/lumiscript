@@ -13,6 +13,7 @@
 import { describe, test, expect } from 'bun:test';
 import {
   warmupQuickJS,
+  getEngineTelemetry,
   _setQuickJSAvailabilityForTests,
   _vmHandlerIdsForTests,
 } from '../../src/script-runner/qjs-engine.js';
@@ -60,6 +61,12 @@ describe('#11 cold-start-fallback: engine-selection degrade (runOne)', () => {
       expect(runRes.ok).toBe(true); // ran successfully (degraded), NOT a hard-fail
       // The handler landed in the asyncfn closure registry, NOT the quickjs VM registry → ran asyncfn.
       expect(_vmHandlerIdsForTests(sid).length).toBe(0);
+      // #11 observability — the degrade is counted at its site (child-entry runOne): the run is
+      // attributed to the RESOLVED asyncfn engine + tallied as a degrade, never as a quickjs run.
+      const tel = getEngineTelemetry();
+      expect(tel.degradedRuns).toBe(1);
+      expect(tel.asyncfnRuns).toBe(1);
+      expect(tel.quickjsRuns).toBe(0);
     } finally {
       childCleanup();
       _setEngineModeForTests(undefined);
@@ -80,6 +87,10 @@ describe('#11 cold-start-fallback: engine-selection degrade (runOne)', () => {
       expect(runRes.ok).toBe(true);
       // A real quickjs run registered the handler as a dup'd VM fn handle.
       expect(_vmHandlerIdsForTests(sid).length).toBeGreaterThan(0);
+      // #11 observability — a real quickjs run is attributed to the quickjs engine, no degrade.
+      const tel = getEngineTelemetry();
+      expect(tel.quickjsRuns).toBe(1);
+      expect(tel.degradedRuns).toBe(0);
     } finally {
       childCleanup();
       _setEngineModeForTests(undefined);

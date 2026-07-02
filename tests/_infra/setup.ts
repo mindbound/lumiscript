@@ -59,7 +59,7 @@ import {
 // #11 P7-2 — dispose the per-script QuickJS context pool + reset contextModel to 'shared' between
 // tests, so a per-script-context test can't leak a context (or a pinned contextModel) into the next
 // file (the CI-readdir flake class). Cheap under 'shared' (empty pool; the shared record is reused).
-import { _disposeContextForTests, _setQuickJSAvailabilityForTests } from '../../src/script-runner/qjs-engine.js';
+import { _disposeContextForTests, _setQuickJSAvailabilityForTests, _resetEngineTelemetryForTests } from '../../src/script-runner/qjs-engine.js';
 
 // `dom-handler.ts` imports DOMPurify at module load — before any per-file DOM env
 // (`useDOM()`) registers a window — so its DOMPurify has no DOM and `.sanitize` is
@@ -116,6 +116,9 @@ beforeEach(() => {
   _setQuickJSAvailabilityForTests(undefined);
   // #11 P7-2 — dispose any per-script quickjs contexts + reset contextModel to 'shared'.
   _disposeContextForTests();
+  // #11 observability — zero the engine telemetry counters so a run/fire/evict in one file can't
+  // bleed into another file's assertions (and the over-cap warn latch is re-armed).
+  _resetEngineTelemetryForTests();
   // api.db collection cache (module-global) — clear so a cached collection from
   // one test can't leak into the next.
   _clearDbCache();

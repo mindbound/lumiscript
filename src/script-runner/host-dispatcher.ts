@@ -94,6 +94,7 @@ import type {
 import type {
   AdvancedModalDismissedNotice,
   FloatWidgetPositionNotice,
+  EngineTelemetry,
 } from '../types/script-runner-ipc.js';
 import {
   removeMacro as macroStoreRemove,
@@ -1866,6 +1867,18 @@ const activeRuns  = new Map<string, ActiveRun>();
 const scriptBodyActiveRunByScript = new Map<string, string>();
 
 /**
+ * #11 field-test hygiene — dedup the resolveActiveRun fallback audit log. A PERSISTENTLY-orphaned
+ * recurring dispatcher — e.g. the live-rendering `setInterval(() => tab.root.update(...))` pattern the
+ * fallback above exists to support, whose originating run was retired (a reload / engine switch) — would
+ * otherwise emit the info line on EVERY fire (~1/sec forever), drowning the backend log. We log the
+ * FIRST reroute per (policy, script, dead-runId, handle/method) — enough to flag the orphan — and
+ * suppress the identical repeats. ROUTING IS UNCHANGED; only the log is deduped. Bounded so a long
+ * session can't grow it without limit (clear-and-re-arm past the cap); cleared in __resetForTests.
+ */
+const loggedFallbackKeys = new Set<string>();
+const LOGGED_FALLBACK_CAP = 500;
+
+/**
  * Per-script "fallback" onConsole. Populated at every script-body dispatch
  * (`dispatchRunScript`) when the caller provides an `onConsole` option;
  * read by `handleConsoleEntry` when the runId-keyed `activeRuns` lookup
@@ -2165,20 +2178,34 @@ function resolveActiveRun(
   const fallback = activeRuns.get(latestRunId);
   if (!fallback) return undefined;
 
-  // Audit-trail log. Includes policy + (when relevant) targetHandle/runIdSource/method
-  // so the operator can correlate with downstream warns.
-  const detail = policy === 'register-handler'
-    ? 'register-handler'
-    : `api dispatch (source=${ctx.runIdSource ?? 'unknown'}` +
-      (ctx.targetHandle
-        ? `, handle=${ctx.targetHandle.kind}/${ctx.targetHandle.id})`
-        : ctx.method && HANDLE_RETURNING_METHODS[ctx.method] !== undefined
-          ? `, factory=${ctx.method}→${HANDLE_RETURNING_METHODS[ctx.method]})`
-          : ')');
-  spindle.log.info(
-    `[script-runner] ${detail} fallback: runId ${ctx.runId} no longer active; ` +
-    `routing to script's current run ${latestRunId} (script ${ctx.scriptId})`,
-  );
+  // Audit-trail log — deduped so a persistently-orphaned recurring dispatcher (a leaked live-render
+  // interval that outlived its run) logs ONCE, not on every fire. Key on the stable orphan identity
+  // (policy, script, dead-runId, handle/method) — NOT the rotating fallback target — so it stays a
+  // single line even as latestRunId advances across reloads.
+  const handleKey = ctx.targetHandle
+    ? `${ctx.targetHandle.kind}/${ctx.targetHandle.id}`
+    : ctx.method ?? '';
+  const fallbackKey = `${policy}|${ctx.scriptId}|${ctx.runId}|${handleKey}`;
+  if (!loggedFallbackKeys.has(fallbackKey)) {
+    // Bound growth over a long session; clearing just re-arms logging (harmless).
+    if (loggedFallbackKeys.size >= LOGGED_FALLBACK_CAP) loggedFallbackKeys.clear();
+    loggedFallbackKeys.add(fallbackKey);
+    // Includes policy + (when relevant) targetHandle/runIdSource/method so the operator can correlate
+    // with downstream warns. Built only when we actually log (skipped on the suppressed hot path).
+    const detail = policy === 'register-handler'
+      ? 'register-handler'
+      : `api dispatch (source=${ctx.runIdSource ?? 'unknown'}` +
+        (ctx.targetHandle
+          ? `, handle=${ctx.targetHandle.kind}/${ctx.targetHandle.id})`
+          : ctx.method && HANDLE_RETURNING_METHODS[ctx.method] !== undefined
+            ? `, factory=${ctx.method}→${HANDLE_RETURNING_METHODS[ctx.method]})`
+            : ')');
+    spindle.log.info(
+      `[script-runner] ${detail} fallback: runId ${ctx.runId} no longer active; ` +
+      `routing to script's current run ${latestRunId} (script ${ctx.scriptId}) ` +
+      `(further identical reroutes suppressed)`,
+    );
+  }
   return fallback;
 }
 
@@ -8010,6 +8037,13 @@ export async function queryRunnerStats(
   );
   if (successful.length === 0) return null;
 
+  // #11 observability — aggregate the per-worker QuickJS-engine telemetry. Two aggregation rules
+  // (see EngineTelemetry's field docs): SUM the summable counters + live gauges across workers; take a
+  // REPRESENTATIVE value for per-child config (contextModel/poolCap/perCtxLimitBytes — identical per
+  // child) + the cold-start / lastEvictionAt time fields. Omitted entirely if NO worker reported engine
+  // stats (older/hung child), so the panel renders its "Not probed" row.
+  const engine = aggregateEngineTelemetry(successful.map((r) => r.engine));
+
   return {
     type:        'diagnostic-stats-response',
     requestId:   'aggregate',  // synthetic; this response is parent-constructed
@@ -8020,6 +8054,47 @@ export async function queryRunnerStats(
     cpuUserUs:   successful.reduce((s, r) => s + r.cpuUserUs,   0),
     cpuSystemUs: successful.reduce((s, r) => s + r.cpuSystemUs, 0),
     uptimeSec:   Math.max(...successful.map((r) => r.uptimeSec)),
+    ...(engine !== undefined ? { engine } : {}),
+  };
+}
+
+/**
+ * #11 observability — fold N per-worker {@link EngineTelemetry} reports into one aggregate. Returns
+ * `undefined` when no worker reported engine stats (leave the field off so the panel shows "Not probed").
+ * SUM the summable counters + live gauges; REPRESENTATIVE for per-child config + time fields (see the
+ * field docs on EngineTelemetry). `coldStartOk` is the AND over PROBED children (any degraded child
+ * flips it false); `coldStartProbed` is the OR (at least one child probed).
+ */
+export function aggregateEngineTelemetry(
+  reports: ReadonlyArray<EngineTelemetry | undefined>,
+): EngineTelemetry | undefined {
+  const probed = reports.filter((e): e is EngineTelemetry => e !== undefined);
+  if (probed.length === 0) return undefined;
+  const sum = (pick: (e: EngineTelemetry) => number): number =>
+    probed.reduce((s, e) => s + pick(e), 0);
+  return {
+    // Representative per-child config + probe results (NOT summed).
+    contextModel:     probed[0]!.contextModel,
+    poolCap:          probed[0]!.poolCap,
+    perCtxLimitBytes: probed[0]!.perCtxLimitBytes,
+    coldStartProbed:  probed.some((e) => e.coldStartProbed),
+    coldStartOk:      probed.every((e) => !e.coldStartProbed || e.coldStartOk),
+    coldStartMs:      Math.max(...probed.map((e) => e.coldStartMs)),
+    lastEvictionAt:   Math.max(...probed.map((e) => e.lastEvictionAt)),
+    // Summable counters + live gauges.
+    quickjsRuns:       sum((e) => e.quickjsRuns),
+    asyncfnRuns:       sum((e) => e.asyncfnRuns),
+    degradedRuns:      sum((e) => e.degradedRuns),
+    quickjsRunErrors:  sum((e) => e.quickjsRunErrors),
+    quickjsFireErrors: sum((e) => e.quickjsFireErrors),
+    quickjsTimeouts:   sum((e) => e.quickjsTimeouts),
+    reentrantRejects:  sum((e) => e.reentrantRejects),
+    inVmOom:           sum((e) => e.inVmOom),
+    contextEvictions:  sum((e) => e.contextEvictions),
+    overCapTolerated:  sum((e) => e.overCapTolerated),
+    liveContexts:      sum((e) => e.liveContexts),
+    pinnedContexts:    sum((e) => e.pinnedContexts),
+    reservedContexts:  sum((e) => e.reservedContexts),
   };
 }
 
@@ -8086,6 +8161,7 @@ export function __resetForTests(): void {
   pendingRuns.clear();
   activeRuns.clear();
   scriptBodyActiveRunByScript.clear();
+  loggedFallbackKeys.clear(); // #11 field-test hygiene — re-arm the fallback-log dedup between tests
   trackingSetsByRunId.clear();
   pendingHandlerCalls.clear();
   abortControllers.clear();

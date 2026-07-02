@@ -29,7 +29,7 @@ import {
 } from 'quickjs-emscripten-core';
 import variant from '@jitl/quickjs-singlefile-mjs-release-sync';
 import { marshalEncode, marshalDecode, VM_MARSHAL_BOOTSTRAP } from './vm-marshal.js';
-import type { HandleKind, HandleRef } from '../types/script-runner-ipc.js';
+import type { HandleKind, HandleRef, EngineTelemetry } from '../types/script-runner-ipc.js';
 import { VM_WEBGLOBALS_BOOTSTRAP } from './vm-webglobals.js';
 import { VM_ZOD_BUNDLE } from './generated/vm-zod-bundle.js';
 import { VM_HANDLEBARS_BUNDLE } from './generated/vm-handlebars-bundle.js';
@@ -374,6 +374,76 @@ globalThis.__lsBuildApi = function (hostDispatch) {
     globalThis.__lsTrackChain(send(method, [target, html, fullOptions]).catch(function () {}));
     return buildDomHandle(elementId);
   };
+  // #11 P5-1 — in-VM component-mount interceptor (mirrors api-proxy.ts dispatchComponentMount +
+  // buildMounted*Proxy). Mount-options can carry fn callbacks (onChange/onCommit/onClick/...) which the
+  // marshaler cannot encode; strip each fn out, register it under the EXISTING componentCallback kind
+  // (dup'd into vmHandlerHandles via __hostRegisterComponentCallback — NO register-handler IPC: the
+  // parent routes component_callback fires via the componentCallbackRoutes map it builds from the mount
+  // _callbacks, matching asyncfn's child-side-only registration), thread the name->handlerId map via
+  // _callbacks, and dispatch the fn-less options fire-and-forget. Returns a sync handle whose methods
+  // dispatch ui._components.* (routed host-side by componentId=args[0], no targetHandle needed). The
+  // handle SHAPE (base / value+getValue / collapsible+body/expand/...) mirrors the asyncfn per-method
+  // builders; the value/collapsible method sets are enumerated to match.
+  var LS_VALUE_MOUNTS = { mountSwitch: 1, mountTextInput: 1, mountTextArea: 1, mountNumericInput: 1, mountNumberStepper: 1, mountCheckbox: 1, mountRangeSlider: 1, mountSelect: 1, mountMultiSelect: 1, mountFolderDropdown: 1, mountModelCombobox: 1, mountPagination: 1 };
+  var componentVoid = function (componentId, method, extra) {
+    globalThis.__lsTrackChain(send('ui._components.' + method, [componentId].concat(extra || [])).catch(function () {}));
+  };
+  var componentValue = function (componentId, method) {
+    return send('ui._components.' + method, [componentId]);
+  };
+  var buildComponentHandle = function (componentId, handlerIds, shape, bodyElementId) {
+    var handle = {
+      id: componentId,
+      update: function (patch) { componentVoid(componentId, 'update', [patch === undefined ? {} : patch]); },
+      destroy: function () {
+        componentVoid(componentId, 'destroy', []);
+        // Eager reap — drop the callback dups so the component's lifecycle doesn't pin the script
+        // past its unmount (mirrors asyncfn's ctx.unregisterHandlerClosure loop in destroy()).
+        for (var i = 0; i < handlerIds.length; i++) globalThis.__hostUnregisterComponentCallback(handlerIds[i]);
+      },
+    };
+    if (shape === 'value') {
+      handle.getValue = function () { return componentValue(componentId, 'getValue'); };
+    } else if (shape === 'collapsible') {
+      handle.body = buildDomHandle(bodyElementId);
+      handle.isExpanded = function () { return componentValue(componentId, 'isExpanded'); };
+      handle.expand = function () { componentVoid(componentId, 'expand', []); };
+      handle.collapse = function () { componentVoid(componentId, 'collapse', []); };
+      handle.toggle = function () { componentVoid(componentId, 'toggle', []); };
+    }
+    return handle;
+  };
+  var mountComponent = function (method, target, options) {
+    var methodName = method.slice('ui.components.'.length);
+    var componentId = globalThis.crypto.randomUUID();
+    var props = {};
+    var callbacks = {};
+    var handlerIds = [];
+    var opts = options || {};
+    var keys = Object.keys(opts);
+    for (var i = 0; i < keys.length; i++) {
+      var key = keys[i];
+      var val = opts[key];
+      if (typeof val === 'function') {
+        var handlerId = 'componentCallback:' + globalThis.crypto.randomUUID();
+        globalThis.__hostRegisterComponentCallback(handlerId, val);
+        callbacks[key] = handlerId;
+        handlerIds.push(handlerId);
+      } else {
+        props[key] = val;
+      }
+    }
+    var shape = LS_VALUE_MOUNTS[methodName] ? 'value' : (methodName === 'mountCollapsibleSection' ? 'collapsible' : 'base');
+    var dispatchProps = Object.assign({}, props, { _componentId: componentId, _callbacks: callbacks });
+    var bodyElementId;
+    if (shape === 'collapsible') {
+      bodyElementId = globalThis.crypto.randomUUID();
+      dispatchProps._bodyElementId = bodyElementId;
+    }
+    var targetId = (target && target.id !== undefined) ? target.id : target;
+    globalThis.__lsTrackChain(send(method, [targetId, dispatchProps]).catch(function () {}));
+    return buildComponentHandle(componentId, handlerIds, shape, bodyElementId);
+  };
   // #11 P4b Inc 2 — GATED factory handles (showAdvancedModal / createFloatWidget). The first
   // consumers of buildDomHandle's gateAck path. ids are generated UPFRONT + threaded via the
   // @internal _modalId/_widgetId/_rootElementId so the canonical adopts them; openAck =
@@ -592,6 +662,10 @@ globalThis.__lsBuildApi = function (hostDispatch) {
         if (path === 'ui.mountApp') return mountApp(a[0]);
         if (path === 'ui.registerInputBarAction') return registerInputBarAction(a[0]);
         if (path === 'ui.showModal') return showModal(a[0], a[1]);
+        // #11 P5-1 — component mounts: strip fn callbacks (register under the componentCallback kind),
+        // dispatch fn-less options, return a sync handle. Prefix match covers every mount* method. MUST
+        // precede the generic send() below — else the fn-valued options hit the marshaler function-throw.
+        if (path.indexOf('ui.components.mount') === 0) return mountComponent(path, a[0], a[1]);
         if (path === 'commands.onInvoked') return registerVmHandler('commandsOnInvoked', 'commands.onInvoked(handler)', a[0], {});
         if (path === 'macros.registerInterceptor') return registerInterceptor('macroInterceptor', 'macros.registerInterceptor', a[0], a[1]);
         if (path === 'chat.registerContentProcessor') return registerInterceptor('contentProcessor', 'chat.registerContentProcessor', a[0], a[1]);
@@ -807,7 +881,7 @@ const VM_FLUSH_BOOTSTRAP = `
 // deep-frozen.) Eval'd LAST in createContext, after all scaffolding is built.
 const VM_FREEZE_BOOTSTRAP = `
 (function () {
-  var locked = ['__lsEncode', '__lsDecode', '__lsErrInfo', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', '__lsFetchAbort', 'fetch', 'Headers', 'Response', 'AbortController', 'AbortSignal', '__hostHandleDispatch', '__lsVmHandleProxy', '__hostRegisterHandler', '__hostUnregisterHandler', '__hostUnregisterHandlerNamed', '__lsCallHandler', '__hostBroadcastSubscribe', '__hostBroadcastUnsubscribe', '__lsTrackChain', '__lsFlush', '__hostAllocElementId', '__hostRegisterWidget', '__hostDropWidget', '__hostRegisterModal', '__hostRegisterModalDismiss', '__hostUnregisterModalDismiss'];
+  var locked = ['__lsEncode', '__lsDecode', '__lsErrInfo', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', '__lsFetchAbort', 'fetch', 'Headers', 'Response', 'AbortController', 'AbortSignal', '__hostHandleDispatch', '__lsVmHandleProxy', '__hostRegisterHandler', '__hostUnregisterHandler', '__hostUnregisterHandlerNamed', '__hostRegisterComponentCallback', '__hostUnregisterComponentCallback', '__lsCallHandler', '__hostBroadcastSubscribe', '__hostBroadcastUnsubscribe', '__lsTrackChain', '__lsFlush', '__hostAllocElementId', '__hostRegisterWidget', '__hostDropWidget', '__hostRegisterModal', '__hostRegisterModalDismiss', '__hostUnregisterModalDismiss'];
   for (var i = 0; i < locked.length; i++) {
     var name = locked[i];
     if (Object.prototype.hasOwnProperty.call(globalThis, name)) {
@@ -976,12 +1050,19 @@ let quickjsAvailability: Promise<boolean> | undefined;
  */
 export function warmupQuickJS(): Promise<boolean> {
   quickjsAvailability ??= (async () => {
+    const t0 = Date.now();
     try {
       modulePromise ??= newQuickJSWASMModuleFromVariant(variant);
       await modulePromise;
+      const ms = Date.now() - t0;
+      noteColdStart(ms, true); // #11 observability — one-time cold-start success + timing
+      try {
+        console.info(`[script-runner] QuickJS WASM instantiated in ${ms}ms; isolate engine active`);
+      } catch { /* console may be locked down */ }
       return true;
     } catch (err) {
       modulePromise = undefined;
+      noteColdStart(0, false); // #11 observability — probed, degrade-to-asyncfn
       try {
         console.error(
           `[script-runner] QuickJS WASM module failed to instantiate on this platform — degrading to ` +
@@ -1001,6 +1082,120 @@ export function warmupQuickJS(): Promise<boolean> {
 export function _setQuickJSAvailabilityForTests(v: boolean | undefined): void {
   quickjsAvailability = v === undefined ? undefined : Promise.resolve(v);
 }
+
+// ─── #11 observability — engine telemetry ────────────────────────────────────
+/**
+ * Field-diagnostics for the quickjs rollout. Every field is either a monotonic counter
+ * (cumulative since child spawn, summable across workers) or a one-time cold-start probe
+ * result. Pure instrumentation — every bump is off the hot path (once per run / fire / evict /
+ * degrade), nothing's behavior depends on these. Surfaced via getEngineTelemetry() on the
+ * diagnostic-stats IPC and rendered in the "Engine (QuickJS-WASM)" diagnostics section.
+ * Reset only by the _resetEngineTelemetryForTests seam (wired into tests/_infra/setup.ts).
+ * NOTE the risk the design flagged: keep every COUNTER a plain summable integer — host-dispatcher
+ * SUMS them across workers. The cold-start fields are per-child probe results (representative, not
+ * summed); the live pool snapshot getEngineTelemetry() appends is likewise per-child.
+ */
+interface EngineCounters {
+  /** True once warmupQuickJS's cached verdict has resolved (distinguishes "not probed" from ok=false). */
+  coldStartProbed:   boolean;
+  /** Did the WASM module instantiate on this platform (the warmup verdict). */
+  coldStartOk:       boolean;
+  /** WASM instantiate wall-time in ms (the once-per-process compile); 0 until probed / on failure. */
+  coldStartMs:       number;
+  /** Body-runs dispatched on the quickjs engine (counted at the RESOLVED engine, post-degrade). */
+  quickjsRuns:       number;
+  /** Body-runs dispatched on the asyncfn engine (the denominator for the quickjs ratio). */
+  asyncfnRuns:       number;
+  /** quickjs-requested runs that DEGRADED to asyncfn because the WASM module won't instantiate. */
+  degradedRuns:      number;
+  /** quickjs body-runs that threw a non-timeout error. */
+  quickjsRunErrors:  number;
+  /** quickjs handler-fires that threw a non-timeout, non-reentrant error. */
+  quickjsFireErrors: number;
+  /** quickjs run/fire timeouts (each forces a whole-child respawn — the key stability signal). */
+  quickjsTimeouts:   number;
+  /** F4 self-`api.tools.invoke` fast-rejects (an expected user error, tracked separately from fireErrors). */
+  reentrantRejects:  number;
+  /** In-VM out-of-memory errors (a per-context memory-limit hit surfaced by toHostError). */
+  inVmOom:           number;
+  /** Per-script contexts evicted (idle-TTL reap + cap enforcement). Always 0 under contextModel='shared'. */
+  contextEvictions:  number;
+  /** Times the pool accepted an over-cap insert because every other context was pinned/mid-run. */
+  overCapTolerated:  number;
+  /** Date.now() of the last context eviction (0 = none). Representative, not summed. */
+  lastEvictionAt:    number;
+}
+const engineCounters: EngineCounters = {
+  coldStartProbed: false, coldStartOk: false, coldStartMs: 0,
+  quickjsRuns: 0, asyncfnRuns: 0, degradedRuns: 0,
+  quickjsRunErrors: 0, quickjsFireErrors: 0, quickjsTimeouts: 0,
+  reentrantRejects: 0, inVmOom: 0, contextEvictions: 0, overCapTolerated: 0, lastEvictionAt: 0,
+};
+/** Edge-trigger latch for the over-cap-tolerated WARN (see enforcePoolCap): logs only on the
+ *  TRANSITION into the tolerated state, re-armed when an eviction drops the pool back within cap. */
+let overCapLogged = false;
+
+/** #11 observability — record the one-time cold-start (WASM instantiate) probe result. Called from
+ *  warmupQuickJS on both the success and the failure branch. */
+export function noteColdStart(ms: number, ok: boolean): void {
+  engineCounters.coldStartProbed = true;
+  engineCounters.coldStartOk     = ok;
+  engineCounters.coldStartMs     = ms;
+}
+/** #11 observability — attribute a dispatched body-run to its RESOLVED engine (call AFTER the
+ *  warmup-degrade reassignment so a degraded run counts as asyncfn, not quickjs). */
+export function noteEngineRun(engine: 'quickjs' | 'asyncfn'): void {
+  if (engine === 'quickjs') engineCounters.quickjsRuns++;
+  else engineCounters.asyncfnRuns++;
+}
+/** #11 observability — a quickjs-requested run degraded to asyncfn (WASM uninstantiable on this platform). */
+export function noteDegradedRun():      void { engineCounters.degradedRuns++; }
+/** #11 observability — a quickjs body-run threw a non-timeout error. */
+export function noteQuickjsRunError():   void { engineCounters.quickjsRunErrors++; }
+/** #11 observability — a quickjs handler-fire threw a non-timeout, non-reentrant error. */
+export function noteQuickjsFireError():  void { engineCounters.quickjsFireErrors++; }
+/** #11 observability — a quickjs run/fire hit its timeout (→ child respawn). */
+export function noteQuickjsTimeout():    void { engineCounters.quickjsTimeouts++; }
+
+/** #11 observability — snapshot the engine telemetry for the diagnostic-stats reply. The counter
+ *  fields spread from {@link EngineCounters}; the pool fields read live state (scriptContexts /
+ *  POOL_CAP / contextReservations / isContextPinned / perContextMemoryLimit, all declared below —
+ *  resolved at call time, never during module init). The return type is the canonical wire shape
+ *  ({@link EngineTelemetry} in script-runner-ipc.ts), so any drift between the local counters and
+ *  the wire contract is a compile error here. */
+export function getEngineTelemetry(): EngineTelemetry {
+  let pinned = 0;
+  for (const scriptId of scriptContexts.keys()) if (isContextPinned(scriptId)) pinned++;
+  return {
+    ...engineCounters,
+    contextModel,
+    liveContexts:     scriptContexts.size,
+    poolCap:          POOL_CAP,
+    pinnedContexts:   pinned,
+    reservedContexts: contextReservations.size,
+    perCtxLimitBytes: perContextMemoryLimit(),
+  };
+}
+/** #11 observability test seam — zero every counter + re-arm the over-cap latch. Wired into
+ *  tests/_infra/setup.ts beforeEach so telemetry never bleeds between test files. */
+export function _resetEngineTelemetryForTests(): void {
+  engineCounters.coldStartProbed = false;
+  engineCounters.coldStartOk     = false;
+  engineCounters.coldStartMs     = 0;
+  engineCounters.quickjsRuns       = 0;
+  engineCounters.asyncfnRuns       = 0;
+  engineCounters.degradedRuns      = 0;
+  engineCounters.quickjsRunErrors  = 0;
+  engineCounters.quickjsFireErrors = 0;
+  engineCounters.quickjsTimeouts   = 0;
+  engineCounters.reentrantRejects  = 0;
+  engineCounters.inVmOom           = 0;
+  engineCounters.contextEvictions  = 0;
+  engineCounters.overCapTolerated  = 0;
+  engineCounters.lastEvictionAt    = 0;
+  overCapLogged = false;
+}
+
 /** #11 P7-1 — the sync-resolved shared ScriptContext record. The notice bridges + leak oracle
  *  need a script's ctx SYNCHRONOUSLY (the notice arrives between runs, off the async build path),
  *  so they resolve it via resolveScriptContext(scriptId). Under contextModel='shared' one record
@@ -1246,7 +1441,22 @@ function enforcePoolCap(exempt?: string): void {
   if (contextModel !== 'per-script') return;
   while (scriptContexts.size > POOL_CAP) {
     const victim = lruEvictable(exempt);
-    if (victim === undefined) break; // all remaining are pinned/mid-run/exempt — accept over-cap
+    if (victim === undefined) {
+      // #11 observability — over cap but every remaining context is pinned/mid-run/exempt: we accept the
+      // over-cap insert and RETAIN (never force-evict a pinned context). Count it every time; edge-trigger
+      // the WARN so a busy pool doesn't firehose (re-armed by evictIdleContext when the pool recovers).
+      engineCounters.overCapTolerated++;
+      if (!overCapLogged) {
+        overCapLogged = true;
+        try {
+          console.warn(
+            `[script-runner] engine: context pool over cap (${scriptContexts.size}/${POOL_CAP}) — all ` +
+            `contexts pinned, eviction deferred (possible handler-pin leak)`,
+          );
+        } catch { /* console may be locked down */ }
+      }
+      break; // all remaining are pinned/mid-run/exempt — accept over-cap
+    }
     if (!evictIdleContext(victim)) break; // defensive: shouldn't fail (victim was evictable), avoid a spin
   }
 }
@@ -1447,6 +1657,43 @@ async function createContext(): Promise<ScriptContext> {
   });
   ctx.setProp(ctx.global, '__hostUnregisterHandler', hostUnregisterHandler);
   hostUnregisterHandler.dispose();
+
+  // ── #11 P5-1: component-callback registration. Component mount-options (onChange/onCommit/onClick
+  // /...) carry fn callbacks. Unlike every other register-handler kind, componentCallback has NO
+  // RegisterHandler IPC variant — the parent routes a fired component_callback via the
+  // componentCallbackRoutes map it builds from the mount's `_callbacks` (host-dispatcher
+  // dispatchComponentCallback), exactly like asyncfn registers the closure CHILD-SIDE only. So these
+  // JUST dup the fn into vmHandlerHandles (so hasVmHandler → fireVmHandler routes the fire) with NO
+  // register/unregister IPC. Disposed eagerly on component destroy + swept at teardown by
+  // disposeScriptVmHandlers (so a mounted component's callbacks pin the context, mirroring broadcast). ──
+  const hostRegisterComponentCallback = ctx.newFunction('__hostRegisterComponentCallback', (handlerIdHandle, fnHandle) => {
+    const run = sc.activeRun;
+    if (run?.scriptId) {
+      const handlerId = ctx.getString(handlerIdHandle);
+      const dup = fnHandle.dup(); // survives run-end; disposed on destroy/teardown
+      let perScript = vmHandlerHandles.get(run.scriptId);
+      if (!perScript) { perScript = new Map(); vmHandlerHandles.set(run.scriptId, perScript); }
+      const prev = perScript.get(handlerId);
+      if (prev?.alive) { try { prev.dispose(); } catch { /* re-register replaces */ } }
+      perScript.set(handlerId, dup);
+    }
+    // returns undefined to the VM
+  });
+  ctx.setProp(ctx.global, '__hostRegisterComponentCallback', hostRegisterComponentCallback);
+  hostRegisterComponentCallback.dispose();
+  const hostUnregisterComponentCallback = ctx.newFunction('__hostUnregisterComponentCallback', (handlerIdHandle) => {
+    const run = sc.activeRun;
+    if (run?.scriptId) {
+      const handlerId = ctx.getString(handlerIdHandle);
+      const perScript = vmHandlerHandles.get(run.scriptId);
+      const h = perScript?.get(handlerId);
+      if (h?.alive) { try { h.dispose(); } catch { /* already gone */ } }
+      perScript?.delete(handlerId);
+    }
+    // returns undefined to the VM
+  });
+  ctx.setProp(ctx.global, '__hostUnregisterComponentCallback', hostUnregisterComponentCallback);
+  hostUnregisterComponentCallback.dispose();
 
   // ── P5 inc3c: macro/tool unregister BY NAME. macro/tool stores resolve by (scriptId,
   // name), NOT handlerId, so this sends a name-keyed unregister IPC (distinct from
@@ -1768,6 +2015,12 @@ function toHostError(ctx: QuickJSContext, errorHandle: QuickJSHandle): Error {
     const err = new Error(String(info.message ?? ''));
     if (info.name)  err.name  = String(info.name);
     if (info.stack) err.stack = String(info.stack);
+    // #11 observability — count an in-VM out-of-memory (a per-context memory-limit hit). QuickJS
+    // surfaces it as InternalError('out of memory'); the shape is pinned by a telemetry test against
+    // _setChildWasmBudgetForTests so a quickjs-emscripten version bump that drifts it fails loudly.
+    if (String(info.name) === 'InternalError' && /out of memory/i.test(String(info.message ?? ''))) {
+      engineCounters.inVmOom++;
+    }
     return err;
   }
   if (info && info.isError === false) {
@@ -2040,6 +2293,11 @@ export function disposeContextForScript(scriptId: string, disposeContext: boolea
     // build dispose its own orphan instead of publishing into the now-cleared pool.
     scriptContextPromises.delete(scriptId);
     if (sc) { try { if (sc.ctx.alive) sc.ctx.dispose(); } catch { /* teardown */ } }
+    // #11 observability (audit follow-up) — this disable/delete removal shrinks the pool too, so re-arm
+    // the over-cap WARN latch when it brings us back within cap. Without this, a pinned script leaving
+    // via disable/delete (not idle-eviction) leaves overCapLogged stuck true, silently suppressing the
+    // next genuine over-cap-tolerated warn. Mirrors the reset in evictIdleContext.
+    if (scriptContexts.size <= POOL_CAP) overCapLogged = false;
   }
   return n;
 }
@@ -2067,7 +2325,13 @@ export function evictIdleContext(scriptId: string): boolean {
   if (isContextPinned(scriptId)) return false; // never evict a pinned context (use-after-free on next fire)
   scriptContexts.delete(scriptId);
   scriptContextPromises.delete(scriptId);
-  if (sc) { try { if (sc.ctx.alive) sc.ctx.dispose(); } catch { /* eviction — best effort */ } return true; }
+  if (sc) {
+    try { if (sc.ctx.alive) sc.ctx.dispose(); } catch { /* eviction — best effort */ }
+    engineCounters.contextEvictions++;            // #11 observability — cumulative evictions (idle + cap)
+    engineCounters.lastEvictionAt = Date.now();
+    if (scriptContexts.size <= POOL_CAP) overCapLogged = false; // pool recovered — re-arm the over-cap warn
+    return true;
+  }
   return false;
 }
 
@@ -2235,6 +2499,7 @@ export async function fireHandlerInQuickJS(opts: QuickJSFireOptions): Promise<un
       `underlying logic directly instead of through api.tools.invoke.`,
     );
     err.name = 'ReentrantToolInvokeError';
+    engineCounters.reentrantRejects++; // #11 observability — track F4 self-invoke fast-rejects
     throw err;
   }
 

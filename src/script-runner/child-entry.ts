@@ -87,6 +87,14 @@ import {
   disposeScriptVmBroadcast,
   sweepIdleContexts,
   warmupQuickJS,
+  // #11 observability — engine telemetry note* bumpers (counters live in qjs-engine.ts) +
+  // the getEngineTelemetry() snapshot spread into the diagnostic-stats reply.
+  noteEngineRun,
+  noteDegradedRun,
+  noteQuickjsRunError,
+  noteQuickjsFireError,
+  noteQuickjsTimeout,
+  getEngineTelemetry,
 } from './qjs-engine.js';
 
 // ─── Error classes ──────────────────────────────────────────────────────────
@@ -683,6 +691,7 @@ function fireVmModalDismiss(proc: SpindleBackendProcessContext, msg: AdvancedMod
       // Swallow listener errors (dismissal parity). On the async-hang ScriptTimeoutError, kill the
       // worker so the wedged runChain slot is cleared by respawn.
       if (err instanceof Error && err.name === 'ScriptTimeoutError') {
+        noteQuickjsTimeout(); // #11 observability — quickjs fire timeout (onDismiss → child respawn)
         proc.fail(`script-runner: async-timeout firing advanced-modal onDismiss handler ${handlerId} (scriptId=${scriptId}); terminating to clear the wedged engine runChain`);
       }
     }),
@@ -952,6 +961,11 @@ async function fireVmHandler(
   } catch (err) {
     ok = false;
     error = serializeError(err);
+    // #11 observability — this is the quickjs-only fire path (routed by hasVmHandler). Count a genuine
+    // engine fire-error, but EXCLUDE the two expected/tracked-elsewhere classes: a timeout (counted at
+    // the proc.fail gate below) and a self-invoke reentrant reject (counted at its throw site + surfaced
+    // to the caller as an ordinary rejection, not an engine fault).
+    if (error.name !== 'ScriptTimeoutError' && error.name !== 'ReentrantToolInvokeError') noteQuickjsFireError();
   }
 
   const result: HandlerResult = {
@@ -967,6 +981,7 @@ async function fireVmHandler(
   // Async-hang rescue (see the ScriptTimeoutError above): kill the worker so the
   // wedged runChain slot is cleared by respawn. Same posture as runOne's body-run.
   if (!ok && error?.name === 'ScriptTimeoutError') {
+    noteQuickjsTimeout(); // #11 observability — quickjs fire timeout (→ child respawn)
     proc.fail(
       `script-runner: async-timeout firing handler ${req.kind}/${req.handlerId} ` +
       `(scriptId=${req.scriptId}, runId=${req.runId}); terminating to clear the wedged engine runChain`,
@@ -1019,6 +1034,7 @@ function fireVmBroadcast(proc: SpindleBackendProcessContext, msg: BroadcastFireM
     // Swallow handler errors (bus parity). On the async-hang ScriptTimeoutError, kill
     // the worker so the wedged runChain slot is cleared by respawn.
     if (err instanceof Error && err.name === 'ScriptTimeoutError') {
+      noteQuickjsTimeout(); // #11 observability — quickjs fire timeout (broadcast → child respawn)
       proc.fail(`script-runner: async-timeout firing broadcast handler ${msg.subId} (scriptId=${msg.scriptId}); terminating to clear the wedged engine runChain`);
     }
   });
@@ -1290,6 +1306,10 @@ async function runOne(
   let value: unknown = undefined;
   let ok = true;
   let error: SerializedError | undefined;
+  // #11 observability — the RESOLVED engine for this run, hoisted to function scope so the
+  // post-`finally` result-assembly (the shared catch + the timeout proc.fail below, both OUTSIDE
+  // the try where engineMode is set) can attribute run errors / timeouts to the right engine.
+  let engineMode: 'asyncfn' | 'quickjs' = 'asyncfn';
 
   // Build the proxy api for this run. Stash by runId so api-response IPC
   // arrivals can route to its pending-request map.
@@ -1364,7 +1384,7 @@ async function runOne(
     // Per-run via RunScriptRequest.engineMode; the test seam overrides per-process
     // for the parity harness. Branch sits inside the try so a quickjs failure is
     // surfaced as RunScriptResult { ok:false } like any other body error.
-    let engineMode: 'asyncfn' | 'quickjs' = testEngineMode ?? req.engineMode ?? 'asyncfn';
+    engineMode = testEngineMode ?? req.engineMode ?? 'asyncfn';
     // #11 cold-start-fallback — if quickjs is requested but the WASM module can't instantiate on this
     // platform, DEGRADE this run to the AsyncFunction engine instead of hard-failing (there is no other
     // isolation layer, so degrade gracefully). warmupQuickJS is cached + this `await` sits OUTSIDE the
@@ -1373,7 +1393,11 @@ async function runOne(
     // default (the guard skips it). When available, warmupQuickJS resolves ~instantly.
     if (engineMode === 'quickjs' && !(await warmupQuickJS())) {
       engineMode = 'asyncfn';
+      noteDegradedRun(); // #11 observability — a quickjs-requested run fell back (WASM uninstantiable)
     }
+    // #11 observability — attribute the run to its RESOLVED engine (AFTER the degrade so a degraded
+    // run counts as asyncfn, preserving the degradedRuns signal — see the risk the design flagged).
+    noteEngineRun(engineMode);
     if (engineMode === 'quickjs') {
       // #11 — QuickJS-WASM isolate. The harness reuses proxy.dispatch / the
       // pending-map / api-response routing / flush / activeProxies verbatim;
@@ -1514,6 +1538,9 @@ ${req.code}
   } catch (err) {
     ok = false;
     error = serializeError(err);
+    // #11 observability — a quickjs body-run threw. Timeouts are counted separately at the proc.fail
+    // gate below (they also force a respawn), so exclude them here to keep the two signals distinct.
+    if (engineMode === 'quickjs' && error.name !== 'ScriptTimeoutError') noteQuickjsRunError();
   } finally {
     // Phase 9d.3 lifecycle: do NOT drop the proxy from `activeProxies`
     // here. Handler closures registered during this run (macros, tools,
@@ -1573,8 +1600,11 @@ ${req.code}
   // a per-script process-isolation design lives in v2 if it becomes a
   // real-world pain point.
   if (!ok && error?.name === 'ScriptTimeoutError') {
+    // #11 observability — a quickjs body-run timed out (→ whole-child respawn). Count it + TAG the engine
+    // into the proc.fail reason so the host-side respawn log distinguishes a quickjs hang from an asyncfn one.
+    if (engineMode === 'quickjs') noteQuickjsTimeout();
     proc.fail(
-      `script-runner: async-timeout in "${req.scriptName}" (runId=${req.runId}); ` +
+      `script-runner: async-timeout in "${req.scriptName}" (engine=${engineMode}, runId=${req.runId}); ` +
       `terminating to prevent orphan-body resource leak`,
     );
   }
@@ -1870,7 +1900,14 @@ export default function (proc: SpindleBackendProcessContext): () => void {
     // #11 P7-3.1 — piggyback the quickjs per-script context idle-sweep on the existing heartbeat (the
     // engine owns no timer). No-op under contextModel='shared' (the default today) — reaps idle,
     // unpinned, non-mid-run per-script contexts + enforces POOL_CAP once per-script is the default.
-    sweepIdleContexts();
+    // #11 observability — capture the (previously discarded) evicted count + log only NON-ZERO sweeps;
+    // the 5-min idle TTL makes reclaims naturally sparse, so this never firehoses. No per-eviction log.
+    const evicted = sweepIdleContexts();
+    if (evicted > 0) {
+      try {
+        console.info(`[script-runner] quickjs pool: evicted ${evicted} idle context(s), ${getEngineTelemetry().liveContexts} remain`);
+      } catch { /* console may be locked down */ }
+    }
   }, IDLE_HEARTBEAT_INTERVAL_MS);
 
   const cleanup = (): void => {
@@ -1987,6 +2024,10 @@ export default function (proc: SpindleBackendProcessContext): () => void {
           cpuUserUs:   cpu.user,
           cpuSystemUs: cpu.system,
           uptimeSec:   _processUptime(),
+          // #11 observability — fold this child's QuickJS-engine telemetry into the stats reply
+          // (rides the existing diagnostic-stats round-trip; no new IPC pair). Counters are 0 and the
+          // pool snapshot reads 'shared'/empty until quickjs is actually exercised on this child.
+          engine:      getEngineTelemetry(),
         });
         break;
       }
