@@ -11,8 +11,8 @@
  */
 import { describe, test, expect } from 'bun:test';
 import { dispatchRunScript, unregisterScriptFromChild, __resetForTests } from '../../src/script-runner/host-dispatcher.js';
-import { _setEngineModeForTests, _asyncfnTimerCountForTests } from '../../src/script-runner/child-entry.js';
-import { on as busOn, clearAll as clearBroadcast } from '../../src/engine/broadcast-bus.js';
+import { _setEngineModeForTests, _asyncfnTimerCountForTests, _vmTimerCountForTests } from '../../src/script-runner/child-entry.js';
+import { on as busOn, emit as busEmit, clearAll as clearBroadcast } from '../../src/engine/broadcast-bus.js';
 import { setupE2E } from '../_infra/script-runner-fixture.js';
 import type { Script } from '../../src/types/script.js';
 
@@ -79,6 +79,34 @@ for (const engine of ['asyncfn', 'quickjs'] as const) {
         childCleanup(); _setEngineModeForTests(undefined); clearBroadcast();
       }
     });
+
+    test('an interval armed INSIDE a broadcast handler is attributed to the script (armed→tracked, unregister→cleared)', async () => {
+      __resetForTests();
+      _setEngineModeForTests(engine);
+      const { childCleanup } = await setupE2E();
+      try {
+        const sid  = `inhandler-${engine}`;
+        const goEv = `p6-go-${engine}`;
+        // Observe the timer store DIRECTLY per engine — observing via api.* would break after unregister
+        // (the torn-down proxy drops the call) regardless of whether the timer was actually cancelled.
+        const timerCount = () => engine === 'asyncfn' ? _asyncfnTimerCountForTests(sid) : _vmTimerCountForTests(sid);
+        // The interval is armed INSIDE the broadcast handler's fire — the case #6 covered: under asyncfn the
+        // fire has no runId->activeProxies mapping, so pre-fix the timer was unattributed (count stayed 0)
+        // and survived unregister. A long delay so it never fires; we only assert on attribution.
+        await dispatchRunScript(
+          makeScript(sid, `api.broadcast.on('${goEv}', () => { setInterval(() => {}, 100000); }); return null;`),
+          makeRequest(),
+        );
+        expect(timerCount()).toBe(0);        // nothing armed yet
+        // Fire the handler: host bus -> per-script forwarder -> broadcast-fire IPC -> child handleBroadcastFire.
+        busEmit(goEv, {});
+        expect(await waitUntil(() => timerCount() === 1, 3_000)).toBe(true); // ATTRIBUTED (was 0 pre-fix under asyncfn)
+        unregisterScriptFromChild(sid, 'disable');
+        expect(timerCount()).toBe(0);        // cancelled + cleared on teardown
+      } finally {
+        childCleanup(); _setEngineModeForTests(undefined); clearBroadcast();
+      }
+    });
   });
 }
 
@@ -119,6 +147,27 @@ describe('asyncfn timer tracking untracks on clear (bounded set growth)', () => 
       expect(_asyncfnTimerCountForTests(sid)).toBe(1);   // still tracked
       unregisterScriptFromChild(sid, 'disable');         // teardown cancels it (and clears the set)
       expect(_asyncfnTimerCountForTests(sid)).toBe(0);
+    } finally {
+      childCleanup(); _setEngineModeForTests(undefined);
+    }
+  });
+
+  test('a timer armed INSIDE a timer callback is attributed too (the callback runs under the owning scriptId)', async () => {
+    __resetForTests();
+    _setEngineModeForTests('asyncfn');
+    const { childCleanup } = await setupE2E();
+    try {
+      const sid = 'asyncfn-nested';
+      // The interval fires from the event loop — outside any run context. Without running the callback under
+      // the owning scriptId, the setTimeout it arms would be unattributed (armed after the body run ended)
+      // and leak. Wrapping the callback attributes it: interval (1) + the nested one-shot (1) = 2 tracked.
+      await dispatchRunScript(
+        makeScript(sid, `let armed = false; setInterval(() => { if (!armed) { armed = true; setTimeout(() => {}, 100000); } }, 15); return null;`),
+        makeRequest(),
+      );
+      expect(await waitUntil(() => _asyncfnTimerCountForTests(sid) >= 2, 3_000)).toBe(true); // nested one-shot attributed
+      unregisterScriptFromChild(sid, 'disable');
+      expect(_asyncfnTimerCountForTests(sid)).toBe(0);   // both cancelled + cleared on teardown
     } finally {
       childCleanup(); _setEngineModeForTests(undefined);
     }

@@ -55,6 +55,7 @@ import type {
   StreamCancelRequest,
 } from '../types/script-runner-ipc.js';
 import type { ConsoleEntry, ConsoleEntryType } from '../types/script.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   buildProxiedAPI,
   runIdContext,
@@ -440,7 +441,8 @@ export function installSandboxLockdown(): void {
     let id: ReturnType<typeof setTimeout>;
     id = _setTimeout((...cbArgs: unknown[]) => {
       untrackAsyncfnTimer(sid, id); // fired → drop from the set (bounds repeated-setTimeout accumulation)
-      (cb as (...a: unknown[]) => void)(...cbArgs);
+      // Run the callback under the owning scriptId so a timer it arms is attributed + cancelled on teardown.
+      currentScriptIdContext.run(sid, () => (cb as (...a: unknown[]) => void)(...cbArgs));
     }, ms as number, ...(args as unknown[]));
     trackAsyncfnTimer(sid, id);
     return id;
@@ -452,8 +454,13 @@ export function installSandboxLockdown(): void {
       );
     }
     const sid = currentUserScriptId();
-    const id = _setInterval(cb as (...a: unknown[]) => void, ms as number, ...(args as unknown[]));
-    if (sid !== undefined) trackAsyncfnTimer(sid, id); // intervals persist until clearInterval/teardown
+    if (sid === undefined) return _setInterval(cb as (...a: unknown[]) => void, ms as number, ...(args as unknown[]));
+    // Run each tick under the owning scriptId so a timer the callback arms is attributed + cancelled on teardown.
+    const id = _setInterval(
+      (...cbArgs: unknown[]) => currentScriptIdContext.run(sid, () => (cb as (...a: unknown[]) => void)(...cbArgs)),
+      ms as number, ...(args as unknown[]),
+    );
+    trackAsyncfnTimer(sid, id); // intervals persist until clearInterval/teardown
     return id;
   }) as typeof setInterval;
   // Patch clearTimeout/clearInterval to also DROP the id from the per-script tracking set. Without this,
@@ -605,7 +612,9 @@ function handleBroadcastFire(
   // lifecycle messages — the indicator simply doesn't move for them.
   let result: unknown;
   try {
-    result = (handler as (payload: unknown) => unknown)(msg.payload);
+    // Establish the executing scriptId for the handler (and any async continuation), so a timer armed
+    // inside it is attributed and cancelled on teardown. This fire path has no runId->activeProxies mapping.
+    result = currentScriptIdContext.run(msg.scriptId, () => (handler as (payload: unknown) => unknown)(msg.payload));
   } catch {
     // Mirror the bus's existing semantic: errors caught so one bad handler
     // can't break the others. Console capture (Phase 9) will eventually
@@ -851,7 +860,9 @@ async function handleRunHandlerRequest(
     value = await raceWithTimeout(
       liveContextStore.run(
         { chatId: req.chatIdAtFire, characterId: req.characterIdAtFire },
-        () => runIdContext.run(req.runId, () => Promise.resolve(handler(...req.args))),
+        // currentScriptIdContext establishes the executing scriptId so a timer armed inside the handler is
+        // attributed + cancelled on teardown (the fire's runId is not in activeProxies).
+        () => runIdContext.run(req.runId, () => currentScriptIdContext.run(req.scriptId, () => Promise.resolve(handler(...req.args)))),
       ),
       req.timeoutMs,
       () => new Error(`Handler ${req.kind}/${req.handlerId} exceeded ${req.timeoutMs / 1000}s timeout`),
@@ -1197,19 +1208,27 @@ function fireVmTimer(proc: SpindleBackendProcessContext, scriptId: string, timer
 
 // ─── #11 P5-3: asyncfn user-timer tracking (the Finding-4 leak fix for the AsyncFunction engine) ──────
 //
-// The asyncfn engine runs user code in the child's own global scope, so a user setTimeout/setInterval
-// goes through the monkeypatched globalThis.setTimeout/setInterval (installSandboxLockdown). Pre-P5-3
-// those wrappers tracked NOTHING, so a leaked interval survived reload/disable and kept firing the old
-// closure (the exact field-test Finding-4). Track each user timer per-script + cancel them all on
-// unregister. Attribution = the run active when the timer is created, resolved from runIdContext (the
-// body-run ALS) via activeProxies. Timers created OUTSIDE a user run (LumiScript's own heartbeat /
-// raceWithTimeout) resolve to no scriptId → NOT tracked (correct — not user timers). Timers set inside a
-// handler-fire / broadcast handler (a synthetic runId not in activeProxies) also resolve to no scriptId
-// → not tracked (a documented minor gap; long-lived timers live in body/trigger runs, which ARE covered).
-// The quickjs half of this fix is clearAllTimersForScript above.
+// The asyncfn engine runs user code in the child's own global scope, so a user setTimeout/setInterval goes
+// through the monkeypatched globalThis.setTimeout/setInterval (installSandboxLockdown). Those wrappers used
+// to track nothing, so a leaked interval survived reload/disable and kept firing the old closure. We now
+// track each user timer per-script and cancel them all on unregister. Attribution needs the scriptId of
+// whatever user code is currently executing — a body/trigger run OR a handler fire (broadcast / command /
+// DOM listener / macro). Handler fires do NOT run under the body-run runId->activeProxies mapping, so they
+// establish the scriptId directly via `currentScriptIdContext` (set around each handler invocation, and
+// around a tracked timer's own callback so a timer armed inside a callback is attributed too). Body/trigger
+// runs fall back to runIdContext->activeProxies. Timers created OUTSIDE any user code (the heartbeat,
+// raceWithTimeout) resolve to no scriptId and are correctly left untracked. The quickjs half — where user
+// timers live in the VM and attribute by scriptId through the scheduler — is clearAllTimersForScript above.
 const asyncfnTimerStore = new Map<string, Set<ReturnType<typeof setTimeout>>>();
-/** The scriptId of the user run currently executing (body/trigger run), or undefined outside one. */
+/** The scriptId of the user code currently executing — set directly around handler fires (and tracked-timer
+ *  callbacks), which don't run under the body-run runId->activeProxies mapping. Body/trigger runs don't set
+ *  it (they resolve via runIdContext->activeProxies instead). */
+const currentScriptIdContext = new AsyncLocalStorage<string>();
+/** The scriptId of the user code currently executing (body/trigger run OR handler fire), or undefined
+ *  outside any user code. */
 function currentUserScriptId(): string | undefined {
+  const direct = currentScriptIdContext.getStore();
+  if (direct !== undefined) return direct;
   const runId = runIdContext.getStore();
   return runId === undefined ? undefined : activeProxies.get(runId)?.scriptId;
 }
@@ -2104,6 +2123,12 @@ export function _activeProxyCountForTests(): number {
  *  measurement: a create+clear cycle must return to 0, not accumulate). */
 export function _asyncfnTimerCountForTests(scriptId: string): number {
   return asyncfnTimerStore.get(scriptId)?.size ?? 0;
+}
+
+/** @internal Test seam — how many quickjs in-VM user timers are currently armed for a script (the
+ *  child-side Bun timers backing the VM's setTimeout/setInterval). Counterpart to the asyncfn seam. */
+export function _vmTimerCountForTests(scriptId: string): number {
+  return vmTimerStore.get(scriptId)?.size ?? 0;
 }
 
 // ─── Entry ──────────────────────────────────────────────────────────────────
