@@ -127,26 +127,27 @@ export const VM_WEBGLOBALS_BOOTSTRAP = `
   // Date.now(); documented as wall-clock-derived, not strictly monotonic.
   globalThis.performance = { now: function () { return Date.now(); } };
 
-  // ── timers — NOT YET SUPPORTED (host-scheduled callbacks land in a later phase) ──
-  // setTimeout/setInterval need host-scheduled callback re-entry into the VM (the P5 callback
-  // machinery), which is not built yet. Define THROWING stubs so a script that reaches for a timer
-  // gets a clear 'not yet supported — a later phase' message (parity with the marshaler's fail-loud)
-  // instead of the bare 'setTimeout is not defined' ReferenceError a missing global gives — that reads
-  // like a LumiScript bug rather than an unbuilt feature. clearTimeout/clearInterval are safe NO-OPs:
-  // set* always throws so no timer id can exist, and throwing in a teardown/cleanup path (where clear*
-  // is typically called) would itself break cleanup.
-  var unsupportedTimer = function (name) {
-    return function () {
-      throw new Error(
-        'LumiScript QuickJS engine: ' + name + ' is not yet supported (timers land in a later phase). ' +
-        'Restructure to avoid timers for now, or run this script under the AsyncFunction engine.',
-      );
-    };
+  // ── timers (#11 P5-2) — host-scheduled callbacks. setTimeout/setInterval register the callback with
+  // the host (dup'd into the VM handler registry by a VM-generated timerId, NO parent IPC) + arm a
+  // child-side Bun timer via __hostScheduleTimer; the timer's expiry fires the callback via
+  // fireHandlerInQuickJS on its OWN runChain entry, so setTimeout(fn, 0) inside a run runs AFTER the run
+  // (macrotask parity). Returns the opaque timerId. clearTimeout/clearInterval cancel the child timer +
+  // drop the dup via __hostClearTimer; they are lenient on a missing/foreign id (no throw — cleanup
+  // paths call them defensively). A pending timer PINS the script's context (its dup keeps it un-evicted).
+  var __lsScheduleTimer = function (fn, ms, repeat) {
+    if (typeof fn !== 'function') {
+      throw new TypeError((repeat ? 'setInterval' : 'setTimeout') + ': callback is not a function');
+    }
+    var timerId = 'timer:' + globalThis.crypto.randomUUID();
+    var delay = (ms === undefined || ms === null) ? 0 : Number(ms);
+    if (delay !== delay || delay < 0) delay = 0; // NaN / negative → 0 (Web-timer semantics)
+    globalThis.__hostScheduleTimer(timerId, fn, delay, !!repeat);
+    return timerId;
   };
-  globalThis.setTimeout = unsupportedTimer('setTimeout');
-  globalThis.setInterval = unsupportedTimer('setInterval');
-  globalThis.clearTimeout = function () {};
-  globalThis.clearInterval = function () {};
+  globalThis.setTimeout  = function (fn, ms) { return __lsScheduleTimer(fn, ms, false); };
+  globalThis.setInterval = function (fn, ms) { return __lsScheduleTimer(fn, ms, true); };
+  globalThis.clearTimeout  = function (id) { if (typeof id === 'string' && id) globalThis.__hostClearTimer(id); };
+  globalThis.clearInterval = function (id) { if (typeof id === 'string' && id) globalThis.__hostClearTimer(id); };
 
   // structuredClone via the marshaler twin — same type fidelity (Date/Map/Set/
   // typed-arrays/etc.) and the same fail-loud on functions/symbols/cycles (real

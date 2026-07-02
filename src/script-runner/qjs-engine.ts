@@ -881,7 +881,7 @@ const VM_FLUSH_BOOTSTRAP = `
 // deep-frozen.) Eval'd LAST in createContext, after all scaffolding is built.
 const VM_FREEZE_BOOTSTRAP = `
 (function () {
-  var locked = ['__lsEncode', '__lsDecode', '__lsErrInfo', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', '__lsFetchAbort', 'fetch', 'Headers', 'Response', 'AbortController', 'AbortSignal', '__hostHandleDispatch', '__lsVmHandleProxy', '__hostRegisterHandler', '__hostUnregisterHandler', '__hostUnregisterHandlerNamed', '__hostRegisterComponentCallback', '__hostUnregisterComponentCallback', '__lsCallHandler', '__hostBroadcastSubscribe', '__hostBroadcastUnsubscribe', '__lsTrackChain', '__lsFlush', '__hostAllocElementId', '__hostRegisterWidget', '__hostDropWidget', '__hostRegisterModal', '__hostRegisterModalDismiss', '__hostUnregisterModalDismiss'];
+  var locked = ['__lsEncode', '__lsDecode', '__lsErrInfo', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', '__lsFetchAbort', 'fetch', 'Headers', 'Response', 'AbortController', 'AbortSignal', '__hostHandleDispatch', '__lsVmHandleProxy', '__hostRegisterHandler', '__hostUnregisterHandler', '__hostUnregisterHandlerNamed', '__hostRegisterComponentCallback', '__hostUnregisterComponentCallback', '__hostScheduleTimer', '__hostClearTimer', '__lsCallHandler', '__hostBroadcastSubscribe', '__hostBroadcastUnsubscribe', '__lsTrackChain', '__lsFlush', '__hostAllocElementId', '__hostRegisterWidget', '__hostDropWidget', '__hostRegisterModal', '__hostRegisterModalDismiss', '__hostUnregisterModalDismiss'];
   for (var i = 0; i < locked.length; i++) {
     var name = locked[i];
     if (Object.prototype.hasOwnProperty.call(globalThis, name)) {
@@ -1485,6 +1485,19 @@ export function sweepIdleContexts(now: number = Date.now(), idleMs: number = idl
   return evicted;
 }
 
+/** #11 P5-2 — the child-side timer scheduler the in-VM setTimeout/setInterval reach through. Injected
+ *  by child-entry (setVmTimerScheduler) because the Bun-timer store + the fireHandlerInQuickJS re-entry
+ *  live in the child, NOT the VM — a timer is entirely child-local (no parent IPC): the VM registers the
+ *  callback (dup'd into vmHandlerHandles by timerId) + calls schedule(); the child arms a Bun timer whose
+ *  expiry fires the callback via fireHandlerInQuickJS on its own runChain entry. `undefined` in a unit
+ *  test that doesn't wire it → the callback still registers (fireable manually) but no Bun timer arms. */
+export interface VmTimerScheduler {
+  schedule(scriptId: string, timerId: string, ms: number, repeat: boolean): void;
+  clear(scriptId: string, timerId: string): void;
+}
+let vmTimerScheduler: VmTimerScheduler | undefined;
+export function setVmTimerScheduler(s: VmTimerScheduler | undefined): void { vmTimerScheduler = s; }
+
 /** Create the module (once per process) + the reusable context (once per child,
  *  mirroring the shared-child model) + the stable VM scaffolding. Returns the
  *  per-context ScriptContext record (#11 P7-0). The interrupt handler and every
@@ -1694,6 +1707,41 @@ async function createContext(): Promise<ScriptContext> {
   });
   ctx.setProp(ctx.global, '__hostUnregisterComponentCallback', hostUnregisterComponentCallback);
   hostUnregisterComponentCallback.dispose();
+
+  // ── #11 P5-2: timers. In-VM setTimeout/setInterval reach __hostScheduleTimer with a VM-generated
+  // timerId + the raw callback fn. Like componentCallback the fn is dup'd into vmHandlerHandles (so
+  // hasVmHandler → fireHandlerInQuickJS routes the fire) with NO register-handler IPC — a timer fire is
+  // entirely CHILD-LOCAL (the child's Bun-timer store, injected via vmTimerScheduler, arms the timer and
+  // fires the callback), so the parent never sees it. The dup pins the context until clear/teardown
+  // (broadcast-parity pinning) — a pending timer keeps an otherwise-idle script's context resident. ──
+  const hostScheduleTimer = ctx.newFunction('__hostScheduleTimer', (timerIdHandle, fnHandle, msHandle, repeatHandle) => {
+    const run = sc.activeRun;
+    if (!run?.scriptId) return; // setTimeout is always called from user code (a run/fire is active)
+    const timerId = ctx.getString(timerIdHandle);
+    const dup = fnHandle.dup(); // survives run-end; disposed on clear/teardown
+    let perScript = vmHandlerHandles.get(run.scriptId);
+    if (!perScript) { perScript = new Map(); vmHandlerHandles.set(run.scriptId, perScript); }
+    const prev = perScript.get(timerId);
+    if (prev?.alive) { try { prev.dispose(); } catch { /* re-schedule replaces */ } }
+    perScript.set(timerId, dup);
+    const ms = Number(ctx.dump(msHandle)) || 0;
+    const repeat = ctx.dump(repeatHandle) === true;
+    vmTimerScheduler?.schedule(run.scriptId, timerId, ms < 0 ? 0 : ms, repeat);
+  });
+  ctx.setProp(ctx.global, '__hostScheduleTimer', hostScheduleTimer);
+  hostScheduleTimer.dispose();
+  const hostClearTimer = ctx.newFunction('__hostClearTimer', (timerIdHandle) => {
+    const run = sc.activeRun;
+    if (!run?.scriptId) return;
+    const timerId = ctx.getString(timerIdHandle);
+    const perScript = vmHandlerHandles.get(run.scriptId);
+    const h = perScript?.get(timerId);
+    if (h?.alive) { try { h.dispose(); } catch { /* already gone */ } }
+    perScript?.delete(timerId);
+    vmTimerScheduler?.clear(run.scriptId, timerId);
+  });
+  ctx.setProp(ctx.global, '__hostClearTimer', hostClearTimer);
+  hostClearTimer.dispose();
 
   // ── P5 inc3c: macro/tool unregister BY NAME. macro/tool stores resolve by (scriptId,
   // name), NOT handlerId, so this sends a name-keyed unregister IPC (distinct from
@@ -2244,6 +2292,16 @@ export function _vmBroadcastIdsForTests(scriptId: string): string[] {
 
 /** #11 P5 — dispose every dup'd handler handle for a script (teardown / reload /
  *  unregister-all). Returns the count disposed. */
+/** #11 P5-2 — dispose a SINGLE dup'd VM handler fn by (scriptId, handlerId) — e.g. a one-shot timer's
+ *  callback after it fires, so a fired setTimeout doesn't pin the context until teardown. No-op if the
+ *  handler is absent. Distinct from disposeScriptVmHandlers (which sweeps the whole script). */
+export function disposeVmHandler(scriptId: string, handlerId: string): void {
+  const perScript = vmHandlerHandles.get(scriptId);
+  const h = perScript?.get(handlerId);
+  if (h?.alive) { try { h.dispose(); } catch { /* already gone */ } }
+  perScript?.delete(handlerId);
+}
+
 export function disposeScriptVmHandlers(scriptId: string): number {
   let n = disposeScriptVmBroadcast(scriptId); // full teardown also drops broadcast subs
   const perScript = vmHandlerHandles.get(scriptId);

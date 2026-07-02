@@ -85,6 +85,7 @@ import {
   dropVmModal,
   disposeContextForScript,
   disposeScriptVmBroadcast,
+  disposeVmHandler,
   sweepIdleContexts,
   warmupQuickJS,
   // #11 observability — engine telemetry note* bumpers (counters live in qjs-engine.ts) +
@@ -95,6 +96,8 @@ import {
   noteQuickjsFireError,
   noteQuickjsTimeout,
   getEngineTelemetry,
+  // #11 P5-2 — inject the child-side Bun-timer scheduler the in-VM setTimeout/setInterval reach through.
+  setVmTimerScheduler,
 } from './qjs-engine.js';
 
 // ─── Error classes ──────────────────────────────────────────────────────────
@@ -1040,6 +1043,102 @@ function fireVmBroadcast(proc: SpindleBackendProcessContext, msg: BroadcastFireM
   });
 }
 
+// ─── #11 P5-2: child-side timer store + host-scheduled fire ────────────────────
+//
+// A quickjs timer is entirely CHILD-LOCAL: the in-VM setTimeout/setInterval registers the callback
+// (dup'd into the VM handler registry by a VM-generated timerId) and calls the injected scheduler; here
+// we arm a real Bun timer whose expiry fires the callback via fireHandlerInQuickJS on its OWN runChain
+// entry (macrotask parity — setTimeout(fn,0) runs AFTER the current run; no F4 deadlock since a timer
+// fire carries no callerScriptId). One-shots delete themselves from the store BEFORE firing (so the id
+// is free for a re-schedule inside the fire) and dispose their VM dup AFTER (so a fired setTimeout does
+// not pin the context until teardown); intervals re-arm implicitly and keep their dup until
+// clearInterval/teardown. All of a script's timers are cancelled at teardown (clearAllTimersForScript).
+interface VmTimerEntry { handle: ReturnType<typeof setInterval>; repeat: boolean }
+const vmTimerStore = new Map<string, Map<string, VmTimerEntry>>();
+
+function scheduleVmTimer(proc: SpindleBackendProcessContext, scriptId: string, timerId: string, ms: number, repeat: boolean): void {
+  let perScript = vmTimerStore.get(scriptId);
+  if (!perScript) { perScript = new Map(); vmTimerStore.set(scriptId, perScript); }
+  const prev = perScript.get(timerId); // a re-schedule under the same id replaces the old Bun handle
+  if (prev) { clearInterval(prev.handle); clearTimeout(prev.handle); }
+  if (repeat) {
+    const handle = setInterval(() => { fireVmTimer(proc, scriptId, timerId, false); }, ms);
+    perScript.set(timerId, { handle, repeat: true });
+  } else {
+    const handle = setTimeout(() => {
+      const ps = vmTimerStore.get(scriptId); // drop BEFORE firing (id free for a re-schedule in the fire)
+      ps?.delete(timerId);
+      if (ps && ps.size === 0) vmTimerStore.delete(scriptId);
+      fireVmTimer(proc, scriptId, timerId, true);
+    }, ms);
+    perScript.set(timerId, { handle, repeat: false });
+  }
+}
+
+function clearVmTimer(scriptId: string, timerId: string): void {
+  const perScript = vmTimerStore.get(scriptId);
+  if (!perScript) return;
+  const entry = perScript.get(timerId);
+  if (!entry) return;
+  clearInterval(entry.handle); clearTimeout(entry.handle);
+  perScript.delete(timerId);
+  if (perScript.size === 0) vmTimerStore.delete(scriptId);
+}
+
+/**
+ * #11 P5-2 / P5-3 — cancel every Bun timer for a script (teardown / reload / disable / delete). The VM
+ * callback dups are separately swept by disposeScriptVmHandlers (via disposeContextForScript); this
+ * cancels the child-side Bun handles so a leaked interval can't keep firing after the script is gone —
+ * the quickjs half of the Finding-4 leak fix.
+ */
+function clearAllTimersForScript(scriptId: string): void {
+  const perScript = vmTimerStore.get(scriptId);
+  if (!perScript) return;
+  for (const { handle } of perScript.values()) { clearInterval(handle); clearTimeout(handle); }
+  vmTimerStore.delete(scriptId);
+}
+
+/**
+ * Fire a VM timer callback. Mirrors fireVmBroadcast (fire-and-forget, errors swallowed, async-hang →
+ * proc.fail); `oneShot` disposes the callback dup after the fire settles so a fired setTimeout doesn't
+ * linger in vmHandlerHandles (pinning the context) until teardown.
+ */
+function fireVmTimer(proc: SpindleBackendProcessContext, scriptId: string, timerId: string, oneShot: boolean): void {
+  let proxy: ProxyHandle | undefined;
+  for (const entry of activeProxies.values()) {
+    if (entry.scriptId === scriptId) { proxy = entry.proxy; break; }
+  }
+  if (!proxy) { if (oneShot) disposeVmHandler(scriptId, timerId); return; } // torn down between arm + fire
+  const theProxy = proxy;
+  proc.heartbeat();
+  const synthRunId = `vmTimer:${timerId}`;
+  const capturedConsole = buildChildCapturedConsole(proc, synthRunId, scriptId);
+  const dispatchers = makeHandlerDispatchers(proc, synthRunId, scriptId);
+  void raceWithTimeout(
+    fireHandlerInQuickJS({
+      scriptId,
+      handlerId:        timerId,
+      args:             [],
+      timeoutMs:        BROADCAST_HANDLER_TIMEOUT_MS,
+      dispatch:         theProxy.dispatch,
+      dispatchOnHandle: theProxy.dispatchOnHandle,
+      console:          capturedConsole,
+      serializeError,
+      allowDangerous:   false, // timer callbacks use api.utils.http, not bare fetch (broadcast parity)
+      ...dispatchers,
+    }),
+    BROADCAST_HANDLER_TIMEOUT_MS,
+    () => new ScriptTimeoutError(`Timer ${timerId} (script ${scriptId}) exceeded ${BROADCAST_HANDLER_TIMEOUT_MS / 1000}s timeout`),
+  ).catch((err: unknown) => {
+    // Swallow handler errors (fire-and-forget parity). On the async-hang ScriptTimeoutError, kill the
+    // worker so the wedged runChain slot is cleared by respawn (mirrors fireVmBroadcast).
+    if (err instanceof Error && err.name === 'ScriptTimeoutError') {
+      noteQuickjsTimeout(); // #11 observability — quickjs fire timeout (timer → child respawn)
+      proc.fail(`script-runner: async-timeout firing timer ${timerId} (scriptId=${scriptId}); terminating to clear the wedged engine runChain`);
+    }
+  }).finally(() => { if (oneShot) disposeVmHandler(scriptId, timerId); });
+}
+
 /**
  * Phase 9d.3 — drop all per-script state when a script is unregistered
  * (extension disable, script delete, etc.). Mirrors the existing
@@ -1060,6 +1159,10 @@ function handleScriptUnregister(msg: ScriptUnregisterMessage): void {
   // default (disable / delete / omitted reason) disposes it, preventing an unbounded
   // context leak across create/delete churn. No-op beyond the handle sweep under 'shared'.
   disposeContextForScript(msg.scriptId, msg.reason !== 'reload');
+  // #11 P5-2 — cancel this script's child-side Bun timers (setTimeout/setInterval). disposeContextForScript
+  // above swept the callback DUPS (via disposeScriptVmHandlers); this stops the armed Bun timers so a
+  // leaked interval can't keep firing after disable/delete/reload — the quickjs half of the Finding-4 fix.
+  clearAllTimersForScript(msg.scriptId);
   // audit C8-03 + C8-04 — prune the per-script rate-limit buckets so they don't
   // accumulate one entry per ever-seen scriptId across the child's lifetime.
   consoleRateState.delete(msg.scriptId);
@@ -1887,6 +1990,15 @@ export default function (proc: SpindleBackendProcessContext): () => void {
   // Module-init captures (`_processOn` / `_hostFetch` / etc.) are already
   // bound — see the "Sandbox lockdown" section above.
   installSandboxLockdown();
+
+  // #11 P5-2 — wire the quickjs in-VM timers to real child-side Bun timers. The VM's setTimeout/
+  // setInterval reach __hostScheduleTimer/__hostClearTimer (qjs-engine), which delegate here; the Bun
+  // timer's expiry fires the callback via fireVmTimer → fireHandlerInQuickJS. Captured `proc` is stable
+  // for the child's lifetime. No-op cost for asyncfn-only children (nothing calls the scheduler).
+  setVmTimerScheduler({
+    schedule: (scriptId, timerId, ms, repeat) => scheduleVmTimer(proc, scriptId, timerId, ms, repeat),
+    clear:    (scriptId, timerId) => clearVmTimer(scriptId, timerId),
+  });
 
   // #11 cold-start-fallback — NOTE: no unconditional module pre-warm here. Instantiating the WASM module
   // in EVERY child would waste ~106ms + tens of MB in asyncfn-only children (quickjs is default-off), so

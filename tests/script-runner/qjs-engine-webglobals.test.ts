@@ -157,40 +157,7 @@ describe('#11 P3 audit: TextDecoder/TextEncoder reject ill-formed UTF-8', () => 
   });
 });
 
-// ─── field-test follow-up: timer stubs (setTimeout/setInterval not yet supported) ──────
-//
-// Timers need host-scheduled callback re-entry (P5), which isn't built. Rather than leave setTimeout
-// UNDEFINED (a cryptic 'setTimeout is not defined' ReferenceError that reads like a bug), define
-// throwing stubs with a clear 'a later phase' message; clear* are safe no-ops.
-
-describe('#11 timer stubs: setTimeout/setInterval fail loud, clear* no-op', () => {
-  test('setTimeout is a defined function that throws a helpful "later phase" message', async () => {
-    const v = await runUserScriptInQuickJS(makeOpts({
-      code: `
-        const isFn = typeof setTimeout === 'function';
-        try { setTimeout(() => {}, 10); return { isFn, msg: 'NO-THROW' }; }
-        catch (e) { return { isFn, msg: e.message }; }
-      `,
-    })) as { isFn: boolean; msg: string };
-    expect(v.isFn).toBe(true);
-    expect(v.msg).toContain('setTimeout is not yet supported');
-    expect(v.msg).toContain('later phase');
-  });
-
-  test('setInterval likewise throws a helpful message', async () => {
-    const v = await runUserScriptInQuickJS(makeOpts({
-      code: `try { setInterval(() => {}, 10); return 'NO-THROW'; } catch (e) { return e.message; }`,
-    })) as string;
-    expect(v).toContain('setInterval is not yet supported');
-  });
-
-  test('clearTimeout / clearInterval are safe no-ops (never throw — cleanup paths call them)', async () => {
-    const v = await runUserScriptInQuickJS(makeOpts({
-      code: `
-        try { clearTimeout(123); clearInterval(456); clearTimeout(undefined); return 'OK'; }
-        catch (e) { return 'THREW: ' + e.message; }
-      `,
-    }));
-    expect(v).toBe('OK');
-  });
-});
+// NOTE: the timer STUBS that used to live here (setTimeout/setInterval throwing "not yet supported")
+// were superseded by #11 P5-2 — timers are now real (host-scheduled Bun timers + fireHandlerInQuickJS).
+// Their behavior is covered by qjs-engine-timers.test.ts (VM/host-fn contract) + e2e-timers.test.ts
+// (the real Bun-timer → fireVmTimer chain).
