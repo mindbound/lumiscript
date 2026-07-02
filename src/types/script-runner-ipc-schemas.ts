@@ -235,6 +235,8 @@ const EngineTelemetrySchema = z.object({
   inVmOom:           z.number(),
   contextEvictions:  z.number(),
   overCapTolerated:  z.number(),
+  streamsOpened:     z.number(),
+  streamsCancelled:  z.number(),
   lastEvictionAt:    z.number(),
   contextModel:      z.enum(['shared', 'per-script']),
   liveContexts:      z.number(),

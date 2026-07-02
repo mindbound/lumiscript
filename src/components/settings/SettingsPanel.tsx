@@ -192,6 +192,24 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
             }}
           />
         </div>
+
+        {/* Stream buffer cap (QuickJS engine) — max undrained generateStream chunks before the stream is cancelled */}
+        <div className="ls-settings-field">
+          <label className="ls-settings-field-label" title="QuickJS engine only. Max chunks buffered for a single api.llm.generateStream that is not being consumed fast enough (or at all) — once this many chunks are queued undrained, the stream is cancelled with an error so it can't grow without limit.">
+            Stream buffer
+          </label>
+          <input
+            type="number"
+            className="ls-number-input"
+            min={16}
+            max={100000}
+            value={settings.streamQueueCap ?? 512}
+            onChange={e => {
+              const cap = Math.max(16, Math.min(100000, Number(e.target.value) || 512));
+              sendToBackend({ type: 'update_settings', patch: { streamQueueCap: cap } });
+            }}
+          />
+        </div>
       </div>
 
       {/* Workers — Phase F (v1.0 runtime-isolation). Worker pool size +

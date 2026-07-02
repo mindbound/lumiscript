@@ -14,6 +14,8 @@ import {
   pushVmStreamEnd,
   hasVmStream,
   sweepVmStreamsForScript,
+  setStreamQueueCap,
+  getEngineTelemetry,
   disposeContextForScript,
   disposeScriptVmHandlers,
   _setContextModelForTests,
@@ -56,6 +58,9 @@ describe('QuickJS generateStream', () => {
     }));
     expect(out).toEqual(['a', 'b', 'c']);
     expect(hasVmStream(rid!)).toBe(false); // generator finally → __lsStreamCancel → cell dropped
+    // Telemetry: one stream opened, none cancelled (it drained to a normal end).
+    expect(getEngineTelemetry().streamsOpened).toBe(1);
+    expect(getEngineTelemetry().streamsCancelled).toBe(0);
     disposeContextForScript('strm-order', true);
   });
 
@@ -89,6 +94,7 @@ describe('QuickJS generateStream', () => {
     }));
     expect(first).toBe('a');
     expect(typeof cancelled).toBe('string'); // finally → __lsStreamCancel → dispatchStreamCancel (stream not ended)
+    expect(getEngineTelemetry().streamsCancelled).toBe(1); // an early break counts as a cancel
     disposeContextForScript('strm-break', true);
   });
 
@@ -145,5 +151,27 @@ describe('QuickJS generateStream', () => {
     expect(cancelled).toEqual([rid!]);      // requestId handed back so the host upstream gets a stream-cancel
     expect(hasVmStream(rid!)).toBe(false);  // cell dropped — no leak
     disposeScriptVmHandlers('strm-teardown'); disposeContextForScript('strm-teardown', true);
+  });
+
+  test('the configurable queue cap bounds an undrained stream — the over-cap chunk overflows + ends it', async () => {
+    _setContextModelForTests('per-script');
+    setStreamQueueCap(3); // each stream captures the current cap at open (refreshed per run in prod)
+    let rid: string | undefined;
+    await runUserScriptInQuickJS(streamOpts({
+      scriptId: 'strm-cap',
+      code: `globalThis.__s = api.llm.generateStream([{ role: 'user', content: 'hi' }]); return null;`,
+      dispatchStreamStart: (requestId: string) => { rid = requestId; },
+    }));
+    expect(pushVmStreamChunk(rid!, 1)).toBe(false);
+    expect(pushVmStreamChunk(rid!, 2)).toBe(false);
+    expect(pushVmStreamChunk(rid!, 3)).toBe(false);
+    expect(pushVmStreamChunk(rid!, 4)).toBe(true); // over cap → the router should cancel the host upstream
+    const drained = await runUserScriptInQuickJS(streamOpts({
+      scriptId: 'strm-cap',
+      code: `const out = []; try { for await (const c of globalThis.__s) out.push(c); return { out, err: 'none' }; } catch (e) { return { out, err: e.name }; }`,
+    })) as { out: number[]; err: string };
+    expect(drained.out).toEqual([1, 2, 3]);        // the queued chunks still deliver
+    expect(drained.err).toBe('StreamOverflowError'); // then the overflow error terminates the stream
+    disposeScriptVmHandlers('strm-cap'); disposeContextForScript('strm-cap', true);
   });
 });

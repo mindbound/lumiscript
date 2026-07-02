@@ -116,6 +116,7 @@ function makeEngine(overrides?: Partial<import('../../src/types/script-runner-ip
     quickjsRuns: 0, asyncfnRuns: 0, degradedRuns: 0,
     quickjsRunErrors: 0, quickjsFireErrors: 0, quickjsTimeouts: 0,
     reentrantRejects: 0, inVmOom: 0, contextEvictions: 0, overCapTolerated: 0, lastEvictionAt: 0,
+    streamsOpened: 0, streamsCancelled: 0,
     contextModel: 'shared', liveContexts: 0, poolCap: 8, pinnedContexts: 0, reservedContexts: 0,
     perCtxLimitBytes: 512 * 1024 * 1024,
     ...overrides,

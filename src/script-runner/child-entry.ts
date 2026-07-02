@@ -92,6 +92,7 @@ import {
   pushVmStreamChunk,
   pushVmStreamEnd,
   sweepVmStreamsForScript,
+  setStreamQueueCap,
   sweepIdleContexts,
   warmupQuickJS,
   // #11 observability — engine telemetry note* bumpers (counters live in qjs-engine.ts) +
@@ -1504,6 +1505,9 @@ async function runOne(
   // post-`finally` result-assembly (the shared catch + the timeout proc.fail below, both OUTSIDE
   // the try where engineMode is set) can attribute run errors / timeouts to the right engine.
   let engineMode: 'asyncfn' | 'quickjs' = 'asyncfn';
+  // #11 P5-4 — refresh the QuickJS generateStream queue cap from the setting (threaded per run) so a
+  // settings change takes effect on the next run's newly-opened streams. No-op for asyncfn runs.
+  if (req.streamQueueCap !== undefined) setStreamQueueCap(req.streamQueueCap);
 
   // Build the proxy api for this run. Stash by runId so api-response IPC
   // arrivals can route to its pending-request map.

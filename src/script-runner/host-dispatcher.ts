@@ -472,6 +472,13 @@ export function setEngineModeReader(fn: EngineModeReader): void {
   engineModeReader = fn;
 }
 
+// The `streamQueueCap` setting reader — same pattern: read per-dispatch onto the RunScriptRequest so the
+// child refreshes its generateStream queue cap on the next run. Default 512 matches DEFAULT_SETTINGS.
+let streamQueueCapReader: () => number = () => 512;
+export function setStreamQueueCapReader(fn: () => number): void {
+  streamQueueCapReader = fn;
+}
+
 /**
  * Returns the workerKey hosting `scriptId`. Assigns lazily on first lookup
  * via least-loaded distribution across the configured pool. Sticky:
@@ -6484,6 +6491,7 @@ export async function dispatchRunScript(
     // 'asyncfn' via the reader's fallback. The child may still DEGRADE quickjs→asyncfn
     // if the WASM module won't instantiate (cold-start-fallback, child-entry runOne).
     engineMode:         engineModeReader(),
+    streamQueueCap:     streamQueueCapReader(),
     chatIdAtStart:      getActiveChatId(),
     characterIdAtStart: getActiveCharacterId(),
     // Phase 9d.X — sync-array-read snapshots at dispatch time. The proxy
@@ -8092,6 +8100,8 @@ export function aggregateEngineTelemetry(
     inVmOom:           sum((e) => e.inVmOom),
     contextEvictions:  sum((e) => e.contextEvictions),
     overCapTolerated:  sum((e) => e.overCapTolerated),
+    streamsOpened:     sum((e) => e.streamsOpened),
+    streamsCancelled:  sum((e) => e.streamsCancelled),
     liveContexts:      sum((e) => e.liveContexts),
     pinnedContexts:    sum((e) => e.pinnedContexts),
     reservedContexts:  sum((e) => e.reservedContexts),
@@ -8124,6 +8134,7 @@ export function __resetForTests(): void {
   // this, a test that sets `setWorkerCountReader(() => N)` would leak the
   // configured N into other test files that just call `__resetForTests`.
   workerCountReader = () => 1;
+  streamQueueCapReader = () => 512; // #11 P5-4 — restore the stream-queue-cap reader default
   // #11 — restore the engineMode reader default so a test's setEngineModeReader
   // doesn't leak the selected engine into another test file.
   engineModeReader = () => 'asyncfn';

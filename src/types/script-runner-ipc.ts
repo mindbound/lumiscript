@@ -157,6 +157,11 @@ export interface RunScriptRequest {
    */
   engineMode?:        'asyncfn' | 'quickjs';
   /**
+   * The QuickJS engine's `api.llm.generateStream` chunk-queue cap (LumiScriptSettings.streamQueueCap).
+   * The child refreshes its module-level cap from this at each run start; absent → keep the current cap.
+   */
+  streamQueueCap?:    number;
+  /**
    * Phase 9d.1 — snapshot of the active chat / character ID at run-dispatch
    * time. Used by the child to implement sync-returning api methods like
    * `api.chat.getChatId()` locally without an IPC roundtrip.
@@ -1095,6 +1100,10 @@ export interface EngineTelemetry {
   contextEvictions:  number;
   /** Over-cap inserts accepted because every other context was pinned/mid-run. SUM. */
   overCapTolerated:  number;
+  /** generateStream streams opened. SUM. */
+  streamsOpened:     number;
+  /** generateStream streams force-closed before a normal end (break / overflow / teardown). SUM. */
+  streamsCancelled:  number;
   /** Date.now() of the last eviction (0 = none). REPRESENTATIVE (max across workers). */
   lastEvictionAt:    number;
   /** Active context model ('shared' = prod default). REPRESENTATIVE. */

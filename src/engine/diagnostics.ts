@@ -968,6 +968,14 @@ function buildEngineSection(deps: DiagnosticsCollectorDeps): DiagnosticSection {
     details: { reentrantRejects: e.reentrantRejects },
   });
 
+  // Streams — generateStream usage. Cancelled = broke early / overflowed / torn down before a normal end.
+  checks.push({
+    label:   'Streams (generateStream)',
+    status:  'info',
+    message: `${e.streamsOpened} opened, ${e.streamsCancelled} cancelled early`,
+    details: { streamsOpened: e.streamsOpened, streamsCancelled: e.streamsCancelled },
+  });
+
   // Context pool — branch on the model so 'shared' (prod default) never reads as an exercised pool.
   if (e.contextModel === 'shared') {
     checks.push({

@@ -1158,12 +1158,17 @@ interface EngineCounters {
   overCapTolerated:  number;
   /** Date.now() of the last context eviction (0 = none). Representative, not summed. */
   lastEvictionAt:    number;
+  /** generateStream streams opened (in-VM). */
+  streamsOpened:     number;
+  /** generateStream streams force-closed before a normal end (consumer break, queue overflow, teardown). */
+  streamsCancelled:  number;
 }
 const engineCounters: EngineCounters = {
   coldStartProbed: false, coldStartOk: false, coldStartMs: 0,
   quickjsRuns: 0, asyncfnRuns: 0, degradedRuns: 0,
   quickjsRunErrors: 0, quickjsFireErrors: 0, quickjsTimeouts: 0,
   reentrantRejects: 0, inVmOom: 0, contextEvictions: 0, overCapTolerated: 0, lastEvictionAt: 0,
+  streamsOpened: 0, streamsCancelled: 0,
 };
 /** Edge-trigger latch for the over-cap-tolerated WARN (see enforcePoolCap): logs only on the
  *  TRANSITION into the tolerated state, re-armed when an eviction drops the pool back within cap. */
@@ -1226,6 +1231,8 @@ export function _resetEngineTelemetryForTests(): void {
   engineCounters.inVmOom           = 0;
   engineCounters.contextEvictions  = 0;
   engineCounters.overCapTolerated  = 0;
+  engineCounters.streamsOpened      = 0;
+  engineCounters.streamsCancelled   = 0;
   engineCounters.lastEvictionAt    = 0;
   overCapLogged = false;
 }
@@ -1359,11 +1366,19 @@ let vmStreamSeq = 0;
  *  instead of the asyncfn proxy broadcast. */
 export function hasVmStream(requestId: string): boolean { return vmStreams.has(requestId); }
 
+/** Set the per-stream chunk-queue cap from the LumiScriptSettings value. Refreshed at each run start
+ *  (child-entry runOne) so a settings change applies to newly-opened streams; each stream captures the
+ *  current value at open. Ignores non-positive / non-finite values (keeps the prior cap). */
+export function setStreamQueueCap(n: number): void {
+  if (Number.isFinite(n) && n > 0) streamQueueCap = Math.floor(n);
+}
+
 function openVmStream(requestId: string, scriptId: string): void {
   vmStreams.set(requestId, { queue: [], waiters: [], ended: false, scriptId, queueCap: streamQueueCap });
   let set = vmStreamsByScript.get(scriptId);
   if (!set) { set = new Set(); vmStreamsByScript.set(scriptId, set); }
   set.add(requestId);
+  engineCounters.streamsOpened++;
 }
 /** Deliver an event to a parked waiter if one exists, else enqueue it. */
 function deliverVmStreamEvent(cell: VmStreamCell, ev: VmStreamEvent): void {
@@ -1378,6 +1393,7 @@ export function pushVmStreamChunk(requestId: string, chunk: unknown): boolean {
   if (!cell || cell.ended) return false;
   if (cell.waiters.length === 0 && cell.queue.length >= cell.queueCap) {
     cell.ended = true;
+    engineCounters.streamsCancelled++; // over cap → the stream is force-closed
     deliverVmStreamEvent(cell, { kind: 'end', ok: false, error: { name: 'StreamOverflowError', message: `generateStream: ${cell.queueCap} chunks queued without being consumed — cancelling the stream (drain it faster, or store + iterate it sooner).` } });
     return true;
   }
@@ -1414,6 +1430,7 @@ export function sweepVmStreamsForScript(scriptId: string): string[] {
     const cell = vmStreams.get(requestId);
     if (cell && !cell.ended) {
       cell.ended = true;
+      engineCounters.streamsCancelled++; // force-closed by teardown
       deliverVmStreamEvent(cell, { kind: 'end', ok: false, error: { name: 'AbortError', message: 'script unregistered' } });
     }
     dropVmStream(requestId);
@@ -1924,7 +1941,10 @@ async function createContext(): Promise<ScriptContext> {
     const cell = vmStreams.get(requestId);
     const wasEnded = cell?.ended ?? true; // no cell or already ended → the host upstream is already gone
     dropVmStream(requestId);
-    if (!wasEnded) sc.activeRun?.dispatchStreamCancel?.(requestId); // consumer broke early — stop the upstream
+    if (!wasEnded) {
+      engineCounters.streamsCancelled++; // consumer broke before the stream ended
+      sc.activeRun?.dispatchStreamCancel?.(requestId); // stop the upstream
+    }
   });
   ctx.setProp(ctx.global, '__lsStreamCancel', hostStreamCancel);
   hostStreamCancel.dispose();
@@ -3009,4 +3029,8 @@ export function _disposeContextForTests(): void {
   POOL_CAP = 8;              // #11 P7-3.1 — restore the pool-bound defaults (a test may have shrunk them)
   idleTimeoutMs = 5 * 60_000;
   CHILD_WASM_BUDGET = 512 * 1024 * 1024; // #11 P7-3.2 — restore the memory budget
+  streamQueueCap = 512;                   // #11 P5-4 — restore the generateStream queue-cap default
+  // Drop any leaked stream cells so a per-script stream test can't bleed into another file.
+  for (const requestId of [...vmStreams.keys()]) dropVmStream(requestId);
+  vmStreamsByScript.clear();
 }

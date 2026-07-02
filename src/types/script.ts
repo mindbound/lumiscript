@@ -139,6 +139,15 @@ export interface LumiScriptSettings {
    */
   engineMode: 'asyncfn' | 'quickjs';
   /**
+   * Max chunks the QuickJS engine will buffer for a single `api.llm.generateStream`
+   * that isn't being consumed fast enough (or at all). A stream opened under the
+   * QuickJS engine can outlive the run that created it, so its chunk queue is bounded:
+   * once this many chunks are queued undrained, the stream is cancelled with an error
+   * so it can't grow without limit. Only affects the QuickJS engine.
+   * Default: 512.  Range: 16 – 100 000.
+   */
+  streamQueueCap: number;
+  /**
    * Number of concurrent script-runner worker subprocesses to spawn.
    * Larger values distribute scripts across more processes for better fault
    * isolation (one bad script no longer affects others) at the cost of
@@ -303,6 +312,7 @@ export const DEFAULT_SETTINGS: LumiScriptSettings = {
   // #11 — the AsyncFunction engine is the default; the QuickJS isolate is opt-in.
   // Flipping this default to 'quickjs' is the P8 "make it default" one-liner.
   engineMode: 'asyncfn',
+  streamQueueCap: 512,
   // v1.0 — multi-worker default. Phases A–F shipped; Sections 1–8 of
   // the manual test pass came back green; the disable-mid-flight bug
   // cluster closed; tracker pair migrated to the broadcast pattern as

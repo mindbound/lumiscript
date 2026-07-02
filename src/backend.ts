@@ -145,6 +145,7 @@ import {
   setSendToFrontend,
   setWorkerCountReader,
   setEngineModeReader,
+  setStreamQueueCapReader,
   setEvictionConfigReader,
   startEvictionSweep,
   rebalanceWorkerPool,
@@ -429,6 +430,7 @@ setWorkerCountReader(() => settingsStore.get().workerCount ?? 1);
 // persisted settings shape has no engineMode. update_settings fire-reloads scripts
 // on an engineMode change so handlers re-register under the new engine (below).
 setEngineModeReader(() => settingsStore.get().engineMode ?? 'asyncfn');
+setStreamQueueCapReader(() => settingsStore.get().streamQueueCap ?? 512);
 
 // Phase E (v1.0 runtime-isolation) — wire the eviction config reader so
 // the dispatcher's sweep reads live thresholds. Fallback defaults match
