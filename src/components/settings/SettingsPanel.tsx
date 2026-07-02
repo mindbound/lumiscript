@@ -1,4 +1,4 @@
-import { FC, useState, useEffect, useMemo } from 'react';
+import { FC, useState, useEffect, useMemo, type CSSProperties } from 'react';
 import { Code2, BookMarked, Terminal, Timer, Type, FileCode2, Activity, MessageCircle, Trash2, RotateCcw, Cpu, Shuffle } from 'lucide-react';
 import type { Script, LumiScriptSettings } from '../../types/script.js';
 import type { BackendToFrontend, FrontendToBackend } from '../../types/messages.js';
@@ -12,6 +12,39 @@ import { ConfirmDialog } from '../common/ConfirmDialog.js';
 // Connection rows as pushed by the backend's `assistant_connections` reply —
 // derived from the message contract so the shape can't drift.
 type AssistantConnRow = Extract<BackendToFrontend, { type: 'assistant_connections' }>['connections'][number];
+
+// ─── Engine-switch confirm modal styling ────────────────────────────────────
+// The confirm dialog is portal-rendered under <body>, where `--lumiverse-*`
+// tokens don't cascade, so colours are hard-coded rgb() (same convention as the
+// card-bundle modal this layout mirrors). Structure: an intro paragraph, then a
+// labelled section + read-only script list for each of the two migration paths.
+const esText  = 'rgb(222,223,230)';
+const esMuted = 'rgba(222,223,230,0.6)';
+const esNote:         CSSProperties = { color: esMuted, fontSize: 12,   lineHeight: 1.5,  margin: '0 0 10px' };
+const esSectionLabel: CSSProperties = { color: esText,  fontSize: 12,   fontWeight: 600,  margin: '14px 0 4px' };
+const esSubNote:      CSSProperties = { color: esMuted, fontSize: 11.5, lineHeight: 1.45, margin: '0 0 6px' };
+const esFoot:         CSSProperties = { color: esMuted, fontSize: 11.5, lineHeight: 1.45, margin: '14px 0 0' };
+const esList:         CSSProperties = { maxHeight: 132, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 2, margin: '0 0 2px' };
+const esRow:          CSSProperties = { display: 'flex', alignItems: 'center', gap: 8, padding: '3px 2px' };
+const esName:         CSSProperties = {
+  fontWeight: 600, fontSize: 12.5, color: esText,
+  flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+};
+
+/** A read-only, scrollable column of script names with a leading action icon —
+ *  presentational counterpart to the card-bundle picker (no checkboxes). */
+function renderEngineSwitchScriptList(list: Script[], Icon: typeof RotateCcw) {
+  return (
+    <div style={esList}>
+      {list.map((s) => (
+        <div key={s.id} style={esRow}>
+          <Icon size={11} style={{ color: esMuted, flexShrink: 0 }} />
+          <span style={esName} title={s.name}>{s.name}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 interface SettingsPanelProps {
   onBackendMessage: (handler: (msg: unknown) => void) => () => void;
@@ -88,8 +121,10 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
   // startup-triggered scripts re-run now; event-driven ones re-arm on their next trigger.
   const engineSwitchImpact = useMemo(() => {
     const enabledTriggers = scripts.filter((s) => s.enabled && s.type === 'trigger');
-    const startup = enabledTriggers.filter(scriptRunsOnStartup).length;
-    return { startup, event: enabledTriggers.length - startup };
+    return {
+      startup: enabledTriggers.filter(scriptRunsOnStartup),
+      event:   enabledTriggers.filter((s) => !scriptRunsOnStartup(s)),
+    };
   }, [scripts]);
 
   // #11 engine-toggle — the two sandbox engines. Stable identity for HostSelect.
@@ -637,16 +672,38 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
           }}
           onCancel={() => setPendingEngineMode(null)}
         >
-          Switching to {pendingEngineMode === 'quickjs' ? 'the QuickJS isolate' : 'AsyncFunction'} re-runs
-          the {engineSwitchImpact.startup} enabled startup script{engineSwitchImpact.startup === 1 ? '' : 's'} now
-          (spaced out, so panels, toasts, and any LLM calls they make on startup happen again)
-          {engineSwitchImpact.event > 0 && (
-            <> and clears the live state of {engineSwitchImpact.event} event-driven
-            script{engineSwitchImpact.event === 1 ? '' : 's'}, which re-arm on their next trigger without
-            an automatic re-run</>
-          )}.
-          In-flight runs finish on the current engine first, and any in-memory (non-persisted) script
-          state is reset. Consider disabling expensive startup scripts before switching.
+          <p style={esNote}>
+            Switching to {pendingEngineMode === 'quickjs' ? 'the QuickJS isolate' : 'AsyncFunction'} changes
+            which sandbox runs your scripts. Each script's live state — handlers, panels, timers — belongs to
+            one engine and can't be moved, so it is rebuilt under the new engine.
+          </p>
+
+          {engineSwitchImpact.startup.length > 0 && (
+            <>
+              <div style={esSectionLabel}>Re-run now ({engineSwitchImpact.startup.length})</div>
+              <p style={esSubNote}>
+                Startup scripts re-run immediately (spaced out) — panels, toasts, and any LLM calls they
+                make on startup happen again.
+              </p>
+              {renderEngineSwitchScriptList(engineSwitchImpact.startup, RotateCcw)}
+            </>
+          )}
+
+          {engineSwitchImpact.event.length > 0 && (
+            <>
+              <div style={esSectionLabel}>State cleared ({engineSwitchImpact.event.length})</div>
+              <p style={esSubNote}>
+                Event-driven scripts have their live state cleared now and re-arm on their next trigger —
+                no automatic re-run.
+              </p>
+              {renderEngineSwitchScriptList(engineSwitchImpact.event, Timer)}
+            </>
+          )}
+
+          <p style={esFoot}>
+            In-flight runs finish on the current engine first, and any in-memory (non-persisted) state is
+            reset. Consider disabling expensive startup scripts before switching.
+          </p>
         </ConfirmDialog>
       )}
     </div>
