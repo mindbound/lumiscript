@@ -456,6 +456,23 @@ export function installSandboxLockdown(): void {
     if (sid !== undefined) trackAsyncfnTimer(sid, id); // intervals persist until clearInterval/teardown
     return id;
   }) as typeof setInterval;
+  // Patch clearTimeout/clearInterval to also DROP the id from the per-script tracking set. Without this,
+  // a timer the user clears (an interval, or a one-shot cleared before it fires) stays in the set — since
+  // only a one-shot FIRE untracks — so a script that repeatedly creates+clears timers accumulates dead
+  // ids until it is unregistered. Untrack is attributed to the clearing run (mirroring creation); the
+  // native clear always runs first so clearing works even outside a user run.
+  const _clearTimeout  = globalThis.clearTimeout;
+  const _clearInterval = globalThis.clearInterval;
+  globalThis.clearTimeout = ((id?: unknown): void => {
+    _clearTimeout(id as Parameters<typeof clearTimeout>[0]);
+    const sid = currentUserScriptId();
+    if (sid !== undefined && id !== undefined) untrackAsyncfnTimer(sid, id as ReturnType<typeof setTimeout>);
+  }) as typeof clearTimeout;
+  globalThis.clearInterval = ((id?: unknown): void => {
+    _clearInterval(id as Parameters<typeof clearInterval>[0]);
+    const sid = currentUserScriptId();
+    if (sid !== undefined && id !== undefined) untrackAsyncfnTimer(sid, id as ReturnType<typeof setInterval>);
+  }) as typeof clearInterval;
 }
 
 /**
@@ -692,7 +709,7 @@ function fireVmModalDismiss(proc: SpindleBackendProcessContext, msg: AdvancedMod
   proc.heartbeat();
   const synthRunId = `advModalDismiss:${msg.modalId}`;
   const capturedConsole = buildChildCapturedConsole(proc, synthRunId, scriptId);
-  const dispatchers = makeHandlerDispatchers(proc, synthRunId, scriptId);
+  const dispatchers = makeHandlerDispatchers(proc, synthRunId, scriptId, 'latest');
   const fires = handlerIds.map((handlerId) =>
     raceWithTimeout(
       fireHandlerInQuickJS({
@@ -866,9 +883,14 @@ async function handleRunHandlerRequest(
  * cannot forge another script's registration.
  */
 function makeHandlerDispatchers(
-  proc:     SpindleBackendProcessContext,
-  runId:    string,
-  scriptId: string,
+  proc:        SpindleBackendProcessContext,
+  runId:       string,
+  scriptId:    string,
+  // For a child-local fire (timer / broadcast / modal-dismiss) the runId is synthetic and was never
+  // registered on the host, so a stream opened from that callback can't resolve by direct runId lookup.
+  // Passing 'latest' lets the host resolve the stream against the script's current body run — matching
+  // how the legacy engine routes a stream opened from a fire. Omitted (undefined) for a live host run.
+  runIdSource?: 'context' | 'latest' | 'ctx',
 ): {
   dispatchRegisterHandler: (kind: string, handlerId: string, meta: unknown) => void;
   dispatchUnregisterHandler: (kind: string, handlerId: string) => void;
@@ -911,9 +933,10 @@ function makeHandlerDispatchers(
       proc.send({ type: 'broadcast-unsubscribe', scriptId, subId } as BroadcastUnsubscribeMessage);
     },
     // generateStream — the in-VM generator owns the chunk queue (vmStreams); only the request + cancel
-    // envelopes cross to the host, carrying this run's runId/scriptId.
+    // envelopes cross to the host, carrying this run's runId/scriptId (+ runIdSource so a fire-opened
+    // stream can fall back to the script's body run — see the runIdSource param note above).
     dispatchStreamStart: (requestId, method, args, hasSignal) => {
-      proc.send({ type: 'stream-request', requestId, runId, scriptId, method, args, hasSignal } as StreamRequest);
+      proc.send({ type: 'stream-request', requestId, runId, scriptId, method, args, hasSignal, _runIdSource: runIdSource } as StreamRequest);
     },
     dispatchStreamCancel: (requestId) => {
       proc.send({ type: 'stream-cancel', requestId } as StreamCancelRequest);
@@ -1046,7 +1069,7 @@ function fireVmBroadcast(proc: SpindleBackendProcessContext, msg: BroadcastFireM
   proc.heartbeat();
   const synthRunId = `broadcast:${msg.subId}`;
   const capturedConsole = buildChildCapturedConsole(proc, synthRunId, msg.scriptId);
-  const dispatchers = makeHandlerDispatchers(proc, synthRunId, msg.scriptId);
+  const dispatchers = makeHandlerDispatchers(proc, synthRunId, msg.scriptId, 'latest');
   void raceWithTimeout(
     fireHandlerInQuickJS({
       scriptId:                     msg.scriptId,
@@ -1146,7 +1169,7 @@ function fireVmTimer(proc: SpindleBackendProcessContext, scriptId: string, timer
   proc.heartbeat();
   const synthRunId = `vmTimer:${timerId}`;
   const capturedConsole = buildChildCapturedConsole(proc, synthRunId, scriptId);
-  const dispatchers = makeHandlerDispatchers(proc, synthRunId, scriptId);
+  const dispatchers = makeHandlerDispatchers(proc, synthRunId, scriptId, 'latest');
   void raceWithTimeout(
     fireHandlerInQuickJS({
       scriptId,
@@ -1205,7 +1228,10 @@ function untrackAsyncfnTimer(scriptId: string, id: ReturnType<typeof setTimeout>
 function clearAllAsyncfnTimersForScript(scriptId: string): void {
   const set = asyncfnTimerStore.get(scriptId);
   if (!set) return;
-  for (const id of set) { clearTimeout(id); clearInterval(id); }
+  // Snapshot: the patched clearTimeout/clearInterval untrack from this same set, so iterating a copy
+  // avoids mutating the set mid-iteration. (At teardown there is no active run, so the patched untrack
+  // is a no-op, but the snapshot keeps this correct regardless of the calling context.)
+  for (const id of [...set]) { clearTimeout(id); clearInterval(id); }
   asyncfnTimerStore.delete(scriptId);
 }
 
@@ -2069,6 +2095,12 @@ export function _setEngineModeForTests(mode: 'asyncfn' | 'quickjs' | undefined):
 /** @internal Test seam — current activeProxies cardinality (leak measurement). */
 export function _activeProxyCountForTests(): number {
   return activeProxies.size;
+}
+
+/** @internal Test seam — how many asyncfn user timers are currently tracked for a script (leak
+ *  measurement: a create+clear cycle must return to 0, not accumulate). */
+export function _asyncfnTimerCountForTests(scriptId: string): number {
+  return asyncfnTimerStore.get(scriptId)?.size ?? 0;
 }
 
 // ─── Entry ──────────────────────────────────────────────────────────────────

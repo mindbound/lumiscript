@@ -2484,6 +2484,13 @@ export function isContextPinned(scriptId: string): boolean {
   if (mapHasAliveHandle(vmBroadcastHandles.get(scriptId))) return true;
   for (const rec of vmWidgetOwner.values()) if (rec.scriptId === scriptId) return true;
   for (const rec of vmModalOwner.values()) if (rec.scriptId === scriptId) return true;
+  // An open in-VM generateStream pins the context too. A parked pull holds a live deferred handle
+  // INSIDE this context, and even an undrained stream's cell must be swept (and its upstream generation
+  // cancelled) before the context is disposed. Keeping the context resident until the stream drains / is
+  // cancelled / the script is torn down stops idle- or cap-eviction from disposing a context a stream
+  // still points into (which would strand the parked pull's handle or leak the upstream generation).
+  const openStreams = vmStreamsByScript.get(scriptId);
+  if (openStreams && openStreams.size > 0) return true;
   return false;
 }
 

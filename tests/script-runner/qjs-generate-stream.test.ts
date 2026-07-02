@@ -14,6 +14,7 @@ import {
   pushVmStreamEnd,
   hasVmStream,
   sweepVmStreamsForScript,
+  isContextPinned,
   setStreamQueueCap,
   getEngineTelemetry,
   disposeContextForScript,
@@ -151,6 +152,21 @@ describe('QuickJS generateStream', () => {
     expect(cancelled).toEqual([rid!]);      // requestId handed back so the host upstream gets a stream-cancel
     expect(hasVmStream(rid!)).toBe(false);  // cell dropped — no leak
     disposeScriptVmHandlers('strm-teardown'); disposeContextForScript('strm-teardown', true);
+  });
+
+  test('an open stream PINS its per-script context until swept (so eviction cannot dispose it out from under a live stream)', async () => {
+    _setContextModelForTests('per-script');
+    let rid: string | undefined;
+    await runUserScriptInQuickJS(streamOpts({
+      scriptId: 'strm-pin',
+      code: `globalThis.__s = api.llm.generateStream([{ role: 'user', content: 'hi' }]); return null;`,
+      dispatchStreamStart: (requestId: string) => { rid = requestId; },
+    }));
+    expect(hasVmStream(rid!)).toBe(true);
+    expect(isContextPinned('strm-pin')).toBe(true);  // an open stream keeps the context resident (idle/cap eviction skips a pinned context)
+    sweepVmStreamsForScript('strm-pin');             // teardown sweep drops the cell
+    expect(isContextPinned('strm-pin')).toBe(false); // unpinned again → evictable
+    disposeScriptVmHandlers('strm-pin'); disposeContextForScript('strm-pin', true);
   });
 
   test('the configurable queue cap bounds an undrained stream — the over-cap chunk overflows + ends it', async () => {

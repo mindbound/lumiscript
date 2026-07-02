@@ -11,7 +11,7 @@
  */
 import { describe, test, expect } from 'bun:test';
 import { dispatchRunScript, unregisterScriptFromChild, __resetForTests } from '../../src/script-runner/host-dispatcher.js';
-import { _setEngineModeForTests } from '../../src/script-runner/child-entry.js';
+import { _setEngineModeForTests, _asyncfnTimerCountForTests } from '../../src/script-runner/child-entry.js';
 import { on as busOn, clearAll as clearBroadcast } from '../../src/engine/broadcast-bus.js';
 import { setupE2E } from '../_infra/script-runner-fixture.js';
 import type { Script } from '../../src/types/script.js';
@@ -81,3 +81,46 @@ for (const engine of ['asyncfn', 'quickjs'] as const) {
     });
   });
 }
+
+// The asyncfn timer tracking set must not grow unboundedly: a timer the user CLEARS has to leave the set
+// too (only a one-shot FIRE untracked it before), else repeated create+clear cycles accumulate dead ids
+// until the script is unregistered. Asyncfn-only (the tracking set is the production timer-leak guard).
+describe('asyncfn timer tracking untracks on clear (bounded set growth)', () => {
+  test('creating then clearing timers in a run returns the tracked count to zero', async () => {
+    __resetForTests();
+    _setEngineModeForTests('asyncfn');
+    const { childCleanup } = await setupE2E();
+    try {
+      const sid = 'asyncfn-untrack';
+      await dispatchRunScript(
+        makeScript(sid, `
+          for (let i = 0; i < 5; i++) { const t = setInterval(() => {}, 100000); clearInterval(t); }
+          const one = setTimeout(() => {}, 100000); clearTimeout(one);
+          return null;
+        `),
+        makeRequest(),
+      );
+      expect(_asyncfnTimerCountForTests(sid)).toBe(0); // all 6 cleared → set empty (was 6 before the clear-untrack fix)
+    } finally {
+      childCleanup(); _setEngineModeForTests(undefined);
+    }
+  });
+
+  test('an UNcleared interval stays tracked (teardown still relies on it to cancel the leak)', async () => {
+    __resetForTests();
+    _setEngineModeForTests('asyncfn');
+    const { childCleanup } = await setupE2E();
+    try {
+      const sid = 'asyncfn-keep';
+      await dispatchRunScript(
+        makeScript(sid, `setInterval(() => {}, 100000); return null;`),
+        makeRequest(),
+      );
+      expect(_asyncfnTimerCountForTests(sid)).toBe(1);   // still tracked
+      unregisterScriptFromChild(sid, 'disable');         // teardown cancels it (and clears the set)
+      expect(_asyncfnTimerCountForTests(sid)).toBe(0);
+    } finally {
+      childCleanup(); _setEngineModeForTests(undefined);
+    }
+  });
+});

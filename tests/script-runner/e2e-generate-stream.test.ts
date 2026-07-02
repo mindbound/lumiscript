@@ -141,4 +141,31 @@ describe('e2e generateStream (real host↔child stream IPC)', () => {
       childCleanup(); _setEngineModeForTests(undefined);
     }
   });
+
+  test('a stream opened from a timer fire tags the request runIdSource=latest, so the host resolves it against the body run', async () => {
+    __resetForTests();
+    _setEngineModeForTests('quickjs');
+    const { ipc, childCleanup } = await setupE2E();
+    try {
+      const spindle = (globalThis as any).spindle;
+      spindle.generate.rawStream.mockImplementation(() => (async function* () { yield { token: 'x' }; })());
+      const res = await dispatchRunScript(
+        // The timer fire's runId is synthetic (never registered host-side); opening a stream from it would
+        // hit the host late-request path and fail unless the request carries runIdSource=latest.
+        makeScript('e2e-strm-fire', `setTimeout(() => { api.llm.generateStream([{ role: 'user', content: 'hi' }]); }, 10); return 'scheduled';`),
+        makeRequest(),
+      );
+      expect(res.value).toBe('scheduled');
+      // Wait for the real timer to fire and the in-VM __lsStreamStart → dispatchStreamStart → proc.send to land.
+      const streamReqs = () => ipc.parentInbox().filter((m) => (m as { type?: string }).type === 'stream-request');
+      for (let i = 0; i < 40 && streamReqs().length === 0; i++) await delay(10);
+      const reqs = streamReqs();
+      expect(reqs.length).toBe(1);
+      const first = reqs[0] as { runId: string; _runIdSource?: string };
+      expect(first.runId.startsWith('vmTimer:')).toBe(true); // synthetic fire runId, not in host activeRuns
+      expect(first._runIdSource).toBe('latest');             // → host falls back to the script's body run
+    } finally {
+      childCleanup(); _setEngineModeForTests(undefined);
+    }
+  });
 });
