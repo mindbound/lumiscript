@@ -2,7 +2,7 @@ declare const spindle: import('lumiverse-spindle-types').SpindleAPI
 
 import type { FrontendToBackend } from './types/messages.js';
 import type { LumiScriptSettings, Script } from './types/script.js';
-import { DEFAULT_SETTINGS } from './types/script.js';
+import { DEFAULT_SETTINGS, scriptRunsOnStartup } from './types/script.js';
 import { ScriptStorage } from './storage/script-storage.js';
 import { SettingsStore } from './storage/settings-store.js';
 import { executionStatusStore } from './engine/execution-status.js';
@@ -876,40 +876,88 @@ function shortCodeHash(code: string): string {
   return createHash('sha256').update(code).digest('hex').slice(0, 16);
 }
 
+/** Gap between successive startup-script re-run STARTS on an engine switch. Spacing the starts
+ *  keeps N bodies from bursting simultaneously (toast rate limits, panel churn, a CPU spike) while
+ *  still migrating everything within a few seconds. */
+const ENGINE_SWITCH_RELOAD_SPACING_MS = 250;
+/** Pending spaced re-run timers from the last engine switch — cancelled wholesale if the user
+ *  flips engines again before the previous fan-out finished (the new fan-out re-derives the full
+ *  script set, so cancelling mid-flight loses nothing). */
+let engineSwitchReloadTimers: Array<ReturnType<typeof setTimeout>> = [];
+
 /**
- * #11 engine-toggle-wiring — on an `engineMode` change, fire-reload every ENABLED
- * trigger script so its handlers re-register under the NEW engine. Required because
- * fires route by REGISTRY PRESENCE (`hasVmHandler` [quickjs] vs `handlerClosures`
- * [asyncfn]), NOT by any wire engineMode: a bare settings flip would leave old
- * handlers firing on the previous engine while new runs register into the new one —
- * a correct-but-inconsistent split-brain that is NOT self-healing. `fireReload`
- * (reason 'manual') wipes both engines' per-script state then re-runs the body under
- * the new engine; it QUEUES + polls if a run is in-flight (drain-safe), and the
- * worker subprocess survives (spawn is idempotent). Fire-and-forget per script.
+ * On an `engineMode` change, migrate every ENABLED trigger script to the new engine. Required
+ * because fires route by REGISTRY PRESENCE (`hasVmHandler` [quickjs] vs `handlerClosures`
+ * [asyncfn]), NOT by any wire engineMode: a bare settings flip would leave old handlers firing on
+ * the previous engine while new runs register into the new one — a correct-but-inconsistent
+ * split-brain that is NOT self-healing.
+ *
+ * Migration is SELECTIVE — scripts split by whether their next natural run would come soon enough
+ * to rebuild their state:
+ *
+ *   - Startup-triggered scripts (`ls:startup`) re-run NOW via `fireReload` (wipe + body re-run
+ *     under the new engine). Their next natural run is the next extension activation, so dropping
+ *     their state without a re-run would leave them inert — no panels, macros, or handlers — for
+ *     the rest of the session. The re-runs are SPACED (not fired simultaneously) so many scripts
+ *     drawing UI at once don't burst into toast rate limits or a CPU spike.
+ *
+ *   - Event-driven scripts only get their registered live state WIPED (`fireEngineSwitchWipe`) —
+ *     no body re-run. Their next trigger fire re-runs the body under the new engine and rebuilds
+ *     the state naturally, so an immediate auto re-run would only burn cost (potentially real
+ *     money — LLM calls, agentic loops) for nothing. Both paths defer while a run is in flight,
+ *     so a mid-run script can't re-register state on the old engine after its wipe passed.
+ *
+ * The settings confirm modal derives its "N reload now / M re-arm on next trigger" counts from the
+ * same `scriptRunsOnStartup` predicate, so what the user is told always matches what happens here.
  */
 function reloadAllEnabledScriptsForEngineChange(prevMode: string, nextMode: string): void {
-  const enabled = scriptStorage.getEnabledTriggerScripts();
-  // #11 observability — lifecycle milestone: a user toggled the execution engine. Low-frequency
-  // (a settings flip), so no rate-limit; the per-script failure error stays at the catch below.
+  // A rapid double-switch cancels the previous fan-out's still-pending re-runs; this call
+  // re-derives the full partition, so every script still converges on the FINAL engine.
+  for (const t of engineSwitchReloadTimers) clearTimeout(t);
+  engineSwitchReloadTimers = [];
+
+  const enabled   = scriptStorage.getEnabledTriggerScripts();
+  const reloadNow = enabled.filter(scriptRunsOnStartup);
+  const dropOnly  = enabled.filter((s) => !scriptRunsOnStartup(s));
+  // Lifecycle milestone: a user toggled the execution engine. Low-frequency (a settings flip),
+  // so no rate-limit; the per-script failure error stays at the catches below.
   spindle.log.info(
-    `[LumiScript] engineMode changed ${prevMode}→${nextMode}; reloading ${enabled.length} enabled script(s)`,
+    `[LumiScript] engineMode changed ${prevMode}→${nextMode}; reloading ${reloadNow.length} startup script(s) now, ` +
+    `${dropOnly.length} event-driven script(s) re-arm on their next trigger`,
   );
-  for (const script of enabled) {
-    const codeHash = shortCodeHash(script.code); // code is unchanged — only the engine
-    const payload: LsReloadPayload = {
-      reason:           'manual',
-      previousCodeHash: codeHash,
-      currentCodeHash:  codeHash,
-      previousLength:   script.code.length,
-      currentLength:    script.code.length,
-    };
-    void triggerRegistry.fireReload(script, payload).catch((err) => {
+
+  for (const script of dropOnly) {
+    void triggerRegistry.fireEngineSwitchWipe(script).catch((err) => {
       spindle.log.error(
-        `[LumiScript] engine-change reload failed for "${script.name}": ` +
+        `[LumiScript] engine-change state wipe failed for "${script.name}": ` +
         `${err instanceof Error ? err.message : String(err)}`,
       );
     });
   }
+
+  reloadNow.forEach((script, i) => {
+    const timer = setTimeout(() => {
+      // Re-read at fire time — the script may have been edited, disabled, or deleted while
+      // earlier re-runs in the spaced sequence were still draining.
+      const latest = scriptStorage.getScript(script.id);
+      if (!latest || !latest.enabled || latest.type !== 'trigger') return;
+      const codeHash = shortCodeHash(latest.code); // code is unchanged — only the engine
+      const payload: LsReloadPayload = {
+        reason:           'manual',
+        previousCodeHash: codeHash,
+        currentCodeHash:  codeHash,
+        previousLength:   latest.code.length,
+        currentLength:    latest.code.length,
+      };
+      void triggerRegistry.fireReload(latest, payload).catch((err) => {
+        spindle.log.error(
+          `[LumiScript] engine-change reload failed for "${latest.name}": ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+    }, i * ENGINE_SWITCH_RELOAD_SPACING_MS);
+    engineSwitchReloadTimers.push(timer);
+  });
 }
 
 /**

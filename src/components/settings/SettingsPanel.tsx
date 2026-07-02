@@ -2,7 +2,7 @@ import { FC, useState, useEffect, useMemo } from 'react';
 import { Code2, BookMarked, Terminal, Timer, Type, FileCode2, Activity, MessageCircle, Trash2, RotateCcw, Cpu, Shuffle } from 'lucide-react';
 import type { Script, LumiScriptSettings } from '../../types/script.js';
 import type { BackendToFrontend, FrontendToBackend } from '../../types/messages.js';
-import { DEFAULT_SETTINGS } from '../../types/script.js';
+import { DEFAULT_SETTINGS, scriptRunsOnStartup } from '../../types/script.js';
 import { DiagnosticsModal } from '../diagnostics/DiagnosticsModal.js';
 import { AssistantModal } from '../assistant/AssistantModal.js';
 import { LS_OPEN_ASSISTANT_EVENT } from '../assistant/openAssistant.js';
@@ -82,6 +82,15 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
     ],
     [assistantConnections],
   );
+
+  // Engine-switch impact counts for the confirm modal. Same predicate the backend fan-out uses
+  // (scriptRunsOnStartup), so what the modal says always matches what the switch actually does:
+  // startup-triggered scripts re-run now; event-driven ones re-arm on their next trigger.
+  const engineSwitchImpact = useMemo(() => {
+    const enabledTriggers = scripts.filter((s) => s.enabled && s.type === 'trigger');
+    const startup = enabledTriggers.filter(scriptRunsOnStartup).length;
+    return { startup, event: enabledTriggers.length - startup };
+  }, [scripts]);
 
   // #11 engine-toggle — the two sandbox engines. Stable identity for HostSelect.
   const engineModeOptions = useMemo(
@@ -616,7 +625,7 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
           sendToBackend={sendToBackend}
         />
       )}
-      {/* #11 engine-toggle — confirm before switching engines (reloads active scripts). */}
+      {/* #11 engine-toggle — confirm before switching engines (reloads startup scripts, wipes the rest). */}
       {pendingEngineMode && (
         <ConfirmDialog
           title="Switch script engine?"
@@ -628,9 +637,16 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
           }}
           onCancel={() => setPendingEngineMode(null)}
         >
-          Switching to {pendingEngineMode === 'quickjs' ? 'the QuickJS isolate' : 'AsyncFunction'} reloads
-          all active scripts so their handlers re-register under the new engine. In-flight runs finish on
-          their current engine first, and any in-memory (non-persisted) script state is reset.
+          Switching to {pendingEngineMode === 'quickjs' ? 'the QuickJS isolate' : 'AsyncFunction'} re-runs
+          the {engineSwitchImpact.startup} enabled startup script{engineSwitchImpact.startup === 1 ? '' : 's'} now
+          (spaced out, so panels, toasts, and any LLM calls they make on startup happen again)
+          {engineSwitchImpact.event > 0 && (
+            <> and clears the live state of {engineSwitchImpact.event} event-driven
+            script{engineSwitchImpact.event === 1 ? '' : 's'}, which re-arm on their next trigger without
+            an automatic re-run</>
+          )}.
+          In-flight runs finish on the current engine first, and any in-memory (non-persisted) script
+          state is reset. Consider disabling expensive startup scripts before switching.
         </ConfirmDialog>
       )}
     </div>

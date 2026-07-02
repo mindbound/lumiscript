@@ -99,6 +99,19 @@ export interface Script {
 }
 
 /**
+ * True if this trigger script re-runs immediately on an engine switch. A script with an
+ * `ls:startup` trigger only runs naturally at extension activation, so dropping its registered
+ * live state (handlers, panels, macros…) without a re-run would leave it inert for the rest of
+ * the session. Event-driven scripts skip the auto re-run instead: their state is wiped at the
+ * switch and repopulates on their next natural trigger fire — avoiding auto-running potentially
+ * expensive bodies (LLM calls, long loops). Shared by the backend's engine-switch fan-out and the
+ * settings confirm modal so the modal's counts always match what the switch actually does.
+ */
+export function scriptRunsOnStartup(script: Pick<Script, 'triggers'>): boolean {
+  return (script.triggers ?? []).includes('ls:startup');
+}
+
+/**
  * A script entry as serialized in a script pack ZIP.
  * Contains only the fields meaningful for sharing — no id, enabled, allowDangerous,
  * or timestamps (all regenerated on import with safe defaults).
