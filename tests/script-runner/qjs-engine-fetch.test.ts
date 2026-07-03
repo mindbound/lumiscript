@@ -339,3 +339,32 @@ describe('#11 fire-path fetch gating (allowdangerous-on-fire-path)', () => {
     disposeScriptVmHandlers('s-firefetch');
   });
 });
+
+describe('#11 library fetch parity (libFetch = the gated in-VM fetch)', () => {
+  const NET_LIB = `exports.ping = async (u) => (await fetch(u)).text();`;
+  const libDispatch = (code: string) => async (method: string, args: unknown[]): Promise<unknown> => {
+    if (method === 'script.fetchLibrary') return { id: 'id-net', name: args[0], code, allowDangerous: false };
+    return undefined;
+  };
+
+  test('a required library CAN fetch when the run is allowDangerous (same gated fetch as the body)', async () => {
+    // Pre-fix, libFetch hardcode-threw "cannot use fetch directly … yet", so this returned that error, not
+    // the body. libFetch = globalThis.fetch routes the library through the same allowDangerous-gated __lsFetch.
+    const v = await runUserScriptInQuickJS(makeOpts({
+      dispatch:       libDispatch(NET_LIB),
+      allowDangerous: true,
+      hostFetch:      async () => new Response('lib-fetched'),
+      code: `const net = await script.require('net'); return await net.ping('https://x');`,
+    }));
+    expect(v).toBe('lib-fetched');
+  });
+
+  test('a required library fetch is GATED when the run is NOT allowDangerous (parity with the body)', async () => {
+    const v = await runUserScriptInQuickJS(makeOpts({
+      dispatch: libDispatch(NET_LIB), // allowDangerous omitted → gated
+      code: `const net = await script.require('net'); try { await net.ping('https://x'); return 'no-throw'; } catch (e) { return 'blocked:' + e.message; }`,
+    })) as string;
+    expect(v.startsWith('blocked:')).toBe(true);
+    expect(v).toContain('Allow Dangerous'); // the SAME gate error the body gets, not the old "not yet" stub
+  });
+});

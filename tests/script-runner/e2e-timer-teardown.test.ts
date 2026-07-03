@@ -13,16 +13,16 @@ import { describe, test, expect } from 'bun:test';
 import { dispatchRunScript, unregisterScriptFromChild, __resetForTests } from '../../src/script-runner/host-dispatcher.js';
 import {
   _setEngineModeForTests, _asyncfnTimerCountForTests, _vmTimerCountForTests,
-  _runInScriptContextForTests, _runInRunContextForTests,
+  _runInScriptContextForTests, _runInRunContextForTests, _setHostFetchForTests,
 } from '../../src/script-runner/child-entry.js';
 import { on as busOn, emit as busEmit, clearAll as clearBroadcast } from '../../src/engine/broadcast-bus.js';
 import { setupE2E } from '../_infra/script-runner-fixture.js';
 import type { Script } from '../../src/types/script.js';
 
-function makeScript(id: string, code: string): Script {
+function makeScript(id: string, code: string, allowDangerous = false): Script {
   return {
     id, name: `T ${id}`, code,
-    enabled: true, allowDangerous: false, type: 'trigger',
+    enabled: true, allowDangerous, type: 'trigger',
     bindings: [], triggers: ['ls:startup'], createdAt: Date.now(), updatedAt: Date.now(),
   };
 }
@@ -213,6 +213,61 @@ describe('asyncfn timer tracking untracks on clear (bounded set growth)', () => 
       expect(_asyncfnTimerCountForTests(sid)).toBe(0);   // both cancelled + cleared on teardown
     } finally {
       childCleanup(); _setEngineModeForTests(undefined);
+    }
+  });
+});
+
+// The three fire-and-forget quickjs paths (broadcast / modal-dismiss / timer) grant a fired handler bare
+// fetch iff the OWNING script is allowDangerous — matching the asyncfn engine, whose handler closures baked
+// in the right fetch at body-run time. Pre-fix they hardcoded allowDangerous:false, so an allowDangerous
+// script's fired handler threw. child-entry now reads a per-script allowDangerous captured at body-run start
+// and threads BOTH the flag and the captured host fetch. (modal-dismiss uses the identical broadcast path.)
+describe('#11 fire-path fetch parity (allowDangerous threaded through broadcast/timer fires — quickjs)', () => {
+  // The default (shared) context model means one VM globalThis across runs — poll it via a reader run until
+  // the async fire has settled its result.
+  async function readGlobal(key: string): Promise<unknown> {
+    for (let i = 0; i < 40; i++) {
+      const res = await dispatchRunScript(makeScript(`rd-${key}`, `return globalThis.${key} ?? null;`), makeRequest()) as { value?: unknown };
+      if (res.value != null) return res.value;
+      await sleep(20);
+    }
+    return null;
+  }
+  const handlerBody = (event: string, slot: string) =>
+    `api.broadcast.on('${event}', async () => { try { globalThis.${slot} = await (await fetch('https://x')).text(); } catch (e) { globalThis.${slot} = 'blocked:' + e.message; } }); return null;`;
+
+  test('a broadcast handler in an allowDangerous script gets bare fetch; a non-allowDangerous one is gated', async () => {
+    __resetForTests();
+    _setEngineModeForTests('quickjs');
+    const { childCleanup } = await setupE2E();
+    _setHostFetchForTests(async () => new Response('via-fire'));
+    try {
+      // allowDangerous → the fired handler's bare fetch reaches the stub (asyncfn parity).
+      await dispatchRunScript(makeScript('bcast-ad', handlerBody('bc-ad', '__bcAd'), true), makeRequest());
+      busEmit('bc-ad', {});
+      expect(await readGlobal('__bcAd')).toBe('via-fire');
+
+      // non-allowDangerous → gated with the SAME "requires Allow Dangerous" error the body would get.
+      await dispatchRunScript(makeScript('bcast-nad', handlerBody('bc-nad', '__bcNad'), false), makeRequest());
+      busEmit('bc-nad', {});
+      expect(String(await readGlobal('__bcNad'))).toContain('Allow Dangerous');
+    } finally {
+      _setHostFetchForTests(undefined); childCleanup(); _setEngineModeForTests(undefined); clearBroadcast();
+    }
+  });
+
+  test('a timer callback in an allowDangerous script gets bare fetch (child-local fire path)', async () => {
+    __resetForTests();
+    _setEngineModeForTests('quickjs');
+    const { childCleanup } = await setupE2E();
+    _setHostFetchForTests(async () => new Response('via-timer'));
+    try {
+      await dispatchRunScript(makeScript('tmr-ad',
+        `setTimeout(async () => { try { globalThis.__tmrAd = await (await fetch('https://x')).text(); } catch (e) { globalThis.__tmrAd = 'blocked:' + e.message; } }, 10); return null;`,
+        true), makeRequest());
+      expect(await readGlobal('__tmrAd')).toBe('via-timer');
+    } finally {
+      _setHostFetchForTests(undefined); childCleanup(); _setEngineModeForTests(undefined);
     }
   });
 });

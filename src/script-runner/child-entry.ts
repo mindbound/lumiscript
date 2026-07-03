@@ -172,8 +172,10 @@ const _processMemoryUsage = process.memoryUsage.bind(process);
 const _processCpuUsage    = process.cpuUsage.bind(process);
 /** Captured `process.uptime` — used by `diagnostic-stats-request` handler. */
 const _processUptime      = process.uptime.bind(process);
-/** Captured host `fetch` — passed to `allowDangerous` scripts as `safeFetch`. */
-const _hostFetch          = globalThis.fetch.bind(globalThis);
+/** Captured host `fetch` — passed to `allowDangerous` scripts as `safeFetch`. `let` (never reassigned in
+ *  production) so fetch-gating tests can swap in a controlled stub via `_setHostFetchForTests`. */
+const _origHostFetch      = globalThis.fetch.bind(globalThis);
+let _hostFetch            = _origHostFetch;
 
 /**
  * Allowlist of `globalThis` properties that survive the lockdown sweep.
@@ -541,6 +543,18 @@ const proxyByScriptId = new Map<string, ActiveProxyEntry>();
 const recentlyUnregistered = new Set<string>();
 
 /**
+ * Per-script `allowDangerous` flag, captured at body-run start. The three FIRE-AND-FORGET quickjs paths
+ * (broadcast / advanced-modal-dismiss / timer) don't carry `allowDangerous` on their source the way a
+ * RunHandlerRequest does, so they read it here to grant a fired handler the same bare-`fetch` capability its
+ * body run had — matching the asyncfn engine, whose handler closures baked in the right `fetch` at body-run
+ * time. It's always populated when a fire can proceed: a fire needs a live proxy (`proxyByScriptId`), and a
+ * proxy exists only if the body has run — the same run that sets this. Cleared on unregister.
+ * (RunHandlerRequest keeps its own host-threaded `allowDangerous` on the wire; this covers only the paths
+ * that lack it.)
+ */
+const scriptAllowDangerous = new Map<string, boolean>();
+
+/**
  * Phase 6: broadcast handler closures, scoped per-script (NOT per-run).
  * Subscriptions persist across script runs; the parent's `dispatchRunScript`
  * sends `BroadcastClearMessage` at the start of every new run for a given
@@ -751,6 +765,9 @@ function fireVmModalDismiss(proc: SpindleBackendProcessContext, msg: AdvancedMod
   const synthRunId = `advModalDismiss:${msg.modalId}`;
   const capturedConsole = buildChildCapturedConsole(proc, synthRunId, scriptId);
   const dispatchers = makeHandlerDispatchers(proc, synthRunId, scriptId, 'latest');
+  // Grant bare fetch iff the owning script is allowDangerous (asyncfn parity), threading BOTH the flag and
+  // the captured host fetch — allowDangerous alone makes __lsFetch report "unavailable".
+  const allowDangerous = scriptAllowDangerous.get(scriptId) ?? false;
   const fires = handlerIds.map((handlerId) =>
     raceWithTimeout(
       fireHandlerInQuickJS({
@@ -762,7 +779,8 @@ function fireVmModalDismiss(proc: SpindleBackendProcessContext, msg: AdvancedMod
         dispatchOnHandle:             theProxy.dispatchOnHandle,
         console:                      capturedConsole,
         serializeError,
-        allowDangerous:               false,
+        allowDangerous,
+        hostFetch:                    allowDangerous ? _hostFetch : undefined,
         dispatchRegisterHandler:        dispatchers.dispatchRegisterHandler,
         dispatchUnregisterHandler:      dispatchers.dispatchUnregisterHandler,
         dispatchUnregisterHandlerNamed: dispatchers.dispatchUnregisterHandlerNamed,
@@ -1107,6 +1125,10 @@ function fireVmBroadcast(proc: SpindleBackendProcessContext, msg: BroadcastFireM
   const synthRunId = `broadcast:${msg.subId}`;
   const capturedConsole = buildChildCapturedConsole(proc, synthRunId, msg.scriptId);
   const dispatchers = makeHandlerDispatchers(proc, synthRunId, msg.scriptId, 'latest');
+  // Grant bare fetch iff the script is allowDangerous (asyncfn parity — its handler closure baked in the
+  // right fetch at body-run time). Thread BOTH the flag and the captured host fetch, exactly as the
+  // RunHandlerRequest fire path does — allowDangerous alone makes __lsFetch report "unavailable".
+  const allowDangerous = scriptAllowDangerous.get(msg.scriptId) ?? false;
   void raceWithTimeout(
     fireHandlerInQuickJS({
       scriptId:                     msg.scriptId,
@@ -1117,7 +1139,8 @@ function fireVmBroadcast(proc: SpindleBackendProcessContext, msg: BroadcastFireM
       dispatchOnHandle:             theProxy.dispatchOnHandle,
       console:                      capturedConsole,
       serializeError,
-      allowDangerous:               false,
+      allowDangerous,
+      hostFetch:                    allowDangerous ? _hostFetch : undefined,
       dispatchRegisterHandler:        dispatchers.dispatchRegisterHandler,
       dispatchUnregisterHandler:      dispatchers.dispatchUnregisterHandler,
       dispatchUnregisterHandlerNamed: dispatchers.dispatchUnregisterHandlerNamed,
@@ -1204,6 +1227,10 @@ function fireVmTimer(proc: SpindleBackendProcessContext, scriptId: string, timer
   const synthRunId = `vmTimer:${timerId}`;
   const capturedConsole = buildChildCapturedConsole(proc, synthRunId, scriptId);
   const dispatchers = makeHandlerDispatchers(proc, synthRunId, scriptId, 'latest');
+  // Grant bare fetch iff the owning script is allowDangerous (asyncfn parity — a setTimeout callback armed
+  // in the body run captured the body's fetch). Thread BOTH the flag and the captured host fetch —
+  // allowDangerous alone makes __lsFetch report "unavailable".
+  const allowDangerous = scriptAllowDangerous.get(scriptId) ?? false;
   void raceWithTimeout(
     fireHandlerInQuickJS({
       scriptId,
@@ -1214,7 +1241,8 @@ function fireVmTimer(proc: SpindleBackendProcessContext, scriptId: string, timer
       dispatchOnHandle: theProxy.dispatchOnHandle,
       console:          capturedConsole,
       serializeError,
-      allowDangerous:   false, // timer callbacks use api.utils.http, not bare fetch (broadcast parity)
+      allowDangerous,
+      hostFetch:        allowDangerous ? _hostFetch : undefined,
       ...dispatchers,
     }),
     BROADCAST_HANDLER_TIMEOUT_MS,
@@ -1327,6 +1355,7 @@ function handleScriptUnregister(proc: SpindleBackendProcessContext, msg: ScriptU
     }
   }
   proxyByScriptId.delete(msg.scriptId); // all of this script's proxies just went, so drop its index entry
+  scriptAllowDangerous.delete(msg.scriptId); // the fire-path capability flag is moot once the script is gone
   // Mark the script recently-unregistered so a detached async continuation (from an already-running body or
   // handler) can't arm a fresh timer that would outlive it — its timers were just cancelled above and there
   // is nothing left to cancel a new one. A subsequent run for this scriptId clears the mark.
@@ -1621,6 +1650,9 @@ async function runOne(
   const proxyEntry: ActiveProxyEntry = { scriptId: req.scriptId, proxy };
   activeProxies.set(req.runId, proxyEntry);
   proxyByScriptId.set(req.scriptId, proxyEntry); // last-run-wins index for the O(1) fire lookups
+  // Capture allowDangerous so the fire-and-forget paths (broadcast/modal/timer) can grant a fired handler
+  // the same bare-fetch capability this body run had (asyncfn parity).
+  scriptAllowDangerous.set(req.scriptId, req.allowDangerous);
   // This run re-registers the script, so a prior disable/delete no longer applies — resume arming its timers.
   recentlyUnregistered.delete(req.scriptId);
 
@@ -2166,6 +2198,13 @@ export function _asyncfnTimerCountForTests(scriptId: string): number {
  *  path (scriptId resolved via ALS) without a full detached-async e2e. */
 export function _runInScriptContextForTests<T>(scriptId: string, fn: () => T): T {
   return currentScriptIdContext.run(scriptId, fn);
+}
+
+/** @internal Test seam — override the captured host fetch so fetch-gating tests can assert against a
+ *  controlled stub without real network. Accepts the engine's looser fetch signature (a plain async fn);
+ *  pass undefined to restore the pre-lockdown capture. */
+export function _setHostFetchForTests(fn: ((url: string, init?: RequestInit) => Promise<Response>) | undefined): void {
+  _hostFetch = (fn ?? _origHostFetch) as typeof globalThis.fetch;
 }
 
 /** @internal Test seam — run `fn` inside a body-run runId ALS context. With no matching activeProxies entry

@@ -866,7 +866,7 @@ const VM_REQUIRE_BOOTSTRAP = `
         var libModule = { exports: libExports };
         var libScript = { id: libInfo.id, name: libInfo.name, type: 'library', require: globalThis.__lsRequire };
         var silent = { log: function () {}, warn: function () {}, error: function () {}, info: function () {} };
-        var libFetch = function () { throw new Error('"' + libInfo.name + '" cannot use fetch directly in the QuickJS engine yet (#11 P3 A2). Use api.utils.http.*.'); };
+        var libFetch = globalThis.fetch; // the gated in-VM fetch (routes through __lsFetch, enforces the run allowDangerous) — same fetch the body gets
         var libFn = new AsyncFunction('api', 'data', 'script', '__console', 'exports', 'module', 'fetch', 'Bun', 'process', '"use strict";\\nconst console = __console;\\n' + libInfo.code + '\\n');
         return Promise.resolve(libFn(globalThis.api, {}, libScript, silent, libExports, libModule, libFetch, undefined, undefined)).then(function () {
           done();
