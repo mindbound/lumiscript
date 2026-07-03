@@ -1,5 +1,5 @@
 import { FC, useRef, useState } from 'react';
-import { Code2, BookMarked, Plus, Upload, Download, Package, MessageCircle, FileCode2, FolderOpen, ChevronDown, ChevronRight, Pencil, AlertTriangle } from 'lucide-react';
+import { Code2, BookMarked, Plus, Upload, Download, Package, MessageCircle, FileCode2, FolderOpen, ChevronDown, ChevronRight, Pencil, AlertTriangle, Trash2 } from 'lucide-react';
 import type { Script, ScriptType, ScriptPackEntry } from '../../types/script.js';
 import type { FrontendToBackend } from '../../types/messages.js';
 import { ScriptListItem, type ExecutionDot } from './ScriptListItem.js';
@@ -50,10 +50,14 @@ export const ScriptList: FC<ScriptListProps> = ({
   const [pendingImport, setPendingImport] = useState<ScriptPackEntry[] | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [prompt, setPrompt] = useState<PromptKind | null>(null);
+  // The folder pending removal (its scripts move to "No folder"), or null. Confirmed via ConfirmDialog.
+  const [folderToRemove, setFolderToRemove] = useState<string | null>(null);
 
   const filtered = scripts.filter(s => s.type === activeType);
   const grouped = groupByFolder(filtered);
   const hasFolders = grouped.size > 1 || (grouped.size === 1 && !grouped.has(''));
+  // Scripts that would be re-homed to "No folder" if the pending folder removal is confirmed.
+  const folderRemovalTargets = folderToRemove !== null ? grouped.get(folderToRemove) ?? [] : [];
 
   const toggleFolder = (folder: string) => {
     setCollapsedFolders(prev => {
@@ -106,6 +110,16 @@ export const ScriptList: FC<ScriptListProps> = ({
   const confirmImport = () => {
     if (pendingImport) sendToBackend({ type: 'import_scripts', entries: pendingImport });
     setPendingImport(null);
+  };
+
+  // Remove a folder by moving each of its scripts to "No folder" (folder: '', the same value the editor's
+  // "No folder" option sets). The folder then disappears from the grouped view on its own — nothing is
+  // deleted. Mirrors the existing behaviour of dragging the last script out of a folder.
+  const confirmRemoveFolder = () => {
+    for (const s of folderRemovalTargets) {
+      sendToBackend({ type: 'update_script', id: s.id, patch: { folder: '' } });
+    }
+    setFolderToRemove(null);
   };
 
   // Single confirm handler for all three text prompts. PromptDialog passes the
@@ -291,6 +305,18 @@ export const ScriptList: FC<ScriptListProps> = ({
                   >
                     <Pencil size={10} />
                   </span>
+                  <span
+                    className="ls-folder-remove"
+                    title="Remove folder (moves its scripts to No folder)"
+                    role="button"
+                    aria-label="Remove folder"
+                    onClick={e => {
+                      e.stopPropagation();
+                      setFolderToRemove(folder);
+                    }}
+                  >
+                    <Trash2 size={10} />
+                  </span>
                   <span className="ls-folder-count">{folderScripts.length}</span>
                 </button>
                 {!isCollapsed && folderScripts.map(renderItem)}
@@ -357,6 +383,24 @@ export const ScriptList: FC<ScriptListProps> = ({
         onCancel={() => setImportError(null)}
       >
         <p className="ls-confirm-message">{importError}</p>
+      </ConfirmDialog>
+    )}
+
+    {folderToRemove !== null && (
+      <ConfirmDialog
+        title={`Remove folder "${folderToRemove}"?`}
+        icon={<AlertTriangle size={15} style={{ color: 'var(--lumiverse-danger, rgb(246, 130, 130))' }} />}
+        variant="danger"
+        confirmLabel="Remove folder"
+        confirmIcon={<Trash2 size={12} />}
+        onConfirm={confirmRemoveFolder}
+        onCancel={() => setFolderToRemove(null)}
+      >
+        <p className="ls-confirm-message">
+          {folderRemovalTargets.length === 1
+            ? <>The script inside will be moved to <strong>No&nbsp;folder</strong> — nothing is deleted.</>
+            : <>The {folderRemovalTargets.length} scripts inside will be moved to <strong>No&nbsp;folder</strong> — nothing is deleted.</>}
+        </p>
       </ConfirmDialog>
     )}
 
