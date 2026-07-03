@@ -50,16 +50,17 @@ export interface QuickJSRunOptions {
   console:        QuickJSConsole;
   timeoutMs:      number;
   serializeError: (err: unknown) => { name: string; message: string; stack?: string };
-  /** Gates the in-VM `fetch` global (direct host fetch), mirroring the asyncfn
-   *  safeFetch: only allowDangerous scripts may fetch directly. Optional with a
-   *  fail-safe default — absent means the capability is OFF (fetch blocked). */
+  /** Gates the in-VM `fetch` global: only allowDangerous scripts get a working `fetch`.
+   *  Both engines route bare `fetch` through the host's SSRF-safe egress path (see `hostFetch`
+   *  below), so this only decides whether the capability exists — not how it reaches the network.
+   *  Optional with a fail-safe default — absent means the capability is OFF (fetch blocked). */
   allowDangerous?: boolean;
-  /** The host `fetch` reference CAPTURED BEFORE `installSandboxLockdown()` nulls
-   *  `globalThis.fetch` (fetch is deliberately not in SAFE_GLOBALS — see
-   *  child-entry's `_hostFetch`). The in-VM fetch bridge MUST use this captured
-   *  reference, not a live `globalThis.fetch` read, or it sees `undefined` in the
-   *  locked child realm. Absent → the in-VM `fetch` reports the capability is
-   *  unavailable (the host did not grant it for this run). */
+  /** The host-side `fetch` the in-VM bridge calls (child-entry's `makeGuardedHostFetch`, built per
+   *  run from the api proxy's dispatch). It forwards the request through `api.utils.http.request` →
+   *  the host cors proxy → `safeFetch`, so the in-VM `fetch` gets the same SSRF-safe egress as
+   *  `api.utils.http.*` (private hosts blocked unless the user allowlists them) — no raw host `fetch`
+   *  is ever exposed to the VM. Absent → the in-VM `fetch` reports the capability is unavailable
+   *  (the host did not grant it for this run). */
   hostFetch?: (url: string, init?: RequestInit) => Promise<Response>;
   /** Host-side handle-method dispatcher (`proxy.dispatchOnHandle`), threaded so the
    *  in-VM handle proxies (P4) can route a method call on a held HandleRef back to
@@ -995,11 +996,15 @@ const VM_CRYPTO_BOOTSTRAP = `
 })();
 `;
 
-// #11 P3 A2 — in-VM fetch. DIRECT host fetch (gated by the run's allowDangerous),
-// mirroring the asyncfn safeFetch — NOT cors-proxied (api.utils.http covers that).
-// The JSON-able RequestInit fields the VM fetch wrapper threads through to the host fetch
-// (fetch-dropped-requestinit) — kept in sync with __lsFetchPassThrough in VM_FETCH_BOOTSTRAP.
-// signal/body/headers/method are handled explicitly; these are the plain string/boolean extras.
+// The JSON-able RequestInit fields the in-VM fetch wrapper copies onto the request handed to the host
+// bridge (method/headers/body are handled explicitly; the AbortSignal rides the abort path below; these
+// are the plain string/boolean extras). Kept in sync with __lsFetchPassThrough in VM_FETCH_BOOTSTRAP.
+// NOTE: bare `fetch` egresses through the guarded host path (makeGuardedHostFetch → api.utils.http.request
+// → cors proxy → safeFetch, or a direct fetch for an allowlisted host). That path forwards method / headers
+// / body, and — on the direct path — the AbortSignal (so an in-VM ctrl.abort() cancels the request; see the
+// abort wiring below + makeGuardedHostFetch). These browser-oriented fields are still threaded to the host
+// boundary but NOT applied to the outgoing request: they're server-meaningless (or safeFetch-owned, e.g.
+// redirect), so the guarded path deliberately drops them.
 const FETCH_INIT_PASSTHROUGH = ['mode', 'credentials', 'cache', 'redirect', 'referrer', 'referrerPolicy', 'integrity', 'keepalive'] as const;
 
 // 3c fetch-binary-base64 — cap the response body the host pulls into memory + transfers to the VM
@@ -1053,18 +1058,20 @@ const VM_FETCH_BOOTSTRAP = `
     if (o && o.e) { var e = new Error((o.e && o.e.message) || 'fetch failed'); if (o.e.name) e.name = o.e.name; throw e; }
     return globalThis.__lsDecode(o ? o.v : undefined);
   };
-  function Headers(obj) {
+  function Headers(obj, setCookies) {
     this._h = {};
+    this._sc = setCookies || []; // individual Set-Cookie values, preserved out-of-band (see getSetCookie)
     if (obj) { var ks = Object.keys(obj); for (var i = 0; i < ks.length; i++) this._h[ks[i].toLowerCase()] = String(obj[ks[i]]); }
   }
   Headers.prototype.get = function (k) { var v = this._h[String(k).toLowerCase()]; return v === undefined ? null : v; };
   Headers.prototype.has = function (k) { return Object.prototype.hasOwnProperty.call(this._h, String(k).toLowerCase()); };
   Headers.prototype.forEach = function (cb, t) { var ks = Object.keys(this._h); for (var i = 0; i < ks.length; i++) cb.call(t, this._h[ks[i]], ks[i], this); };
+  Headers.prototype.getSetCookie = function () { return this._sc.slice(); };
   globalThis.Headers = Headers;
   function Response(r) {
     this.ok = !!r.ok; this.status = r.status; this.statusText = r.statusText || '';
     this.url = r.url || ''; this.redirected = !!r.redirected;
-    this.headers = new Headers(r.headers || {});
+    this.headers = new Headers(r.headers || {}, r.setCookies || []);
     // 3c — body arrives as base64 (bodyB64); legacy bytes path kept as a fallback.
     this._bytes = (typeof r.bodyB64 === 'string') ? __lsB64ToBytes(r.bodyB64) : ((r.bytes instanceof Uint8Array) ? r.bytes : new Uint8Array(0));
     this.bodyUsed = false;
@@ -2220,9 +2227,9 @@ async function createContext(): Promise<ScriptContext> {
     } else if (!run.allowDangerous) {
       settle('e', { name: 'Error', message: 'fetch() requires Allow Dangerous in the QuickJS engine. Use api.utils.http.* for HTTP.' }, 'fetch blocked');
     } else if (!run.hostFetch) {
-      // allowDangerous but the host did not pass a captured fetch — should not
-      // happen in production (child-entry always supplies _hostFetch when
-      // allowDangerous); fail loudly rather than reading a lockdown-nulled global.
+      // allowDangerous but the host did not pass a fetch capability — should not happen in
+      // production (child-entry always supplies makeGuardedHostFetch when allowDangerous);
+      // fail loudly rather than silently no-op.
       settle('e', { name: 'Error', message: 'fetch() is unavailable: the host did not grant a fetch capability for this run.' }, 'fetch unavailable');
     } else {
       const hostFetch = run.hostFetch;
@@ -2259,9 +2266,12 @@ async function createContext(): Promise<ScriptContext> {
           }
           const headers: Record<string, string> = {};
           res.headers.forEach((v, k) => { headers[k] = v; });
+          // Preserve Set-Cookie multiplicity (the flat `headers` above collapses it) so the in-VM
+          // Response's getSetCookie() returns each cookie; populated only on the direct path.
+          const setCookies = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
           // 3c — body crosses as base64 (bodyB64), not a marshaled number array (~3x smaller transfer).
           const bodyB64 = Buffer.from(bytes).toString('base64');
-          settle('v', { ok: res.ok, status: res.status, statusText: res.statusText, url: res.url, redirected: res.redirected, headers, bodyB64 }, 'fetch result could not be marshaled');
+          settle('v', { ok: res.ok, status: res.status, statusText: res.statusText, url: res.url, redirected: res.redirected, headers, bodyB64, setCookies }, 'fetch result could not be marshaled');
         } catch (err) {
           settle('e', run.serializeError(err), 'fetch error could not be serialized');
         } finally {

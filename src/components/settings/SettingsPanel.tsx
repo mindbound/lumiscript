@@ -1,8 +1,9 @@
 import { FC, useState, useEffect, useMemo, type CSSProperties } from 'react';
-import { Code2, BookMarked, Terminal, Timer, Type, FileCode2, Activity, MessageCircle, Trash2, RotateCcw, Cpu, Shuffle } from 'lucide-react';
+import { Code2, BookMarked, Terminal, Timer, Type, FileCode2, Activity, MessageCircle, Trash2, RotateCcw, Cpu, Shuffle, Globe } from 'lucide-react';
 import type { Script, LumiScriptSettings } from '../../types/script.js';
 import type { BackendToFrontend, FrontendToBackend } from '../../types/messages.js';
 import { DEFAULT_SETTINGS, scriptRunsOnStartup } from '../../types/script.js';
+import { parseAllowlistEntry, isDirectEligibleHost } from '../../engine/egress-allowlist.js';
 import { DiagnosticsModal } from '../diagnostics/DiagnosticsModal.js';
 import { AssistantModal } from '../assistant/AssistantModal.js';
 import { LS_OPEN_ASSISTANT_EVENT } from '../assistant/openAssistant.js';
@@ -76,6 +77,10 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
   // key on Cancel remounts the dropdown so it re-reads the true value. (Confirm needs no remount: the
   // display already shows the new value, and settings catches up via the settings_updated round-trip.)
   const [engineSelectResetKey, setEngineSelectResetKey] = useState(0);
+  // Outbound-egress allowlist editor — the host currently being typed into the "add" field, plus
+  // an inline validation message (null = valid/empty). The committed list is settings.allowedPrivateHosts.
+  const [newHost, setNewHost] = useState('');
+  const [hostError, setHostError] = useState<string | null>(null);
 
   useEffect(() => {
     const unsub = onBackendMessage((raw) => {
@@ -144,6 +149,31 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
 
   const handleToggleEnabled = (enabled: boolean) => {
     sendToBackend({ type: 'update_settings', patch: { enabled } });
+  };
+
+  // Outbound-egress allowlist — the hosts the user permits scripts to reach DIRECTLY, bypassing the
+  // SSRF-safe proxy that otherwise blocks loopback / LAN / link-local addresses. The backend re-validates
+  // every entry when a request is made; the check here only guides input. Only fixed addresses are
+  // accepted (an IP literal or localhost, optionally with a port) — a plain hostname would resolve at
+  // connect time with no pinning, so it is rejected here and, as defence in depth, also by the backend.
+  const allowedHosts = settings.allowedPrivateHosts ?? [];
+  const addAllowedHost = () => {
+    const parsed = parseAllowlistEntry(newHost);
+    if (!parsed || !isDirectEligibleHost(parsed.host)) {
+      setHostError('Enter an IP address or localhost, optionally with a port — e.g. localhost:11434, 192.168.1.50, or [::1]:8080.');
+      return;
+    }
+    // Normalize to a stable display form (the parser already lowercased the host; re-bracket IPv6).
+    const normalized = parsed.host.includes(':')
+      ? `[${parsed.host}]${parsed.port ? `:${parsed.port}` : ''}`
+      : `${parsed.host}${parsed.port ? `:${parsed.port}` : ''}`;
+    if (allowedHosts.includes(normalized)) { setNewHost(''); setHostError(null); return; }
+    sendToBackend({ type: 'update_settings', patch: { allowedPrivateHosts: [...allowedHosts, normalized] } });
+    setNewHost('');
+    setHostError(null);
+  };
+  const removeAllowedHost = (host: string) => {
+    sendToBackend({ type: 'update_settings', patch: { allowedPrivateHosts: allowedHosts.filter((h) => h !== host) } });
   };
 
   return (
@@ -260,6 +290,76 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
               sendToBackend({ type: 'update_settings', patch: { streamQueueCap: cap } });
             }}
           />
+        </div>
+      </div>
+
+      {/* Network — the user-managed allowlist of private hosts that outbound HTTP (bare `fetch`
+          and `api.utils.http.*`) may reach directly. By default every request is routed through an
+          SSRF-safe proxy that resolves + pins DNS and blocks loopback / LAN / link-local addresses;
+          entries here are the deliberate local exceptions (a local model server, a LAN device),
+          named by the user and never writable by a script. */}
+      <div className="ls-settings-section">
+        <div className="ls-settings-section-label">
+          <Globe size={11} />
+          Network
+        </div>
+
+        <div
+          className="ls-settings-template-label"
+          title="Hosts that outbound HTTP may reach directly, bypassing the private-address block. By default every request goes through an SSRF-safe proxy that blocks loopback / LAN / link-local addresses. Only fixed addresses are accepted: an IP literal or localhost, optionally with a port. Omit the port to allow any port on that host, or include one to scope to a single port. This list lives in your settings and is never writable by a script."
+        >
+          Allowed private hosts
+        </div>
+
+        <div className="ls-allowlist">
+          {allowedHosts.length === 0 ? (
+            <div className="ls-allowlist-empty">None — every request uses the SSRF-safe path.</div>
+          ) : (
+            <div className="ls-allowlist-list">
+              {allowedHosts.map((h) => (
+                <div key={h} className="ls-allowlist-row">
+                  <span className="ls-allowlist-host" title={h}>{h}</span>
+                  <button
+                    type="button"
+                    className="ls-allowlist-remove"
+                    title={`Remove ${h}`}
+                    aria-label={`Remove ${h}`}
+                    onClick={() => removeAllowedHost(h)}
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="ls-allowlist-add">
+            <input
+              type="text"
+              className="ls-allowlist-input"
+              placeholder="localhost:11434"
+              spellCheck={false}
+              autoCapitalize="off"
+              autoCorrect="off"
+              value={newHost}
+              onChange={(e) => { setNewHost(e.target.value); if (hostError) setHostError(null); }}
+              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addAllowedHost(); } }}
+            />
+            <button
+              type="button"
+              className="ls-btn ls-accent"
+              disabled={!newHost.trim()}
+              onClick={addAllowedHost}
+            >
+              Add
+            </button>
+          </div>
+
+          {hostError ? (
+            <div className="ls-allowlist-error">{hostError}</div>
+          ) : (
+            <div className="ls-allowlist-hint">Examples: localhost, localhost:11434, 192.168.1.50, [::1]:8080</div>
+          )}
         </div>
       </div>
 

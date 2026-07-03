@@ -738,6 +738,13 @@ export interface ProxyHandle {
    */
   dispatch(method: string, args: unknown[]): Promise<unknown>;
   /**
+   * Signal-aware variant of `dispatch` — for a call carrying an `AbortSignal`. Sends the api-request with
+   * `hasSignal` set (so the host creates an `AbortController` and injects it into the method's opts) and
+   * relays the signal's abort to the host as an `abort-request`. Exposed so the bare-`fetch` bridge can
+   * make its dispatched `utils.http.request` cancellable, the same way the LLM generate methods are.
+   */
+  dispatchWithSignal(method: string, args: unknown[], signal: AbortSignal | undefined): Promise<unknown>;
+  /**
    * Handle-method dispatcher — a method call on a held `HandleRef` (e.g. a
    * `db.collection` returned to the script). Sets `targetHandle` on the
    * `ApiProxyRequest` so the host resolves the handle + applies the
@@ -1068,6 +1075,28 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
    */
   const hbs = Handlebars.create();
 
+  // http.* methods accept an optional AbortSignal in their opts. Strip it from the opts arg (the last
+  // object-shaped arg — the same position the host injects the controller's signal into) and route through
+  // the signal-aware dispatch so the request is cancellable. With no signal this behaves exactly like mkAsync.
+  const mkHttp = <T extends (...args: any[]) => Promise<any>>(method: string): T =>
+    ((...args: unknown[]) => {
+      const outArgs = args.slice();
+      let signal: AbortSignal | undefined;
+      for (let i = outArgs.length - 1; i >= 0; i--) {
+        const a = outArgs[i];
+        if (a !== null && typeof a === 'object' && !Array.isArray(a)) {
+          const opts = a as { signal?: AbortSignal };
+          if (opts.signal !== undefined) {
+            const { signal: s, ...rest } = opts;
+            signal = s;
+            outArgs[i] = rest;
+          }
+          break; // only the last object-shaped arg is the opts position
+        }
+      }
+      return signal !== undefined ? dispatchWithSignal(method, outArgs, signal) : dispatch(method, outArgs);
+    }) as unknown as T;
+
   const utils: UtilsAPI = {
     /* Sync, pure: implement locally. */
     uuid: () => crypto.randomUUID(),
@@ -1150,11 +1179,11 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
     /* allowDangerous + cors_proxy permission gating happens parent-side  */
     /* in the existing api impl; the proxy just forwards.                 */
     http: {
-      get:     mkAsync<UtilsAPI['http']['get']>(dispatch,     'utils.http.get'),
-      post:    mkAsync<UtilsAPI['http']['post']>(dispatch,    'utils.http.post'),
-      put:     mkAsync<UtilsAPI['http']['put']>(dispatch,     'utils.http.put'),
-      delete:  mkAsync<UtilsAPI['http']['delete']>(dispatch,  'utils.http.delete'),
-      request: mkAsync<UtilsAPI['http']['request']>(dispatch, 'utils.http.request'),
+      get:     mkHttp<UtilsAPI['http']['get']>('utils.http.get'),
+      post:    mkHttp<UtilsAPI['http']['post']>('utils.http.post'),
+      put:     mkHttp<UtilsAPI['http']['put']>('utils.http.put'),
+      delete:  mkHttp<UtilsAPI['http']['delete']>('utils.http.delete'),
+      request: mkHttp<UtilsAPI['http']['request']>('utils.http.request'),
     },
 
     /* ── Phase 9d.2: pure-byte image utilities (shared `image-format.ts`) ── */
@@ -4658,6 +4687,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
     cleanup,
     flush,
     dispatch,
+    dispatchWithSignal,
     dispatchOnHandle,
   };
 }

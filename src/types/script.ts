@@ -1775,6 +1775,13 @@ export interface HttpRequestOptions {
    * value you passed in to determine the body's shape.
    */
   responseType?: 'text' | 'arraybuffer';
+  /**
+   * An `AbortSignal` to cancel the request in flight (e.g. from `AbortController`).
+   * Honored only for requests that take the direct path (a user-allowlisted local host); the SSRF-safe
+   * proxy path can't be cancelled, so a signal there is accepted but has no effect. On abort the returned
+   * promise rejects with an `AbortError`.
+   */
+  signal?: AbortSignal;
 }
 
 export interface HttpResponse {
@@ -1786,6 +1793,15 @@ export interface HttpResponse {
    * omitted; `Uint8Array` when `'arraybuffer'`.
    */
   body: string | Uint8Array;
+  /**
+   * Every `Set-Cookie` header from the response, preserved individually.
+   * `headers['set-cookie']` collapses multiple cookies into one comma-joined
+   * (and, because cookie `Expires` values contain commas, ambiguous) value —
+   * this array keeps them separate. Only populated for requests that took the
+   * direct path (a user-allowlisted local host); the SSRF-safe proxy path can't
+   * supply per-cookie values, so this is absent there.
+   */
+  setCookies?: string[];
 }
 
 export interface UtilsAPI {

@@ -50,6 +50,13 @@ describe('isAllowlistedHost', () => {
     expect(isAllowlistedHost('http://127.0.0.1.nip.io/', ['127.0.0.1'])).toBe(false);
   });
 
+  test('SECURITY: a hostname URL never takes the direct path even if the hostname is literally allowlisted', () => {
+    // A hand-edited settings.json could add a bare hostname. Only fixed addresses (IP/localhost) are
+    // direct-eligible; a hostname resolves at connect time with no pinning → must fall through to safeFetch.
+    expect(isAllowlistedHost('http://myserver.local/', ['myserver.local'])).toBe(false);
+    expect(isAllowlistedHost('http://internal.corp:8080/', ['internal.corp:8080'])).toBe(false);
+  });
+
   test('case + trailing-dot normalization', () => {
     expect(isAllowlistedHost('http://LOCALHOST./', ['localhost'])).toBe(true);
     expect(isAllowlistedHost('http://localhost/', ['LocalHost'])).toBe(true);
@@ -65,5 +72,30 @@ describe('isAllowlistedHost', () => {
     expect(parseAllowlistEntry('[::1]')).toEqual({ host: '::1', port: undefined });
     expect(parseAllowlistEntry('[fd00::1]:8080')).toEqual({ host: 'fd00::1', port: '8080' });
     expect(parseAllowlistEntry('  ')).toBeNull();
+  });
+
+  test('SECURITY: a non-http(s) scheme never takes the direct path (file:// local-file-read guard)', () => {
+    // The direct path skips safeFetch, which is the only layer that enforces http/https. A file:// URL to
+    // an allowlisted IP would otherwise be an arbitrary local-file read, so it must fail closed.
+    expect(isAllowlistedHost('file://127.0.0.1/etc/passwd', ['127.0.0.1'])).toBe(false);
+    expect(isAllowlistedHost('file://[::1]/etc/passwd', ['::1'])).toBe(false);
+    expect(isAllowlistedHost('ftp://127.0.0.1/x', ['127.0.0.1'])).toBe(false);
+    // http/https to the same allowlisted host still take the direct path.
+    expect(isAllowlistedHost('http://127.0.0.1/x', ['127.0.0.1'])).toBe(true);
+    expect(isAllowlistedHost('https://127.0.0.1/x', ['127.0.0.1'])).toBe(true);
+  });
+
+  test('non-canonical IP / IPv6 entries are canonicalized so they actually match their own server', () => {
+    // Entry and URL host are compared in one WHATWG-canonical form; a non-canonical literal the user types
+    // must still authorize requests to it (previously it was a silent dead entry).
+    expect(isAllowlistedHost('http://[::1]/', ['[0:0:0:0:0:0:0:1]'])).toBe(true);
+    expect(isAllowlistedHost('http://1.2.3.4/', ['01.02.03.04'])).toBe(true);
+  });
+
+  test('parseAllowlistEntry canonicalizes hosts and rejects invalid addresses', () => {
+    expect(parseAllowlistEntry('01.02.03.04')).toEqual({ host: '1.2.3.4' });
+    expect(parseAllowlistEntry('[0:0:0:0:0:0:0:1]')).toEqual({ host: '::1' });
+    expect(parseAllowlistEntry('[0:0:0:0:0:0:0:1]:8080')).toEqual({ host: '::1', port: '8080' });
+    expect(parseAllowlistEntry('999.999.999.999')).toBeNull();
   });
 });

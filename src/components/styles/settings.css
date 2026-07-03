@@ -208,3 +208,92 @@
   tab-size: 2;
 }
 .ls-textarea:focus { outline: none; border-color: var(--lumiverse-accent); }
+
+/* ── Allowed private hosts (Network section) ───────────────────────────────
+   Stacked list editor: current entries as removable rows, then an add row
+   (monospace text input + accent Add button), then an inline hint or error.
+   Full-width like the template fields, not the label-left `.ls-settings-field`. */
+.ls-allowlist {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+.ls-allowlist-empty {
+  font-size: 11px;
+  color: var(--lumiverse-text-muted);
+  opacity: 0.75;
+  padding: 2px 0;
+}
+.ls-allowlist-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ls-allowlist-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px 3px 8px;
+  border-radius: var(--lumiverse-radius);
+  border: 1px solid var(--lumiverse-border);
+  background: var(--lumiverse-fill);
+}
+.ls-allowlist-host {
+  flex: 1;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--lumiverse-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ls-allowlist-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  padding: 3px;
+  background: transparent;
+  border: none;
+  border-radius: 3px;
+  color: var(--lumiverse-text-muted);
+  cursor: pointer;
+  transition: background 120ms, color 120ms;
+}
+.ls-allowlist-remove:hover {
+  background: rgba(239, 68, 68, 0.12);
+  color: rgb(239, 68, 68);
+}
+/* Keep the click target on the button itself — a click landing on the inner
+   icon still counts as a button press (see the icon-button swallowing note). */
+.ls-allowlist-remove svg { pointer-events: none; }
+.ls-allowlist-add {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ls-allowlist-input {
+  flex: 1;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  padding: 4px 6px;
+  border-radius: var(--lumiverse-radius);
+  border: 1px solid var(--lumiverse-border);
+  background: var(--lumiverse-fill);
+  color: var(--lumiverse-text);
+}
+.ls-allowlist-input:focus { outline: none; border-color: var(--lumiverse-accent); }
+.ls-allowlist-error {
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: rgb(252, 165, 165);
+}
+.ls-allowlist-hint {
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--lumiverse-text-muted);
+  opacity: 0.8;
+}

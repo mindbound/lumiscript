@@ -187,6 +187,7 @@ const _processUptime      = process.uptime.bind(process);
  */
 export function makeGuardedHostFetch(
   dispatch: (method: string, args: unknown[]) => Promise<unknown>,
+  dispatchWithSignal?: (method: string, args: unknown[], signal: AbortSignal | undefined) => Promise<unknown>,
 ): typeof globalThis.fetch {
   return (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = typeof input === 'string' ? input
@@ -194,17 +195,42 @@ export function makeGuardedHostFetch(
       :                          (input as Request).url;
     const headers: Record<string, string> = {};
     if (init?.headers) new Headers(init.headers).forEach((v, k) => { headers[k] = v; });
-    const r = await dispatch('utils.http.request', [url, {
+    const reqArgs: unknown[] = [url, {
       method:       init?.method ?? 'GET',
       headers,
       body:         init?.body,
       responseType: 'arraybuffer',
-    }]) as { status: number; statusText: string; headers: Record<string, string>; body: string | Uint8Array };
-    // 1xx/204/205/304 forbid a body in the Response constructor — pass null there to avoid a throw.
-    const nullBody = r.status === 101 || r.status === 204 || r.status === 205 || r.status === 304;
-    return new Response(nullBody ? null : (r.body as BodyInit), {
-      status: r.status, statusText: r.statusText, headers: r.headers,
-    });
+    }];
+    // An AbortSignal makes the request cancellable: route through the signal-aware dispatch, which relays
+    // the abort to the host so it can cancel the in-flight (direct-path) fetch — the host injects the real
+    // AbortController's signal into the opts, where directLocalFetch forwards it to the underlying fetch.
+    // No signal (or no signal-aware dispatch supplied) falls back to the plain dispatch.
+    const signal = init?.signal ?? undefined;
+    const r = await (signal !== undefined && dispatchWithSignal !== undefined
+      ? dispatchWithSignal('utils.http.request', reqArgs, signal)
+      : dispatch('utils.http.request', reqArgs)) as { status: number; statusText: string; headers: Record<string, string>; body: string | Uint8Array; setCookies?: string[] };
+    // Rebuild the response headers. r.headers is a flat record, so a direct-path response also carries its
+    // Set-Cookie values split out in r.setCookies — re-add each individually (dropping the collapsed entry
+    // first) so res.headers.getSetCookie() returns them all. When absent (the cors path), the single
+    // collapsed 'set-cookie' from r.headers is left as-is.
+    const outHeaders = new Headers(r.headers);
+    if (Array.isArray(r.setCookies) && r.setCookies.length > 0) {
+      outHeaders.delete('set-cookie');
+      for (const c of r.setCookies) outHeaders.append('set-cookie', c);
+    }
+    // A completed HTTP response must RESOLVE fetch (with res.ok reflecting the status), never reject it.
+    // `new Response(body, { status })` has two constraints: it forbids a body on a null-body status
+    // (1xx / 204 / 205 / 304), and it accepts only a status of 101 or in [200, 599]. Pass null for the
+    // null-body statuses; and if the raw status still falls outside the constructor's range (e.g. a
+    // non-standard 6xx a local server put on the wire), clamp it so the response is still delivered
+    // rather than turned into a rejected fetch — losing the exact numeric status beats losing the response.
+    const status = r.status;
+    const body = (status < 200 || status === 204 || status === 205 || status === 304) ? null : (r.body as BodyInit);
+    try {
+      return new Response(body, { status, statusText: r.statusText, headers: outHeaders });
+    } catch {
+      return new Response(body, { status: status < 200 ? 200 : 599, statusText: r.statusText, headers: outHeaders });
+    }
   }) as unknown as typeof globalThis.fetch;
 }
 
@@ -410,8 +436,7 @@ export function installSandboxLockdown(): void {
       //   references. `defineProperty` replaces the data slot — the
       //   original Bun-side / Node-compat value (fs, http, Worker, etc.)
       //   is gone from the global object. Backend code paths capture what
-      //   they need before lockdown (see `_processOn` / `_hostFetch` /
-      //   etc. above).
+      //   they need before lockdown (see `_processOn` etc. above).
       //
       //   Why `value: undefined` (data) instead of `get() { throw }`:
       //   the throwing-accessor design (rc.7 v1) broke `typeof X` feature
@@ -811,7 +836,7 @@ function fireVmModalDismiss(proc: SpindleBackendProcessContext, msg: AdvancedMod
         console:                      capturedConsole,
         serializeError,
         allowDangerous,
-        hostFetch:                    allowDangerous ? makeGuardedHostFetch(theProxy.dispatch) : undefined,
+        hostFetch:                    allowDangerous ? makeGuardedHostFetch(theProxy.dispatch, theProxy.dispatchWithSignal) : undefined,
         dispatchRegisterHandler:        dispatchers.dispatchRegisterHandler,
         dispatchUnregisterHandler:      dispatchers.dispatchUnregisterHandler,
         dispatchUnregisterHandlerNamed: dispatchers.dispatchUnregisterHandlerNamed,
@@ -1089,7 +1114,7 @@ async function fireVmHandler(
           // closure baked in the right fetch at body-run time). hostFetch is the captured host fetch,
           // granted only when allowDangerous — same gate as the body-run (child-entry runOne).
           allowDangerous:            req.allowDangerous,
-          hostFetch:                 req.allowDangerous ? makeGuardedHostFetch(theProxy.dispatch) : undefined,
+          hostFetch:                 req.allowDangerous ? makeGuardedHostFetch(theProxy.dispatch, theProxy.dispatchWithSignal) : undefined,
           // #11 P7-F4 (Tier 0) — the invoking script (api.tools.invoke path only) so the fire can
           // fast-reject a self-reentrant invoke instead of deadlocking on the caller's runChain.
           callerScriptId:            req.callerScriptId,
@@ -1171,7 +1196,7 @@ function fireVmBroadcast(proc: SpindleBackendProcessContext, msg: BroadcastFireM
       console:                      capturedConsole,
       serializeError,
       allowDangerous,
-      hostFetch:                    allowDangerous ? makeGuardedHostFetch(theProxy.dispatch) : undefined,
+      hostFetch:                    allowDangerous ? makeGuardedHostFetch(theProxy.dispatch, theProxy.dispatchWithSignal) : undefined,
       dispatchRegisterHandler:        dispatchers.dispatchRegisterHandler,
       dispatchUnregisterHandler:      dispatchers.dispatchUnregisterHandler,
       dispatchUnregisterHandlerNamed: dispatchers.dispatchUnregisterHandlerNamed,
@@ -1273,7 +1298,7 @@ function fireVmTimer(proc: SpindleBackendProcessContext, scriptId: string, timer
       console:          capturedConsole,
       serializeError,
       allowDangerous,
-      hostFetch:        allowDangerous ? makeGuardedHostFetch(theProxy.dispatch) : undefined,
+      hostFetch:        allowDangerous ? makeGuardedHostFetch(theProxy.dispatch, theProxy.dispatchWithSignal) : undefined,
       ...dispatchers,
     }),
     BROADCAST_HANDLER_TIMEOUT_MS,
@@ -1711,7 +1736,7 @@ async function runOne(
     //           per the Lumiverse 519565 capability regex.
     //   - `process`: always undefined — same reason.
     const safeFetch: typeof globalThis.fetch = req.allowDangerous
-      ? makeGuardedHostFetch(proxy.dispatch)
+      ? makeGuardedHostFetch(proxy.dispatch, proxy.dispatchWithSignal)
       : ((() => {
           throw new Error(
             `"${req.scriptName}" must enable Allow Dangerous to use fetch directly. ` +
@@ -1762,7 +1787,7 @@ async function runOne(
             // Bare fetch is routed through the backend's SSRF-guarded outbound path (see
             // makeGuardedHostFetch): an allowlisted trusted-local host → direct fetch, else cors → safeFetch.
             // Only granted when allowDangerous (defense-in-depth alongside the in-VM __lsFetch gate).
-            hostFetch:      req.allowDangerous ? makeGuardedHostFetch(proxy.dispatch) : undefined,
+            hostFetch:      req.allowDangerous ? makeGuardedHostFetch(proxy.dispatch, proxy.dispatchWithSignal) : undefined,
             // P4 — handle-method dispatcher, so in-VM handle proxies (db.collection
             // etc.) route method calls back through the SAME targetHandle IPC as the
             // asyncfn path. Boundary #1 unchanged.
@@ -2253,7 +2278,7 @@ export function _vmTimerCountForTests(scriptId: string): number {
 export default function (proc: SpindleBackendProcessContext): () => void {
   // CRIT-01 mitigation: install the sandbox lockdown BEFORE any user-code-
   // adjacent surface is wired (heartbeat timer, IPC message handler).
-  // Module-init captures (`_processOn` / `_hostFetch` / etc.) are already
+  // Module-init captures (`_processOn` etc.) are already
   // bound — see the "Sandbox lockdown" section above.
   installSandboxLockdown();
 

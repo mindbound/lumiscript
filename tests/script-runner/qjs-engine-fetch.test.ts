@@ -1,13 +1,12 @@
 /**
- * #11 P3 A2 — in-VM fetch (direct host fetch, allowDangerous-gated).
+ * #11 P3 A2 — the in-VM `fetch` bridge (allowDangerous-gated).
  *
- * The VM has no network. A host newFunction (__lsFetch) runs the CAPTURED host
- * fetch (passed as opts.hostFetch — captured pre-lockdown, since
- * installSandboxLockdown() nulls globalThis.fetch in the real child) and settles
- * a deferred promise with the response + body bytes; the in-VM wrapper rebuilds a
- * Response (text/json/arrayBuffer/bytes + Headers). Gating mirrors the asyncfn
- * safeFetch: only allowDangerous runs may fetch, and the host only supplies the
- * fetch reference when allowDangerous.
+ * The VM has no network. A host newFunction (__lsFetch) calls opts.hostFetch and settles a
+ * deferred promise with the response + body bytes; the in-VM wrapper rebuilds a Response
+ * (text/json/arrayBuffer/bytes + Headers). These tests supply a MOCK hostFetch to exercise the
+ * bridge in isolation. In production hostFetch is child-entry's makeGuardedHostFetch, which routes
+ * the request through api.utils.http.request → the host cors proxy → safeFetch (the same SSRF-safe
+ * egress as api.utils.http.*); only allowDangerous runs get a fetch capability at all.
  */
 
 import { describe, test, expect } from 'bun:test';
