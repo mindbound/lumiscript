@@ -74,6 +74,17 @@ describe('#11 P3 D: in-VM script.require', () => {
     expect(getFetchCount()).toBe(1);
   });
 
+  test('concurrent same-name requires share ONE fetch (no double-fetch)', async () => {
+    const { dispatch, getFetchCount } = libDispatch({ m: `exports.v = 42;` });
+    const v = await runUserScriptInQuickJS(makeOpts({
+      dispatch,
+      code: `const [a, b] = await Promise.all([script.require('m'), script.require('m')]); return { same: a === b, v: a.v };`,
+    })) as { same: boolean; v: number };
+    expect(v.same).toBe(true);
+    expect(v.v).toBe(42);
+    expect(getFetchCount()).toBe(1); // ONE fetchLibrary despite two concurrent requires (was 2 before the loading dedup)
+  });
+
   test('nested require works (a library requiring another library)', async () => {
     const { dispatch } = libDispatch({
       a: `const b = await script.require('b'); exports.sum = (x) => b.add(x, 10);`,

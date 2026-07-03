@@ -238,10 +238,14 @@ function serializeReturnValue(value: unknown): { ok: true; value: unknown } | { 
   // the value contains something un-serializable (function, BigInt, etc.).
   if (typeof value === 'object') {
     try {
-      // structuredClone is the right primitive but might not be present
-      // on older Bun versions; JSON round-trip catches the most common
-      // failures (functions, undefined-in-array). Both work for primitives
-      // + plain data; both fail for object-with-methods (like a Collection).
+      // JSON round-trip catches the un-serializable shapes that DO throw:
+      // circular references and BigInt. NOTE it does NOT throw on function
+      // properties — JSON.stringify silently omits them — so an object with
+      // methods (a raw handle) would round-trip to a stripped, method-less
+      // object here. Callers that can return such an object (the handle-method
+      // path) must reject it BEFORE reaching this point (see
+      // dispatchHandleMethodCall's guard); the top-level path registers
+      // handle-returning methods as HandleRefs first.
       JSON.stringify(value);
       return { ok: true, value };
     } catch (err) {
@@ -311,9 +315,13 @@ export interface HandleHelpers {
  *   - **Handle-method call** (`req.targetHandle !== undefined`):
  *     resolve the handle via `helpers.resolveHandle`, invoke `req.method`
  *     on it (single-segment method name, not dotted). The result is
- *     always serialized as a value — Phase 4 doesn't yet have
- *     handle-method calls returning new handles. (Phase 5 will, e.g.,
- *     `Collection.iterator()` returning a CursorHandle.)
+ *     serialized as a value. No handle method returns a NEW handle on this
+ *     path today: the two HandleRef kinds (Collection, StyleHandle) return
+ *     plain data / void, and quickjs UI handles (DOMHandle etc.) are
+ *     string-id handles managed entirely in-VM (qjs-engine's ui._dom.*),
+ *     not via this HandleRef path. A method that DID return an object with
+ *     methods is rejected loudly (see the guard below) rather than silently
+ *     JSON-stripped.
  */
 export async function dispatchApiCall(
   req: ApiProxyRequest,
@@ -468,6 +476,30 @@ async function dispatchHandleMethodCall(
       requestId,
       ok:        false,
       error:     serializeError(err),
+    };
+  }
+
+  // A handle method that returns an object bearing methods (a raw handle, or any object with function
+  // properties) can't cross IPC as a value: serializeReturnValue's JSON round-trip silently DROPS the
+  // functions (JSON.stringify omits them — it does not throw), handing the VM a dead, method-less object.
+  // No handle method returns one today — the two HandleRef kinds (Collection, StyleHandle) return plain
+  // data/void, and quickjs UI handles (DOMHandle etc.) use the separate in-VM string-id path
+  // (qjs-engine's ui._dom.* fires), NOT this HandleRef path. Guard so that if one is ever added it fails
+  // loudly (register it via the top-level handle-returning path) instead of corrupting silently.
+  if (
+    result !== null && typeof result === 'object' && !isHandleRef(result) &&
+    Object.values(result as Record<string, unknown>).some((v) => typeof v === 'function')
+  ) {
+    return {
+      type:      'api-response',
+      requestId,
+      ok:        false,
+      error: {
+        name: 'TypeError',
+        message:
+          `api-proxy host: handle method ${targetHandle.kind}.${methodName} returned an object with methods, ` +
+          `which cannot cross IPC. Handle-returning handle methods are not wired on this path.`,
+      },
     };
   }
 

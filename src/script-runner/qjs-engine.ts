@@ -850,6 +850,7 @@ const VM_REQUIRE_BOOTSTRAP = `
   globalThis.__lsRequire = function (nameOrId) {
     var cache = globalThis.__lsRequireCache;
     var inProgress = globalThis.__lsRequireInProgress;
+    var loading = globalThis.__lsRequireLoading;
     if (typeof nameOrId !== 'string' || nameOrId.length === 0) {
       return Promise.reject(new Error('script.require: name must be a non-empty string'));
     }
@@ -857,8 +858,14 @@ const VM_REQUIRE_BOOTSTRAP = `
       return Promise.reject(new Error('script.require: built-in "' + nameOrId + '" libraries are not yet available in the QuickJS engine (host-side ls:* factories).'));
     }
     if (Object.prototype.hasOwnProperty.call(cache, nameOrId)) return Promise.resolve(cache[nameOrId]);
+    // inProgress is set only WHILE a library body executes, so a require reaching it is a nested (circular)
+    // require. loading is set for the whole in-flight load (fetch + body), so a require reaching it is a
+    // CONCURRENT sibling (e.g. Promise.all([require(x), require(x)])) that hasn't started the body yet —
+    // hand it the same in-flight promise instead of firing a second fetchLibrary. Order matters: circular
+    // (inProgress) is checked before concurrent (loading).
     if (inProgress[nameOrId]) return Promise.reject(new Error('script.require: circular dependency detected for "' + nameOrId + '"'));
-    return hostCall('script.fetchLibrary', [nameOrId]).then(function (libInfo) {
+    if (loading[nameOrId]) return loading[nameOrId];
+    var p = hostCall('script.fetchLibrary', [nameOrId]).then(function (libInfo) {
       inProgress[nameOrId] = true;
       var done = function () { delete inProgress[nameOrId]; };
       try {
@@ -875,6 +882,12 @@ const VM_REQUIRE_BOOTSTRAP = `
         }, function (err) { done(); throw err; });
       } catch (e) { done(); throw e; }
     });
+    // Drop the in-flight marker on ANY settle (fetch reject, body throw, or success), so a failed load can
+    // be retried and a completed one falls through to the value cache above.
+    loading[nameOrId] = p;
+    var clearLoading = function () { if (loading[nameOrId] === p) delete loading[nameOrId]; };
+    p.then(clearLoading, clearLoading);
+    return p;
   };
 })();
 `;
@@ -2402,6 +2415,7 @@ export async function runUserScriptInQuickJS(opts: QuickJSRunOptions): Promise<u
       globalThis.__lsListSnapshots = globalThis.__lsDecode(JSON.parse(globalThis.__lsListSnapshotsJson));
       globalThis.__lsRequireCache = {};
       globalThis.__lsRequireInProgress = {};
+      globalThis.__lsRequireLoading = {};
       globalThis.__lsVmHandles = {};
       globalThis.__lsOutstanding = new Set();
       globalThis.script.require = globalThis.__lsRequire;

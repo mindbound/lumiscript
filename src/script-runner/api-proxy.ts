@@ -4487,6 +4487,10 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
   // factory invocation, removed in `finally`. A re-entrant call for the
   // same name throws.
   const inProgress = new Set<string>();
+  // Concurrent-load dedup. `inProgress` marks the window a library BODY runs (for circular detection);
+  // `loading` marks the whole in-flight load (fetch + body) so two concurrent same-name requires
+  // (Promise.all([require(x), require(x)])) share ONE fetch instead of each firing script.fetchLibrary.
+  const loading = new Map<string, Promise<unknown>>();
 
   // Build the api object once for library factories. Cast to the full
   // LumiScriptAPI even though we currently only implement a subset —
@@ -4528,7 +4532,25 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
     if (inProgress.has(nameOrId)) {
       throw new Error(`script.require: circular dependency detected for "${nameOrId}"`);
     }
+    // loading holds the whole in-flight load (fetch + body): a require reaching it is a CONCURRENT sibling
+    // (Promise.all([require(x), require(x)])) that hasn't started the body — hand it the same in-flight
+    // promise instead of firing a second script.fetchLibrary. Circular is caught by inProgress, above.
+    const inFlight = loading.get(nameOrId);
+    if (inFlight) return inFlight;
+    const loadPromise = loadUserLibrary(nameOrId);
+    loading.set(nameOrId, loadPromise);
+    // Drop the in-flight marker on any settle so a failed load can retry + a completed one hits requireCache.
+    void loadPromise.then(
+      () => { if (loading.get(nameOrId) === loadPromise) loading.delete(nameOrId); },
+      () => { if (loading.get(nameOrId) === loadPromise) loading.delete(nameOrId); },
+    );
+    return loadPromise;
+  };
 
+  // Fetch + compile + execute a user library. Wrapped by requireFn's loading-dedup so concurrent same-name
+  // requires share ONE fetch; nested requires from the library (via libScriptNS.require = requireFn) still
+  // hit the cache + circular guard.
+  const loadUserLibrary = async (nameOrId: string): Promise<unknown> => {
     // Fetch library metadata from the parent. This resolves to the
     // canonical Script lookup chain (`getScript(id) ?? getByName(name)`)
     // wired through `setScriptResolver` in backend.ts. Error responses
