@@ -49,3 +49,26 @@ describe('#11 dispatchHandleMethodCall: object-with-methods returns fail loud, n
     expect((res as { value: unknown }).value).toEqual([{ a: 1 }, { b: 2 }]);
   });
 });
+
+// The handle-method path resolves the method as an OWN callable of the resolved handle (isOwnCallableSegment)
+// — a reflective probe like coll.constructor / .hasOwnProperty / .__proto__, or a bogus name, must be
+// rejected, never invoked off the prototype chain. This locks that gate (a security invariant with no prior
+// direct assertion) against a regression.
+describe('#11 dispatchHandleMethodCall: only OWN callables are invocable (reflective-probe gate)', () => {
+  const target = { realMethod: () => 'ok' };
+  const helpers: HandleHelpers = { resolveHandle: () => target, registerHandle: () => HANDLE };
+
+  for (const bad of ['constructor', 'hasOwnProperty', 'toString', 'valueOf', '__proto__', 'notAMethod']) {
+    test(`rejects non-own / prototype method "${bad}"`, async () => {
+      const res = await dispatchApiCall(reqFor(bad), api, helpers);
+      expect(res.ok).toBe(false);
+      expect((res as { error: { message: string } }).error.message).toContain('has no method');
+    });
+  }
+
+  test('allows a genuine own method', async () => {
+    const res = await dispatchApiCall(reqFor('realMethod'), api, helpers);
+    expect(res.ok).toBe(true);
+    expect((res as { value: unknown }).value).toBe('ok');
+  });
+});

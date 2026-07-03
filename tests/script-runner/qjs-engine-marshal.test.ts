@@ -189,3 +189,57 @@ describe('#11 P2 audit M1: sparse-array holes encode consistently (twins agree)'
     expect(dataRt[2]).toBe(false);  // NOT null (the pre-fix host-.map behavior)
   });
 });
+
+// ─── Error-as-value ($:'err') + own '__proto__' data keys ──────────────────────
+
+describe('#11 marshaling: Error values + own __proto__ keys', () => {
+  const rt = (v: unknown) => marshalDecode(JSON.parse(JSON.stringify(marshalEncode(v))));
+
+  test('host twin round-trips an Error (name/message/stack + own props), not to {}', () => {
+    const err = new TypeError('boom');
+    (err as unknown as Record<string, unknown>).code = 'E_BOOM';
+    const d = rt(err) as Error & { code?: string };
+    expect(d).toBeInstanceOf(Error);
+    expect(d.name).toBe('TypeError');
+    expect(d.message).toBe('boom');
+    expect(typeof d.stack).toBe('string');
+    expect(d.code).toBe('E_BOOM'); // own-enumerable extra preserved (the old plain-object path kept these)
+  });
+
+  test('host twin preserves an own __proto__ data key WITHOUT polluting the prototype', () => {
+    const withProto = JSON.parse('{"__proto__": {"polluted": true}, "safe": 1}') as Record<string, unknown>;
+    const d = rt(withProto) as Record<string, unknown>;
+    expect(Object.getPrototypeOf(d)).toBe(Object.prototype);      // NOT polluted
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined(); // no global pollution
+    expect(Object.getOwnPropertyDescriptor(d, '__proto__')?.value).toEqual({ polluted: true }); // key preserved as own data
+    expect(d.safe).toBe(1);
+  });
+
+  test('bridge: a VM-returned Error decodes to a host Error (VM encode → host decode)', async () => {
+    const v = await runUserScriptInQuickJS(makeOpts({
+      code: `const e = new RangeError('vm-boom'); e.detail = 7; return e;`,
+    })) as Error & { detail?: number };
+    expect(v).toBeInstanceOf(Error);
+    expect(v.name).toBe('RangeError');
+    expect(v.message).toBe('vm-boom');
+    expect(v.detail).toBe(7);
+  });
+
+  test('bridge: a host Error + own __proto__ key in DATA reach the VM intact (host encode → VM decode)', async () => {
+    const err = new Error('host-boom');
+    const v = await runUserScriptInQuickJS(makeOpts({
+      data: { err, obj: JSON.parse('{"__proto__": {"p": 1}, "safe": 2}') as unknown },
+      code: `return [
+        data.err instanceof Error, data.err.message,
+        Object.getPrototypeOf(data.obj) === Object.prototype,
+        (Object.getOwnPropertyDescriptor(data.obj, '__proto__') || {}).value?.p,
+        data.obj.safe,
+      ];`,
+    })) as [boolean, string, boolean, unknown, unknown];
+    expect(v[0]).toBe(true);
+    expect(v[1]).toBe('host-boom');
+    expect(v[2]).toBe(true);  // VM object's prototype not polluted
+    expect(v[3]).toBe(1);     // own __proto__ data key survived host→VM
+    expect(v[4]).toBe(2);
+  });
+});

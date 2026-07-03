@@ -17,6 +17,7 @@
  *   Set                                  → { $: 's', v: [encV, …] }
  *   ArrayBuffer / typed array / DataView → { $: 'b', k: <ctor name>, v: [byte,…] }
  *   HandleRef (P4)                       → { $: 'h', id, kind }
+ *   Error                                → { $: 'err', name, message, stack, props }
  *   Array                                → [ enc, … ]
  *   plain object WITHOUT own '$'         → { key: enc, … }            (pass-through)
  *   plain object WITH own '$'            → { $: 'o', v: { key: enc, … } }  (escaped)
@@ -51,6 +52,20 @@ const TYPED_ARRAY_CTORS: Record<string, new (buf: ArrayBuffer) => ArrayBufferVie
   DataView,
 };
 
+/**
+ * Assign a key as an OWN data property. A plain `target[key] = value` invokes the `__proto__` accessor for
+ * key `'__proto__'` (setting the prototype, or no-op for a primitive) instead of creating an own property —
+ * silently DROPPING a legitimate own `'__proto__'` data key (e.g. from `JSON.parse('{"__proto__":…}')`).
+ * defineProperty preserves it. Kept in lockstep with the VM twin's `setKey`.
+ */
+function assignKey(target: Record<string, unknown>, key: string, value: unknown): void {
+  if (key === '__proto__') {
+    Object.defineProperty(target, key, { value, enumerable: true, writable: true, configurable: true });
+  } else {
+    target[key] = value;
+  }
+}
+
 /** Encode a host value to its JSON-serializable shadow. Throws on unsupported. */
 export function marshalEncode(value: unknown): unknown {
   return encodeInner(value, new Set<object>());
@@ -84,6 +99,16 @@ function encodeInner(v: unknown, seen: Set<object>): unknown {
   if (seen.has(obj)) throw new Error(UNSUPPORTED + 'circular reference.');
   seen.add(obj);
   try {
+    if (v instanceof Error) {
+      // Error's name/message/stack are non-enumerable, so the plain-object path below (Object.keys) would
+      // encode a bare Error to `{}`. Tag it, carrying name/message/stack + any own-enumerable extras (which
+      // the old path preserved). The decoder rebuilds a real Error.
+      const err = v as Error;
+      const errRec = err as unknown as Record<string, unknown>;
+      const eprops: Record<string, unknown> = {};
+      for (const key of Object.keys(err)) assignKey(eprops, key, encodeInner(errRec[key], seen));
+      return { $: 'err', name: err.name, message: err.message, stack: err.stack, props: eprops };
+    }
     if (v instanceof Map) {
       const out: Array<[unknown, unknown]> = [];
       for (const [k, val] of v) out.push([encodeInner(k, seen), encodeInner(val, seen)]);
@@ -112,7 +137,7 @@ function encodeInner(v: unknown, seen: Set<object>): unknown {
 
     const rec = v as Record<string, unknown>;
     const mapped: Record<string, unknown> = {};
-    for (const key of Object.keys(rec)) mapped[key] = encodeInner(rec[key], seen);
+    for (const key of Object.keys(rec)) assignKey(mapped, key, encodeInner(rec[key], seen));
     return Object.prototype.hasOwnProperty.call(rec, '$') ? { $: 'o', v: mapped } : mapped;
   } finally {
     seen.delete(obj);
@@ -136,10 +161,18 @@ export function marshalDecode(shadow: unknown): unknown {
       case 's': return new Set((o.v as unknown[]).map(marshalDecode));
       case 'b': return decodeBytes(o.k as string, o.v as number[]);
       case 'h': return { __handleRef: true, id: o.id as string, kind: o.kind as HandleKind } satisfies HandleRef;
+      case 'err': {
+        const e = new Error(typeof o.message === 'string' ? o.message : '');
+        if (typeof o.name === 'string') e.name = o.name;
+        if (typeof o.stack === 'string') e.stack = o.stack;
+        const eprops = (o.props ?? {}) as Record<string, unknown>;
+        for (const key of Object.keys(eprops)) assignKey(e as unknown as Record<string, unknown>, key, marshalDecode(eprops[key]));
+        return e;
+      }
       case 'o': {
         const inner = o.v as Record<string, unknown>;
         const out: Record<string, unknown> = {};
-        for (const key of Object.keys(inner)) out[key] = marshalDecode(inner[key]);
+        for (const key of Object.keys(inner)) assignKey(out, key, marshalDecode(inner[key]));
         return out;
       }
       default: throw new Error(UNSUPPORTED + 'unknown marshaling tag ' + String(o.$) + '.');
@@ -147,7 +180,7 @@ export function marshalDecode(shadow: unknown): unknown {
   }
 
   const out: Record<string, unknown> = {};
-  for (const key of Object.keys(o)) out[key] = marshalDecode(o[key]);
+  for (const key of Object.keys(o)) assignKey(out, key, marshalDecode(o[key]));
   return out;
 }
 
@@ -169,6 +202,12 @@ function decodeBytes(kind: string, bytes: number[]): unknown {
 export const VM_MARSHAL_BOOTSTRAP = `
 (function () {
   var BAD = 'LumiScript QuickJS engine: unsupported value — ';
+  // Assign an OWN data property (lockstep with the host twin's assignKey). Plain t[k]=v invokes the
+  // __proto__ accessor for key '__proto__', dropping a legitimate own '__proto__' data key.
+  function setKey(t, k, v) {
+    if (k === '__proto__') { Object.defineProperty(t, k, { value: v, enumerable: true, writable: true, configurable: true }); }
+    else { t[k] = v; }
+  }
   function enc(v, seen) {
     if (v === null) return null;
     var t = typeof v;
@@ -195,6 +234,11 @@ export const VM_MARSHAL_BOOTSTRAP = `
     if (seen.indexOf(v) !== -1) throw new Error(BAD + 'circular reference.');
     seen.push(v);
     try {
+      if (v instanceof Error) {
+        var ep = {}; var ek = Object.keys(v);
+        for (var ei = 0; ei < ek.length; ei++) setKey(ep, ek[ei], enc(v[ek[ei]], seen));
+        return { $: 'err', name: v.name, message: v.message, stack: v.stack, props: ep };
+      }
       if (v instanceof Map) {
         var m = []; v.forEach(function (val, k) { m.push([enc(k, seen), enc(val, seen)]); }); return { $: 'm', v: m };
       }
@@ -210,7 +254,7 @@ export const VM_MARSHAL_BOOTSTRAP = `
       }
       if (Array.isArray(v)) { var a = []; for (var i = 0; i < v.length; i++) a.push(enc(v[i], seen)); return a; }
       var keys = Object.keys(v); var o = {};
-      for (var j = 0; j < keys.length; j++) o[keys[j]] = enc(v[keys[j]], seen);
+      for (var j = 0; j < keys.length; j++) setKey(o, keys[j], enc(v[keys[j]], seen));
       return Object.prototype.hasOwnProperty.call(v, '$') ? { $: 'o', v: o } : o;
     } finally { seen.pop(); }
   }
@@ -235,11 +279,19 @@ export const VM_MARSHAL_BOOTSTRAP = `
         case 's': { var s = new Set(); for (var i = 0; i < x.v.length; i++) s.add(dec(x.v[i])); return s; }
         case 'b': return decB(x.k, x.v);
         case 'h': return globalThis.__lsVmHandleProxy(x.id, x.kind);
-        case 'o': { var o = {}; var ks = Object.keys(x.v); for (var i = 0; i < ks.length; i++) o[ks[i]] = dec(x.v[ks[i]]); return o; }
+        case 'err': {
+          var e = new Error(typeof x.message === 'string' ? x.message : '');
+          if (typeof x.name === 'string') e.name = x.name;
+          if (typeof x.stack === 'string') e.stack = x.stack;
+          var ep2 = x.props || {}; var ek2 = Object.keys(ep2);
+          for (var epi = 0; epi < ek2.length; epi++) setKey(e, ek2[epi], dec(ep2[ek2[epi]]));
+          return e;
+        }
+        case 'o': { var o = {}; var ks = Object.keys(x.v); for (var i = 0; i < ks.length; i++) setKey(o, ks[i], dec(x.v[ks[i]])); return o; }
         default: throw new Error(BAD + 'unknown marshaling tag ' + String(x.$) + '.');
       }
     }
-    var oo = {}; var k2 = Object.keys(x); for (var i = 0; i < k2.length; i++) oo[k2[i]] = dec(x[k2[i]]); return oo;
+    var oo = {}; var k2 = Object.keys(x); for (var i = 0; i < k2.length; i++) setKey(oo, k2[i], dec(x[k2[i]])); return oo;
   }
   globalThis.__lsEncode = function (v) { return enc(v, []); };
   globalThis.__lsDecode = dec;

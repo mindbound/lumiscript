@@ -29,6 +29,7 @@ import {
 } from 'quickjs-emscripten-core';
 import variant from '@jitl/quickjs-singlefile-mjs-release-sync';
 import { marshalEncode, marshalDecode, VM_MARSHAL_BOOTSTRAP } from './vm-marshal.js';
+import { enforceBroadcastEmitLimits } from './broadcast-emit-limits.js';
 import type { HandleKind, HandleRef, EngineTelemetry } from '../types/script-runner-ipc.js';
 import { VM_WEBGLOBALS_BOOTSTRAP } from './vm-webglobals.js';
 import { VM_ZOD_BUNDLE } from './generated/vm-zod-bundle.js';
@@ -750,6 +751,19 @@ globalThis.__lsBuildApi = function (hostDispatch) {
           });
         }
         if (path === 'tools.unregister') { unregisterNamedHandler('tool', a[0]); return; }
+        // broadcast.emit — sync-VOID with the SAME limits the asyncfn proxy enforces (parity): serializability
+        // (JSON.stringify throws in-VM), a size cap + per-script rate limit (__lsBroadcastEmitCheck throws
+        // host-side via the shared enforcer). The catch-all would skip the limits AND return a promise
+        // instead of void. Then fire-forget-dispatch like the sync-void group below.
+        if (path === 'broadcast.emit') {
+          var __pl = a[1];
+          var __bytes;
+          try { __bytes = __pl === undefined ? 0 : JSON.stringify(__pl).length; }
+          catch (e) { throw new Error('api.broadcast.emit: payload is not JSON-serialisable (' + (e && e.message) + '). Broadcast payloads must round-trip through structured-clone IPC.'); }
+          globalThis.__lsBroadcastEmitCheck(__bytes);
+          globalThis.__lsTrackChain(send(path, a).catch(function () {}));
+          return;
+        }
         // flush#1 — asyncfn-classified sync-VOID methods (mkSyncVoidFireForget): swallow the
         // rejection AND __lsTrackChain the fire-and-forget dispatch so the run-loop flush drains it,
         // then return void. Falling through to the catch-all would return an un-tracked, un-caught
@@ -937,7 +951,7 @@ const VM_FLUSH_BOOTSTRAP = `
 // deep-frozen.) Eval'd LAST in createContext, after all scaffolding is built.
 const VM_FREEZE_BOOTSTRAP = `
 (function () {
-  var locked = ['__lsEncode', '__lsDecode', '__lsErrInfo', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', '__lsFetchAbort', 'fetch', 'Headers', 'Response', 'AbortController', 'AbortSignal', '__hostHandleDispatch', '__lsVmHandleProxy', '__hostRegisterHandler', '__hostUnregisterHandler', '__hostUnregisterHandlerNamed', '__hostRegisterComponentCallback', '__hostUnregisterComponentCallback', '__hostScheduleTimer', '__hostClearTimer', '__lsStreamStart', '__lsStreamPull', '__lsStreamCancel', '__lsCallHandler', '__hostBroadcastSubscribe', '__hostBroadcastUnsubscribe', '__lsTrackChain', '__lsFlush', '__hostAllocElementId', '__hostRegisterWidget', '__hostDropWidget', '__hostRegisterModal', '__hostRegisterModalDismiss', '__hostUnregisterModalDismiss'];
+  var locked = ['__lsEncode', '__lsDecode', '__lsErrInfo', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', '__lsFetchAbort', 'fetch', 'Headers', 'Response', 'AbortController', 'AbortSignal', '__hostHandleDispatch', '__lsVmHandleProxy', '__hostRegisterHandler', '__hostUnregisterHandler', '__hostUnregisterHandlerNamed', '__hostRegisterComponentCallback', '__hostUnregisterComponentCallback', '__hostScheduleTimer', '__hostClearTimer', '__lsStreamStart', '__lsStreamPull', '__lsStreamCancel', '__lsCallHandler', '__hostBroadcastSubscribe', '__hostBroadcastUnsubscribe', '__lsBroadcastEmitCheck', '__lsTrackChain', '__lsFlush', '__hostAllocElementId', '__hostRegisterWidget', '__hostDropWidget', '__hostRegisterModal', '__hostRegisterModalDismiss', '__hostUnregisterModalDismiss'];
   for (var i = 0; i < locked.length; i++) {
     var name = locked[i];
     if (Object.prototype.hasOwnProperty.call(globalThis, name)) {
@@ -2170,6 +2184,18 @@ async function createContext(): Promise<ScriptContext> {
   ctx.setProp(ctx.global, '__lsRandomFill', randomFill);
   randomFill.dispose();
   ctx.unwrapResult(ctx.evalCode(VM_CRYPTO_BOOTSTRAP)).dispose();
+
+  // ── api.broadcast.emit limits (shared with asyncfn) — a sync host fn the in-VM proxy calls with the
+  // serialised payload byte count; enforceBroadcastEmitLimits THROWS on over-cap / over-rate, which
+  // quickjs-emscripten converts to a VM exception so the in-VM emit() throws (parity with the asyncfn
+  // proxy). Keyed by the current run's scriptId, so the per-script rate bucket is shared across engines. ──
+  const broadcastEmitCheck = ctx.newFunction('__lsBroadcastEmitCheck', (bytesHandle) => {
+    const scriptId = sc.activeRun?.scriptId;
+    if (scriptId) enforceBroadcastEmitLimits(scriptId, ctx.getNumber(bytesHandle) | 0);
+    // returns undefined (void)
+  });
+  ctx.setProp(ctx.global, '__lsBroadcastEmitCheck', broadcastEmitCheck);
+  broadcastEmitCheck.dispose();
 
   // ── Direct fetch bridge (P3 A2) — async host fn (deferred-promise pattern, like
   // __hostDispatch). Gated by the run's allowDangerous (mirrors asyncfn safeFetch);

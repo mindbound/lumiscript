@@ -44,7 +44,7 @@ Every on-disk surface loads through a **permissive path that tolerates both unkn
 
 ## Engine divergence — QuickJS isolate (opt-in)
 
-Scripts run under the **AsyncFunction** engine by default. A second, opt-in **QuickJS-WASM isolate** engine is behaviorally faithful to it across the observable surface (proven by the dual-engine parity harness — register-IPC and handler-fire behavior are identical), with **one permanent divergence** worth knowing:
+Scripts run under the **AsyncFunction** engine by default. A second, opt-in **QuickJS-WASM isolate** engine is behaviorally faithful to it across the observable surface (proven by the dual-engine parity harness — register-IPC and handler-fire behavior are identical), with a few divergences worth knowing:
 
 - **`api.tools.invoke('X')` where the *calling* script itself registered tool `X`** returns the handler's value under AsyncFunction, but throws a catchable `ReentrantToolInvokeError` under QuickJS. Under QuickJS a script's runs and handler-fires serialize on a single per-script lock, so a script awaiting its **own** tool mid-run would deadlock — the engine rejects it cleanly instead. This is architectural (there is no in-engine fix on the shared-module design), but narrow: it is the **only** re-entrancy divergence, and the common cases are unaffected — registering, listing, the **LLM/Council invoking your tool**, and **another script invoking your tool** are all identical across engines. It's also strictly safer than the alternative it replaced (a hang that would take down the whole child process).
 
@@ -57,6 +57,10 @@ Scripts run under the **AsyncFunction** engine by default. A second, opt-in **Qu
   api.tools.register('summarize', toolDef, summarize); // thin wrapper still exposed to the LLM
   const r = await summarize({ text });                 // call the function directly — works on both engines
   ```
+
+- **Bare `fetch` (an `allowDangerous` feature) supports a SUBSET of the platform API under QuickJS.** The AsyncFunction engine hands `allowDangerous` scripts the host's real `fetch`; the QuickJS engine bridges a faithful-but-partial `fetch` over its VM boundary. Supported: the request `method`, `headers`, `body`, and `signal` (`AbortController`/`AbortSignal`), plus the `RequestInit` fields `mode`, `credentials`, `cache`, `redirect`, `referrer`, `referrerPolicy`, `integrity`, `keepalive`; and on the response `ok` / `status` / `statusText`, `headers.get` / `.has` / `.forEach`, and the body readers `text()` / `json()` / `arrayBuffer()` / `bytes()`. NOT bridged: `Response.blob()` / `formData()` / `clone()`, the streaming `Response.body`, and passing a `Request` object (pass a URL string + an init object). An unsupported `RequestInit` field is simply not forwarded; an unsupported `Response` method is absent. **Prefer `api.utils.http.*`** (gated, identical on both engines) unless you specifically need bare `fetch`.
+
+- **`api.llm.generateStream(messages, { signal })` rejects an `AbortSignal` under QuickJS.** The AsyncFunction engine honours it (aborting the stream); the QuickJS engine throws a clear "AbortSignal is not yet supported in the QuickJS engine" up front rather than silently ignoring it (a later phase adds general `AbortSignal` marshaling). Cancel a QuickJS stream by breaking the `for await` (or letting it finish); the upstream generation is cancelled either way.
 
 ## Known drift risk
 
