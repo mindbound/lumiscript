@@ -109,6 +109,7 @@ import {
   dispatchActivation as dispatchTabActivation,
 } from './engine/drawer-tab-registry.js';
 import { resolveContextMenu, resolvePickFile } from './engine/api/ui.js';
+import { setAllowedPrivateHostsReader } from './engine/api/utils.js';
 import {
   dispatchKeyboardChange,
   dispatchDrawerChange,
@@ -431,6 +432,9 @@ setWorkerCountReader(() => settingsStore.get().workerCount ?? 1);
 // on an engineMode change so handlers re-register under the new engine (below).
 setEngineModeReader(() => settingsStore.get().engineMode ?? 'asyncfn');
 setStreamQueueCapReader(() => settingsStore.get().streamQueueCap ?? 512);
+// SSRF egress allowlist — the guarded outbound-HTTP path (api/utils.ts) reads this live to decide which
+// private hosts take the direct-fetch escape hatch vs the hardened cors→safeFetch path.
+setAllowedPrivateHostsReader(() => settingsStore.get().allowedPrivateHosts ?? []);
 
 // Phase E (v1.0 runtime-isolation) — wire the eviction config reader so
 // the dispatcher's sweep reads live thresholds. Fallback defaults match

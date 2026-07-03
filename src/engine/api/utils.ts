@@ -11,6 +11,7 @@ import Handlebars from 'handlebars';
 import type { LumiScriptAPI, HttpResponse, HttpRequestOptions } from '../../types/script.js';
 import { generateUUID, generateShortId } from '../../utils/uuid.js';
 import { type APIBuildDeps, assertDangerous, shielded } from './shared.js';
+import { isAllowlistedHost } from '../egress-allowlist.js';
 import {
   detectImageMime,
   parseBase64DataUrl,
@@ -87,6 +88,56 @@ function base64ToUint8Array(b64: string): Uint8Array {
   return bytes;
 }
 
+// ─── SSRF-guarded egress (the single outbound-HTTP chokepoint) ───────────────
+//
+// All LumiScript outbound HTTP (api.utils.http.* AND — from Phase 2 — bare `fetch`) funnels through
+// `guardedCorsFetch`. By default it routes through `spindle.cors` → the host's `safeFetch` (DNS-pinned,
+// blocks loopback/LAN/link-local/metadata). The one exception is a host the USER has allowlisted for direct
+// local access (see LumiScriptSettings.allowedPrivateHosts / egress-allowlist.ts): those take a DIRECT
+// `globalThis.fetch`, which is how a script reaches a trusted local model server / LAN device. The allowlist
+// is read live via an injected reader (wired in backend.ts from settingsStore, like engineMode).
+
+let allowedPrivateHostsReader: () => readonly string[] = () => [];
+export function setAllowedPrivateHostsReader(fn: () => readonly string[]): void {
+  allowedPrivateHostsReader = fn;
+}
+
+type CorsOptions = { method: string; headers?: Record<string, string>; body?: unknown; responseType?: 'text' | 'arraybuffer' };
+/** The `spindle.cors`-shaped response the decoder consumes (both the cors path and the direct path emit it). */
+type CorsLikeResponse = { status: number; statusText: string; headers: Record<string, string>; body: string; encoding?: 'base64' };
+
+/**
+ * Direct fetch to a user-allowlisted trusted-local host, normalized to `spindle.cors`'s response shape so
+ * the SAME `decodeHttpResponse` handles both paths. `redirect: 'manual'` — the direct path never chases a
+ * redirect off the allowlisted host into the internal network; a redirecting local endpoint surfaces the
+ * 3xx to the caller rather than silently following it.
+ */
+async function directLocalFetch(url: string, opts: CorsOptions): Promise<CorsLikeResponse> {
+  const res = await globalThis.fetch(url, {
+    method:   opts.method,
+    headers:  opts.headers,
+    body:     opts.body as BodyInit | undefined,
+    redirect: 'manual',
+  });
+  const headers: Record<string, string> = {};
+  res.headers.forEach((v, k) => { headers[k] = v; });
+  if (opts.responseType === 'arraybuffer') {
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    return { status: res.status, statusText: res.statusText, headers, body: bytesToBase64(bytes), encoding: 'base64' };
+  }
+  return { status: res.status, statusText: res.statusText, headers, body: await res.text() };
+}
+
+/** Route a request to the direct path (allowlisted trusted-local host) or the hardened cors→safeFetch path. */
+export async function guardedCorsFetch(url: string, opts: CorsOptions): Promise<unknown> {
+  if (isAllowlistedHost(url, allowedPrivateHostsReader())) {
+    return directLocalFetch(url, opts);
+  }
+  // opts matches spindle.cors's option shape (method/headers/responseType/body); cast past the nominal DTO
+  // type (its `body` is narrower than our `unknown`, same as the pre-refactor call site).
+  return spindle.cors(url, opts as Parameters<typeof spindle.cors>[1]);
+}
+
 export function buildUtilsAPI(deps: APIBuildDeps): LumiScriptAPI['utils'] {
   const { script, hasPerm, userId, activeContext } = deps;
 
@@ -139,27 +190,27 @@ export function buildUtilsAPI(deps: APIBuildDeps): LumiScriptAPI['utils'] {
       get: (url, opts) => {
         requireHttp();
         const corsOpts = buildCorsOptions('GET', opts);
-        return shielded((spindle.cors(url, corsOpts) as Promise<unknown>).then(decodeHttpResponse));
+        return shielded(guardedCorsFetch(url, corsOpts).then(decodeHttpResponse));
       },
       post: (url, body, opts) => {
         requireHttp();
         const corsOpts = { ...buildCorsOptions('POST', opts), body };
-        return shielded((spindle.cors(url, corsOpts) as Promise<unknown>).then(decodeHttpResponse));
+        return shielded(guardedCorsFetch(url, corsOpts).then(decodeHttpResponse));
       },
       put: (url, body, opts) => {
         requireHttp();
         const corsOpts = { ...buildCorsOptions('PUT', opts), body };
-        return shielded((spindle.cors(url, corsOpts) as Promise<unknown>).then(decodeHttpResponse));
+        return shielded(guardedCorsFetch(url, corsOpts).then(decodeHttpResponse));
       },
       delete: (url, opts) => {
         requireHttp();
         const corsOpts = buildCorsOptions('DELETE', opts);
-        return shielded((spindle.cors(url, corsOpts) as Promise<unknown>).then(decodeHttpResponse));
+        return shielded(guardedCorsFetch(url, corsOpts).then(decodeHttpResponse));
       },
       request: (url, opts) => {
         requireHttp();
         const corsOpts = { ...buildCorsOptions(opts.method ?? 'GET', opts), body: opts.body };
-        return shielded((spindle.cors(url, corsOpts) as Promise<unknown>).then(decodeHttpResponse));
+        return shielded(guardedCorsFetch(url, corsOpts).then(decodeHttpResponse));
       },
     },
 

@@ -204,6 +204,17 @@ export interface LumiScriptSettings {
    * Default: 500.  Range: 50 – 2 000.
    */
   consoleHistoryLimit: number;
+  /**
+   * User-managed allowlist of PRIVATE hosts that outbound HTTP (`allowDangerous` bare `fetch` +
+   * `api.utils.http.*`) may reach DIRECTLY, bypassing the default SSRF block. All outbound HTTP is otherwise
+   * routed through the host's cors proxy → `safeFetch`, which blocks loopback / LAN / link-local / cloud-
+   * metadata addresses. This is the escape hatch for intentional local access — a local model server
+   * (Ollama `localhost:11434`, ComfyUI `localhost:8188`, …), a LAN device — so scripts you trust can reach
+   * services you name. Entries are IP literals or `localhost` (± a port), matched LITERALLY against the URL
+   * host (a hostname that merely RESOLVES to an allowlisted IP does NOT match — no rebinding bypass). Pairs
+   * with the per-script `allowDangerous` gate. Default: [] (nothing private is reachable).
+   */
+  allowedPrivateHosts: string[];
   // ─── Editor ──────────────────────────────────────────────────────────────────
   /**
    * Monaco editor font size in pixels.  Affects the code editor only; reference
@@ -335,6 +346,7 @@ export const DEFAULT_SETTINGS: LumiScriptSettings = {
   workerIdleTimeoutMs: 30 * 60 * 1000,
   workerMemoryCeilingMb: 512,
   consoleHistoryLimit: 500,
+  allowedPrivateHosts: [],
   editorFontSize: 12,
   editorIntellisense: true,
   autosaveDebounceMs: 1_200,
