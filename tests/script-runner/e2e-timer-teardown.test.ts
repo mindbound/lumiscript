@@ -13,7 +13,7 @@ import { describe, test, expect } from 'bun:test';
 import { dispatchRunScript, unregisterScriptFromChild, __resetForTests } from '../../src/script-runner/host-dispatcher.js';
 import {
   _setEngineModeForTests, _asyncfnTimerCountForTests, _vmTimerCountForTests,
-  _runInScriptContextForTests, _runInRunContextForTests, _setHostFetchForTests,
+  _runInScriptContextForTests, _runInRunContextForTests,
 } from '../../src/script-runner/child-entry.js';
 import { on as busOn, emit as busEmit, clearAll as clearBroadcast } from '../../src/engine/broadcast-bus.js';
 import { setupE2E } from '../_infra/script-runner-fixture.js';
@@ -218,11 +218,14 @@ describe('asyncfn timer tracking untracks on clear (bounded set growth)', () => 
 });
 
 // The three fire-and-forget quickjs paths (broadcast / modal-dismiss / timer) grant a fired handler bare
-// fetch iff the OWNING script is allowDangerous — matching the asyncfn engine, whose handler closures baked
-// in the right fetch at body-run time. Pre-fix they hardcoded allowDangerous:false, so an allowDangerous
-// script's fired handler threw. child-entry now reads a per-script allowDangerous captured at body-run start
-// and threads BOTH the flag and the captured host fetch. (modal-dismiss uses the identical broadcast path.)
-describe('#11 fire-path fetch parity (allowDangerous threaded through broadcast/timer fires — quickjs)', () => {
+// fetch iff the OWNING script is allowDangerous. Bare fetch is now SSRF-guarded: it dispatches
+// utils.http.request → the backend guardedCorsFetch (allowlisted local → direct; else cors → safeFetch), so
+// a fired handler's fetch reaches the (mocked) cors path and comes back 200. A non-allowDangerous fire is
+// gated up front by the in-VM __lsFetch (never reaches the backend). (modal-dismiss uses the broadcast path.)
+describe('#11 fire-path bare fetch → SSRF-guarded backend path (quickjs)', () => {
+  // Bare fetch dispatches utils.http.request → the backend requireHttp gate needs cors_proxy (which
+  // allowDangerous maps to); grant it so the guarded path is exercised end-to-end against the mock cors.
+  const corsReq = () => ({ ...makeRequest(), grantedPermissions: new Set<string>(['cors_proxy']) });
   // The default (shared) context model means one VM globalThis across runs — poll it via a reader run until
   // the async fire has settled its result.
   async function readGlobal(key: string): Promise<unknown> {
@@ -234,40 +237,38 @@ describe('#11 fire-path fetch parity (allowDangerous threaded through broadcast/
     return null;
   }
   const handlerBody = (event: string, slot: string) =>
-    `api.broadcast.on('${event}', async () => { try { globalThis.${slot} = await (await fetch('https://x')).text(); } catch (e) { globalThis.${slot} = 'blocked:' + e.message; } }); return null;`;
+    `api.broadcast.on('${event}', async () => { try { globalThis.${slot} = 'status:' + (await fetch('http://example.com/')).status; } catch (e) { globalThis.${slot} = 'blocked:' + e.message; } }); return null;`;
 
-  test('a broadcast handler in an allowDangerous script gets bare fetch; a non-allowDangerous one is gated', async () => {
+  test('an allowDangerous broadcast handler routes bare fetch through the guarded backend (cors mock → 200); a non-allowDangerous one is gated', async () => {
     __resetForTests();
     _setEngineModeForTests('quickjs');
     const { childCleanup } = await setupE2E();
-    _setHostFetchForTests(async () => new Response('via-fire'));
     try {
-      // allowDangerous → the fired handler's bare fetch reaches the stub (asyncfn parity).
-      await dispatchRunScript(makeScript('bcast-ad', handlerBody('bc-ad', '__bcAd'), true), makeRequest());
+      // allowDangerous (+ cors_proxy) → the fired handler's bare fetch dispatches to guardedCorsFetch → mock cors → 200.
+      await dispatchRunScript(makeScript('bcast-ad', handlerBody('bc-ad', '__bcAd'), true), corsReq());
       busEmit('bc-ad', {});
-      expect(await readGlobal('__bcAd')).toBe('via-fire');
+      expect(await readGlobal('__bcAd')).toBe('status:200');
 
-      // non-allowDangerous → gated with the SAME "requires Allow Dangerous" error the body would get.
+      // non-allowDangerous → gated up front by __lsFetch (never reaches the backend).
       await dispatchRunScript(makeScript('bcast-nad', handlerBody('bc-nad', '__bcNad'), false), makeRequest());
       busEmit('bc-nad', {});
       expect(String(await readGlobal('__bcNad'))).toContain('Allow Dangerous');
     } finally {
-      _setHostFetchForTests(undefined); childCleanup(); _setEngineModeForTests(undefined); clearBroadcast();
+      childCleanup(); _setEngineModeForTests(undefined); clearBroadcast();
     }
   });
 
-  test('a timer callback in an allowDangerous script gets bare fetch (child-local fire path)', async () => {
+  test('an allowDangerous timer callback routes bare fetch through the guarded backend (child-local fire path)', async () => {
     __resetForTests();
     _setEngineModeForTests('quickjs');
     const { childCleanup } = await setupE2E();
-    _setHostFetchForTests(async () => new Response('via-timer'));
     try {
       await dispatchRunScript(makeScript('tmr-ad',
-        `setTimeout(async () => { try { globalThis.__tmrAd = await (await fetch('https://x')).text(); } catch (e) { globalThis.__tmrAd = 'blocked:' + e.message; } }, 10); return null;`,
-        true), makeRequest());
-      expect(await readGlobal('__tmrAd')).toBe('via-timer');
+        `setTimeout(async () => { try { globalThis.__tmrAd = 'status:' + (await fetch('http://example.com/')).status; } catch (e) { globalThis.__tmrAd = 'blocked:' + e.message; } }, 10); return null;`,
+        true), corsReq());
+      expect(await readGlobal('__tmrAd')).toBe('status:200');
     } finally {
-      _setHostFetchForTests(undefined); childCleanup(); _setEngineModeForTests(undefined);
+      childCleanup(); _setEngineModeForTests(undefined);
     }
   });
 });

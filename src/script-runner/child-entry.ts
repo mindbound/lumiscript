@@ -172,10 +172,41 @@ const _processMemoryUsage = process.memoryUsage.bind(process);
 const _processCpuUsage    = process.cpuUsage.bind(process);
 /** Captured `process.uptime` — used by `diagnostic-stats-request` handler. */
 const _processUptime      = process.uptime.bind(process);
-/** Captured host `fetch` — passed to `allowDangerous` scripts as `safeFetch`. `let` (never reassigned in
- *  production) so fetch-gating tests can swap in a controlled stub via `_setHostFetchForTests`. */
-const _origHostFetch      = globalThis.fetch.bind(globalThis);
-let _hostFetch            = _origHostFetch;
+
+/**
+ * The `fetch` capability handed to an allowDangerous run/handler. Rather than the raw host fetch (which would
+ * egress straight from the child with NO SSRF guard — the #5 hole), bare `fetch` routes through the backend's
+ * guarded outbound-HTTP path (`utils.http.request` → `guardedCorsFetch`: a user-allowlisted trusted-local
+ * host takes a DIRECT fetch, everything else goes cors → safeFetch, which pins DNS + blocks loopback / LAN /
+ * link-local / metadata). The buffered result is rebuilt into a standard `Response` so `.text()` / `.json()`
+ * / `.arrayBuffer()` / `.bytes()` / `.headers` all work. Bare `fetch` thereby matches `api.utils.http`'s
+ * posture (hardened by default + the user allowlist as the local escape hatch) and gating (`cors_proxy`,
+ * which `allowDangerous` maps to). Buffered, `http(s)`-only, no streaming body — same trade-offs as
+ * `api.utils.http`. Dispatching `utils.http.request` reaches the backend's canonical handler via
+ * `dispatchApiCall`, independent of the proxy's own api surface.
+ */
+export function makeGuardedHostFetch(
+  dispatch: (method: string, args: unknown[]) => Promise<unknown>,
+): typeof globalThis.fetch {
+  return (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = typeof input === 'string' ? input
+      : input instanceof URL   ? input.toString()
+      :                          (input as Request).url;
+    const headers: Record<string, string> = {};
+    if (init?.headers) new Headers(init.headers).forEach((v, k) => { headers[k] = v; });
+    const r = await dispatch('utils.http.request', [url, {
+      method:       init?.method ?? 'GET',
+      headers,
+      body:         init?.body,
+      responseType: 'arraybuffer',
+    }]) as { status: number; statusText: string; headers: Record<string, string>; body: string | Uint8Array };
+    // 1xx/204/205/304 forbid a body in the Response constructor — pass null there to avoid a throw.
+    const nullBody = r.status === 101 || r.status === 204 || r.status === 205 || r.status === 304;
+    return new Response(nullBody ? null : (r.body as BodyInit), {
+      status: r.status, statusText: r.statusText, headers: r.headers,
+    });
+  }) as unknown as typeof globalThis.fetch;
+}
 
 /**
  * Allowlist of `globalThis` properties that survive the lockdown sweep.
@@ -780,7 +811,7 @@ function fireVmModalDismiss(proc: SpindleBackendProcessContext, msg: AdvancedMod
         console:                      capturedConsole,
         serializeError,
         allowDangerous,
-        hostFetch:                    allowDangerous ? _hostFetch : undefined,
+        hostFetch:                    allowDangerous ? makeGuardedHostFetch(theProxy.dispatch) : undefined,
         dispatchRegisterHandler:        dispatchers.dispatchRegisterHandler,
         dispatchUnregisterHandler:      dispatchers.dispatchUnregisterHandler,
         dispatchUnregisterHandlerNamed: dispatchers.dispatchUnregisterHandlerNamed,
@@ -1058,7 +1089,7 @@ async function fireVmHandler(
           // closure baked in the right fetch at body-run time). hostFetch is the captured host fetch,
           // granted only when allowDangerous — same gate as the body-run (child-entry runOne).
           allowDangerous:            req.allowDangerous,
-          hostFetch:                 req.allowDangerous ? _hostFetch : undefined,
+          hostFetch:                 req.allowDangerous ? makeGuardedHostFetch(theProxy.dispatch) : undefined,
           // #11 P7-F4 (Tier 0) — the invoking script (api.tools.invoke path only) so the fire can
           // fast-reject a self-reentrant invoke instead of deadlocking on the caller's runChain.
           callerScriptId:            req.callerScriptId,
@@ -1140,7 +1171,7 @@ function fireVmBroadcast(proc: SpindleBackendProcessContext, msg: BroadcastFireM
       console:                      capturedConsole,
       serializeError,
       allowDangerous,
-      hostFetch:                    allowDangerous ? _hostFetch : undefined,
+      hostFetch:                    allowDangerous ? makeGuardedHostFetch(theProxy.dispatch) : undefined,
       dispatchRegisterHandler:        dispatchers.dispatchRegisterHandler,
       dispatchUnregisterHandler:      dispatchers.dispatchUnregisterHandler,
       dispatchUnregisterHandlerNamed: dispatchers.dispatchUnregisterHandlerNamed,
@@ -1242,7 +1273,7 @@ function fireVmTimer(proc: SpindleBackendProcessContext, scriptId: string, timer
       console:          capturedConsole,
       serializeError,
       allowDangerous,
-      hostFetch:        allowDangerous ? _hostFetch : undefined,
+      hostFetch:        allowDangerous ? makeGuardedHostFetch(theProxy.dispatch) : undefined,
       ...dispatchers,
     }),
     BROADCAST_HANDLER_TIMEOUT_MS,
@@ -1674,14 +1705,13 @@ async function runOne(
     // reference any of them as top-level identifiers fail with
     // `ReferenceError` in the child runtime. The shadowing semantics:
     //   - `z`: real zod, bundled into the child via `import * as z`.
-    //   - `fetch`: real `globalThis.fetch` for allowDangerous scripts;
-    //              throws otherwise (matching `buildSafeFetch` in
-    //              executor.ts).
+    //   - `fetch`: for allowDangerous scripts, the SSRF-guarded fetch (backend cors → safeFetch, with the
+    //              user allowlist as the local escape hatch — see makeGuardedHostFetch); throws otherwise.
     //   - `Bun`: always undefined — direct Bun API access is forbidden
     //           per the Lumiverse 519565 capability regex.
     //   - `process`: always undefined — same reason.
     const safeFetch: typeof globalThis.fetch = req.allowDangerous
-      ? _hostFetch
+      ? makeGuardedHostFetch(proxy.dispatch)
       : ((() => {
           throw new Error(
             `"${req.scriptName}" must enable Allow Dangerous to use fetch directly. ` +
@@ -1729,11 +1759,10 @@ async function runOne(
             timeoutMs:      req.timeoutMs,
             serializeError,
             allowDangerous: req.allowDangerous,
-            // Pass the host fetch CAPTURED PRE-LOCKDOWN (_hostFetch). `globalThis.fetch`
-            // is nulled by installSandboxLockdown(), so the in-VM bridge must use this
-            // reference. Only granted when allowDangerous (defense-in-depth alongside
-            // the engine's own allowDangerous gate). Mirrors the asyncfn safeFetch.
-            hostFetch:      req.allowDangerous ? _hostFetch : undefined,
+            // Bare fetch is routed through the backend's SSRF-guarded outbound path (see
+            // makeGuardedHostFetch): an allowlisted trusted-local host → direct fetch, else cors → safeFetch.
+            // Only granted when allowDangerous (defense-in-depth alongside the in-VM __lsFetch gate).
+            hostFetch:      req.allowDangerous ? makeGuardedHostFetch(proxy.dispatch) : undefined,
             // P4 — handle-method dispatcher, so in-VM handle proxies (db.collection
             // etc.) route method calls back through the SAME targetHandle IPC as the
             // asyncfn path. Boundary #1 unchanged.
@@ -2198,13 +2227,6 @@ export function _asyncfnTimerCountForTests(scriptId: string): number {
  *  path (scriptId resolved via ALS) without a full detached-async e2e. */
 export function _runInScriptContextForTests<T>(scriptId: string, fn: () => T): T {
   return currentScriptIdContext.run(scriptId, fn);
-}
-
-/** @internal Test seam — override the captured host fetch so fetch-gating tests can assert against a
- *  controlled stub without real network. Accepts the engine's looser fetch signature (a plain async fn);
- *  pass undefined to restore the pre-lockdown capture. */
-export function _setHostFetchForTests(fn: ((url: string, init?: RequestInit) => Promise<Response>) | undefined): void {
-  _hostFetch = (fn ?? _origHostFetch) as typeof globalThis.fetch;
 }
 
 /** @internal Test seam — run `fn` inside a body-run runId ALS context. With no matching activeProxies entry
