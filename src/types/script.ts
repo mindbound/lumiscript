@@ -207,6 +207,16 @@ export interface LumiScriptSettings {
    * ceiling.
    * Default: 512 (MB).  Range: 64 – 8 192.
    *
+   * NOTE: this bounds each worker's whole-process OS RSS, so a worker
+   * running the QuickJS engine weighs substantially more than an
+   * AsyncFunction worker — it carries the WASM runtime (~112 MB baseline)
+   * plus per-script context heap (up to ~512 MB for a fully-loaded
+   * per-script pool). The same ceiling therefore evicts and respawns much
+   * more aggressively under QuickJS; raise it accordingly when running the
+   * QuickJS engine across several workers. It is independent of the
+   * engine's own per-context memory cap, which is a fixed internal limit
+   * not derived from this setting.
+   *
    * Phase E (v1.0 runtime-isolation): consumed by the eviction sweep.
    */
   workerMemoryCeilingMb: number;
