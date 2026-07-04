@@ -118,6 +118,10 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
   const triggerCount = scripts.filter(s => s.type === 'trigger').length;
   const libraryCount = scripts.filter(s => s.type === 'library').length;
 
+  // #11 P7 — the context-isolation setting only applies under the QuickJS engine; gates the Isolation
+  // control's enabled/displayed state below.
+  const engineIsQuickjs = (settings.engineMode ?? 'asyncfn') === 'quickjs';
+
   // Options for the default-connection picker: a "Lumiverse default" sentinel
   // (value '') ahead of every configured connection. Memoized for a stable
   // array identity into HostSelect.
@@ -254,17 +258,22 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
           />
         </div>
 
-        {/* #11 P7 context-model — QuickJS context-isolation model. Only has an effect under the QuickJS
-            engine; switching it respawns the QuickJS worker(s) and reloads active scripts, so it confirms
-            first (same reload impact as an engine switch). */}
+        {/* #11 P7 context-model — QuickJS context-isolation model. Has NO effect under AsyncFunction (which
+            runs every script in one shared realm), so the control is disabled unless the QuickJS engine is
+            selected. While disabled it DISPLAYS 'Shared context' — AsyncFunction's effective posture (one
+            sandbox for all scripts), so the locked-in mode reads unambiguously — but the persisted value is
+            NOT changed: a per-script preference is preserved and shown again when the engine returns to
+            QuickJS. Under QuickJS, switching respawns the worker(s) and reloads active scripts, so it
+            confirms first (same reload impact as an engine switch). */}
         <div className="ls-settings-field">
-          <label className="ls-settings-field-label" title="QuickJS engine only. 'Shared context' runs every script in one QuickJS context (default). 'Per-script isolation' gives each script its own context — its own globalThis and library instances — so one script cannot observe or poison another's sandbox. Switching respawns the QuickJS worker(s) and reloads all active scripts.">
+          <label className="ls-settings-field-label" title="QuickJS engine only — disabled while AsyncFunction is selected, which runs every script in one shared sandbox (shown here as 'Shared context'). 'Shared context' runs every script in one QuickJS context (default). 'Per-script isolation' gives each script its own context — its own globalThis and library instances — so one script cannot observe or poison another's sandbox. Switching respawns the QuickJS worker(s) and reloads all active scripts.">
             Isolation
           </label>
           <HostSelect
             key={contextModelSelectResetKey}
             options={contextModelOptions}
-            value={settings.contextModel ?? 'shared'}
+            value={engineIsQuickjs ? (settings.contextModel ?? 'shared') : 'shared'}
+            disabled={!engineIsQuickjs}
             onChange={(v) => {
               const next = v === 'per-script' ? 'per-script' : 'shared';
               if (next !== (settings.contextModel ?? 'shared')) setPendingContextModel(next);
@@ -819,6 +828,16 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
             which sandbox runs your scripts. Each script's live state — handlers, panels, timers — belongs to
             one engine and can't be moved, so it is rebuilt under the new engine.
           </p>
+
+          {/* #11 P7 — per-script isolation is a QuickJS-only capability; note that it goes dormant when
+              leaving QuickJS, and reassure the user their choice is kept (restored on switching back). */}
+          {pendingEngineMode === 'asyncfn' && (settings.contextModel ?? 'shared') === 'per-script' && (
+            <p style={esNote}>
+              Per-script isolation applies only to the QuickJS engine, so it will be inactive while
+              AsyncFunction runs your scripts. Your choice is kept and takes effect again if you switch back
+              to QuickJS.
+            </p>
+          )}
 
           {engineSwitchImpact.startup.length > 0 && (
             <>
