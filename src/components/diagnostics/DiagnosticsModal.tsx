@@ -5,7 +5,7 @@
  * Full-screen portaled modal that renders a `DiagnosticsReport` snapshot of
  * LumiScript's runtime state. Triggered from the "View Diagnostics" button
  * in the Settings panel; mirrors the shape of Lumiverse's Memory Cortex
- * Diagnostics modal (header with Refresh + Copy buttons, status-badged
+ * Diagnostics modal (header with Refresh + Download buttons, status-badged
  * checks grouped by section, ESC / backdrop dismissal).
  *
  * State flow:
@@ -13,8 +13,8 @@
  *   2. Backend collects from registries, probes storage + script-runner,
  *      sends `diagnostics_report` back.
  *   3. Component renders the report; user can hit Refresh for a fresh
- *      snapshot, or Copy to copy the markdown-formatted dump into their
- *      clipboard for Discord support reports.
+ *      snapshot, or Download to save the markdown-formatted dump as a
+ *      timestamped `.md` file for support reports.
  *
  * The markdown serializer + Section F (frontend-side Monaco / fonts /
  * worker / CDN checks) are introduced in Phase 4 — this Phase 3 scaffold
@@ -23,7 +23,7 @@
 
 import { useState, useEffect, useCallback, useMemo, type FC } from 'react';
 import { createPortal } from 'react-dom';
-import { X, RefreshCw, Activity, CheckCircle2, AlertTriangle, Info, XCircle, Copy, Check } from 'lucide-react';
+import { X, RefreshCw, Activity, CheckCircle2, AlertTriangle, Info, XCircle, Download, Check } from 'lucide-react';
 import type { FrontendToBackend, BackendToFrontend } from '../../types/messages.js';
 import type {
   DiagnosticsReport, DiagnosticStatus, DiagnosticCheck, DiagnosticSection,
@@ -48,7 +48,7 @@ export const DiagnosticsModal: FC<DiagnosticsModalProps> = ({
   const [report,          setReport]          = useState<DiagnosticsReport | null>(null);
   const [loading,         setLoading]         = useState(true);
   const [frontendSection, setFrontendSection] = useState<DiagnosticSection | null>(null);
-  const [copyState,       setCopyState]       = useState<'idle' | 'copied' | 'error'>('idle');
+  const [downloadState,   setDownloadState]   = useState<'idle' | 'done' | 'error'>('idle');
 
   // Subscribe to backend responses + kick off the initial request. After
   // receiving the backend report, fire Section F's frontend-side probes
@@ -111,16 +111,31 @@ export const DiagnosticsModal: FC<DiagnosticsModalProps> = ({
     };
   }, [report, frontendSection]);
 
-  const handleCopy = useCallback(async () => {
+  const handleDownload = useCallback(() => {
     if (!mergedReport) return;
     try {
-      await navigator.clipboard.writeText(serializeReportAsMarkdown(mergedReport));
-      setCopyState('copied');
+      const markdown = serializeReportAsMarkdown(mergedReport);
+      // Timestamp the file from the report's generation time (UTC, consistent with the reference /
+      // Lisa exports): lumiscript-diagnostics-YYYY-MM-DD-HHMMSS.md.
+      const stamp = new Date(mergedReport.generatedAt).toISOString().slice(0, 19).replace(/:/g, '').replace('T', '-');
+      const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `lumiscript-diagnostics-${stamp}.md`;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      // Revoke after a tick so the browser has time to start the download — a premature revoke breaks
+      // the save dialog in some browsers (same pattern as Lisa's thread export).
+      window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+      setDownloadState('done');
     } catch {
-      setCopyState('error');
+      setDownloadState('error');
     }
     // Auto-revert the button state so the user knows the action is repeatable.
-    window.setTimeout(() => setCopyState('idle'), 2_000);
+    window.setTimeout(() => setDownloadState('idle'), 2_000);
   }, [mergedReport]);
 
   // Pre-compute the overall tone for the header summary chip. fail > warn > pass.
@@ -161,13 +176,13 @@ export const DiagnosticsModal: FC<DiagnosticsModalProps> = ({
             </button>
             <button
               type="button"
-              className={`ls-diag-action-btn${copyState === 'copied' ? ' ls-diag-action-btn-done' : ''}${copyState === 'error' ? ' ls-diag-action-btn-error' : ''}`}
-              onClick={handleCopy}
+              className={`ls-diag-action-btn${downloadState === 'done' ? ' ls-diag-action-btn-done' : ''}${downloadState === 'error' ? ' ls-diag-action-btn-error' : ''}`}
+              onClick={handleDownload}
               disabled={!mergedReport}
-              title="Copy as Markdown for Discord support reports"
+              title="Download as a timestamped Markdown file for support reports"
             >
-              {copyState === 'copied' ? <Check size={13} /> : <Copy size={13} />}
-              {copyState === 'copied' ? 'Copied' : copyState === 'error' ? 'Copy failed' : 'Copy Report'}
+              {downloadState === 'done' ? <Check size={13} /> : <Download size={13} />}
+              {downloadState === 'done' ? 'Downloaded' : downloadState === 'error' ? 'Download failed' : 'Download Report'}
             </button>
             <button type="button" className="ls-diag-close" onClick={onClose} title="Close (Esc)">
               <X size={15} />
