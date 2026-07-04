@@ -147,9 +147,11 @@ import {
   setWorkerCountReader,
   setEngineModeReader,
   setStreamQueueCapReader,
+  setContextModelReader,
   setEvictionConfigReader,
   startEvictionSweep,
   rebalanceWorkerPool,
+  restartAllWorkers,
   redistributeAllAssignments,
   unregisterScriptFromChild,
   getRunnerHealth,
@@ -432,6 +434,9 @@ setWorkerCountReader(() => settingsStore.get().workerCount ?? 1);
 // on an engineMode change so handlers re-register under the new engine (below).
 setEngineModeReader(() => settingsStore.get().engineMode ?? 'asyncfn');
 setStreamQueueCapReader(() => settingsStore.get().streamQueueCap ?? 512);
+// #11 P7 — wire the contextModel reader so the dispatcher pins the live setting onto each RunScriptRequest.
+// The child applies it only on a clean worker; update_settings respawns the QuickJS worker(s) on a flip.
+setContextModelReader(() => settingsStore.get().contextModel ?? 'shared');
 // SSRF egress allowlist — the guarded outbound-HTTP path (api/utils.ts) reads this live to decide which
 // private hosts take the direct-fetch escape hatch vs the hardened cors→safeFetch path.
 setAllowedPrivateHostsReader(() => settingsStore.get().allowedPrivateHosts ?? []);
@@ -890,11 +895,12 @@ const ENGINE_SWITCH_RELOAD_SPACING_MS = 250;
 let engineSwitchReloadTimers: Array<ReturnType<typeof setTimeout>> = [];
 
 /**
- * On an `engineMode` change, migrate every ENABLED trigger script to the new engine. Required
- * because fires route by REGISTRY PRESENCE (`hasVmHandler` [quickjs] vs `handlerClosures`
- * [asyncfn]), NOT by any wire engineMode: a bare settings flip would leave old handlers firing on
- * the previous engine while new runs register into the new one — a correct-but-inconsistent
- * split-brain that is NOT self-healing.
+ * On an `engineMode` OR `contextModel` change, migrate every ENABLED trigger script under the new runtime.
+ * Required because fires route by REGISTRY PRESENCE (`hasVmHandler` [quickjs] vs `handlerClosures`
+ * [asyncfn]), NOT by any wire flag: a bare settings flip would leave old handlers firing under the previous
+ * runtime while new runs register under the new one — a correct-but-inconsistent split-brain that is NOT
+ * self-healing. (For a contextModel flip the worker(s) are respawned first — `restartAllWorkers` — so the
+ * old QuickJS contexts are gone before these re-runs rebuild handlers in the new-model contexts.)
  *
  * Migration is SELECTIVE — scripts split by whether their next natural run would come soon enough
  * to rebuild their state:
@@ -914,7 +920,7 @@ let engineSwitchReloadTimers: Array<ReturnType<typeof setTimeout>> = [];
  * The settings confirm modal derives its "N reload now / M re-arm on next trigger" counts from the
  * same `scriptRunsOnStartup` predicate, so what the user is told always matches what happens here.
  */
-function reloadAllEnabledScriptsForEngineChange(prevMode: string, nextMode: string): void {
+function reloadAllEnabledScriptsForRuntimeChange(changeLabel: string): void {
   // A rapid double-switch cancels the previous fan-out's still-pending re-runs; this call
   // re-derives the full partition, so every script still converges on the FINAL engine.
   for (const t of engineSwitchReloadTimers) clearTimeout(t);
@@ -923,17 +929,17 @@ function reloadAllEnabledScriptsForEngineChange(prevMode: string, nextMode: stri
   const enabled   = scriptStorage.getEnabledTriggerScripts();
   const reloadNow = enabled.filter(scriptRunsOnStartup);
   const dropOnly  = enabled.filter((s) => !scriptRunsOnStartup(s));
-  // Lifecycle milestone: a user toggled the execution engine. Low-frequency (a settings flip),
-  // so no rate-limit; the per-script failure error stays at the catches below.
+  // Lifecycle milestone: a user changed a runtime setting (engine or context model). Low-frequency (a
+  // settings flip), so no rate-limit; the per-script failure error stays at the catches below.
   spindle.log.info(
-    `[LumiScript] engineMode changed ${prevMode}→${nextMode}; reloading ${reloadNow.length} startup script(s) now, ` +
+    `[LumiScript] ${changeLabel}; reloading ${reloadNow.length} startup script(s) now, ` +
     `${dropOnly.length} event-driven script(s) re-arm on their next trigger`,
   );
 
   for (const script of dropOnly) {
     void triggerRegistry.fireEngineSwitchWipe(script).catch((err) => {
       spindle.log.error(
-        `[LumiScript] engine-change state wipe failed for "${script.name}": ` +
+        `[LumiScript] runtime-change state wipe failed for "${script.name}": ` +
         `${err instanceof Error ? err.message : String(err)}`,
       );
     });
@@ -955,7 +961,7 @@ function reloadAllEnabledScriptsForEngineChange(prevMode: string, nextMode: stri
       };
       void triggerRegistry.fireReload(latest, payload).catch((err) => {
         spindle.log.error(
-          `[LumiScript] engine-change reload failed for "${latest.name}": ` +
+          `[LumiScript] runtime-change reload failed for "${latest.name}": ` +
           `${err instanceof Error ? err.message : String(err)}`,
         );
       });
@@ -3878,7 +3884,8 @@ spindle.onFrontendMessage(async (raw, userId) => {
         // #11 — capture engineMode BEFORE the merge so we can react only to a REAL
         // change (the workerCount branch below uses presence-of-key because rebalance
         // is idempotent; an engineMode reload is disruptive, so gate on prev !== next).
-        const prevEngineMode = settingsStore.get().engineMode ?? 'asyncfn';
+        const prevEngineMode   = settingsStore.get().engineMode ?? 'asyncfn';
+        const prevContextModel = settingsStore.get().contextModel ?? 'shared';
         await settingsStore.update(msg.patch);
         pushSettings();
         void syncTriggers(); // handles the master enabled/disabled toggle
@@ -3900,7 +3907,22 @@ spindle.onFrontendMessage(async (raw, userId) => {
           Object.prototype.hasOwnProperty.call(msg.patch, 'engineMode') &&
           nextEngineMode !== prevEngineMode
         ) {
-          reloadAllEnabledScriptsForEngineChange(prevEngineMode, nextEngineMode);
+          reloadAllEnabledScriptsForRuntimeChange(`engineMode changed ${prevEngineMode}→${nextEngineMode}`);
+        }
+        // #11 P7 — on a REAL contextModel change, RESPAWN the QuickJS worker(s) so all contexts rebuild
+        // under the new isolation model (a live pool can't be re-partitioned mid-flight), THEN fire-reload
+        // enabled scripts so their handlers re-register in the fresh contexts. The respawn precedes the
+        // reload so the re-run dispatches land on fresh workers. Value-diff gated like engineMode (a
+        // respawn+reload is disruptive). Only observable under engineMode 'quickjs', but the migration is
+        // engine-agnostic so running it regardless is safe.
+        const nextContextModel = settingsStore.get().contextModel ?? 'shared';
+        if (
+          msg.patch &&
+          Object.prototype.hasOwnProperty.call(msg.patch, 'contextModel') &&
+          nextContextModel !== prevContextModel
+        ) {
+          await restartAllWorkers();
+          reloadAllEnabledScriptsForRuntimeChange(`context model changed ${prevContextModel}→${nextContextModel}`);
         }
         break;
       }

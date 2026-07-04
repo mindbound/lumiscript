@@ -94,6 +94,7 @@ import {
   pushVmStreamEnd,
   sweepVmStreamsForScript,
   setStreamQueueCap,
+  setContextModel,
   sweepIdleContexts,
   warmupQuickJS,
   // #11 observability — engine telemetry note* bumpers (counters live in qjs-engine.ts) +
@@ -1671,6 +1672,10 @@ async function runOne(
   // #11 P5-4 — refresh the QuickJS generateStream queue cap from the setting (threaded per run) so a
   // settings change takes effect on the next run's newly-opened streams. No-op for asyncfn runs.
   if (req.streamQueueCap !== undefined) setStreamQueueCap(req.streamQueueCap);
+  // #11 P7 — apply the contextModel setting (threaded per run). setContextModel only flips on a CLEAN
+  // child (no live pool), so a real change takes effect on the fresh child the update_settings respawn spins
+  // up; on an already-warm child it's a no-op. No-op entirely for asyncfn runs (no QuickJS contexts).
+  if (req.contextModel !== undefined) setContextModel(req.contextModel);
 
   // Build the proxy api for this run. Stash by runId so api-response IPC
   // arrivals can route to its pending-request map.

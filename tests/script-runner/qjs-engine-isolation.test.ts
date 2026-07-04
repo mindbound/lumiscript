@@ -19,6 +19,8 @@ import {
   fireHandlerInQuickJS,
   disposeScriptVmHandlers,
   disposeContextForScript,
+  setContextModel,
+  getEngineTelemetry,
   _setContextModelForTests,
   _vmHandlerIdsForTests,
   _scriptContextCountForTests,
@@ -120,5 +122,29 @@ describe('#11 P7-2 cross-script isolation (contextModel=per-script)', () => {
     const after = await runUserScriptInQuickJS(runOpts('iso-relA', `return globalThis.__keep;`));
     expect(after).toBe('survives');
     disposeContextForScript('iso-relA', true);
+  });
+});
+
+// The setting is applied per-run via setContextModel(req.contextModel) on the child (child-entry.ts).
+// setContextModel only lets a flip land on a CLEAN child (no live shared/per-script context); a warm
+// child is left unchanged, because in prod a contextModel change respawns the worker(s) first
+// (backend.ts update_settings → restartAllWorkers), so the flip always lands on the fresh child. These
+// cover the no-op branches deterministically; the clean-child flip (one assignment) and the
+// respawn+reload wiring are verified by code review — a live shared context is reused across the whole
+// suite, so a genuinely clean-child state can't be reconstructed in-process.
+describe('setContextModel — apply-on-clean-child guard', () => {
+  test('no-ops when the requested mode already matches the active model', () => {
+    _setContextModelForTests('per-script');
+    setContextModel('per-script');
+    expect(getEngineTelemetry().contextModel).toBe('per-script');
+  });
+
+  test('does NOT switch a warm child that holds a live per-script context', async () => {
+    _setContextModelForTests('per-script');
+    await runUserScriptInQuickJS(runOpts('cm-warm', `return 1;`));
+    expect(_scriptContextCountForTests()).toBeGreaterThan(0); // a live per-script context exists
+    setContextModel('shared');                                // must be a no-op — mixing models is unsafe
+    expect(getEngineTelemetry().contextModel).toBe('per-script'); // model unchanged
+    disposeContextForScript('cm-warm', true);
   });
 });

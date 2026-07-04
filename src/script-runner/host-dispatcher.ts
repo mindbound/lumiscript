@@ -479,6 +479,15 @@ export function setStreamQueueCapReader(fn: () => number): void {
   streamQueueCapReader = fn;
 }
 
+// The `contextModel` setting reader — read per-dispatch onto the RunScriptRequest like engineMode. UNLIKE
+// engineMode, the child only applies a CHANGE on a fresh worker (a live context pool can't be re-partitioned
+// mid-flight), so update_settings respawns the QuickJS worker(s) on a flip and the fresh child picks the new
+// model up here. Default 'shared' matches DEFAULT_SETTINGS.
+let contextModelReader: () => 'shared' | 'per-script' = () => 'shared';
+export function setContextModelReader(fn: () => 'shared' | 'per-script'): void {
+  contextModelReader = fn;
+}
+
 /**
  * Returns the workerKey hosting `scriptId`. Assigns lazily on first lookup
  * via least-loaded distribution across the configured pool. Sticky:
@@ -6492,6 +6501,7 @@ export async function dispatchRunScript(
     // if the WASM module won't instantiate (cold-start-fallback, child-entry runOne).
     engineMode:         engineModeReader(),
     streamQueueCap:     streamQueueCapReader(),
+    contextModel:       contextModelReader(),
     chatIdAtStart:      getActiveChatId(),
     characterIdAtStart: getActiveCharacterId(),
     // Phase 9d.X — sync-array-read snapshots at dispatch time. The proxy
@@ -6903,6 +6913,24 @@ export async function rebalanceWorkerPool(): Promise<void> {
 
   spindle.log.info(
     `[script-runner] rebalance complete — shut down ${overCap.length} over-cap worker(s): ${overCap.join(', ')}`,
+  );
+}
+
+/**
+ * #11 P7 — gracefully restart EVERY live worker. Used on a `contextModel` flip, where the QuickJS context
+ * pool must be rebuilt under the new isolation model (a live pool can't be safely re-partitioned mid-flight —
+ * pinned cross-run handlers, in-flight runs, mixed per-context memory limits). Each worker is stopped via
+ * `shutdownWorker` (idempotent; keeps the key respawnable + the runner's shared subscriptions intact); the
+ * next dispatch respawns a fresh worker that re-sends the script snapshot and builds contexts under the new
+ * model. Callers should fire-reload enabled scripts AFTER this so the re-run dispatches land on the fresh
+ * workers. No-op when no worker is currently spawned.
+ */
+export async function restartAllWorkers(): Promise<void> {
+  const keys = [...childHandles.keys()];
+  if (keys.length === 0) return;
+  await Promise.all(keys.map((k) => shutdownWorker(k)));
+  spindle.log.info(
+    `[script-runner] restarted ${keys.length} worker(s) to rebuild QuickJS contexts under the new context model`,
   );
 }
 
@@ -8140,6 +8168,7 @@ export function __resetForTests(): void {
   // #11 — restore the engineMode reader default so a test's setEngineModeReader
   // doesn't leak the selected engine into another test file.
   engineModeReader = () => 'asyncfn';
+  contextModelReader = () => 'shared'; // #11 P7 — restore the context-model reader default (test isolation)
   // Phase E — eviction state. Clear last-activity timestamps + restore
   // the eviction-config reader's safe default; stop any in-flight sweep
   // timer so tests don't see surprise eviction during their own setup.

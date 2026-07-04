@@ -77,6 +77,12 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
   // key on Cancel remounts the dropdown so it re-reads the true value. (Confirm needs no remount: the
   // display already shows the new value, and settings catches up via the settings_updated round-trip.)
   const [engineSelectResetKey, setEngineSelectResetKey] = useState(0);
+  // #11 P7 context-model toggle — mirrors the engine toggle. Switching the QuickJS context-isolation
+  // model respawns the QuickJS worker(s) and reloads active scripts, so the dropdown stashes the pending
+  // choice and only dispatches on confirm; its reset key remounts the dropdown on Cancel to re-read the
+  // true value (same reasoning as engineSelectResetKey above).
+  const [pendingContextModel, setPendingContextModel] = useState<'shared' | 'per-script' | null>(null);
+  const [contextModelSelectResetKey, setContextModelSelectResetKey] = useState(0);
   // Outbound-egress allowlist editor — the host currently being typed into the "add" field, plus
   // an inline validation message (null = valid/empty). The committed list is settings.allowedPrivateHosts.
   const [newHost, setNewHost] = useState('');
@@ -127,7 +133,8 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
     [assistantConnections],
   );
 
-  // Engine-switch impact counts for the confirm modal. Same predicate the backend fan-out uses
+  // Runtime-switch impact counts for the confirm modals (shared by the engine and the context-isolation
+  // switch — both migrate every enabled trigger the same way). Same predicate the backend fan-out uses
   // (scriptRunsOnStartup), so what the modal says always matches what the switch actually does:
   // startup-triggered scripts re-run now; event-driven ones re-arm on their next trigger.
   const engineSwitchImpact = useMemo(() => {
@@ -143,6 +150,15 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
     () => [
       { value: 'asyncfn', label: 'AsyncFunction',                 sublabel: 'Default engine' },
       { value: 'quickjs', label: 'QuickJS (experimental isolate)', sublabel: 'Stronger WASM sandbox isolation' },
+    ],
+    [],
+  );
+
+  // #11 P7 context-model toggle — the QuickJS context-isolation model. Stable identity for HostSelect.
+  const contextModelOptions = useMemo(
+    () => [
+      { value: 'shared',     label: 'Shared context',      sublabel: 'One sandbox for all scripts (default)' },
+      { value: 'per-script', label: 'Per-script isolation', sublabel: 'Each script in its own sandbox' },
     ],
     [],
   );
@@ -235,6 +251,25 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
               if (next !== (settings.engineMode ?? 'asyncfn')) setPendingEngineMode(next);
             }}
             ariaLabel="Script engine"
+          />
+        </div>
+
+        {/* #11 P7 context-model — QuickJS context-isolation model. Only has an effect under the QuickJS
+            engine; switching it respawns the QuickJS worker(s) and reloads active scripts, so it confirms
+            first (same reload impact as an engine switch). */}
+        <div className="ls-settings-field">
+          <label className="ls-settings-field-label" title="QuickJS engine only. 'Shared context' runs every script in one QuickJS context (default). 'Per-script isolation' gives each script its own context — its own globalThis and library instances — so one script cannot observe or poison another's sandbox. Switching respawns the QuickJS worker(s) and reloads all active scripts.">
+            Isolation
+          </label>
+          <HostSelect
+            key={contextModelSelectResetKey}
+            options={contextModelOptions}
+            value={settings.contextModel ?? 'shared'}
+            onChange={(v) => {
+              const next = v === 'per-script' ? 'per-script' : 'shared';
+              if (next !== (settings.contextModel ?? 'shared')) setPendingContextModel(next);
+            }}
+            ariaLabel="Script context isolation"
           />
         </div>
 
@@ -810,6 +845,53 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
           <p style={esFoot}>
             In-flight runs finish on the current engine first, and any in-memory (non-persisted) state is
             reset. Consider disabling expensive startup scripts before switching.
+          </p>
+        </ConfirmDialog>
+      )}
+      {/* #11 P7 context-model — confirm before switching isolation (respawns the QuickJS worker(s), reloads). */}
+      {pendingContextModel && (
+        <ConfirmDialog
+          title="Switch script isolation?"
+          confirmLabel="Switch & reload"
+          variant="danger"
+          onConfirm={() => {
+            sendToBackend({ type: 'update_settings', patch: { contextModel: pendingContextModel } });
+            setPendingContextModel(null);
+          }}
+          onCancel={() => { setPendingContextModel(null); setContextModelSelectResetKey((k) => k + 1); }}
+        >
+          <p style={esNote}>
+            Switching to {pendingContextModel === 'per-script' ? 'per-script isolation' : 'a shared context'} changes
+            how the QuickJS engine sandboxes your scripts. The QuickJS worker is respawned so every context is
+            rebuilt under the new model, and each script's live state — handlers, panels, timers — is rebuilt
+            with it.
+          </p>
+
+          {engineSwitchImpact.startup.length > 0 && (
+            <>
+              <div style={esSectionLabel}>Re-run now ({engineSwitchImpact.startup.length})</div>
+              <p style={esSubNote}>
+                Startup scripts re-run immediately (spaced out) — panels, toasts, and any LLM calls they
+                make on startup happen again.
+              </p>
+              {renderEngineSwitchScriptList(engineSwitchImpact.startup, RotateCcw)}
+            </>
+          )}
+
+          {engineSwitchImpact.event.length > 0 && (
+            <>
+              <div style={esSectionLabel}>State cleared ({engineSwitchImpact.event.length})</div>
+              <p style={esSubNote}>
+                Event-driven scripts have their live state cleared now and re-arm on their next trigger —
+                no automatic re-run.
+              </p>
+              {renderEngineSwitchScriptList(engineSwitchImpact.event, Timer)}
+            </>
+          )}
+
+          <p style={esFoot}>
+            This setting only affects the QuickJS engine. In-flight runs finish first, and any in-memory
+            (non-persisted) state is reset.
           </p>
         </ConfirmDialog>
       )}

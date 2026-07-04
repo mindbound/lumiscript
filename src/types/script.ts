@@ -152,6 +152,18 @@ export interface LumiScriptSettings {
    */
   engineMode: 'asyncfn' | 'quickjs';
   /**
+   * The QuickJS engine's context-isolation model. Only has an effect under `engineMode: 'quickjs'`.
+   *   - 'shared'     (default): one QuickJS context backs every script — lower memory; LumiScript's own
+   *      scaffolding is frozen, so the residual is third-party library object-internal mutation (e.g.
+   *      `z.object = evil`) bleeding across a script's own subsequent runs.
+   *   - 'per-script' (experimental): each script gets its OWN context — its own `globalThis` + zod/
+   *      Handlebars/api bundle, a per-context memory cap, and an LRU pool — so one script can't poison
+   *      another's runtime.
+   * Switching this respawns the QuickJS worker(s) + fire-reloads active scripts so all contexts rebuild
+   * under the new model (see `update_settings`). Persisted GLOBAL. Default: 'shared'.
+   */
+  contextModel: 'shared' | 'per-script';
+  /**
    * Max chunks the QuickJS engine will buffer for a single `api.llm.generateStream`
    * that isn't being consumed fast enough (or at all). A stream opened under the
    * QuickJS engine can outlive the run that created it, so its chunk queue is bounded:
@@ -336,6 +348,9 @@ export const DEFAULT_SETTINGS: LumiScriptSettings = {
   // #11 — the AsyncFunction engine is the default; the QuickJS isolate is opt-in.
   // Flipping this default to 'quickjs' is the P8 "make it default" one-liner.
   engineMode: 'asyncfn',
+  // #11 P7 — one shared QuickJS context by default; per-script isolation is opt-in (and only effective
+  // under engineMode 'quickjs'). Flipping to 'per-script' via Settings is the context-model rollout knob.
+  contextModel: 'shared',
   streamQueueCap: 512,
   // v1.0 — multi-worker default. Phases A–F shipped; Sections 1–8 of
   // the manual test pass came back green; the disable-mid-flight bug

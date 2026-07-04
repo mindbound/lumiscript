@@ -3060,6 +3060,23 @@ export function _setContextModelForTests(mode: 'shared' | 'per-script'): void {
   contextModel = mode;
 }
 
+/**
+ * #11 P7 — apply the LumiScript contextModel setting on this child (threaded per-run on RunScriptRequest;
+ * child-entry calls it at run start). A CHANGE is applied ONLY on a clean child — no context has been built
+ * yet — because a live context pool can't be safely re-partitioned mid-flight (pinned cross-run handlers,
+ * in-flight runs, mixed per-context memory limits). A real flip therefore respawns the worker(s)
+ * (backend update_settings), and the fresh child lands here with an empty pool and adopts the new model.
+ * If any context already exists, the change is IGNORED (deferred to the next respawned child) rather than
+ * risking a mid-flight teardown — so this is always a no-op after the first run of a given child.
+ */
+export function setContextModel(mode: 'shared' | 'per-script'): void {
+  if (mode === contextModel) return;
+  if (sharedSc !== undefined || sharedScPromise !== undefined || scriptContexts.size > 0 || scriptContextPromises.size > 0) {
+    return; // a live context exists — a clean flip needs a respawn; leave the model unchanged
+  }
+  contextModel = mode;
+}
+
 /** #11 P7-2 test seam — current size of the per-script context pool (0 under 'shared'; the count of
  *  live per-script contexts under 'per-script'). Lets the isolation suite assert disposeContextForScript
  *  frees pool entries (the handle-lifecycle-dispose#0 leak regression). */

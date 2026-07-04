@@ -162,6 +162,13 @@ export interface RunScriptRequest {
    */
   streamQueueCap?:    number;
   /**
+   * #11 P7 — the QuickJS context-isolation model (LumiScriptSettings.contextModel). The child applies it at
+   * run start, but ONLY on a clean child (no context built yet) — a live context pool can't be safely
+   * re-partitioned mid-flight, so a real change takes effect after the QuickJS worker respawn that
+   * update_settings performs on a flip. Absent → keep the current model ('shared').
+   */
+  contextModel?:      'shared' | 'per-script';
+  /**
    * Phase 9d.1 — snapshot of the active chat / character ID at run-dispatch
    * time. Used by the child to implement sync-returning api methods like
    * `api.chat.getChatId()` locally without an IPC roundtrip.
