@@ -1092,6 +1092,10 @@ export interface EngineTelemetry {
   quickjsFireErrors: number;
   /** quickjs run/fire timeouts (each → child respawn). SUM. */
   quickjsTimeouts:   number;
+  /** asyncfn body-runs that threw a non-timeout error (user-script throws land here too). SUM. */
+  asyncfnRunErrors:  number;
+  /** asyncfn runs that hit their timeout (each → child respawn). SUM. */
+  asyncfnTimeouts:   number;
   /** F4 self-`api.tools.invoke` fast-rejects. SUM. */
   reentrantRejects:  number;
   /** In-VM out-of-memory errors (per-context memory-limit hits). SUM. */

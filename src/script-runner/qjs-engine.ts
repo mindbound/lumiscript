@@ -1191,6 +1191,10 @@ interface EngineCounters {
   quickjsFireErrors: number;
   /** quickjs run/fire timeouts (each forces a whole-child respawn — the key stability signal). */
   quickjsTimeouts:   number;
+  /** asyncfn body-runs that threw a non-timeout error (user-script throws land here too — informational). */
+  asyncfnRunErrors:  number;
+  /** asyncfn runs that hit their timeout (each forces a whole-child respawn — the asyncfn stability signal). */
+  asyncfnTimeouts:   number;
   /** F4 self-`api.tools.invoke` fast-rejects (an expected user error, tracked separately from fireErrors). */
   reentrantRejects:  number;
   /** In-VM out-of-memory errors (a per-context memory-limit hit surfaced by toHostError). */
@@ -1210,6 +1214,7 @@ const engineCounters: EngineCounters = {
   coldStartProbed: false, coldStartOk: false, coldStartMs: 0,
   quickjsRuns: 0, asyncfnRuns: 0, degradedRuns: 0,
   quickjsRunErrors: 0, quickjsFireErrors: 0, quickjsTimeouts: 0,
+  asyncfnRunErrors: 0, asyncfnTimeouts: 0,
   reentrantRejects: 0, inVmOom: 0, contextEvictions: 0, overCapTolerated: 0, lastEvictionAt: 0,
   streamsOpened: 0, streamsCancelled: 0,
 };
@@ -1238,6 +1243,10 @@ export function noteQuickjsRunError():   void { engineCounters.quickjsRunErrors+
 export function noteQuickjsFireError():  void { engineCounters.quickjsFireErrors++; }
 /** #11 observability — a quickjs run/fire hit its timeout (→ child respawn). */
 export function noteQuickjsTimeout():    void { engineCounters.quickjsTimeouts++; }
+/** Observability — an asyncfn body-run threw a non-timeout error. */
+export function noteAsyncfnRunError():   void { engineCounters.asyncfnRunErrors++; }
+/** Observability — an asyncfn run hit its timeout (→ child respawn). */
+export function noteAsyncfnTimeout():    void { engineCounters.asyncfnTimeouts++; }
 
 /** #11 observability — snapshot the engine telemetry for the diagnostic-stats reply. The counter
  *  fields spread from {@link EngineCounters}; the pool fields read live state (scriptContexts /
@@ -1270,6 +1279,8 @@ export function _resetEngineTelemetryForTests(): void {
   engineCounters.quickjsRunErrors  = 0;
   engineCounters.quickjsFireErrors = 0;
   engineCounters.quickjsTimeouts   = 0;
+  engineCounters.asyncfnRunErrors  = 0;
+  engineCounters.asyncfnTimeouts   = 0;
   engineCounters.reentrantRejects  = 0;
   engineCounters.inVmOom           = 0;
   engineCounters.contextEvictions  = 0;

@@ -231,6 +231,8 @@ const EngineTelemetrySchema = z.object({
   quickjsRunErrors:  z.number(),
   quickjsFireErrors: z.number(),
   quickjsTimeouts:   z.number(),
+  asyncfnRunErrors:  z.number(),
+  asyncfnTimeouts:   z.number(),
   reentrantRejects:  z.number(),
   inVmOom:           z.number(),
   contextEvictions:  z.number(),

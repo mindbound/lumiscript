@@ -115,6 +115,7 @@ function makeEngine(overrides?: Partial<import('../../src/types/script-runner-ip
     coldStartProbed: false, coldStartOk: false, coldStartMs: 0,
     quickjsRuns: 0, asyncfnRuns: 0, degradedRuns: 0,
     quickjsRunErrors: 0, quickjsFireErrors: 0, quickjsTimeouts: 0,
+    asyncfnRunErrors: 0, asyncfnTimeouts: 0,
     reentrantRejects: 0, inVmOom: 0, contextEvictions: 0, overCapTolerated: 0, lastEvictionAt: 0,
     streamsOpened: 0, streamsCancelled: 0,
     contextModel: 'shared', liveContexts: 0, poolCap: 8, pinnedContexts: 0, reservedContexts: 0,
@@ -126,9 +127,13 @@ const engineSection = (report: DiagnosticsReport) => report.sections.find(s => s
 const engineCheck = (report: DiagnosticsReport, label: string) =>
   engineSection(report).checks.find(c => c.label === label)!;
 
-describe('collectBackendDiagnostics — Section B2 (Engine)', () => {
+describe('collectBackendDiagnostics — Section B2 (Engine, QuickJS-WASM)', () => {
+  // The QuickJS section renders only when quickjs is the active engine; force it here.
+  const qjsDeps = (o: Partial<DiagnosticsCollectorDeps> = {}): DiagnosticsCollectorDeps =>
+    makeDeps({ ...o, engineMode: 'quickjs' });
+
   test('renders a single "Not probed" info row when engineProbe is absent', () => {
-    const report = collectBackendDiagnostics(makeDeps()); // no engineProbe
+    const report = collectBackendDiagnostics(qjsDeps()); // no engineProbe
     const section = engineSection(report);
     expect(section.name).toBe('Engine (QuickJS-WASM)');
     expect(section.checks).toHaveLength(1);
@@ -137,7 +142,7 @@ describe('collectBackendDiagnostics — Section B2 (Engine)', () => {
   });
 
   test('stock shared/never-probed telemetry reads honest-but-quiet (no false warns)', () => {
-    const report = collectBackendDiagnostics(makeDeps({ engineProbe: makeEngine({ asyncfnRuns: 12 }) }));
+    const report = collectBackendDiagnostics(qjsDeps({ engineProbe: makeEngine({ asyncfnRuns: 12 }) }));
     // Availability: not probed → info, not a warn.
     expect(engineCheck(report, 'WASM availability').status).toBe('info');
     // Runs by engine shows the asyncfn denominator.
@@ -151,7 +156,7 @@ describe('collectBackendDiagnostics — Section B2 (Engine)', () => {
   });
 
   test('cold-start success promotes availability to pass with the timing', () => {
-    const report = collectBackendDiagnostics(makeDeps({
+    const report = collectBackendDiagnostics(qjsDeps({
       engineProbe: makeEngine({ coldStartProbed: true, coldStartOk: true, coldStartMs: 106, quickjsRuns: 3 }),
     }));
     const avail = engineCheck(report, 'WASM availability');
@@ -160,7 +165,7 @@ describe('collectBackendDiagnostics — Section B2 (Engine)', () => {
   });
 
   test('cold-start failure + degraded runs + timeouts + OOM all surface as warn', () => {
-    const report = collectBackendDiagnostics(makeDeps({
+    const report = collectBackendDiagnostics(qjsDeps({
       engineProbe: makeEngine({
         coldStartProbed: true, coldStartOk: false,
         degradedRuns: 4, quickjsTimeouts: 2, inVmOom: 1,
@@ -173,7 +178,7 @@ describe('collectBackendDiagnostics — Section B2 (Engine)', () => {
   });
 
   test('per-script model surfaces the live pool + an evictions row; over-cap flips the pool to warn', () => {
-    const report = collectBackendDiagnostics(makeDeps({
+    const report = collectBackendDiagnostics(qjsDeps({
       engineProbe: makeEngine({
         contextModel: 'per-script', liveContexts: 9, poolCap: 8, pinnedContexts: 9,
         reservedContexts: 1, overCapTolerated: 1, contextEvictions: 3, lastEvictionAt: Date.now() - 2000,
@@ -186,6 +191,44 @@ describe('collectBackendDiagnostics — Section B2 (Engine)', () => {
     expect(pool.message).toContain('over-cap');
     // The evictions row only exists under the per-script model.
     expect(engineCheck(report, 'Context evictions').message).toContain('3 eviction');
+  });
+});
+
+describe('collectBackendDiagnostics — Section B2 (Engine, AsyncFunction)', () => {
+  test('default engineMode (absent) renders the AsyncFunction section, not QuickJS', () => {
+    const report = collectBackendDiagnostics(makeDeps({ engineProbe: makeEngine({ asyncfnRuns: 5 }) }));
+    const section = engineSection(report);
+    expect(section.name).toBe('Engine (AsyncFunction)');
+    // The QuickJS-only rows must NOT bleed into the AsyncFunction section.
+    expect(section.checks.some(c => c.label === 'WASM availability')).toBe(false);
+    expect(section.checks.some(c => c.label === 'Context pool')).toBe(false);
+    // Its own rows are present.
+    expect(engineCheck(report, 'Sandbox').message).toContain('new AsyncFunction');
+    expect(engineCheck(report, 'Runs').message).toContain('5 asyncfn body-run');
+  });
+
+  test('renders a single "Not probed" info row when engineProbe is absent', () => {
+    const report = collectBackendDiagnostics(makeDeps({ engineMode: 'asyncfn' }));
+    const section = engineSection(report);
+    expect(section.name).toBe('Engine (AsyncFunction)');
+    expect(section.checks).toHaveLength(1);
+    expect(section.checks[0]!.message).toContain('Not probed');
+  });
+
+  test('run errors stay info; run timeouts flip Timeouts to warn', () => {
+    const report = collectBackendDiagnostics(makeDeps({
+      engineProbe: makeEngine({ asyncfnRuns: 20, asyncfnRunErrors: 3, asyncfnTimeouts: 2 }),
+    }));
+    expect(engineCheck(report, 'Run errors').status).toBe('info');
+    expect(engineCheck(report, 'Run errors').message).toContain('3 run error');
+    const timeouts = engineCheck(report, 'Timeouts (→ respawn)');
+    expect(timeouts.status).toBe('warn');
+    expect(timeouts.message).toContain('2 asyncfn run timeout');
+  });
+
+  test('idle telemetry reads quiet (no false warns)', () => {
+    const report = collectBackendDiagnostics(makeDeps({ engineProbe: makeEngine() }));
+    expect(engineSection(report).checks.some(c => c.status === 'warn')).toBe(false);
   });
 });
 

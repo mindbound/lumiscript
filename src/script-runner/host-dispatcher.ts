@@ -8096,6 +8096,8 @@ export function aggregateEngineTelemetry(
     quickjsRunErrors:  sum((e) => e.quickjsRunErrors),
     quickjsFireErrors: sum((e) => e.quickjsFireErrors),
     quickjsTimeouts:   sum((e) => e.quickjsTimeouts),
+    asyncfnRunErrors:  sum((e) => e.asyncfnRunErrors),
+    asyncfnTimeouts:   sum((e) => e.asyncfnTimeouts),
     reentrantRejects:  sum((e) => e.reentrantRejects),
     inVmOom:           sum((e) => e.inVmOom),
     contextEvictions:  sum((e) => e.contextEvictions),

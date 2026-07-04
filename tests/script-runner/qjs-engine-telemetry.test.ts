@@ -25,6 +25,8 @@ import {
   noteQuickjsRunError,
   noteQuickjsFireError,
   noteQuickjsTimeout,
+  noteAsyncfnRunError,
+  noteAsyncfnTimeout,
   _setContextModelForTests,
   _setPoolCapForTests,
   _setQuickJSAvailabilityForTests,
@@ -66,6 +68,14 @@ describe('#11 observability — note* bumpers + getEngineTelemetry snapshot', ()
     expect(t.quickjsRunErrors).toBe(1);
     expect(t.quickjsFireErrors).toBe(2);
     expect(t.quickjsTimeouts).toBe(1);
+  });
+
+  test('the asyncfn note* helpers bump their counters (parallel to the quickjs ones)', () => {
+    noteAsyncfnRunError();
+    noteAsyncfnTimeout(); noteAsyncfnTimeout();
+    const t = getEngineTelemetry();
+    expect(t.asyncfnRunErrors).toBe(1);
+    expect(t.asyncfnTimeouts).toBe(2);
   });
 
   test('the live pool snapshot reads the shared-model defaults when quickjs is idle', () => {
@@ -177,6 +187,7 @@ describe('#11 observability — aggregateEngineTelemetry (cross-worker)', () => 
     coldStartProbed: false, coldStartOk: false, coldStartMs: 0,
     quickjsRuns: 0, asyncfnRuns: 0, degradedRuns: 0,
     quickjsRunErrors: 0, quickjsFireErrors: 0, quickjsTimeouts: 0,
+    asyncfnRunErrors: 0, asyncfnTimeouts: 0,
     reentrantRejects: 0, inVmOom: 0, contextEvictions: 0, overCapTolerated: 0, lastEvictionAt: 0,
     streamsOpened: 0, streamsCancelled: 0,
     contextModel: 'shared', liveContexts: 0, poolCap: 8, pinnedContexts: 0, reservedContexts: 0,
@@ -190,14 +201,16 @@ describe('#11 observability — aggregateEngineTelemetry (cross-worker)', () => 
 
   test('SUMS the summable counters + live gauges across workers', () => {
     const agg = aggregateEngineTelemetry([
-      base({ quickjsRuns: 3, quickjsTimeouts: 1, liveContexts: 2, inVmOom: 1 }),
-      base({ quickjsRuns: 5, quickjsTimeouts: 2, liveContexts: 4, inVmOom: 0 }),
+      base({ quickjsRuns: 3, quickjsTimeouts: 1, liveContexts: 2, inVmOom: 1, asyncfnRunErrors: 2, asyncfnTimeouts: 1 }),
+      base({ quickjsRuns: 5, quickjsTimeouts: 2, liveContexts: 4, inVmOom: 0, asyncfnRunErrors: 3, asyncfnTimeouts: 0 }),
       undefined, // a hung/older worker is skipped, not fatal
     ])!;
     expect(agg.quickjsRuns).toBe(8);
     expect(agg.quickjsTimeouts).toBe(3);
     expect(agg.liveContexts).toBe(6);
     expect(agg.inVmOom).toBe(1);
+    expect(agg.asyncfnRunErrors).toBe(5);
+    expect(agg.asyncfnTimeouts).toBe(1);
   });
 
   test('keeps per-child config REPRESENTATIVE (not summed) and folds cold-start correctly', () => {

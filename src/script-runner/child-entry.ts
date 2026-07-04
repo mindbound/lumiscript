@@ -103,6 +103,8 @@ import {
   noteQuickjsRunError,
   noteQuickjsFireError,
   noteQuickjsTimeout,
+  noteAsyncfnRunError,
+  noteAsyncfnTimeout,
   getEngineTelemetry,
   // #11 P5-2 — inject the child-side Bun-timer scheduler the in-VM setTimeout/setInterval reach through.
   setVmTimerScheduler,
@@ -1902,9 +1904,12 @@ ${req.code}
   } catch (err) {
     ok = false;
     error = serializeError(err);
-    // #11 observability — a quickjs body-run threw. Timeouts are counted separately at the proc.fail
-    // gate below (they also force a respawn), so exclude them here to keep the two signals distinct.
-    if (engineMode === 'quickjs' && error.name !== 'ScriptTimeoutError') noteQuickjsRunError();
+    // Observability — a body-run threw. Timeouts are counted separately at the proc.fail gate below
+    // (they also force a respawn), so exclude them here to keep the "errors" and "timeouts" signals distinct.
+    if (error.name !== 'ScriptTimeoutError') {
+      if (engineMode === 'quickjs') noteQuickjsRunError();
+      else noteAsyncfnRunError();
+    }
   } finally {
     // Phase 9d.3 lifecycle: do NOT drop the proxy from `activeProxies`
     // here. Handler closures registered during this run (macros, tools,
@@ -1964,9 +1969,10 @@ ${req.code}
   // a per-script process-isolation design lives in v2 if it becomes a
   // real-world pain point.
   if (!ok && error?.name === 'ScriptTimeoutError') {
-    // #11 observability — a quickjs body-run timed out (→ whole-child respawn). Count it + TAG the engine
+    // Observability — a body-run timed out (→ whole-child respawn). Count it per engine + TAG the engine
     // into the proc.fail reason so the host-side respawn log distinguishes a quickjs hang from an asyncfn one.
     if (engineMode === 'quickjs') noteQuickjsTimeout();
+    else noteAsyncfnTimeout();
     proc.fail(
       `script-runner: async-timeout in "${req.scriptName}" (engine=${engineMode}, runId=${req.runId}); ` +
       `terminating to prevent orphan-body resource leak`,

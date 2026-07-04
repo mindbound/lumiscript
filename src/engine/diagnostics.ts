@@ -393,6 +393,12 @@ export interface DiagnosticsCollectorDeps {
    * quickjs is actually selected in the field (the engine is default-off, flag-gated).
    */
   engineProbe?:        EngineTelemetry;
+  /**
+   * The active script engine (LumiScriptSettings.engineMode, default 'asyncfn'). Selects which single
+   * engine section is emitted — "Engine (AsyncFunction)" or "Engine (QuickJS-WASM)" — so the panel always
+   * shows the engine actually in use. Absent → treated as 'asyncfn' (the default engine).
+   */
+  engineMode?:         'asyncfn' | 'quickjs';
 }
 
 // ─── Entry point ────────────────────────────────────────────────────────────
@@ -407,7 +413,8 @@ export function collectBackendDiagnostics(deps: DiagnosticsCollectorDeps): Diagn
   const sections: DiagnosticSection[] = [
     buildLumiScriptSection(deps),
     buildScriptRunnerSection(deps),
-    buildEngineSection(deps),
+    // Only the ACTIVE engine's section renders (they share the slot + id — mutually exclusive).
+    (deps.engineMode === 'quickjs' ? buildEngineSection(deps) : buildAsyncFnSection(deps)),
     buildActiveContextSection(deps),
     buildRegistrationsSection(deps),
     buildStorageSection(deps),
@@ -1015,6 +1022,80 @@ function buildEngineSection(deps: DiagnosticsCollectorDeps): DiagnosticSection {
   return {
     id:   'engine',
     name: 'Engine (QuickJS-WASM)',
+    checks,
+  };
+}
+
+// ─── Section B2 (AsyncFunction variant) — Engine (AsyncFunction) ─────────────
+//
+// Field-diagnostics for the DEFAULT in-process AsyncFunction engine — the counterpart to
+// buildEngineSection. Only one engine section renders (collectBackendDiagnostics picks by the active
+// engineMode), so a stock install shows this one. Same honesty convention: `warn` is reserved for genuine
+// trouble (run timeouts, each of which respawns the child); runs/errors/streams are `info`. It omits the
+// WASM / cold-start / in-VM-OOM / context-pool rows, which don't exist for the in-process engine, and reads
+// from the run/error/timeout/stream counters shared with the QuickJS section.
+
+function buildAsyncFnSection(deps: DiagnosticsCollectorDeps): DiagnosticSection {
+  if (deps.engineProbe === undefined) {
+    return {
+      id:   'engine',
+      name: 'Engine (AsyncFunction)',
+      checks: [
+        { label: 'Status', status: 'info', message: 'Not probed (no worker reported engine telemetry)' },
+      ],
+    };
+  }
+
+  const e = deps.engineProbe;
+  const checks: DiagnosticCheck[] = [];
+
+  // Sandbox — the AsyncFunction engine's isolation model (the counterpart to the QuickJS "WASM
+  // availability" row). No WASM / context pool; isolation is the supervised child + respawn ladder.
+  checks.push({
+    label:   'Sandbox',
+    status:  'pass',
+    message: 'In-process `new AsyncFunction` in the supervised child subprocess — no WASM isolate or per-script context pool; isolation is the child heartbeat watchdog + respawn ladder (see Script-runner subprocess)',
+  });
+
+  // Runs — asyncfn body-runs (the default engine's throughput). quickjs runs are shown only if any exist
+  // (e.g. left from a prior quickjs session before the setting was flipped back).
+  checks.push({
+    label:   'Runs',
+    status:  'info',
+    message: `${e.asyncfnRuns} asyncfn body-run(s)` + (e.quickjsRuns > 0 ? ` (+${e.quickjsRuns} quickjs)` : ''),
+    details: { asyncfnRuns: e.asyncfnRuns, quickjsRuns: e.quickjsRuns },
+  });
+
+  // Run errors — non-timeout throws. Info, not warn: a user script legitimately throwing lands here too,
+  // so read it as a rate against the run count, not a health verdict on its own.
+  checks.push({
+    label:   'Run errors',
+    status:  'info',
+    message: `${e.asyncfnRunErrors} run error(s) (excludes timeouts; a user script throwing counts here too)`,
+    details: { asyncfnRunErrors: e.asyncfnRunErrors },
+  });
+
+  // Timeouts — each one SIGKILLed + respawned the child. The load-bearing stability signal.
+  checks.push({
+    label:   'Timeouts (→ respawn)',
+    status:  e.asyncfnTimeouts > 0 ? 'warn' : 'pass',
+    message: e.asyncfnTimeouts > 0
+      ? `${e.asyncfnTimeouts} asyncfn run timeout(s) — each respawned the child`
+      : 'None — no asyncfn run hit its execution timeout',
+    details: { asyncfnTimeouts: e.asyncfnTimeouts },
+  });
+
+  // Streams — generateStream usage (engine-neutral; the asyncfn engine opens streams too).
+  checks.push({
+    label:   'Streams (generateStream)',
+    status:  'info',
+    message: `${e.streamsOpened} opened, ${e.streamsCancelled} cancelled early`,
+    details: { streamsOpened: e.streamsOpened, streamsCancelled: e.streamsCancelled },
+  });
+
+  return {
+    id:   'engine',
+    name: 'Engine (AsyncFunction)',
     checks,
   };
 }

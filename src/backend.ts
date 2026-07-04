@@ -1745,6 +1745,8 @@ async function runDiagnostics(userId: string | undefined): Promise<DiagnosticsRe
     // #11 observability — the aggregated QuickJS-engine telemetry (folded into runnerStats by
     // queryRunnerStats). undefined when no worker reported it → the panel shows "Not probed".
     ...(runnerStats?.engine !== undefined ? { engineProbe: runnerStats.engine } : {}),
+    // The active engine selects which single engine section the panel shows.
+    engineMode: settingsStore.get().engineMode ?? 'asyncfn',
   });
 }
 
