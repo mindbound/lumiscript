@@ -170,6 +170,8 @@ try {
 }
 ```
 
+> **QuickJS engine:** an external `options.signal` is **rejected up front** under the QuickJS engine — it throws rather than silently ignoring the signal. To cancel a stream there, `break` out of the `for await` instead (the earlier example): that works on both engines and cancels the upstream generation either way. See [API stability → Engine divergence](../api-stability.md#engine-divergence-quickjs-isolate-opt-in).
+
 Either path correctly tears down the upstream connection — you won't keep paying tokens after the consumer stops listening. The worker host also auto-aborts in-flight streams on extension teardown, same as the non-streaming methods.
 
 ### Errors surface on first iteration

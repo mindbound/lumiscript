@@ -2,7 +2,7 @@
 
 > A JavaScript scripting platform for the Lumiverse AI chat application. Write scripts that react to chat events, automate behaviour, inject prompt context, register custom tools and macros, and build interactive UI.
 
-LumiScript is a Lumiverse extension. Your scripts run server-side inside a sandboxed Bun subprocess; they get an `api.*` object that lets them touch chat messages, world books, presets, the LLM, persistent storage, custom DOM in the host app shell, and 15+ other capability namespaces. Scripts are written, edited, and tested entirely inside Lumiverse — there's no external toolchain, no separate IDE, no deploy step. Save the script and it's live.
+LumiScript is a Lumiverse extension. Your scripts run server-side inside a sandboxed Bun subprocess; they get an `api.*` object that lets them touch chat messages, world books, presets, the LLM, persistent storage, custom DOM in the host app shell, and 15+ other capability namespaces. Scripts are written, edited, and tested entirely inside Lumiverse — there's no external toolchain, no separate IDE, no deploy step. Save the script and it's live. Bodies run under a selectable engine — the default AsyncFunction runtime, or an opt-in QuickJS-WASM isolate with stronger sandboxing (see [Execution engine](concepts/engine.md)).
 
 ## Who this is for
 
@@ -23,6 +23,9 @@ If you're contributing to the LumiScript extension itself (not writing scripts t
 | Understand permissions, `allowDangerous`, and graceful denial | [Permissions](concepts/permissions.md) |
 | Pick the right place to put your data (variables / db / scriptStorage / enclave / files) | [Storage model](concepts/storage-model.md) |
 | Understand how registered handlers (`broadcast.on`, `commands.onInvoked`, `macros.register`, etc.) survive past the body that registered them | [Handler lifetime](concepts/handler-lifetime.md) |
+| Choose an execution engine (AsyncFunction vs the QuickJS isolate), or tune isolation and the worker pool | [Execution engine](concepts/engine.md) · [Worker pool](concepts/workers.md) |
+| Reach a local model server or LAN device past the network block | [Network egress](guides/network.md) |
+| Diagnose a problem or export a support report | [Diagnostics](guides/diagnostics.md) |
 | Know which `api.*` namespace covers which use case | The in-app **Reference** tab (auto-generated, comprehensive — open the LumiScript panel and switch to the Reference tab) |
 | Look up a specific method's signature, args, permissions | Same place — the in-app Reference, or the exported cheat-sheet (`src/assistant/corpus/cheat-sheet.md`) |
 | Ask LumiScript questions while you write — and have the assistant draft or fix scripts | [Working with Lisa](guides/lisa.md) |
@@ -40,7 +43,7 @@ If you're contributing to the LumiScript extension itself (not writing scripts t
 
 - **Code blocks are runnable.** If a snippet looks self-contained — copy-paste into a script and it works, modulo any permission your script needs to have granted.
 - **Permissions are flagged explicitly.** When a method requires a Spindle permission and/or the per-script `allowDangerous` toggle, we say so inline.
-- **Versions** are noted where behaviour differs across LumiScript versions. The current target is **v1.0.0-rc.9+**.
+- **Versions** are noted where behaviour differs across LumiScript versions. The current target is **v2.0**.
 - **Cross-references** to topics that haven't been written yet are bracketed *(coming next)* or *(coming, by topic)* — they'll resolve as the docs fill in.
 
 ## A note on what's NOT here

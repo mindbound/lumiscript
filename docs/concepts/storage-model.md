@@ -23,7 +23,7 @@ Most non-trivial scripts use two or three of these together. A typical pattern: 
 
 | Tier | Durability | Scope | Permission | Size cap | Async? |
 |---|---|---|---|---|---|
-| `globalThis.<key>` | Until the script-runner subprocess restarts (extension reload / backend restart) | Per-script-runner subprocess (shared across all scripts running in it) | none | host RAM | sync |
+| `globalThis.<key>` | Until the script-runner subprocess restarts (extension reload / backend restart) | Per-script-runner subprocess, shared across all scripts running in it (per-script under QuickJS *per-script* isolation) | none | host RAM | sync |
 | `api.scriptStorage` | Until script disable / delete / backend restart. Survives worker eviction + script-source edits. | Per script | none | 1 MB per script | async |
 | `api.variables.local` | Persistent, until the user clears the chat's variables | Per chat | none | host limits | async |
 | `api.variables.global` | Persistent, until the user clears | Per user (cross-chat, cross-character) | none | host limits | async |
@@ -35,7 +35,7 @@ Most non-trivial scripts use two or three of these together. A typical pattern: 
 | `api.files.{sharedRead,sharedWrite,...}` | Persistent | Shared across all users of the extension | `allowDangerous` | host limits | async |
 | `api.files.{tempRead,tempWrite,...}` | TTL-bound, auto-expires | Per user, per extension | `allowDangerous` + `ephemeral_storage` | host limits + quota | async |
 
-**`globalThis.<key>`** is just JavaScript. The script-runner subprocess shares one `globalThis` across every script that runs in it, so namespace your keys aggressively (`globalThis.lsMyScript_cache ??= {}` is a good shape). Values can be anything — including non-serialisable things like functions, class instances, or live `Map`s — which is the main reason to reach for it over `api.scriptStorage` when serialisation would be wasteful. Sync access: no `await`.
+**`globalThis.<key>`** is just JavaScript. The script-runner subprocess shares one `globalThis` across every script that runs in it, so namespace your keys aggressively (`globalThis.lsMyScript_cache ??= {}` is a good shape). One exception: under the QuickJS engine's *per-script* isolation each script gets its own `globalThis`, so cross-script collisions can't happen there — but the aggressive-namespacing habit is worth keeping regardless (it holds under the default engine and QuickJS *shared* isolation). See [Execution engine](engine.md). Values can be anything — including non-serialisable things like functions, class instances, or live `Map`s — which is the main reason to reach for it over `api.scriptStorage` when serialisation would be wasteful. Sync access: no `await`.
 
 **`api.scriptStorage`** is the structured cousin of `globalThis`. Same lifetime ceiling (lost on backend restart), but per-script-isolated with an admin inspector in the **Storage** tab of the LumiScript panel. The 1 MB cap is a hard ceiling per script — `set` throws if you exceed it. Use when you want the inspector (debug-visibility into what your script is keeping in memory) or when multiple scripts could accidentally collide on `globalThis` keys.
 

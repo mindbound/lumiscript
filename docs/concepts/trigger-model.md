@@ -16,7 +16,7 @@ A small consequence worth internalising up front: the `// @triggers MESSAGE_SENT
 
 1. A wired event happens somewhere in Lumiverse (user sends a message, chat switches, etc.).
 2. The host packages the event payload, picks the scripts wired to that event, and dispatches each one.
-3. For each dispatched script: a fresh `AsyncFunction` is constructed around the script body. The function takes eight positional parameters that are exposed to the body as in-scope names: `api`, `data`, `script`, `__console` (re-bound to `console` by a preamble the engine prepends), `z` (the Zod library), `fetch` (the real fetch when the script has `allowDangerous` on, a stub that throws otherwise), `Bun`, and `process` (the last two always `undefined` — they're in the parameter list to shadow the global so a user reference resolves to `undefined` rather than reaching the host runtime).
+3. For each dispatched script, under the default **AsyncFunction** engine: a fresh `AsyncFunction` is constructed around the script body. The function takes eight positional parameters that are exposed to the body as in-scope names: `api`, `data`, `script`, `__console` (re-bound to `console` by a preamble the engine prepends), `z` (the Zod library), `fetch` (a guarded `fetch` — an SSRF-hardened wrapper over `api.utils.http.*` — when the script has `allowDangerous` on, a stub that throws otherwise), `Bun`, and `process` (the last two always `undefined` — they're in the parameter list to shadow the global so a user reference resolves to `undefined` rather than reaching the host runtime). Under the opt-in **QuickJS** isolate the same names are in scope (`api` / `data` / `script` / `console` / `z` / `fetch`), reached as VM globals rather than eight positional params — and a fresh WASM realm simply never had `Bun` / `process` to shadow. Same names and behaviour to your body, different plumbing. See [Execution engine](engine.md).
 4. The body executes top-to-bottom. `await` works normally; the run waits for it. Any handler closures the body registers (more on this below) get captured for later.
 5. When the body returns (or throws), a *flush* step drains any fire-and-forget chains the body initiated (e.g. unawaited `api.broadcast.emit(...)`) so they complete before the run is reported done.
 6. The function instance is discarded.
@@ -136,7 +136,7 @@ This logs `1`, every time. The `let counter` is local to the AsyncFunction wrapp
 
 Three escape valves, in increasing durability:
 
-- **`globalThis.<key>`** — process-scoped, persists for the lifetime of the script-runner subprocess (≈ until the extension reloads). Cheapest option; good for in-memory caches. `globalThis.myCounter ??= 0; globalThis.myCounter += 1;`
+- **`globalThis.<key>`** — persists for the lifetime of the script-runner subprocess (≈ until the extension reloads). Cheapest option; good for in-memory caches. `globalThis.myCounter ??= 0; globalThis.myCounter += 1;` Shared across scripts in the worker under AsyncFunction and QuickJS *shared* isolation (so namespace your keys); under QuickJS *per-script* isolation each script has its own `globalThis`. See [Execution engine](engine.md).
 - **`api.scriptStorage.*`** — session-scoped per-script KV store. Survives worker eviction/respawn and script edits, but cleared on disable/delete and lost on backend restart. 1 MB hard cap.
 - **`api.variables.{local, global, character, chat}`** — durable JSON-serialised stores, four scopes. Survives extension reloads. This is the "real" persistence tier.
 
@@ -147,13 +147,13 @@ The full decision matrix lives in [`concepts/storage-model.md`](storage-model.md
 User scripts run in a hardened sandbox, not on the bare Bun runtime. The short version:
 
 - Some literal source patterns are **rejected at dispatch time** — your script won't run, and the editor console shows a `[security]` entry. The patterns include `import('...')`, bare `require('...')`, `new Function('...')` / `Function('...')`, `.constructor.constructor`, and literal `globalThis.Bun` / `globalThis.process`. Each pattern has a documented replacement (use `script.require('library-name')` instead of `import()`, define functions with normal syntax instead of `new Function`, etc.).
-- Many `globalThis` properties are **replaced with `undefined`** at runtime — `fetch`, `Worker`, `WebSocket`, `XMLHttpRequest`, browser dialogs (`alert`/`prompt`/`confirm`), Node-compat module globals (`fs`, `http`, `net`, ...). Standard ES built-ins (`Object`, `Array`, `Promise`, `JSON`, `Math`, `Date`, ...), Web data carriers, Web Crypto, streams, and timers all work normally.
+- Many `globalThis` properties are **replaced with `undefined`** at runtime — `Worker`, `WebSocket`, `XMLHttpRequest`, browser dialogs (`alert`/`prompt`/`confirm`), Node-compat module globals (`fs`, `http`, `net`, ...). Standard ES built-ins (`Object`, `Array`, `Promise`, `JSON`, `Math`, `Date`, ...), Web data carriers, Web Crypto, streams, and timers all work normally. (`fetch` is the exception worth calling out: `globalThis.fetch` is locked, but a script with `allowDangerous` receives a top-level `fetch` — the guarded wrapper from step 3 above, on both engines. See [Network egress](../guides/network.md).)
 
 For the full list of rejected patterns + accessible globals + the rationale for each: in-app **Reference** → **Sandbox hardening** section. The canonical accessible-globals list is `SAFE_GLOBALS` in `src/script-runner/child-entry.ts` — when in doubt, that's the source of truth.
 
 Two things to internalise about the sandbox:
 
-- **It's not configurable per script.** There's no opt-out, no escape hatch in the script source. The sandbox is part of the runtime contract.
+- **It's not configurable per script or from script source.** There's no opt-out or escape hatch in your code — the sandbox is part of the runtime contract. (The runtime *engine* — AsyncFunction vs the stronger QuickJS isolate — and, under QuickJS, the context-*isolation* model are user-configurable, but globally in Settings, and neither weakens the sandbox. See [Execution engine](engine.md).)
 - **The script's outbound capabilities flow through `api.*` instead.** HTTP via `api.utils.http.*` (gated by `cors_proxy` + `allowDangerous`); filesystem via `api.files.*` (`allowDangerous`); secrets via `api.enclave.*` (`allowDangerous`); etc. The sandbox doesn't lock you *out* of these capabilities — it routes you through permission gates that the user grants explicitly when enabling the extension.
 
 ## What's next

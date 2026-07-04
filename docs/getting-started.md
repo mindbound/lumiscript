@@ -58,7 +58,7 @@ If it didn't fire:
 
 Three things to internalise from this:
 
-**1. The script body IS the handler.** There's no `api.on('MESSAGE_SENT', handler)` or `addEventListener` call. When the wired event fires, Lumiverse wraps your script body in a fresh `AsyncFunction` and runs it top-to-bottom. The wiring lives in the editor UI (the events multi-select you clicked), not in the script source.
+**1. The script body IS the handler.** There's no `api.on('MESSAGE_SENT', handler)` or `addEventListener` call. When the wired event fires, Lumiverse wraps your script body in a fresh `AsyncFunction` and runs it top-to-bottom. The wiring lives in the editor UI (the events multi-select you clicked), not in the script source. (That's the default AsyncFunction engine; the opt-in QuickJS isolate runs a fresh invocation per fire too — the fresh-scope lesson below holds either way. See [Execution engine](concepts/engine.md).)
 
 **2. The `data` global carries the event payload.** When `MESSAGE_SENT` fires, `data` looks roughly like:
 
