@@ -10,6 +10,7 @@ import { parseScriptPack } from '../../utils/pack-import.js';
 import { openBundleModal } from '../cardscripts/bundle-helpers.js';
 import { dispatchOpenAssistant } from '../assistant/openAssistant.js';
 import { bytesToBase64, groupByFolder } from './script-list-logic.js';
+import { ExportPackModal } from './ExportPackModal.js';
 
 interface ScriptExecInfo {
   dot: ExecutionDot;
@@ -30,7 +31,6 @@ interface ScriptListProps {
 /** Which text-prompt dialog is open (replaces the former window.prompt calls). */
 type PromptKind =
   | { kind: 'newScript' }
-  | { kind: 'exportPack' }
   | { kind: 'renameFolder'; folder: string };
 
 export const ScriptList: FC<ScriptListProps> = ({
@@ -50,6 +50,8 @@ export const ScriptList: FC<ScriptListProps> = ({
   const [pendingImport, setPendingImport] = useState<ScriptPackEntry[] | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [prompt, setPrompt] = useState<PromptKind | null>(null);
+  // Export-pack selection modal open state (the picker replaces the old name-only prompt).
+  const [exportOpen, setExportOpen] = useState(false);
   // The folder pending removal (its scripts move to "No folder"), or null. Confirmed via ConfirmDialog.
   const [folderToRemove, setFolderToRemove] = useState<string | null>(null);
 
@@ -73,10 +75,10 @@ export const ScriptList: FC<ScriptListProps> = ({
   };
 
   const handleExport = (e: React.MouseEvent<HTMLButtonElement>) => {
-    if (filtered.length === 0) return;
-    // Shift+click → save to extension storage instead of browser download.
-    // Used by external dev tooling that polls a fixed path on disk.
+    // Shift+click → save the CURRENT tab's scripts to extension storage instead of
+    // opening the picker. Used by external dev tooling that polls a fixed path on disk.
     if (e.shiftKey) {
+      if (filtered.length === 0) return;
       const bytes = buildScriptPackBytes(filtered);
       sendToBackend({
         type: 'save_pack_to_disk',
@@ -85,7 +87,9 @@ export const ScriptList: FC<ScriptListProps> = ({
       });
       return;
     }
-    setPrompt({ kind: 'exportPack' });
+    // Normal click → the selection modal (spans BOTH tabs, for flexibility).
+    if (scripts.length === 0) return;
+    setExportOpen(true);
   };
 
   const handleImportClick = () => {
@@ -122,16 +126,13 @@ export const ScriptList: FC<ScriptListProps> = ({
     setFolderToRemove(null);
   };
 
-  // Single confirm handler for all three text prompts. PromptDialog passes the
-  // already-trimmed value (and guarantees it's non-empty).
+  // Single confirm handler for the text prompts (new script, rename folder).
+  // PromptDialog passes the already-trimmed value (and guarantees it's non-empty).
   const handlePromptConfirm = (value: string) => {
     if (!prompt) return;
     switch (prompt.kind) {
       case 'newScript':
         sendToBackend({ type: 'create_script', name: value, scriptType: activeType });
-        break;
-      case 'exportPack':
-        exportScriptPack(filtered, value);
         break;
       case 'renameFolder':
         for (const s of grouped.get(prompt.folder) ?? []) {
@@ -154,17 +155,6 @@ export const ScriptList: FC<ScriptListProps> = ({
             title={`New ${activeType === 'library' ? 'library' : 'script'}`}
             label={activeType === 'library' ? 'Library name:' : 'Script name:'}
             confirmLabel="Create"
-            onConfirm={handlePromptConfirm}
-            onCancel={onCancel}
-          />
-        );
-      case 'exportPack':
-        return (
-          <PromptDialog
-            title="Export pack"
-            label="Pack name:"
-            initialValue="my-scripts"
-            confirmLabel="Export"
             onConfirm={handlePromptConfirm}
             onCancel={onCancel}
           />
@@ -230,8 +220,8 @@ export const ScriptList: FC<ScriptListProps> = ({
           <button
             className="ls-icon-btn"
             onClick={handleExport}
-            title="Export current scripts as pack (Shift+click: save to extension storage)"
-            disabled={filtered.length === 0}
+            title="Export scripts as a pack (Shift+click: save the current tab to extension storage)"
+            disabled={scripts.length === 0}
           >
             <Download size={15} />
           </button>
@@ -402,6 +392,14 @@ export const ScriptList: FC<ScriptListProps> = ({
             : <>The {folderRemovalTargets.length} scripts inside will be moved to <strong>No&nbsp;folder</strong> — nothing is deleted.</>}
         </p>
       </ConfirmDialog>
+    )}
+
+    {exportOpen && (
+      <ExportPackModal
+        scripts={scripts}
+        onExport={(sel, name) => { exportScriptPack(sel, name); setExportOpen(false); }}
+        onCancel={() => setExportOpen(false)}
+      />
     )}
 
     {prompt !== null && renderPrompt(prompt)}
