@@ -162,6 +162,7 @@ export const PERM_GROUPS: PermGroup[] = [
       { method: 'api.chat.registerContentProcessor', perms: ['chat_mutation'] },
       { method: 'api.chat.listContentProcessors', perms: [] },
       { method: 'api.chat.setStyleMode', perms: ['app_manipulation'] },
+      { method: 'api.chat.onMessageTag', perms: ['chat_mutation'] },
     ],
   },
   {
@@ -3106,6 +3107,7 @@ export const API_GROUPS: FnGroup[] = [
       { name: 'setMessagesHidden', args: 'ids, hidden',             desc: 'Bulk variant of `setMessageHidden`. Max 500 IDs per call. Same hidden-flag semantics (excluded from vector retrieval, still included in prompt assembly). Requires chat_mutation permission.' },
       { name: 'isMessageHidden',   args: 'id',                      desc: 'Check whether a message is hidden. Returns false for messages that have never had the flag set (default state). Requires chat_mutation permission.' },
       { name: 'setStyleMode',      args: 'mode',                    desc: "Set the active chat's CSS containment mode. 'bounded' (default) clamps extension- and card-injected content inside the message stream; 'extension-relaxed' lets a `position: fixed` element injected into a message paint at viewport scope — e.g. a full-bleed overlay from an injected-DOM or card script. Distinct from `api.ui.mountApp` (a host-owned document.body portal): this relaxes the in-chat container. Requires app_manipulation permission." },
+      { name: 'onMessageTag',      args: 'tagName, handler, options?', desc: "Register a handler for a custom XML-like tag in chat messages (e.g. `<dice>3d6</dice>`). The handler receives a MessageTagEvent (tagName, content, attrs, messageId). `options.removeFromMessage` strips the tag from the rendered message. Returns an unsubscribe function. Requires chat_mutation permission." },
     ],
   },
   {
