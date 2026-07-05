@@ -37,18 +37,25 @@ import type {
   ScriptRunningNotice,
   ApiProxyResponse,
   BroadcastFireMessage,
+  BroadcastSubscribeMessage,
+  BroadcastUnsubscribeMessage,
   BroadcastClearMessage,
   ConsoleEntryNotice,
   SerializedError,
   RunHandlerRequest,
+  RegisterHandler,
+  UnregisterHandler,
   HandlerResult,
   ScriptUnregisterMessage,
   AdvancedModalDismissedNotice,
   FloatWidgetPositionNotice,
   StreamChunkMessage,
   StreamEndMessage,
+  StreamRequest,
+  StreamCancelRequest,
 } from '../types/script-runner-ipc.js';
 import type { ConsoleEntry, ConsoleEntryType } from '../types/script.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   buildProxiedAPI,
   runIdContext,
@@ -67,6 +74,42 @@ import { serializeConsoleArg } from '../engine/console-format.js';
 // AsyncFunction sandbox as a top-level binding).
 import * as z from 'zod';
 import { LumiScriptSecurityError } from '../types/lumiscript-errors.js';
+// #11 — QuickJS-WASM isolate harness (engineMode='quickjs'). Reuses the
+// api-proxy dispatch path verbatim; only the in-VM user-code boundary differs.
+import {
+  runUserScriptInQuickJS,
+  fireHandlerInQuickJS,
+  hasVmHandler,
+  hasVmBroadcast,
+  hasVmWidget,
+  notifyVmWidgetPosition,
+  hasVmModal,
+  notifyVmModalDismissed,
+  dropVmModal,
+  disposeContextForScript,
+  disposeScriptVmBroadcast,
+  disposeVmHandler,
+  hasVmStream,
+  pushVmStreamChunk,
+  pushVmStreamEnd,
+  sweepVmStreamsForScript,
+  setStreamQueueCap,
+  setContextModel,
+  sweepIdleContexts,
+  warmupQuickJS,
+  // #11 observability — engine telemetry note* bumpers (counters live in qjs-engine.ts) +
+  // the getEngineTelemetry() snapshot spread into the diagnostic-stats reply.
+  noteEngineRun,
+  noteDegradedRun,
+  noteQuickjsRunError,
+  noteQuickjsFireError,
+  noteQuickjsTimeout,
+  noteAsyncfnRunError,
+  noteAsyncfnTimeout,
+  getEngineTelemetry,
+  // #11 P5-2 — inject the child-side Bun-timer scheduler the in-VM setTimeout/setInterval reach through.
+  setVmTimerScheduler,
+} from './qjs-engine.js';
 
 // ─── Error classes ──────────────────────────────────────────────────────────
 
@@ -132,8 +175,67 @@ const _processMemoryUsage = process.memoryUsage.bind(process);
 const _processCpuUsage    = process.cpuUsage.bind(process);
 /** Captured `process.uptime` — used by `diagnostic-stats-request` handler. */
 const _processUptime      = process.uptime.bind(process);
-/** Captured host `fetch` — passed to `allowDangerous` scripts as `safeFetch`. */
-const _hostFetch          = globalThis.fetch.bind(globalThis);
+
+/**
+ * The `fetch` capability handed to an allowDangerous run/handler. Rather than the raw host fetch (which would
+ * egress straight from the child with NO SSRF guard — the #5 hole), bare `fetch` routes through the backend's
+ * guarded outbound-HTTP path (`utils.http.request` → `guardedCorsFetch`: a user-allowlisted trusted-local
+ * host takes a DIRECT fetch, everything else goes cors → safeFetch, which pins DNS + blocks loopback / LAN /
+ * link-local / metadata). The buffered result is rebuilt into a standard `Response` so `.text()` / `.json()`
+ * / `.arrayBuffer()` / `.bytes()` / `.headers` all work. Bare `fetch` thereby matches `api.utils.http`'s
+ * posture (hardened by default + the user allowlist as the local escape hatch) and gating (`cors_proxy`,
+ * which `allowDangerous` maps to). Buffered, `http(s)`-only, no streaming body — same trade-offs as
+ * `api.utils.http`. Dispatching `utils.http.request` reaches the backend's canonical handler via
+ * `dispatchApiCall`, independent of the proxy's own api surface.
+ */
+export function makeGuardedHostFetch(
+  dispatch: (method: string, args: unknown[]) => Promise<unknown>,
+  dispatchWithSignal?: (method: string, args: unknown[], signal: AbortSignal | undefined) => Promise<unknown>,
+): typeof globalThis.fetch {
+  return (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = typeof input === 'string' ? input
+      : input instanceof URL   ? input.toString()
+      :                          (input as Request).url;
+    const headers: Record<string, string> = {};
+    if (init?.headers) new Headers(init.headers).forEach((v, k) => { headers[k] = v; });
+    const reqArgs: unknown[] = [url, {
+      method:       init?.method ?? 'GET',
+      headers,
+      body:         init?.body,
+      responseType: 'arraybuffer',
+    }];
+    // An AbortSignal makes the request cancellable: route through the signal-aware dispatch, which relays
+    // the abort to the host so it can cancel the in-flight (direct-path) fetch — the host injects the real
+    // AbortController's signal into the opts, where directLocalFetch forwards it to the underlying fetch.
+    // No signal (or no signal-aware dispatch supplied) falls back to the plain dispatch.
+    const signal = init?.signal ?? undefined;
+    const r = await (signal !== undefined && dispatchWithSignal !== undefined
+      ? dispatchWithSignal('utils.http.request', reqArgs, signal)
+      : dispatch('utils.http.request', reqArgs)) as { status: number; statusText: string; headers: Record<string, string>; body: string | Uint8Array; setCookies?: string[] };
+    // Rebuild the response headers. r.headers is a flat record, so a direct-path response also carries its
+    // Set-Cookie values split out in r.setCookies — re-add each individually (dropping the collapsed entry
+    // first) so res.headers.getSetCookie() returns them all. When absent (the cors path), the single
+    // collapsed 'set-cookie' from r.headers is left as-is.
+    const outHeaders = new Headers(r.headers);
+    if (Array.isArray(r.setCookies) && r.setCookies.length > 0) {
+      outHeaders.delete('set-cookie');
+      for (const c of r.setCookies) outHeaders.append('set-cookie', c);
+    }
+    // A completed HTTP response must RESOLVE fetch (with res.ok reflecting the status), never reject it.
+    // `new Response(body, { status })` has two constraints: it forbids a body on a null-body status
+    // (1xx / 204 / 205 / 304), and it accepts only a status of 101 or in [200, 599]. Pass null for the
+    // null-body statuses; and if the raw status still falls outside the constructor's range (e.g. a
+    // non-standard 6xx a local server put on the wire), clamp it so the response is still delivered
+    // rather than turned into a rejected fetch — losing the exact numeric status beats losing the response.
+    const status = r.status;
+    const body = (status < 200 || status === 204 || status === 205 || status === 304) ? null : (r.body as BodyInit);
+    try {
+      return new Response(body, { status, statusText: r.statusText, headers: outHeaders });
+    } catch {
+      return new Response(body, { status: status < 200 ? 200 : 599, statusText: r.statusText, headers: outHeaders });
+    }
+  }) as unknown as typeof globalThis.fetch;
+}
 
 /**
  * Allowlist of `globalThis` properties that survive the lockdown sweep.
@@ -337,8 +439,7 @@ export function installSandboxLockdown(): void {
       //   references. `defineProperty` replaces the data slot — the
       //   original Bun-side / Node-compat value (fs, http, Worker, etc.)
       //   is gone from the global object. Backend code paths capture what
-      //   they need before lockdown (see `_processOn` / `_hostFetch` /
-      //   etc. above).
+      //   they need before lockdown (see `_processOn` etc. above).
       //
       //   Why `value: undefined` (data) instead of `get() { throw }`:
       //   the throwing-accessor design (rc.7 v1) broke `typeof X` feature
@@ -382,16 +483,44 @@ export function installSandboxLockdown(): void {
 
   // setTimeout / setInterval can accept a string in some runtimes (the
   // string compiles to Function under the hood — a vector if our Function
-  // lock fails). Monkey-patch to require a callable first arg.
-  const _setTimeout  = globalThis.setTimeout;
-  const _setInterval = globalThis.setInterval;
+  // lock fails). Monkey-patch to require a callable first arg. #11 P5-3 —
+  // ALSO track each timer per owning script (currentUserScriptId) so a leaked
+  // interval can't outlive its script (Finding-4). A one-shot untracks itself
+  // after firing (so repeated setTimeouts don't accumulate); intervals stay
+  // tracked until clear/teardown. Internal timers (no active user run → no
+  // scriptId) pass through untracked.
+  const _setTimeout    = globalThis.setTimeout;
+  const _setInterval   = globalThis.setInterval;
+  const _clearTimeout  = globalThis.clearTimeout;
+  const _clearInterval = globalThis.clearInterval;
+  // A valid, already-cancelled timer id. Returned when the patches refuse to arm a timer for a script that
+  // was torn down while async work was still in flight (see recentlyUnregistered): the callback must never
+  // run, and an armed timer would leak — teardown already ran, so nothing is left to cancel it.
+  const deadTimer = (): ReturnType<typeof setTimeout> => { const t = _setTimeout(() => {}, 0); _clearTimeout(t); return t; };
   globalThis.setTimeout = ((cb: unknown, ms?: unknown, ...args: unknown[]): ReturnType<typeof setTimeout> => {
     if (typeof cb !== 'function') {
       throw new LumiScriptSecurityError(
         'setTimeout requires a function callback (string form is not supported in the LumiScript sandbox)',
       );
     }
-    return _setTimeout(cb as (...a: unknown[]) => void, ms as number, ...(args as unknown[]));
+    const sid = currentUserScriptId();
+    if (sid === undefined) {
+      // A live body run always has an activeProxies entry, so a runId in context that resolves to NO script
+      // means the owning run's script was unregistered while this async work was mid-flight — refuse, or the
+      // armed timer would leak. A genuinely internal timer (heartbeat, raceWithTimeout — no runId at all)
+      // still passes through untracked.
+      if (runIdContext.getStore() !== undefined) return deadTimer();
+      return _setTimeout(cb as (...a: unknown[]) => void, ms as number, ...(args as unknown[]));
+    }
+    if (recentlyUnregistered.has(sid)) return deadTimer(); // owner torn down mid-async (scriptId resolved via ALS)
+    let id: ReturnType<typeof setTimeout>;
+    id = _setTimeout((...cbArgs: unknown[]) => {
+      untrackAsyncfnTimer(sid, id); // fired → drop from the set (bounds repeated-setTimeout accumulation)
+      // Run the callback under the owning scriptId so a timer it arms is attributed + cancelled on teardown.
+      currentScriptIdContext.run(sid, () => (cb as (...a: unknown[]) => void)(...cbArgs));
+    }, ms as number, ...(args as unknown[]));
+    trackAsyncfnTimer(sid, id);
+    return id;
   }) as typeof setTimeout;
   globalThis.setInterval = ((cb: unknown, ms?: unknown, ...args: unknown[]): ReturnType<typeof setInterval> => {
     if (typeof cb !== 'function') {
@@ -399,8 +528,35 @@ export function installSandboxLockdown(): void {
         'setInterval requires a function callback (string form is not supported in the LumiScript sandbox)',
       );
     }
-    return _setInterval(cb as (...a: unknown[]) => void, ms as number, ...(args as unknown[]));
+    const sid = currentUserScriptId();
+    if (sid === undefined) {
+      if (runIdContext.getStore() !== undefined) return deadTimer(); // owning body run's script was unregistered
+      return _setInterval(cb as (...a: unknown[]) => void, ms as number, ...(args as unknown[]));
+    }
+    if (recentlyUnregistered.has(sid)) return deadTimer();
+    // Run each tick under the owning scriptId so a timer the callback arms is attributed + cancelled on teardown.
+    const id = _setInterval(
+      (...cbArgs: unknown[]) => currentScriptIdContext.run(sid, () => (cb as (...a: unknown[]) => void)(...cbArgs)),
+      ms as number, ...(args as unknown[]),
+    );
+    trackAsyncfnTimer(sid, id); // intervals persist until clearInterval/teardown
+    return id;
   }) as typeof setInterval;
+  // Patch clearTimeout/clearInterval to also DROP the id from the per-script tracking set. Without this,
+  // a timer the user clears (an interval, or a one-shot cleared before it fires) stays in the set — since
+  // only a one-shot FIRE untracks — so a script that repeatedly creates+clears timers accumulates dead
+  // ids until it is unregistered. Untrack is attributed to the clearing run (mirroring creation); the
+  // native clear always runs first so clearing works even outside a user run.
+  globalThis.clearTimeout = ((id?: unknown): void => {
+    _clearTimeout(id as Parameters<typeof clearTimeout>[0]);
+    const sid = currentUserScriptId();
+    if (sid !== undefined && id !== undefined) untrackAsyncfnTimer(sid, id as ReturnType<typeof setTimeout>);
+  }) as typeof clearTimeout;
+  globalThis.clearInterval = ((id?: unknown): void => {
+    _clearInterval(id as Parameters<typeof clearInterval>[0]);
+    const sid = currentUserScriptId();
+    if (sid !== undefined && id !== undefined) untrackAsyncfnTimer(sid, id as ReturnType<typeof setInterval>);
+  }) as typeof clearInterval;
 }
 
 /**
@@ -425,6 +581,37 @@ interface ActiveProxyEntry {
   proxy:    ProxyHandle;
 }
 const activeProxies = new Map<string, ActiveProxyEntry>();
+
+/**
+ * Secondary index: scriptId → its most-recent proxy entry (last run wins). The `fire*` paths only need
+ * ANY live proxy for a script (they share a scriptId; the runId is overridden per-fire), so an O(1) lookup
+ * here replaces an O(n) scan of `activeProxies` on every handler / broadcast / timer / modal-dismiss fire.
+ * Kept in lockstep with `activeProxies`: set on each run start, dropped when the script is unregistered
+ * (which drops ALL of that script's proxies at once, so a single delete suffices).
+ */
+const proxyByScriptId = new Map<string, ActiveProxyEntry>();
+
+/**
+ * Scripts unregistered (disable / delete / master-toggle-off) while async work may still be in flight.
+ * A detached continuation of an already-torn-down script can still reach the patched setTimeout/setInterval
+ * — its scriptId stays resolvable through the executing AsyncLocalStorage context — and arming a timer there
+ * would leak: teardown already cancelled the script's timers, so nothing is left to cancel a new one. The
+ * timer patches refuse to arm for a scriptId in this set. Cleared when the script next starts a run
+ * (re-registration), so a disable→enable cycle resumes arming timers normally.
+ */
+const recentlyUnregistered = new Set<string>();
+
+/**
+ * Per-script `allowDangerous` flag, captured at body-run start. The three FIRE-AND-FORGET quickjs paths
+ * (broadcast / advanced-modal-dismiss / timer) don't carry `allowDangerous` on their source the way a
+ * RunHandlerRequest does, so they read it here to grant a fired handler the same bare-`fetch` capability its
+ * body run had — matching the asyncfn engine, whose handler closures baked in the right `fetch` at body-run
+ * time. It's always populated when a fire can proceed: a fire needs a live proxy (`proxyByScriptId`), and a
+ * proxy exists only if the body has run — the same run that sets this. Cleared on unregister.
+ * (RunHandlerRequest keeps its own host-threaded `allowDangerous` on the wire; this covers only the paths
+ * that lack it.)
+ */
+const scriptAllowDangerous = new Map<string, boolean>();
 
 /**
  * Phase 6: broadcast handler closures, scoped per-script (NOT per-run).
@@ -502,10 +689,26 @@ function unregisterHandlerClosure(scriptId: string, handlerId: string): void {
   if (scriptHandlers.size === 0) handlerClosures.delete(scriptId);
 }
 
+/**
+ * Max time an async broadcast (`api.broadcast.on`) handler may run before the
+ * child releases the parent's in-flight counter (audit C5-01). It does NOT
+ * cancel the user's promise (the child can't) — it only fires the `-finished`
+ * notice so a never-resolving handler can't pin its worker against eviction +
+ * block hot-reload forever. Generous, because legitimate broadcast handlers
+ * react to pub/sub events and should be quick.
+ */
+const BROADCAST_HANDLER_TIMEOUT_MS = 30_000;
+
 function handleBroadcastFire(
   proc: SpindleBackendProcessContext,
   msg: BroadcastFireMessage,
 ): void {
+  // #11 P5 inc3b — a quickjs broadcast handler closure lives in the VM (keyed by subId
+  // in the engine's broadcast registry), NOT in broadcastHandlers. Route by presence.
+  if (hasVmBroadcast(msg.scriptId, msg.subId)) {
+    fireVmBroadcast(proc, msg);
+    return;
+  }
   const scriptHandlers = broadcastHandlers.get(msg.scriptId);
   const handler = scriptHandlers?.get(msg.subId);
   if (!handler) return; // late fire after clear/unsub — drop silently
@@ -517,7 +720,9 @@ function handleBroadcastFire(
   // lifecycle messages — the indicator simply doesn't move for them.
   let result: unknown;
   try {
-    result = (handler as (payload: unknown) => unknown)(msg.payload);
+    // Establish the executing scriptId for the handler (and any async continuation), so a timer armed
+    // inside it is attributed and cancelled on teardown. This fire path has no runId->activeProxies mapping.
+    result = currentScriptIdContext.run(msg.scriptId, () => (handler as (payload: unknown) => unknown)(msg.payload));
   } catch {
     // Mirror the bus's existing semantic: errors caught so one bad handler
     // can't break the others. Console capture (Phase 9) will eventually
@@ -536,38 +741,47 @@ function handleBroadcastFire(
       });
     } catch { /* channel down — best-effort */ }
 
+    // Fire `broadcast-handler-finished` EXACTLY ONCE — on resolve, reject, OR
+    // timeout (audit C5-01). The timeout is the fix: without it a never-
+    // resolving handler never fires -finished, so the parent's
+    // broadcastHandlerInFlight counter stays pinned forever (worker exempt from
+    // eviction, hot-reload blocked). `settled` prevents a late resolve/reject
+    // from double-decrementing the counter after a timeout already released it.
+    let settled = false;
+    const finish = (ok: boolean, error?: string): void => {
+      if (settled) return;
+      settled = true;
+      const base = {
+        type:       'broadcast-handler-finished' as const,
+        scriptId:   msg.scriptId,
+        subId:      msg.subId,
+        event:      msg.event,
+        durationMs: Date.now() - startedAt,
+      };
+      try {
+        send(proc, ok
+          ? { ...base, ok: true }
+          : { ...base, ok: false, error: error ?? 'broadcast handler failed' });
+      } catch { /* channel down — best-effort */ }
+    };
+
+    const timer = setTimeout(
+      () => finish(false, `broadcast handler exceeded ${BROADCAST_HANDLER_TIMEOUT_MS / 1000}s timeout`),
+      BROADCAST_HANDLER_TIMEOUT_MS,
+    );
+
     void (result as Promise<unknown>).then(
-      () => {
-        try {
-          send(proc, {
-            type:       'broadcast-handler-finished',
-            scriptId:   msg.scriptId,
-            subId:      msg.subId,
-            event:      msg.event,
-            durationMs: Date.now() - startedAt,
-            ok:         true,
-          });
-        } catch { /* channel down — best-effort */ }
-      },
-      (err: unknown) => {
-        try {
-          send(proc, {
-            type:       'broadcast-handler-finished',
-            scriptId:   msg.scriptId,
-            subId:      msg.subId,
-            event:      msg.event,
-            durationMs: Date.now() - startedAt,
-            ok:         false,
-            error:      err instanceof Error ? err.message : String(err),
-          });
-        } catch { /* channel down — best-effort */ }
-      },
+      () => { clearTimeout(timer); finish(true); },
+      (err: unknown) => { clearTimeout(timer); finish(false, err instanceof Error ? err.message : String(err)); },
     );
   }
 }
 
 function handleBroadcastClear(msg: BroadcastClearMessage): void {
   broadcastHandlers.delete(msg.scriptId);
+  // #11 P5 inc3b — also drop the quickjs script's VM broadcast handler dups (parity:
+  // broadcast subs are wiped at the start of each new run, unlike persistent handlers).
+  disposeScriptVmBroadcast(msg.scriptId);
 }
 
 /**
@@ -580,8 +794,72 @@ function handleBroadcastClear(msg: BroadcastClearMessage): void {
  * X dismissed for reason Y"; the api-proxy module owns storage layout
  * + listener fan-out semantics.
  */
-function handleAdvancedModalDismissed(msg: AdvancedModalDismissedNotice): void {
+function handleAdvancedModalDismissed(proc: SpindleBackendProcessContext, msg: AdvancedModalDismissedNotice): void {
+  // #11 P4b Inc 3c-2b — a quickjs modal's dismissedRef + onDismiss listeners live in the VM, not in
+  // api-proxy module scope. The notice carries no engineMode, so route by owner-registry membership.
+  if (hasVmModal(msg.modalId)) { fireVmModalDismiss(proc, msg); return; }
   notifyAdvancedModalDismissed(msg.modalId, msg.reason);
+}
+
+/**
+ * #11 P4b Inc 3c-2b — fan an advanced-modal-dismissed notice out to a quickjs modal's onDismiss
+ * listeners. Mirrors `fireVmBroadcast`: find the script's proxy, fire each listener via
+ * `fireHandlerInQuickJS` (runChain-serialized, errors swallowed so one bad listener can't break
+ * dismissal, async-hang -> proc.fail). `notifyVmModalDismissed` first flips the in-VM dismissedRef
+ * EAGERLY (so `handle.dismissed` reads true immediately + a late onDismiss takes the fast-path) and
+ * returns the listener snapshot. The modal is dropped (dups disposed, registries cleared) only once
+ * ALL fires settle — the dups must stay alive in vmHandlerHandles across the serialized fires.
+ */
+function fireVmModalDismiss(proc: SpindleBackendProcessContext, msg: AdvancedModalDismissedNotice): void {
+  const info = notifyVmModalDismissed(msg.modalId, msg.reason);
+  if (!info) return; // unknown / already-dropped modal — fires-once (notify cleared the owner)
+  const { scriptId, handlerIds } = info;
+  // notifyVmModalDismissed already removed the owner/listener membership (synchronous fires-once), so
+  // dropVmModal must dispose the dups by the captured scriptId + handlerIds (the maps are now empty).
+  if (handlerIds.length === 0) { dropVmModal(msg.modalId, scriptId, handlerIds); return; }
+  const proxy = proxyByScriptId.get(scriptId)?.proxy;
+  if (!proxy) { dropVmModal(msg.modalId, scriptId, handlerIds); return; } // no proxy — can't fire; still drop the dups
+  const theProxy = proxy;
+  proc.heartbeat();
+  const synthRunId = `advModalDismiss:${msg.modalId}`;
+  const capturedConsole = buildChildCapturedConsole(proc, synthRunId, scriptId);
+  const dispatchers = makeHandlerDispatchers(proc, synthRunId, scriptId, 'latest');
+  // Grant bare fetch iff the owning script is allowDangerous (asyncfn parity), threading BOTH the flag and
+  // the captured host fetch — allowDangerous alone makes __lsFetch report "unavailable".
+  const allowDangerous = scriptAllowDangerous.get(scriptId) ?? false;
+  const fires = handlerIds.map((handlerId) =>
+    raceWithTimeout(
+      fireHandlerInQuickJS({
+        scriptId,
+        handlerId,
+        args:                         [msg.reason],
+        timeoutMs:                    BROADCAST_HANDLER_TIMEOUT_MS,
+        dispatch:                     theProxy.dispatch,
+        dispatchOnHandle:             theProxy.dispatchOnHandle,
+        console:                      capturedConsole,
+        serializeError,
+        allowDangerous,
+        hostFetch:                    allowDangerous ? makeGuardedHostFetch(theProxy.dispatch, theProxy.dispatchWithSignal) : undefined,
+        dispatchRegisterHandler:        dispatchers.dispatchRegisterHandler,
+        dispatchUnregisterHandler:      dispatchers.dispatchUnregisterHandler,
+        dispatchUnregisterHandlerNamed: dispatchers.dispatchUnregisterHandlerNamed,
+        dispatchBroadcastSubscribe:     dispatchers.dispatchBroadcastSubscribe,
+        dispatchBroadcastUnsubscribe: dispatchers.dispatchBroadcastUnsubscribe,
+      }),
+      BROADCAST_HANDLER_TIMEOUT_MS,
+      () => new ScriptTimeoutError(`advanced-modal onDismiss handler ${handlerId} (modal ${msg.modalId}) exceeded ${BROADCAST_HANDLER_TIMEOUT_MS / 1000}s timeout`),
+    ).catch((err: unknown) => {
+      // Swallow listener errors (dismissal parity). On the async-hang ScriptTimeoutError, kill the
+      // worker so the wedged runChain slot is cleared by respawn.
+      if (err instanceof Error && err.name === 'ScriptTimeoutError') {
+        noteQuickjsTimeout(); // #11 observability — quickjs fire timeout (onDismiss → child respawn)
+        proc.fail(`script-runner: async-timeout firing advanced-modal onDismiss handler ${handlerId} (scriptId=${scriptId}); terminating to clear the wedged engine runChain`);
+      }
+    }),
+  );
+  // Drop the modal once ALL listeners have settled — fireHandlerInQuickJS re-fetches the dup AFTER
+  // its runChain await, so the dups must outlive every (serialized) fire.
+  void Promise.allSettled(fires).then(() => { dropVmModal(msg.modalId, scriptId, handlerIds); });
 }
 
 /**
@@ -595,7 +873,33 @@ function handleAdvancedModalDismissed(msg: AdvancedModalDismissedNotice): void {
  * storage layout.
  */
 function handleFloatWidgetPosition(msg: FloatWidgetPositionNotice): void {
+  // #11 P4b Inc 3c-2a — a quickjs float widget's positionCache lives in the VM, not in api-proxy
+  // module scope. The notice carries no engineMode, so route by owner-registry membership.
+  if (hasVmWidget(msg.widgetId)) { notifyVmWidgetPosition(msg.widgetId, msg.x, msg.y); return; }
   notifyFloatWidgetPosition(msg.widgetId, msg.x, msg.y);
+}
+
+/**
+ * Race a promise against a timeout, clearing the timeout timer once the promise
+ * settles (win OR loss) so the timer + its closure don't linger until the
+ * deadline (audit C7-02 / C8-01 / C8-02). `Promise.race` does NOT cancel the
+ * loser, so a bare `setTimeout(reject)` kept firing at `timeoutMs` on every
+ * successful run / handler-fire — a per-fire timer + closure leak.
+ */
+async function raceWithTimeout<T>(
+  op: Promise<T>,
+  timeoutMs: number,
+  makeTimeoutError: () => Error,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(makeTimeoutError()), timeoutMs);
+  });
+  try {
+    return await Promise.race([op, timeoutPromise]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 /**
@@ -617,6 +921,15 @@ async function handleRunHandlerRequest(
   req:  RunHandlerRequest,
 ): Promise<void> {
   const startedAt = Date.now();
+
+  // #11 P5 — a quickjs handler closure lives IN the VM (the dup'd fn handle in the
+  // engine's per-script registry), NOT in handlerClosures. Route by registry presence
+  // (no engineMode needed on the wire — a handler's engine is where its closure lives).
+  if (hasVmHandler(req.scriptId, req.handlerId)) {
+    await fireVmHandler(proc, req, startedAt);
+    return;
+  }
+
   const scriptHandlers = handlerClosures.get(req.scriptId);
   const handler = scriptHandlers?.get(req.handlerId);
 
@@ -645,14 +958,6 @@ async function handleRunHandlerRequest(
   let error: SerializedError | undefined;
   try {
     // Race against handler timeout (mirror script-run timeout race).
-    const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(
-        () => reject(new Error(
-          `Handler ${req.kind}/${req.handlerId} exceeded ${req.timeoutMs / 1000}s timeout`,
-        )),
-        req.timeoutMs,
-      ),
-    );
     // Two nested AsyncLocalStorage scopes:
     //   1. liveContextStore — fresh per-fire chatId / characterId from
     //      the parent's binding.ts. Sync getters (api.chat.getChatId)
@@ -661,13 +966,16 @@ async function handleRunHandlerRequest(
     //   2. runIdContext — fresh per-fire runId so the proxy's dispatch
     //      routes api.* calls through the ephemeral activeRun the parent
     //      registered for this fire.
-    value = await Promise.race([
+    value = await raceWithTimeout(
       liveContextStore.run(
         { chatId: req.chatIdAtFire, characterId: req.characterIdAtFire },
-        () => runIdContext.run(req.runId, () => Promise.resolve(handler(...req.args))),
+        // currentScriptIdContext establishes the executing scriptId so a timer armed inside the handler is
+        // attributed + cancelled on teardown (the fire's runId is not in activeProxies).
+        () => runIdContext.run(req.runId, () => currentScriptIdContext.run(req.scriptId, () => Promise.resolve(handler(...req.args)))),
       ),
-      timeoutPromise,
-    ]);
+      req.timeoutMs,
+      () => new Error(`Handler ${req.kind}/${req.handlerId} exceeded ${req.timeoutMs / 1000}s timeout`),
+    );
   } catch (err) {
     ok = false;
     error = serializeError(err);
@@ -685,6 +993,378 @@ async function handleRunHandlerRequest(
 }
 
 /**
+ * #11 P5 — build the register/unregister-handler IPC dispatchers for an in-VM
+ * registration (during a body-run OR a handler fire). The closure stays in the VM
+ * registry; only the function-less IPC crosses, so the parent wires the canonical
+ * wrapper identically to the asyncfn path (Boundary #1 unchanged).
+ *
+ * SECURITY: a VM-supplied `meta` is spread FIRST so the host-stamped trust-critical
+ * fields (type/kind/runId/scriptId/handlerId/hasHandler) always win — a crafted meta
+ * cannot forge another script's registration.
+ */
+function makeHandlerDispatchers(
+  proc:        SpindleBackendProcessContext,
+  runId:       string,
+  scriptId:    string,
+  // For a child-local fire (timer / broadcast / modal-dismiss) the runId is synthetic and was never
+  // registered on the host, so a stream opened from that callback can't resolve by direct runId lookup.
+  // Passing 'latest' lets the host resolve the stream against the script's current body run — matching
+  // how the legacy engine routes a stream opened from a fire. Omitted (undefined) for a live host run.
+  runIdSource?: 'context' | 'latest' | 'ctx',
+): {
+  dispatchRegisterHandler: (kind: string, handlerId: string, meta: unknown) => void;
+  dispatchUnregisterHandler: (kind: string, handlerId: string) => void;
+  dispatchUnregisterHandlerNamed: (kind: string, name: string) => void;
+  dispatchBroadcastSubscribe: (subId: string, event: string) => void;
+  dispatchBroadcastUnsubscribe: (subId: string) => void;
+  dispatchStreamStart: (requestId: string, method: string, args: unknown[], hasSignal: boolean) => void;
+  dispatchStreamCancel: (requestId: string) => void;
+} {
+  return {
+    dispatchRegisterHandler: (kind, handlerId, meta) => {
+      const msg = {
+        ...(meta && typeof meta === 'object' ? meta : {}),
+        type:       'register-handler',
+        kind,
+        runId,
+        scriptId,
+        handlerId,
+        hasHandler: true,
+      } as unknown as RegisterHandler;
+      proc.send(msg);
+    },
+    dispatchUnregisterHandler: (kind, handlerId) => {
+      const msg = { type: 'unregister-handler', kind, scriptId, handlerId } as unknown as UnregisterHandler;
+      proc.send(msg);
+    },
+    // P5 inc3c — macro/tool unregister is BY NAME (the host's macro/tool stores resolve
+    // by (scriptId, name), not handlerId). Same IPC type, name field instead of handlerId.
+    dispatchUnregisterHandlerNamed: (kind, name) => {
+      const msg = { type: 'unregister-handler', kind, scriptId, name } as unknown as UnregisterHandler;
+      proc.send(msg);
+    },
+    // P5 inc3b — broadcast.on uses the separate broadcast-subscribe / -unsubscribe IPC
+    // (keyed by subId, no kind/handlerId/runId/hasHandler). The closure lives in the VM
+    // registry; the parent fires it via broadcast-fire. Boundary #1 unchanged.
+    dispatchBroadcastSubscribe: (subId, event) => {
+      proc.send({ type: 'broadcast-subscribe', scriptId, subId, event } as BroadcastSubscribeMessage);
+    },
+    dispatchBroadcastUnsubscribe: (subId) => {
+      proc.send({ type: 'broadcast-unsubscribe', scriptId, subId } as BroadcastUnsubscribeMessage);
+    },
+    // generateStream — the in-VM generator owns the chunk queue (vmStreams); only the request + cancel
+    // envelopes cross to the host, carrying this run's runId/scriptId (+ runIdSource so a fire-opened
+    // stream can fall back to the script's body run — see the runIdSource param note above).
+    dispatchStreamStart: (requestId, method, args, hasSignal) => {
+      proc.send({ type: 'stream-request', requestId, runId, scriptId, method, args, hasSignal, _runIdSource: runIdSource } as StreamRequest);
+    },
+    dispatchStreamCancel: (requestId) => {
+      proc.send({ type: 'stream-cancel', requestId } as StreamCancelRequest);
+    },
+  };
+}
+
+/**
+ * #11 P5 — fire a handler whose closure lives in the QuickJS VM. Dispatches the
+ * handler's api.* calls through a PERSISTED proxy for this script (any run's — the
+ * runId is overridden to the fire's runId via runIdContext, and api-responses route
+ * by requestId broadcast across all proxies). Wrapped in the SAME liveContextStore +
+ * runIdContext + raceWithTimeout as the asyncfn path so at-fire chat/character context
+ * and the async-hang guard behave identically. The dup'd fn handle stays in the
+ * engine registry (disposed on unregister), not here.
+ */
+async function fireVmHandler(
+  proc:      SpindleBackendProcessContext,
+  req:       RunHandlerRequest,
+  startedAt: number,
+): Promise<void> {
+  // A persisted proxy for this script provides dispatch/dispatchOnHandle. Proxies are
+  // kept across runs for fires (see runOne's activeProxies note); any one for this
+  // script works — they share scriptId and the runId is overridden per-fire.
+  const proxy = proxyByScriptId.get(req.scriptId)?.proxy;
+
+  proc.heartbeat();
+  let value: unknown = undefined;
+  let ok = true;
+  let error: SerializedError | undefined;
+  try {
+    if (!proxy) {
+      throw new Error(`api-proxy host: no active proxy for script ${req.scriptId} firing handler ${req.handlerId}`);
+    }
+    const theProxy = proxy;
+    const capturedConsole = buildChildCapturedConsole(proc, req.runId, req.scriptId);
+    // A handler may itself register/unregister handlers (api.commands.onInvoked from
+    // inside a fire) — thread the same IPC dispatchers as the body-run so those reach
+    // the parent (else the new registration stores a dup the parent never wires).
+    const dispatchers = makeHandlerDispatchers(proc, req.runId, req.scriptId);
+    value = await raceWithTimeout(
+      liveContextStore.run(
+        { chatId: req.chatIdAtFire, characterId: req.characterIdAtFire },
+        () => runIdContext.run(req.runId, () => fireHandlerInQuickJS({
+          scriptId:                  req.scriptId,
+          handlerId:                 req.handlerId,
+          args:                      req.args,
+          timeoutMs:                 req.timeoutMs,
+          dispatch:                  theProxy.dispatch,
+          dispatchOnHandle:          theProxy.dispatchOnHandle,
+          console:                   capturedConsole,
+          serializeError,
+          // #11 P7-F3 — the fired script's identity, so the quickjs fire re-seeds globalThis.script
+          // (no residue). RunHandlerRequest now carries scriptName/scriptType.
+          script:                    { id: req.scriptId, name: req.scriptName, type: req.scriptType },
+          // Thread the script's allowDangerous (RunHandlerRequest now carries it) so an
+          // allowDangerous script's fired handler can fetch under quickjs, matching asyncfn (whose
+          // closure baked in the right fetch at body-run time). hostFetch is the captured host fetch,
+          // granted only when allowDangerous — same gate as the body-run (child-entry runOne).
+          allowDangerous:            req.allowDangerous,
+          hostFetch:                 req.allowDangerous ? makeGuardedHostFetch(theProxy.dispatch, theProxy.dispatchWithSignal) : undefined,
+          // #11 P7-F4 (Tier 0) — the invoking script (api.tools.invoke path only) so the fire can
+          // fast-reject a self-reentrant invoke instead of deadlocking on the caller's runChain.
+          callerScriptId:            req.callerScriptId,
+          dispatchRegisterHandler:        dispatchers.dispatchRegisterHandler,
+          dispatchUnregisterHandler:      dispatchers.dispatchUnregisterHandler,
+          dispatchUnregisterHandlerNamed: dispatchers.dispatchUnregisterHandlerNamed,
+        })),
+      ),
+      req.timeoutMs,
+      // ScriptTimeoutError so the proc.fail gate below fires: an ASYNC-hung handler
+      // (awaiting a never-settling api call) leaves fireHandlerInQuickJS parked on the
+      // shared runChain slot (the interrupt only catches SYNC loops), wedging every
+      // later run/fire on this child. Killing + respawning the worker is the only
+      // rescue (parity with the body-run's async-timeout posture).
+      () => new ScriptTimeoutError(`Handler ${req.kind}/${req.handlerId} exceeded ${req.timeoutMs / 1000}s timeout`),
+    );
+  } catch (err) {
+    ok = false;
+    error = serializeError(err);
+    // #11 observability — this is the quickjs-only fire path (routed by hasVmHandler). Count a genuine
+    // engine fire-error, but EXCLUDE the two expected/tracked-elsewhere classes: a timeout (counted at
+    // the proc.fail gate below) and a self-invoke reentrant reject (counted at its throw site + surfaced
+    // to the caller as an ordinary rejection, not an engine fault).
+    if (error.name !== 'ScriptTimeoutError' && error.name !== 'ReentrantToolInvokeError') noteQuickjsFireError();
+  }
+
+  const result: HandlerResult = {
+    type:       'handler-result',
+    runId:      req.runId,
+    ok,
+    durationMs: Date.now() - startedAt,
+  };
+  if (ok)    result.value = value;
+  if (error) result.error = error;
+  proc.send(result);
+
+  // Async-hang rescue (see the ScriptTimeoutError above): kill the worker so the
+  // wedged runChain slot is cleared by respawn. Same posture as runOne's body-run.
+  if (!ok && error?.name === 'ScriptTimeoutError') {
+    noteQuickjsTimeout(); // #11 observability — quickjs fire timeout (→ child respawn)
+    proc.fail(
+      `script-runner: async-timeout firing handler ${req.kind}/${req.handlerId} ` +
+      `(scriptId=${req.scriptId}, runId=${req.runId}); terminating to clear the wedged engine runChain`,
+    );
+  }
+}
+
+/**
+ * #11 P5 inc3b — fire a broadcast handler whose closure lives in the QuickJS VM.
+ * Unlike a RunHandlerRequest fire this is FIRE-AND-FORGET (the bus expects no result)
+ * and UNWRAPPED — no at-fire chat/character context and no per-fire runId, so the
+ * handler's api.* calls route through the proxy's originating-run id, parity with the
+ * asyncfn broadcast path (handleBroadcastFire does not wrap in liveContext/runIdContext).
+ * Handler errors are SWALLOWED (one bad subscriber can't break the bus). The async-hang
+ * guard still applies: a never-settling api call would strand the shared runChain, so on
+ * timeout we proc.fail (same posture as the body-run). Nested registrations from a
+ * broadcast handler are rare; their IPC runId is synthetic (no originating run here).
+ */
+function fireVmBroadcast(proc: SpindleBackendProcessContext, msg: BroadcastFireMessage): void {
+  const proxy = proxyByScriptId.get(msg.scriptId)?.proxy;
+  if (!proxy) return; // no proxy for the script — drop (like the broadcastHandlers miss)
+  const theProxy = proxy;
+  proc.heartbeat();
+  const synthRunId = `broadcast:${msg.subId}`;
+  const capturedConsole = buildChildCapturedConsole(proc, synthRunId, msg.scriptId);
+  const dispatchers = makeHandlerDispatchers(proc, synthRunId, msg.scriptId, 'latest');
+  // Grant bare fetch iff the script is allowDangerous (asyncfn parity — its handler closure baked in the
+  // right fetch at body-run time). Thread BOTH the flag and the captured host fetch, exactly as the
+  // RunHandlerRequest fire path does — allowDangerous alone makes __lsFetch report "unavailable".
+  const allowDangerous = scriptAllowDangerous.get(msg.scriptId) ?? false;
+  void raceWithTimeout(
+    fireHandlerInQuickJS({
+      scriptId:                     msg.scriptId,
+      handlerId:                    msg.subId,
+      args:                         [msg.payload],
+      timeoutMs:                    BROADCAST_HANDLER_TIMEOUT_MS,
+      dispatch:                     theProxy.dispatch,
+      dispatchOnHandle:             theProxy.dispatchOnHandle,
+      console:                      capturedConsole,
+      serializeError,
+      allowDangerous,
+      hostFetch:                    allowDangerous ? makeGuardedHostFetch(theProxy.dispatch, theProxy.dispatchWithSignal) : undefined,
+      dispatchRegisterHandler:        dispatchers.dispatchRegisterHandler,
+      dispatchUnregisterHandler:      dispatchers.dispatchUnregisterHandler,
+      dispatchUnregisterHandlerNamed: dispatchers.dispatchUnregisterHandlerNamed,
+      dispatchBroadcastSubscribe:     dispatchers.dispatchBroadcastSubscribe,
+      dispatchBroadcastUnsubscribe: dispatchers.dispatchBroadcastUnsubscribe,
+    }),
+    BROADCAST_HANDLER_TIMEOUT_MS,
+    () => new ScriptTimeoutError(`Broadcast handler ${msg.subId} (event ${msg.event}) exceeded ${BROADCAST_HANDLER_TIMEOUT_MS / 1000}s timeout`),
+  ).catch((err: unknown) => {
+    // Swallow handler errors (bus parity). On the async-hang ScriptTimeoutError, kill
+    // the worker so the wedged runChain slot is cleared by respawn.
+    if (err instanceof Error && err.name === 'ScriptTimeoutError') {
+      noteQuickjsTimeout(); // #11 observability — quickjs fire timeout (broadcast → child respawn)
+      proc.fail(`script-runner: async-timeout firing broadcast handler ${msg.subId} (scriptId=${msg.scriptId}); terminating to clear the wedged engine runChain`);
+    }
+  });
+}
+
+// ─── #11 P5-2: child-side timer store + host-scheduled fire ────────────────────
+//
+// A quickjs timer is entirely CHILD-LOCAL: the in-VM setTimeout/setInterval registers the callback
+// (dup'd into the VM handler registry by a VM-generated timerId) and calls the injected scheduler; here
+// we arm a real Bun timer whose expiry fires the callback via fireHandlerInQuickJS on its OWN runChain
+// entry (macrotask parity — setTimeout(fn,0) runs AFTER the current run; no F4 deadlock since a timer
+// fire carries no callerScriptId). One-shots delete themselves from the store BEFORE firing (so the id
+// is free for a re-schedule inside the fire) and dispose their VM dup AFTER (so a fired setTimeout does
+// not pin the context until teardown); intervals re-arm implicitly and keep their dup until
+// clearInterval/teardown. All of a script's timers are cancelled at teardown (clearAllTimersForScript).
+interface VmTimerEntry { handle: ReturnType<typeof setInterval>; repeat: boolean }
+const vmTimerStore = new Map<string, Map<string, VmTimerEntry>>();
+
+function scheduleVmTimer(proc: SpindleBackendProcessContext, scriptId: string, timerId: string, ms: number, repeat: boolean): void {
+  let perScript = vmTimerStore.get(scriptId);
+  if (!perScript) { perScript = new Map(); vmTimerStore.set(scriptId, perScript); }
+  const prev = perScript.get(timerId); // a re-schedule under the same id replaces the old Bun handle
+  if (prev) { clearInterval(prev.handle); clearTimeout(prev.handle); }
+  if (repeat) {
+    const handle = setInterval(() => { fireVmTimer(proc, scriptId, timerId, false); }, ms);
+    perScript.set(timerId, { handle, repeat: true });
+  } else {
+    const handle = setTimeout(() => {
+      const ps = vmTimerStore.get(scriptId); // drop BEFORE firing (id free for a re-schedule in the fire)
+      ps?.delete(timerId);
+      if (ps && ps.size === 0) vmTimerStore.delete(scriptId);
+      fireVmTimer(proc, scriptId, timerId, true);
+    }, ms);
+    perScript.set(timerId, { handle, repeat: false });
+  }
+}
+
+function clearVmTimer(scriptId: string, timerId: string): void {
+  const perScript = vmTimerStore.get(scriptId);
+  if (!perScript) return;
+  const entry = perScript.get(timerId);
+  if (!entry) return;
+  clearInterval(entry.handle); clearTimeout(entry.handle);
+  perScript.delete(timerId);
+  if (perScript.size === 0) vmTimerStore.delete(scriptId);
+}
+
+/**
+ * #11 P5-2 / P5-3 — cancel every Bun timer for a script (teardown / reload / disable / delete). The VM
+ * callback dups are separately swept by disposeScriptVmHandlers (via disposeContextForScript); this
+ * cancels the child-side Bun handles so a leaked interval can't keep firing after the script is gone —
+ * the quickjs half of the Finding-4 leak fix.
+ */
+function clearAllTimersForScript(scriptId: string): void {
+  const perScript = vmTimerStore.get(scriptId);
+  if (!perScript) return;
+  for (const { handle } of perScript.values()) { clearInterval(handle); clearTimeout(handle); }
+  vmTimerStore.delete(scriptId);
+}
+
+/**
+ * Fire a VM timer callback. Mirrors fireVmBroadcast (fire-and-forget, errors swallowed, async-hang →
+ * proc.fail); `oneShot` disposes the callback dup after the fire settles so a fired setTimeout doesn't
+ * linger in vmHandlerHandles (pinning the context) until teardown.
+ */
+function fireVmTimer(proc: SpindleBackendProcessContext, scriptId: string, timerId: string, oneShot: boolean): void {
+  const proxy = proxyByScriptId.get(scriptId)?.proxy;
+  if (!proxy) { if (oneShot) disposeVmHandler(scriptId, timerId); return; } // torn down between arm + fire
+  const theProxy = proxy;
+  proc.heartbeat();
+  const synthRunId = `vmTimer:${timerId}`;
+  const capturedConsole = buildChildCapturedConsole(proc, synthRunId, scriptId);
+  const dispatchers = makeHandlerDispatchers(proc, synthRunId, scriptId, 'latest');
+  // Grant bare fetch iff the owning script is allowDangerous (asyncfn parity — a setTimeout callback armed
+  // in the body run captured the body's fetch). Thread BOTH the flag and the captured host fetch —
+  // allowDangerous alone makes __lsFetch report "unavailable".
+  const allowDangerous = scriptAllowDangerous.get(scriptId) ?? false;
+  void raceWithTimeout(
+    fireHandlerInQuickJS({
+      scriptId,
+      handlerId:        timerId,
+      args:             [],
+      timeoutMs:        BROADCAST_HANDLER_TIMEOUT_MS,
+      dispatch:         theProxy.dispatch,
+      dispatchOnHandle: theProxy.dispatchOnHandle,
+      console:          capturedConsole,
+      serializeError,
+      allowDangerous,
+      hostFetch:        allowDangerous ? makeGuardedHostFetch(theProxy.dispatch, theProxy.dispatchWithSignal) : undefined,
+      ...dispatchers,
+    }),
+    BROADCAST_HANDLER_TIMEOUT_MS,
+    () => new ScriptTimeoutError(`Timer ${timerId} (script ${scriptId}) exceeded ${BROADCAST_HANDLER_TIMEOUT_MS / 1000}s timeout`),
+  ).catch((err: unknown) => {
+    // Swallow handler errors (fire-and-forget parity). On the async-hang ScriptTimeoutError, kill the
+    // worker so the wedged runChain slot is cleared by respawn (mirrors fireVmBroadcast).
+    if (err instanceof Error && err.name === 'ScriptTimeoutError') {
+      noteQuickjsTimeout(); // #11 observability — quickjs fire timeout (timer → child respawn)
+      proc.fail(`script-runner: async-timeout firing timer ${timerId} (scriptId=${scriptId}); terminating to clear the wedged engine runChain`);
+    }
+  }).finally(() => { if (oneShot) disposeVmHandler(scriptId, timerId); });
+}
+
+// ─── #11 P5-3: asyncfn user-timer tracking (the Finding-4 leak fix for the AsyncFunction engine) ──────
+//
+// The asyncfn engine runs user code in the child's own global scope, so a user setTimeout/setInterval goes
+// through the monkeypatched globalThis.setTimeout/setInterval (installSandboxLockdown). Those wrappers used
+// to track nothing, so a leaked interval survived reload/disable and kept firing the old closure. We now
+// track each user timer per-script and cancel them all on unregister. Attribution needs the scriptId of
+// whatever user code is currently executing — a body/trigger run OR a handler fire (broadcast / command /
+// DOM listener / macro). Handler fires do NOT run under the body-run runId->activeProxies mapping, so they
+// establish the scriptId directly via `currentScriptIdContext` (set around each handler invocation, and
+// around a tracked timer's own callback so a timer armed inside a callback is attributed too). Body/trigger
+// runs fall back to runIdContext->activeProxies. Timers created OUTSIDE any user code (the heartbeat,
+// raceWithTimeout) resolve to no scriptId and are correctly left untracked. The quickjs half — where user
+// timers live in the VM and attribute by scriptId through the scheduler — is clearAllTimersForScript above.
+const asyncfnTimerStore = new Map<string, Set<ReturnType<typeof setTimeout>>>();
+/** The scriptId of the user code currently executing — set directly around handler fires (and tracked-timer
+ *  callbacks), which don't run under the body-run runId->activeProxies mapping. Body/trigger runs don't set
+ *  it (they resolve via runIdContext->activeProxies instead). */
+const currentScriptIdContext = new AsyncLocalStorage<string>();
+/** The scriptId of the user code currently executing (body/trigger run OR handler fire), or undefined
+ *  outside any user code. */
+function currentUserScriptId(): string | undefined {
+  const direct = currentScriptIdContext.getStore();
+  if (direct !== undefined) return direct;
+  const runId = runIdContext.getStore();
+  return runId === undefined ? undefined : activeProxies.get(runId)?.scriptId;
+}
+function trackAsyncfnTimer(scriptId: string, id: ReturnType<typeof setTimeout>): void {
+  let set = asyncfnTimerStore.get(scriptId);
+  if (!set) { set = new Set(); asyncfnTimerStore.set(scriptId, set); }
+  set.add(id);
+}
+function untrackAsyncfnTimer(scriptId: string, id: ReturnType<typeof setTimeout>): void {
+  const set = asyncfnTimerStore.get(scriptId);
+  if (!set) return;
+  set.delete(id);
+  if (set.size === 0) asyncfnTimerStore.delete(scriptId);
+}
+/** Cancel every tracked asyncfn user timer for a script (teardown / reload / disable / delete). */
+function clearAllAsyncfnTimersForScript(scriptId: string): void {
+  const set = asyncfnTimerStore.get(scriptId);
+  if (!set) return;
+  // Snapshot: the patched clearTimeout/clearInterval untrack from this same set, so iterating a copy
+  // avoids mutating the set mid-iteration. (At teardown there is no active run, so the patched untrack
+  // is a no-op, but the snapshot keeps this correct regardless of the calling context.)
+  for (const id of [...set]) { clearTimeout(id); clearInterval(id); }
+  asyncfnTimerStore.delete(scriptId);
+}
+
+/**
  * Phase 9d.3 — drop all per-script state when a script is unregistered
  * (extension disable, script delete, etc.). Mirrors the existing
  * `clearByScriptId` semantics on the parent's macro / tool / etc. stores.
@@ -694,9 +1374,36 @@ async function handleRunHandlerRequest(
  * Handlebars state, pending request maps, etc. — dropping them releases
  * memory accumulated across runs.
  */
-function handleScriptUnregister(msg: ScriptUnregisterMessage): void {
+function handleScriptUnregister(proc: SpindleBackendProcessContext, msg: ScriptUnregisterMessage): void {
   handlerClosures.delete(msg.scriptId);
   broadcastHandlers.delete(msg.scriptId);
+  // Close this script's open in-VM generateStream streams FIRST, while its QuickJS context is still alive.
+  // Sweeping wakes any parked stream consumer (which settles that pull's in-VM promise) and drops the
+  // cells; we tell the host to tear down each upstream generate. This MUST precede disposeContextForScript:
+  // a parked pull holds a live, unsettled promise INSIDE the context, and disposing a context that still
+  // holds one aborts the whole WASM runtime. (Handler and timer callback dups ARE swept by
+  // disposeContextForScript itself, but stream cells live outside that map, so they need this explicit
+  // pre-dispose sweep.) Only the per-script context model actually disposes, but the ordering is harmless
+  // under the shared model too.
+  for (const requestId of sweepVmStreamsForScript(msg.scriptId)) {
+    proc.send({ type: 'stream-cancel', requestId } as StreamCancelRequest);
+  }
+  // Dispose this script's dup'd in-VM handler fn handles, and — under contextModel='per-script' — the
+  // whole QuickJSContext, UNLESS this is a reload (reason='reload' keeps the context so globalThis +
+  // module captures survive; see ScriptUnregisterMessage.reason). The default (disable / delete / omitted
+  // reason) disposes it, preventing an unbounded context leak across create/delete churn. No-op beyond the
+  // handle sweep under 'shared'.
+  disposeContextForScript(msg.scriptId, msg.reason !== 'reload');
+  // Cancel this script's child-side Bun timers (setTimeout/setInterval) on both engines, so a leaked
+  // interval can't keep firing after disable/delete/reload. clearAllTimersForScript stops the quickjs VM
+  // timers (their callback dups were already swept above); clearAllAsyncfnTimersForScript stops the
+  // tracked asyncfn user timers.
+  clearAllTimersForScript(msg.scriptId);
+  clearAllAsyncfnTimersForScript(msg.scriptId);
+  // audit C8-03 + C8-04 — prune the per-script rate-limit buckets so they don't
+  // accumulate one entry per ever-seen scriptId across the child's lifetime.
+  consoleRateState.delete(msg.scriptId);
+  unhandledRejectionRateState.delete(msg.scriptId);
   // Drop only the proxies that belong to THIS script. Other scripts'
   // proxies (which may still be servicing in-flight runs or holding
   // post-run handler closures) stay intact.
@@ -706,6 +1413,12 @@ function handleScriptUnregister(msg: ScriptUnregisterMessage): void {
       activeProxies.delete(runId);
     }
   }
+  proxyByScriptId.delete(msg.scriptId); // all of this script's proxies just went, so drop its index entry
+  scriptAllowDangerous.delete(msg.scriptId); // the fire-path capability flag is moot once the script is gone
+  // Mark the script recently-unregistered so a detached async continuation (from an already-running body or
+  // handler) can't arm a fresh timer that would outlive it — its timers were just cancelled above and there
+  // is nothing left to cancel a new one. A subsequent run for this scriptId clears the mark.
+  recentlyUnregistered.add(msg.scriptId);
   // Phase 9f-1 — drop module-scope per-script state in api-proxy
   // (advancedModalState, floatWidgetState, domStableIdToElementId).
   // Without this, those tables would accumulate entries across the
@@ -772,6 +1485,21 @@ function buildChildCapturedConsole(
 ): Record<string, (...args: unknown[]) => void> {
   const makeHandler = (type: ConsoleEntryType) =>
     (...args: unknown[]) => {
+      // Rate-gate FIRST (audit C8-03) so a tight `while(true) console.log()`
+      // loop can't flood the console-entry IPC + parent dispatch + backend log.
+      // Dropping before serialization also skips the per-entry arg-serialize cost.
+      const { emit, summary } = consoleRateGate(scriptId, Date.now());
+      if (summary !== null) {
+        try {
+          proc.send({
+            type:     'console-entry',
+            runId,
+            scriptId,
+            entry: { timestamp: new Date().toLocaleTimeString(), type: 'warn', message: `[lumiscript] ${summary}.` },
+          });
+        } catch { /* channel down — drop */ }
+      }
+      if (!emit) return;
       const message = args.map(serializeConsoleArg).join(' ');
       const entry: ConsoleEntry = {
         timestamp: new Date().toLocaleTimeString(),
@@ -793,6 +1521,44 @@ function buildChildCapturedConsole(
     error: makeHandler('error'),
     info:  makeHandler('info'),
   };
+}
+
+// ── Console-entry rate limit (audit C8-03) ──────────────────────────────────
+// Cap console-entry IPC per scriptId per window — generous for legitimate
+// logging, bounded against a runaway loop. Mirrors the unhandled-rejection
+// token bucket below. The state map is pruned in handleScriptUnregister.
+const CONSOLE_ENTRY_THRESHOLD = 500;
+const CONSOLE_ENTRY_WINDOW_MS = 5_000;
+interface ConsoleRateState { windowStartMs: number; count: number; suppressed: number; }
+const consoleRateState = new Map<string, ConsoleRateState>();
+
+/**
+ * Per-script console-entry gate. Returns whether to emit this entry, plus a
+ * one-time `N suppressed` summary string when a window that dropped entries
+ * rolls over (so the user learns their logging was throttled).
+ */
+function consoleRateGate(scriptId: string, now: number): { emit: boolean; summary: string | null } {
+  const state = consoleRateState.get(scriptId);
+  if (state === undefined) {
+    consoleRateState.set(scriptId, { windowStartMs: now, count: 1, suppressed: 0 });
+    return { emit: true, summary: null };
+  }
+  if (now - state.windowStartMs > CONSOLE_ENTRY_WINDOW_MS) {
+    const summary = state.suppressed > 0
+      ? `${state.suppressed} console ${state.suppressed === 1 ? 'entry was' : 'entries were'} suppressed ` +
+        `(rate limit: ${CONSOLE_ENTRY_THRESHOLD} per ${CONSOLE_ENTRY_WINDOW_MS / 1000}s)`
+      : null;
+    state.windowStartMs = now;
+    state.count = 1;
+    state.suppressed = 0;
+    return { emit: true, summary };
+  }
+  if (state.count < CONSOLE_ENTRY_THRESHOLD) {
+    state.count += 1;
+    return { emit: true, summary: null };
+  }
+  state.suppressed += 1;
+  return { emit: false, summary: null };
 }
 
 /**
@@ -820,12 +1586,25 @@ function routeApiResponse(msg: ApiProxyResponse): void {
  * `handleStreamChunk` / `handleStreamEnd` silently drops requestIds it
  * doesn't own; the right one wins.
  */
-function routeStreamChunk(msg: StreamChunkMessage): void {
+function routeStreamChunk(proc: SpindleBackendProcessContext, msg: StreamChunkMessage): void {
+  // A quickjs (in-VM) stream owns its chunk queue in the engine; feed it there and stop. If the undrained
+  // queue hit the cap, the engine ended the stream with an overflow error — tell the host to stop the
+  // upstream. Non-quickjs requestIds fall through to the asyncfn proxy broadcast unchanged.
+  if (hasVmStream(msg.requestId)) {
+    if (pushVmStreamChunk(msg.requestId, msg.chunk)) {
+      proc.send({ type: 'stream-cancel', requestId: msg.requestId } as StreamCancelRequest);
+    }
+    return;
+  }
   for (const entry of activeProxies.values()) {
     entry.proxy.handleStreamChunk(msg);
   }
 }
 function routeStreamEnd(msg: StreamEndMessage): void {
+  if (hasVmStream(msg.requestId)) {
+    pushVmStreamEnd(msg.requestId, msg.ok, msg.error);
+    return;
+  }
   for (const entry of activeProxies.values()) {
     entry.proxy.handleStreamEnd(msg);
   }
@@ -886,6 +1665,17 @@ async function runOne(
   let value: unknown = undefined;
   let ok = true;
   let error: SerializedError | undefined;
+  // #11 observability — the RESOLVED engine for this run, hoisted to function scope so the
+  // post-`finally` result-assembly (the shared catch + the timeout proc.fail below, both OUTSIDE
+  // the try where engineMode is set) can attribute run errors / timeouts to the right engine.
+  let engineMode: 'asyncfn' | 'quickjs' = 'asyncfn';
+  // #11 P5-4 — refresh the QuickJS generateStream queue cap from the setting (threaded per run) so a
+  // settings change takes effect on the next run's newly-opened streams. No-op for asyncfn runs.
+  if (req.streamQueueCap !== undefined) setStreamQueueCap(req.streamQueueCap);
+  // #11 P7 — apply the contextModel setting (threaded per run). setContextModel only flips on a CLEAN
+  // child (no live pool), so a real change takes effect on the fresh child the update_settings respawn spins
+  // up; on an already-warm child it's a no-op. No-op entirely for asyncfn runs (no QuickJS contexts).
+  if (req.contextModel !== undefined) setContextModel(req.contextModel);
 
   // Build the proxy api for this run. Stash by runId so api-response IPC
   // arrivals can route to its pending-request map.
@@ -920,7 +1710,14 @@ async function runOne(
     chatContentProcessorsSnapshot: req.chatContentProcessorsSnapshot ?? [],
     worldInfoInterceptorsSnapshot: req.worldInfoInterceptorsSnapshot ?? [],
   });
-  activeProxies.set(req.runId, { scriptId: req.scriptId, proxy });
+  const proxyEntry: ActiveProxyEntry = { scriptId: req.scriptId, proxy };
+  activeProxies.set(req.runId, proxyEntry);
+  proxyByScriptId.set(req.scriptId, proxyEntry); // last-run-wins index for the O(1) fire lookups
+  // Capture allowDangerous so the fire-and-forget paths (broadcast/modal/timer) can grant a fired handler
+  // the same bare-fetch capability this body run had (asyncfn parity).
+  scriptAllowDangerous.set(req.scriptId, req.allowDangerous);
+  // This run re-registers the script, so a prior disable/delete no longer applies — resume arming its timers.
+  recentlyUnregistered.delete(req.scriptId);
 
   try {
     // Phase 9a sandbox: `api` + `data` + `script` + `__console`.
@@ -940,14 +1737,13 @@ async function runOne(
     // reference any of them as top-level identifiers fail with
     // `ReferenceError` in the child runtime. The shadowing semantics:
     //   - `z`: real zod, bundled into the child via `import * as z`.
-    //   - `fetch`: real `globalThis.fetch` for allowDangerous scripts;
-    //              throws otherwise (matching `buildSafeFetch` in
-    //              executor.ts).
+    //   - `fetch`: for allowDangerous scripts, the SSRF-guarded fetch (backend cors → safeFetch, with the
+    //              user allowlist as the local escape hatch — see makeGuardedHostFetch); throws otherwise.
     //   - `Bun`: always undefined — direct Bun API access is forbidden
     //           per the Lumiverse 519565 capability regex.
     //   - `process`: always undefined — same reason.
     const safeFetch: typeof globalThis.fetch = req.allowDangerous
-      ? _hostFetch
+      ? makeGuardedHostFetch(proxy.dispatch, proxy.dispatchWithSignal)
       : ((() => {
           throw new Error(
             `"${req.scriptName}" must enable Allow Dangerous to use fetch directly. ` +
@@ -955,6 +1751,78 @@ async function runOne(
           );
         }) as unknown as typeof globalThis.fetch);
 
+    // #11 — engine selection. Default 'asyncfn' (the AsyncFunction path below);
+    // 'quickjs' will route to the QuickJS-WASM isolate harness (P1 increment 2).
+    // Per-run via RunScriptRequest.engineMode; the test seam overrides per-process
+    // for the parity harness. Branch sits inside the try so a quickjs failure is
+    // surfaced as RunScriptResult { ok:false } like any other body error.
+    engineMode = testEngineMode ?? req.engineMode ?? 'asyncfn';
+    // #11 cold-start-fallback — if quickjs is requested but the WASM module can't instantiate on this
+    // platform, DEGRADE this run to the AsyncFunction engine instead of hard-failing (there is no other
+    // isolation layer, so degrade gracefully). warmupQuickJS is cached + this `await` sits OUTSIDE the
+    // run's raceWithTimeout below, so the module compile is never charged against the script's deadline
+    // (a first quickjs run pays ~106ms here, once per process, off-budget). No cost under the asyncfn
+    // default (the guard skips it). When available, warmupQuickJS resolves ~instantly.
+    if (engineMode === 'quickjs' && !(await warmupQuickJS())) {
+      engineMode = 'asyncfn';
+      noteDegradedRun(); // #11 observability — a quickjs-requested run fell back (WASM uninstantiable)
+    }
+    // #11 observability — attribute the run to its RESOLVED engine (AFTER the degrade so a degraded
+    // run counts as asyncfn, preserving the degradedRuns signal — see the risk the design flagged).
+    noteEngineRun(engineMode);
+    if (engineMode === 'quickjs') {
+      // #11 — QuickJS-WASM isolate. The harness reuses proxy.dispatch / the
+      // pending-map / api-response routing / flush / activeProxies verbatim;
+      // only the in-VM user-code boundary differs. Wrapped in the SAME
+      // raceWithTimeout + runIdContext.run as the AsyncFunction path so the
+      // async-timeout semantics, ScriptTimeoutError shape, and runId
+      // attribution are identical across engines. (The harness ALSO sets an
+      // in-VM interrupt deadline as a sync-loop guard — the two are
+      // complementary: this race catches a stalled host Promise, the interrupt
+      // catches a sync `while(true){}` the race can't see.)
+      value = await raceWithTimeout(
+        runIdContext.run(req.runId, () =>
+          runUserScriptInQuickJS({
+            code:           req.code,
+            dispatch:       proxy.dispatch,
+            data:           req.data,
+            script:         { id: req.scriptId, name: req.scriptName, type: req.scriptType },
+            console:        capturedConsole,
+            timeoutMs:      req.timeoutMs,
+            serializeError,
+            allowDangerous: req.allowDangerous,
+            // Bare fetch is routed through the backend's SSRF-guarded outbound path (see
+            // makeGuardedHostFetch): an allowlisted trusted-local host → direct fetch, else cors → safeFetch.
+            // Only granted when allowDangerous (defense-in-depth alongside the in-VM __lsFetch gate).
+            hostFetch:      req.allowDangerous ? makeGuardedHostFetch(proxy.dispatch, proxy.dispatchWithSignal) : undefined,
+            // P4 — handle-method dispatcher, so in-VM handle proxies (db.collection
+            // etc.) route method calls back through the SAME targetHandle IPC as the
+            // asyncfn path. Boundary #1 unchanged.
+            dispatchOnHandle: proxy.dispatchOnHandle,
+            // P5 — when an in-VM handler is registered/unregistered, send the
+            // function-less register/unregister-handler IPC to the parent (the closure
+            // stays in the VM registry, keyed by the same handlerId). Boundary #1
+            // unchanged — the parent wires the wrapper identically across engines.
+            ...makeHandlerDispatchers(proc, req.runId, req.scriptId),
+            // #11 list-methods parity — seed the sync-list snapshots so the in-VM declared-SYNC
+            // list reads (tools.list / macros.list / etc.) return arrays, matching asyncfn's local*.
+            listSnapshots: {
+              tools:                 req.toolsSnapshot                 ?? [],
+              macros:                req.macrosSnapshot                ?? [],
+              macroInterceptors:     req.macroInterceptorsSnapshot     ?? [],
+              chatInjections:        req.chatInjectionsSnapshot        ?? [],
+              chatContentProcessors: req.chatContentProcessorsSnapshot ?? [],
+              worldInfoInterceptors: req.worldInfoInterceptorsSnapshot ?? [],
+            },
+          }),
+        ),
+        req.timeoutMs,
+        () => new ScriptTimeoutError(
+          `Script "${req.scriptName}" exceeded the ${req.timeoutMs / 1000}s execution timeout. ` +
+          `(Looking for await on a stalled Promise? Tighten error handling around your async calls.)`,
+        ),
+      );
+    } else {
     // CRIT-01 Layer 3: hard lexical rebindings layered on top of the
     // AsyncFunction parameter shadowing. Belt-and-braces against the
     // globalThis lockdown (Layer 2):
@@ -1008,19 +1876,6 @@ ${req.code}
     // post-result `proc.fail()` call below (gated on this specific
     // error class) terminates the child cleanly so Phase 10's restart
     // logic respawns a fresh one.
-    const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(
-        () =>
-          reject(
-            new ScriptTimeoutError(
-              `Script "${req.scriptName}" exceeded the ${req.timeoutMs / 1000}s execution timeout. ` +
-              `(Looking for await on a stalled Promise? Tighten error handling around your async calls.)`,
-            ),
-          ),
-        req.timeoutMs,
-      ),
-    );
-
     // Wrap the body invocation in `runIdContext.run(req.runId, …)` so
     // AsyncLocalStorage carries the runId through every async hop the
     // body initiates — including detached promises like un-awaited
@@ -1040,15 +1895,26 @@ ${req.code}
     // matches the fallback value. Handler-fire paths still override
     // via their own `runIdContext.run(handlerRunId, …)` to swap in
     // the per-fire runId.
-    value = await Promise.race([
+    value = await raceWithTimeout(
       runIdContext.run(req.runId, () =>
         fn(proxy.api, req.data, proxy.script, capturedConsole, z, safeFetch, undefined, undefined),
       ),
-      timeoutPromise,
-    ]);
+      req.timeoutMs,
+      () => new ScriptTimeoutError(
+        `Script "${req.scriptName}" exceeded the ${req.timeoutMs / 1000}s execution timeout. ` +
+        `(Looking for await on a stalled Promise? Tighten error handling around your async calls.)`,
+      ),
+    );
+    }
   } catch (err) {
     ok = false;
     error = serializeError(err);
+    // Observability — a body-run threw. Timeouts are counted separately at the proc.fail gate below
+    // (they also force a respawn), so exclude them here to keep the "errors" and "timeouts" signals distinct.
+    if (error.name !== 'ScriptTimeoutError') {
+      if (engineMode === 'quickjs') noteQuickjsRunError();
+      else noteAsyncfnRunError();
+    }
   } finally {
     // Phase 9d.3 lifecycle: do NOT drop the proxy from `activeProxies`
     // here. Handler closures registered during this run (macros, tools,
@@ -1108,8 +1974,12 @@ ${req.code}
   // a per-script process-isolation design lives in v2 if it becomes a
   // real-world pain point.
   if (!ok && error?.name === 'ScriptTimeoutError') {
+    // Observability — a body-run timed out (→ whole-child respawn). Count it per engine + TAG the engine
+    // into the proc.fail reason so the host-side respawn log distinguishes a quickjs hang from an asyncfn one.
+    if (engineMode === 'quickjs') noteQuickjsTimeout();
+    else noteAsyncfnTimeout();
     proc.fail(
-      `script-runner: async-timeout in "${req.scriptName}" (runId=${req.runId}); ` +
+      `script-runner: async-timeout in "${req.scriptName}" (engine=${engineMode}, runId=${req.runId}); ` +
       `terminating to prevent orphan-body resource leak`,
     );
   }
@@ -1324,6 +2194,7 @@ export function handleUnhandledRejection(
 /** @internal Test seam — reset the rate-limit map between tests. */
 export function _resetUnhandledRejectionRateStateForTests(): void {
   unhandledRejectionRateState.clear();
+  consoleRateState.clear();
 }
 
 // ─── Test-only helpers ──────────────────────────────────────────────────────
@@ -1336,16 +2207,75 @@ export function _resetUnhandledRejectionRateStateForTests(): void {
 
 /** @internal Test seam — seed an activeProxies entry. */
 export function _setActiveProxyForTests(runId: string, scriptId: string): void {
-  // The `proxy` field of `ActiveProxyEntry` isn't read by the
-  // unhandledRejection guard (only `scriptId` is) — use an empty
-  // object cast through `unknown` so the test seam doesn't have to
-  // construct a real ProxyHandle.
-  activeProxies.set(runId, { scriptId, proxy: {} as unknown as ProxyHandle });
+  // The unhandledRejection guard only reads `scriptId`, but the broadcast
+  // routers (`routeApiResponse` / `routeStreamChunk` / `routeStreamEnd`) and
+  // `handleScriptUnregister` call methods on EVERY entry's `proxy`. Seed a
+  // stub with no-op implementations of exactly those methods so a leaked
+  // entry can never crash routing — `activeProxies` is module-level state
+  // shared across test files, and bun's test-file order is filesystem-
+  // readdir-dependent (ext4 on CI vs NTFS locally), so this seam can outlive
+  // its own file and land in an e2e file's `routeApiResponse` sweep. A bare
+  // `{}` here is what produced the CI-only `entry.proxy.handleResponse is not
+  // a function` TypeError (which manifested as the F-L9 e2e timeout when the
+  // throw aborted the response sweep before the real proxy was reached).
+  const stubProxy = {
+    handleResponse:    () => {},
+    handleStreamChunk: () => {},
+    handleStreamEnd:   () => {},
+    cleanup:           () => {},
+  } as unknown as ProxyHandle;
+  const entry: ActiveProxyEntry = { scriptId, proxy: stubProxy };
+  activeProxies.set(runId, entry);
+  proxyByScriptId.set(scriptId, entry); // keep the fire-lookup index in lockstep with activeProxies
 }
 
 /** @internal Test seam — clear all activeProxies entries. */
 export function _clearActiveProxiesForTests(): void {
   activeProxies.clear();
+  proxyByScriptId.clear();
+  recentlyUnregistered.clear();
+}
+
+/**
+ * @internal Test seam (#11) — force the engine mode per-process for the parity
+ * harness (mirrors `_setActiveProxyForTests`). `runOne` reads it ahead of
+ * `req.engineMode`. Reset to `undefined` in `tests/_infra/setup.ts` (wired with
+ * P1 increment 2's parity tests) so it can't leak across test files.
+ */
+let testEngineMode: 'asyncfn' | 'quickjs' | undefined;
+export function _setEngineModeForTests(mode: 'asyncfn' | 'quickjs' | undefined): void {
+  testEngineMode = mode;
+}
+
+/** @internal Test seam — current activeProxies cardinality (leak measurement). */
+export function _activeProxyCountForTests(): number {
+  return activeProxies.size;
+}
+
+/** @internal Test seam — how many asyncfn user timers are currently tracked for a script (leak
+ *  measurement: a create+clear cycle must return to 0, not accumulate). */
+export function _asyncfnTimerCountForTests(scriptId: string): number {
+  return asyncfnTimerStore.get(scriptId)?.size ?? 0;
+}
+
+/** @internal Test seam — run `fn` inside a script's handler-fire AsyncLocalStorage context, so the patched
+ *  timers attribute to it. Exercises the post-unregister timer-refuse guard for the handler/timer-callback
+ *  path (scriptId resolved via ALS) without a full detached-async e2e. */
+export function _runInScriptContextForTests<T>(scriptId: string, fn: () => T): T {
+  return currentScriptIdContext.run(scriptId, fn);
+}
+
+/** @internal Test seam — run `fn` inside a body-run runId ALS context. With no matching activeProxies entry
+ *  this reproduces an orphaned body run (its proxy dropped on unregister while a detached async is pending),
+ *  exercising the orphan-runId timer-refuse guard. */
+export function _runInRunContextForTests<T>(runId: string, fn: () => T): T {
+  return runIdContext.run(runId, fn);
+}
+
+/** @internal Test seam — how many quickjs in-VM user timers are currently armed for a script (the
+ *  child-side Bun timers backing the VM's setTimeout/setInterval). Counterpart to the asyncfn seam. */
+export function _vmTimerCountForTests(scriptId: string): number {
+  return vmTimerStore.get(scriptId)?.size ?? 0;
 }
 
 // ─── Entry ──────────────────────────────────────────────────────────────────
@@ -1359,12 +2289,39 @@ export function _clearActiveProxiesForTests(): void {
 export default function (proc: SpindleBackendProcessContext): () => void {
   // CRIT-01 mitigation: install the sandbox lockdown BEFORE any user-code-
   // adjacent surface is wired (heartbeat timer, IPC message handler).
-  // Module-init captures (`_processOn` / `_hostFetch` / etc.) are already
+  // Module-init captures (`_processOn` etc.) are already
   // bound — see the "Sandbox lockdown" section above.
   installSandboxLockdown();
 
+  // #11 P5-2 — wire the quickjs in-VM timers to real child-side Bun timers. The VM's setTimeout/
+  // setInterval reach __hostScheduleTimer/__hostClearTimer (qjs-engine), which delegate here; the Bun
+  // timer's expiry fires the callback via fireVmTimer → fireHandlerInQuickJS. Captured `proc` is stable
+  // for the child's lifetime. No-op cost for asyncfn-only children (nothing calls the scheduler).
+  setVmTimerScheduler({
+    schedule: (scriptId, timerId, ms, repeat) => scheduleVmTimer(proc, scriptId, timerId, ms, repeat),
+    clear:    (scriptId, timerId) => clearVmTimer(scriptId, timerId),
+  });
+
+  // #11 cold-start-fallback — NOTE: no unconditional module pre-warm here. Instantiating the WASM module
+  // in EVERY child would waste ~106ms + tens of MB in asyncfn-only children (quickjs is default-off), so
+  // the module is warmed LAZILY by `warmupQuickJS()` at engine-selection in runOne — outside the run's
+  // timeout budget, and only when a run actually selects quickjs (zero cost under the asyncfn default).
+  // When engine-toggle-wiring makes quickjs the configured engine, THAT increment should add a startup
+  // pre-warm gated on the setting so the first quickjs run doesn't wait on the compile.
+
   let heartbeatTimer: ReturnType<typeof setInterval> | null = setInterval(() => {
     proc.heartbeat();
+    // #11 P7-3.1 — piggyback the quickjs per-script context idle-sweep on the existing heartbeat (the
+    // engine owns no timer). No-op under contextModel='shared' (the default today) — reaps idle,
+    // unpinned, non-mid-run per-script contexts + enforces POOL_CAP once per-script is the default.
+    // #11 observability — capture the (previously discarded) evicted count + log only NON-ZERO sweeps;
+    // the 5-min idle TTL makes reclaims naturally sparse, so this never firehoses. No per-eviction log.
+    const evicted = sweepIdleContexts();
+    if (evicted > 0) {
+      try {
+        console.info(`[script-runner] quickjs pool: evicted ${evicted} idle context(s), ${getEngineTelemetry().liveContexts} remain`);
+      } catch { /* console may be locked down */ }
+    }
   }, IDLE_HEARTBEAT_INTERVAL_MS);
 
   const cleanup = (): void => {
@@ -1416,7 +2373,7 @@ export default function (proc: SpindleBackendProcessContext): () => void {
         break;
 
       case 'stream-chunk':
-        routeStreamChunk(msg);
+        routeStreamChunk(proc, msg);
         break;
 
       case 'stream-end':
@@ -1439,7 +2396,7 @@ export default function (proc: SpindleBackendProcessContext): () => void {
         break;
 
       case 'script-unregister':
-        handleScriptUnregister(msg);
+        handleScriptUnregister(proc, msg);
         break;
 
       case 'script-state-sync':
@@ -1453,7 +2410,7 @@ export default function (proc: SpindleBackendProcessContext): () => void {
         break;
 
       case 'advanced-modal-dismissed':
-        handleAdvancedModalDismissed(msg);
+        handleAdvancedModalDismissed(proc, msg);
         break;
 
       case 'float-widget-position':
@@ -1481,6 +2438,10 @@ export default function (proc: SpindleBackendProcessContext): () => void {
           cpuUserUs:   cpu.user,
           cpuSystemUs: cpu.system,
           uptimeSec:   _processUptime(),
+          // #11 observability — fold this child's QuickJS-engine telemetry into the stats reply
+          // (rides the existing diagnostic-stats round-trip; no new IPC pair). Counters are 0 and the
+          // pool snapshot reads 'shared'/empty until quickjs is actually exercised on this child.
+          engine:      getEngineTelemetry(),
         });
         break;
       }

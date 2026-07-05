@@ -127,7 +127,6 @@ export const UserFilePicker: FC<UserFilePickerProps> = ({
             placeholder="name.md"
             value={name}
             onChange={(e) => setName(e.target.value)}
-            // eslint-disable-next-line jsx-a11y/no-autofocus
             autoFocus
           />
           <textarea

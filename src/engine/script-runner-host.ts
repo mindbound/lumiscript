@@ -124,6 +124,33 @@ export const HANDLE_KIND_LIFECYCLE: Readonly<Record<HandleKind, 'transient' | 'p
 };
 
 /**
+ * #11 security hardening — own-property gate for method resolution.
+ *
+ * The QuickJS engine (engineMode='quickjs') exposes a GENERIC in-VM `api`
+ * proxy: any dotted path `api.a.b.c(args)` becomes a host dispatch for the
+ * literal string "a.b.c". That makes THIS resolver the authorization boundary
+ * for the whole api surface, rather than a lookup safely behind the curated
+ * proxy object (which only ever exposed real methods). Without a gate, a user
+ * could name a prototype-chain member (`constructor`, `__proto__`, `toString`,
+ * `valueOf`, `hasOwnProperty`, ...) and have it resolve against the host api
+ * object — benign realm primitives today, but the wrong direction for the
+ * boundary that becomes the SOLE isolation layer on Windows at the P8 flip.
+ *
+ * Every curated namespace and method is an OWN property of a plain object
+ * literal (verified across the build*API factories in executor.ts and
+ * createDOMHandle/etc.), so requiring own-property membership at each segment
+ * rejects all prototype-chain access with zero impact on legitimate calls.
+ * This protects BOTH engines (the asyncfn path dispatches through here too).
+ */
+const FORBIDDEN_PATH_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function isOwnCallableSegment(target: unknown, key: string): boolean {
+  if (FORBIDDEN_PATH_SEGMENTS.has(key)) return false;
+  if (target == null) return false;
+  return Object.prototype.hasOwnProperty.call(target, key);
+}
+
+/**
  * Resolve a dotted method path against an api object. Returns the function
  * + the object to bind `this` to, or `null` if the path doesn't terminate
  * at a function.
@@ -149,12 +176,14 @@ function resolveMethodPath(
     if (target == null || typeof target !== 'object') return null;
     const part = parts[i];
     if (part === undefined) return null; // satisfy noUncheckedIndexedAccess
+    if (!isOwnCallableSegment(target, part)) return null; // #11 own-property gate
     target = (target as Record<string, unknown>)[part];
   }
 
   if (target == null || typeof target !== 'object') return null;
   const methodName = parts[parts.length - 1];
   if (methodName === undefined) return null;
+  if (!isOwnCallableSegment(target, methodName)) return null; // #11 own-property gate
   const fn = (target as Record<string, unknown>)[methodName];
   if (typeof fn !== 'function') return null;
 
@@ -209,10 +238,14 @@ function serializeReturnValue(value: unknown): { ok: true; value: unknown } | { 
   // the value contains something un-serializable (function, BigInt, etc.).
   if (typeof value === 'object') {
     try {
-      // structuredClone is the right primitive but might not be present
-      // on older Bun versions; JSON round-trip catches the most common
-      // failures (functions, undefined-in-array). Both work for primitives
-      // + plain data; both fail for object-with-methods (like a Collection).
+      // JSON round-trip catches the un-serializable shapes that DO throw:
+      // circular references and BigInt. NOTE it does NOT throw on function
+      // properties — JSON.stringify silently omits them — so an object with
+      // methods (a raw handle) would round-trip to a stripped, method-less
+      // object here. Callers that can return such an object (the handle-method
+      // path) must reject it BEFORE reaching this point (see
+      // dispatchHandleMethodCall's guard); the top-level path registers
+      // handle-returning methods as HandleRefs first.
       JSON.stringify(value);
       return { ok: true, value };
     } catch (err) {
@@ -282,9 +315,13 @@ export interface HandleHelpers {
  *   - **Handle-method call** (`req.targetHandle !== undefined`):
  *     resolve the handle via `helpers.resolveHandle`, invoke `req.method`
  *     on it (single-segment method name, not dotted). The result is
- *     always serialized as a value — Phase 4 doesn't yet have
- *     handle-method calls returning new handles. (Phase 5 will, e.g.,
- *     `Collection.iterator()` returning a CursorHandle.)
+ *     serialized as a value. No handle method returns a NEW handle on this
+ *     path today: the two HandleRef kinds (Collection, StyleHandle) return
+ *     plain data / void, and quickjs UI handles (DOMHandle etc.) are
+ *     string-id handles managed entirely in-VM (qjs-engine's ui._dom.*),
+ *     not via this HandleRef path. A method that DID return an object with
+ *     methods is rejected loudly (see the guard below) rather than silently
+ *     JSON-stripped.
  */
 export async function dispatchApiCall(
   req: ApiProxyRequest,
@@ -410,7 +447,13 @@ async function dispatchHandleMethodCall(
   }
 
   const methodName = req.method;
-  const fn = (target as Record<string, unknown>)[methodName];
+  // #11 own-property gate (see resolveMethodPath) — handle methods are own
+  // properties of plain object literals (createDOMHandle etc.), so reject any
+  // prototype-chain / forbidden segment before lookup. Same protection on the
+  // handle path as the top-level api path.
+  const fn = isOwnCallableSegment(target, methodName)
+    ? (target as Record<string, unknown>)[methodName]
+    : undefined;
   if (typeof fn !== 'function') {
     return {
       type:      'api-response',
@@ -433,6 +476,30 @@ async function dispatchHandleMethodCall(
       requestId,
       ok:        false,
       error:     serializeError(err),
+    };
+  }
+
+  // A handle method that returns an object bearing methods (a raw handle, or any object with function
+  // properties) can't cross IPC as a value: serializeReturnValue's JSON round-trip silently DROPS the
+  // functions (JSON.stringify omits them — it does not throw), handing the VM a dead, method-less object.
+  // No handle method returns one today — the two HandleRef kinds (Collection, StyleHandle) return plain
+  // data/void, and quickjs UI handles (DOMHandle etc.) use the separate in-VM string-id path
+  // (qjs-engine's ui._dom.* fires), NOT this HandleRef path. Guard so that if one is ever added it fails
+  // loudly (register it via the top-level handle-returning path) instead of corrupting silently.
+  if (
+    result !== null && typeof result === 'object' && !isHandleRef(result) &&
+    Object.values(result as Record<string, unknown>).some((v) => typeof v === 'function')
+  ) {
+    return {
+      type:      'api-response',
+      requestId,
+      ok:        false,
+      error: {
+        name: 'TypeError',
+        message:
+          `api-proxy host: handle method ${targetHandle.kind}.${methodName} returned an object with methods, ` +
+          `which cannot cross IPC. Handle-returning handle methods are not wired on this path.`,
+      },
     };
   }
 

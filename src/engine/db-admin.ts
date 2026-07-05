@@ -26,11 +26,12 @@
 
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
 
-import { jsonquery } from '@jsonquerylang/jsonquery';
+import { filterRecords } from './record-filter.js';
+import { dbCacheKey, invalidateDbCache } from './db-cache.js';
 import type { DbScope, DbRecord } from '../types/script.js';
 import { runExclusive } from './db-queue.js';
 import { emit as busEmit } from './broadcast-bus.js';
-import { DB_SIZE_MAX_BYTES, DbSizeExceededError } from './db-store.js';
+import { DB_SIZE_MAX_BYTES, DB_SIZE_WARN_BYTES, DbSizeExceededError } from './db-store.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -304,36 +305,12 @@ export async function inspectCollection(
   //      for typed matches like `filter(.hp > 50)`").
   const offset   = Math.max(0, opts.offset ?? 0);
 
-  const queryRaw = opts.jsonqueryFilter?.trim();
-  if (queryRaw) {
-    let queried: unknown;
-    try {
-      queried = jsonquery(records, queryRaw);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return { records: [], total: 0, error: `jsonquery error: ${msg}` };
-    }
-    if (!Array.isArray(queried)) {
-      return {
-        records: [],
-        total: 0,
-        error: `jsonquery error: expression must return an array of records (got ${queried === null ? 'null' : typeof queried})`,
-      };
-    }
-    const queriedRecords = queried as DbRecord[];
-    const rawLimit = opts.limit ?? queriedRecords.length;
-    const limit    = Math.max(0, rawLimit);
-    const slice    = queriedRecords.slice(offset, offset + limit);
-    return { records: slice, total: queriedRecords.length };
+  // Mode precedence + matching live in the shared `record-filter` module so the
+  // backend and the InspectModal client-side fast path can never diverge.
+  const { records: filtered, error } = filterRecords(records, opts);
+  if (error) {
+    return { records: [], total: 0, error };
   }
-
-  const needleRaw = opts.textFilter?.trim();
-  const needle = needleRaw ? needleRaw.toLowerCase() : '';
-  const filtered = needle
-    ? records.filter((r) => opts.deepFilter
-        ? matchesDeep(r, needle)
-        : matchesShallow(r, needle))
-    : records;
 
   const rawLimit = opts.limit ?? filtered.length;
   const limit    = Math.max(0, rawLimit);
@@ -565,50 +542,6 @@ export async function countCollection(
   }
 }
 
-// ─── Filter helpers ──────────────────────────────────────────────────────────
-
-/**
- * Shallow filter — top-level fields only, string-typed values, case-
- * insensitive substring match. The needle is expected lowercased by the
- * caller (we don't lowercase per-call to keep the inner loop tight on
- * large collections).
- */
-function matchesShallow(record: DbRecord, needle: string): boolean {
-  for (const v of Object.values(record)) {
-    if (typeof v === 'string' && v.toLowerCase().includes(needle)) return true;
-  }
-  return false;
-}
-
-/**
- * Deep filter — recursively walk objects + arrays, matching string
- * values at any depth. Bounded by the 50 MB collection size cap, which
- * indirectly bounds traversal depth + breadth. Returns early on first
- * match (no full traversal needed for hits).
- *
- * String-only by design; numbers / booleans aren't coerced. The mental
- * model is "filter searches string content; use jsonquery (planned)
- * for typed matches like `[hp > 50]`". Keeps parity with shallow.
- */
-function matchesDeep(value: unknown, needle: string): boolean {
-  if (typeof value === 'string') {
-    return value.toLowerCase().includes(needle);
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      if (matchesDeep(item, needle)) return true;
-    }
-    return false;
-  }
-  if (value !== null && typeof value === 'object') {
-    for (const v of Object.values(value)) {
-      if (matchesDeep(v, needle)) return true;
-    }
-    return false;
-  }
-  return false;
-}
-
 // ─── Record mutations (admin-side) ───────────────────────────────────────────
 
 /**
@@ -702,12 +635,28 @@ export async function updateRecord(
     };
     records[idx] = merged;
 
-    // Persist with the same size guard `DbStore.persist()` enforces —
-    // admin mutations should not be able to push a collection past the
-    // hard cap any more than script-side ones can.
+    // Persist with the same size governance `DbStore.persist()` enforces —
+    // admin mutations should neither push a collection past the hard cap
+    // (throw) nor silently skip the soft-warn the script-side path emits.
     const serialized = JSON.stringify(records, null, 2);
     if (serialized.length > DB_SIZE_MAX_BYTES) {
       return { success: false, error: new DbSizeExceededError(serialized.length).message };
+    }
+
+    const desc = broadcastDescriptorFor(path);
+
+    // C12-07 — mirror the script-side soft-warn (DbStore.persist → onSizeWarn
+    // → api/db.ts makeSizeWarn). An admin edit that grows a collection past the
+    // 10 MB soft threshold now emits the same `size-warning` broadcast scripts
+    // get, instead of crossing it unobserved. (deleteRecord needs no guard — a
+    // delete only shrinks the collection, so it can't cross either threshold.)
+    if (serialized.length > DB_SIZE_WARN_BYTES && desc) {
+      busEmit('ls:collection:size-warning', {
+        name:     desc.name,
+        scope:    desc.scope,
+        scriptId: ADMIN_BROADCAST_SCRIPT_ID,
+        bytes:    serialized.length,
+      });
     }
 
     try {
@@ -715,8 +664,9 @@ export async function updateRecord(
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : String(err) };
     }
+    // Out-of-band write (bypasses DbStore) — drop its cache for this collection.
+    invalidateDbCache(dbCacheKey(userId, path));
 
-    const desc = broadcastDescriptorFor(path);
     if (desc) {
       busEmit('ls:collection:updated', {
         name:       desc.name,
@@ -764,6 +714,8 @@ export async function deleteRecord(
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : String(err) };
     }
+    // Out-of-band write (bypasses DbStore) — drop its cache for this collection.
+    invalidateDbCache(dbCacheKey(userId, path));
     const desc = broadcastDescriptorFor(path);
     if (desc) {
       busEmit('ls:collection:deleted', {

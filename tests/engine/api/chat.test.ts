@@ -3,6 +3,10 @@ import { buildChatAPI } from '../../../src/engine/api/chat.js';
 import { createTestDeps } from '../../_infra/mock-deps.js';
 import { listAll, clearAll as clearInjections } from '../../../src/engine/injection-store.js';
 import { listAll as listProcessorEntries } from '../../../src/engine/message-content-processor-registry.js';
+import {
+  listByScript as listTagHandlers,
+  countByScriptId as countTagHandlers,
+} from '../../../src/engine/message-tag-handler-registry.js';
 let mockSpindle: any;
 
 beforeEach(() => {
@@ -525,6 +529,29 @@ describe('isMessageHidden', () => {
   });
 });
 
+// ─── setStyleMode ─────────────────────────────────────────────────────────────
+
+describe('setStyleMode', () => {
+  test('delegates to spindle.chat.setStyleMode with the active chatId + mode', async () => {
+    const api = buildApi();
+    await api.setStyleMode('extension-relaxed');
+    expect(mockSpindle.chat.setStyleMode).toHaveBeenCalledWith('test-chat-id', 'extension-relaxed');
+  });
+
+  test('is gated on app_manipulation, not chat_mutation', () => {
+    // Grant everything EXCEPT app_manipulation — it must still reject, proving it
+    // rides the app-shell permission (it relaxes CSS containment) rather than the
+    // chat_mutation gate its sibling message methods use.
+    const api = buildApi({ hasPerm: (p) => p !== 'app_manipulation' });
+    expect(() => api.setStyleMode('bounded')).toThrow('PERMISSION_DENIED');
+  });
+
+  test('throws when no active chat', () => {
+    const api = buildApi({ activeContext: { chatId: null, characterId: null } });
+    expect(() => api.setStyleMode('bounded')).toThrow('no active chat');
+  });
+});
+
 // ─── registerContentProcessor ───────────────────────────────────────────────
 //
 // The thin layer above `message-content-processor-registry`. Registry-internal
@@ -623,5 +650,62 @@ describe('listContentProcessors', () => {
   test('does not require chat_mutation permission (un-gated diagnostic)', () => {
     const api = buildApi({ hasPerm: () => false });
     expect(() => api.listContentProcessors()).not.toThrow();
+  });
+});
+
+// ─── onMessageTag ────────────────────────────────────────────────────────────
+
+describe('onMessageTag', () => {
+  const feCalls = () => ((mockSpindle.sendToFrontend as any).mock.calls as any[][]).map((c) => c[0]);
+
+  test('registers in the backend registry + sends the FE register message (id stripped from options)', () => {
+    const api = buildApi({ script: { id: 'sX', name: 'SX' } });
+    // The host-dispatcher threads the child handlerId in via `options.id`.
+    const off = api.onMessageTag('dice', () => {}, { attrs: { type: 'd20' }, id: 'h1' } as any);
+    expect(typeof off).toBe('function');
+
+    const list = listTagHandlers('sX');
+    expect(list).toHaveLength(1);
+    expect(list[0]!.id).toBe('h1');         // registry keyed by the threaded id
+    expect(list[0]!.tagName).toBe('dice');
+
+    const reg = feCalls().find((m) => m.type === 'ls_tag_interceptor_register');
+    expect(reg).toBeDefined();
+    expect(reg.handlerId).toBe('h1');
+    expect(reg.tagName).toBe('dice');
+    expect(reg.options).toEqual({ attrs: { type: 'd20' } }); // internal `id` stripped
+    off();
+  });
+
+  test('unsubscribe removes the registry entry + sends the FE unregister', () => {
+    const api = buildApi({ script: { id: 'sX', name: 'SX' } });
+    const off = api.onMessageTag('dice', () => {}, { id: 'h1' } as any);
+    expect(countTagHandlers('sX')).toBe(1);
+    (mockSpindle.sendToFrontend as any).mockClear();
+    off();
+    expect(countTagHandlers('sX')).toBe(0);
+    expect(feCalls()).toContainEqual({ type: 'ls_tag_interceptor_unregister', scriptId: 'sX', handlerId: 'h1' });
+  });
+
+  test('unsubscribe is idempotent — no second FE unregister', () => {
+    const api = buildApi({ script: { id: 'sX', name: 'SX' } });
+    const off = api.onMessageTag('dice', () => {}, { id: 'h1' } as any);
+    off();
+    (mockSpindle.sendToFrontend as any).mockClear();
+    off(); // already gone
+    expect(feCalls().some((m) => m.type === 'ls_tag_interceptor_unregister')).toBe(false);
+  });
+
+  test('with no options, registers with no FE-facing options', () => {
+    const api = buildApi({ script: { id: 'sX', name: 'SX' } });
+    // Mirrors the host-dispatcher passing only `{ id }` when the script gave none.
+    api.onMessageTag('dice', () => {}, { id: 'h1' } as any);
+    const reg = feCalls().find((m) => m.type === 'ls_tag_interceptor_register');
+    expect(reg.options).toBeUndefined();
+  });
+
+  test('requires chat_mutation permission', () => {
+    const api = buildApi({ hasPerm: () => false });
+    expect(() => api.onMessageTag('dice', () => {})).toThrow();
   });
 });

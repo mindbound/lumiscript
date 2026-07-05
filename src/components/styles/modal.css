@@ -374,6 +374,15 @@
   font-style: italic;
 }
 
+/* Filter-match highlight (CSS Custom Highlight API) — painted over the record
+   bodies as a range overlay, WITHOUT touching their cached/lazily-built DOM, so
+   marking the active needle never re-parses innerHTML or invalidates the body
+   cache. Inert (no visual change) where the browser lacks the API. */
+::highlight(ls-inspect-match) {
+  background-color: rgba(250, 204, 21, 0.85);
+  color: #1a1a1a;
+}
+
 /* ── Stats view (Inspect modal → Stats tab) ───────────────────────────────
  *
  * Per-field aggregate cards. Grid layout that wraps responsively as the
@@ -811,6 +820,47 @@
   height: auto;   /* override the modal-card full-height default */
   max-height: 90vh;
 }
+.ls-confirm-card.ls-confirm-card-wide {
+  width: min(760px, 94vw);
+}
+
+/* Lisa "Apply to script" diff preview — rendered inside the update-confirm
+   dialog. Portal-mounted under <body>, so colors are hard-coded (no --lumiverse
+   token cascade). */
+.ls-apply-diff {
+  margin: 10px 0;
+  max-height: 46vh;
+  overflow: auto;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.22);
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.ls-apply-diff-row {
+  display: flex;
+  white-space: pre;
+  padding: 0 8px;
+}
+.ls-apply-diff-gutter {
+  flex: 0 0 1.2em;
+  text-align: center;
+  opacity: 0.65;
+  user-select: none;
+}
+.ls-apply-diff-text { flex: 1 1 auto; }
+.ls-apply-diff-add { background: rgba(70, 200, 120, 0.16); color: rgb(178, 230, 188); }
+.ls-apply-diff-del { background: rgba(246, 130, 130, 0.16); color: rgb(248, 184, 184); }
+.ls-apply-diff-ctx { color: rgba(255, 255, 255, 0.6); }
+.ls-apply-diff-gap {
+  padding: 1px 10px;
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(255, 255, 255, 0.4);
+  font-style: italic;
+}
+.ls-apply-diff-stat-add { color: rgb(120, 210, 150); font-weight: 600; }
+.ls-apply-diff-stat-del { color: rgb(246, 150, 150); font-weight: 600; }
 
 .ls-confirm-body {
   display: flex;

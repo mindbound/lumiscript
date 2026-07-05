@@ -33,14 +33,15 @@
  * observe the fan-out.
  */
 
-import { describe, test, expect } from 'bun:test';
+import { describe, test, expect, afterEach } from 'bun:test';
 import {
   dispatchRunScript,
 } from '../../src/script-runner/host-dispatcher.js';
+import { _setEngineModeForTests } from '../../src/script-runner/child-entry.js';
 import { setupE2E } from '../_infra/script-runner-fixture.js';
 import { emit as busEmit } from '../../src/engine/broadcast-bus.js';
 import type { Script } from '../../src/types/script.js';
-import type { BroadcastFireMessage } from '../../src/types/script-runner-ipc.js';
+import type { BroadcastFireMessage, BroadcastSubscribeMessage } from '../../src/types/script-runner-ipc.js';
 import type { ScriptRunnerMockIpc } from '../_infra/script-runner-mock-ipc.js';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -154,5 +155,62 @@ describe('e2e: broadcast subscribe → emit → forward → fire', () => {
     const fire = afterFires[afterFires.length - 1]!;
     expect(fire.scriptId).toBe('script-A');
     expect(fire.payload).toEqual({ from: 'B' });
+  });
+});
+
+// ─── #11 P5 inc3b — the same round-trip under the QuickJS isolate engine ───────
+//
+// Proves the broadcast path reaches parity end-to-end when the body runs in the
+// VM: the in-VM `api.broadcast.on` stores the closure in the engine's SEPARATE
+// vmBroadcastHandles registry + sends the broadcast-subscribe IPC; busEmit walks
+// the parent forwarder -> broadcast-fire IPC -> child's handleBroadcastFire routes
+// by hasVmBroadcast -> fireVmBroadcast actually INVOKES the VM closure (we observe
+// its awaited api.* call round-trip to the parent, not just the fire IPC delivery).
+
+describe('#11 P5 inc3b e2e: quickjs broadcast subscribe → emit → fire-in-VM', () => {
+  afterEach(() => { _setEngineModeForTests(undefined); });
+
+  test('busEmit forwards to the child and fires the in-VM handler (its api.* call round-trips)', async () => {
+    const { ipc } = await setupE2E();
+    _setEngineModeForTests('quickjs');
+
+    const subResult = await dispatchRunScript(
+      makeScript('qjs-bc', `
+        api.broadcast.on('bc-evt', async (payload) => {
+          await api.scriptStorage.set('bc-last', payload.tag);
+        });
+        return 'subscribed';
+      `),
+      makeRequest(),
+    );
+    expect(subResult.ok).toBe(true);
+
+    // The subscribe IPC reached the parent (registered a real bus forwarder).
+    const sub = ipc.parentInbox().find((m): m is BroadcastSubscribeMessage => {
+      const r = m as { type?: unknown; event?: unknown };
+      return typeof m === 'object' && m !== null && r.type === 'broadcast-subscribe' && r.event === 'bc-evt';
+    });
+    expect(sub).toBeDefined();
+    expect(sub!.subId).toMatch(/^sub:/);
+
+    const beforeFires = broadcastFires(ipc).length;
+    busEmit('bc-evt', { tag: 'hello-bc' });
+    await sleep(50);
+
+    // The broadcast-fire IPC reached the child with the payload.
+    const afterFires = broadcastFires(ipc);
+    expect(afterFires.length).toBe(beforeFires + 1);
+    const fire = afterFires[afterFires.length - 1]!;
+    expect(fire.scriptId).toBe('qjs-bc');
+    expect(fire.payload).toEqual({ tag: 'hello-bc' });
+
+    // The handler actually RAN in the VM: its scriptStorage.set round-tripped to
+    // the parent (distinguishes fireVmBroadcast invoking the closure from mere IPC
+    // delivery). The mock's parentInbox records child→parent api-requests.
+    const apiReq = ipc.parentInbox().find((m) => {
+      const r = m as { type?: unknown; method?: unknown };
+      return typeof m === 'object' && m !== null && r.type === 'api-request' && r.method === 'scriptStorage.set';
+    });
+    expect(apiReq).toBeDefined();
   });
 });

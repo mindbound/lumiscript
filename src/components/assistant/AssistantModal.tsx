@@ -23,10 +23,11 @@
  * portal-modal CSS-token gotcha.
  */
 
-import { FC, useState, useEffect, useRef, useMemo, KeyboardEvent, ChangeEvent } from 'react';
+import { FC, useState, useEffect, useRef, useMemo, useCallback, memo, KeyboardEvent, ChangeEvent } from 'react';
 import { createPortal } from 'react-dom';
-import { Send, X, Loader2, Coffee, Square, Brain, ChevronRight, MessageSquarePlus, Pencil, Trash2, Check, Download, RotateCcw, Code2, BookMarked, RefreshCw, AlertTriangle, NotebookPen, Paperclip, FileText } from 'lucide-react';
+import { Send, X, Loader2, Coffee, Square, Brain, ChevronRight, MessageSquarePlus, Pencil, Trash2, Check, Download, RotateCcw, Code2, BookMarked, RefreshCw, AlertTriangle, NotebookPen, Paperclip, FileText, FoldVertical } from 'lucide-react';
 import type { BackendToFrontend, FrontendToBackend } from '../../types/messages.js';
+import { ContextBreakdownPopover, type ContextBreakdown } from './ContextBreakdownPopover.js';
 import type { Script } from '../../types/script.js';
 import type { AssistantThreadIndexEntry } from '../../assistant/types.js';
 import { historyToDisplay, formatTokens, formatRelativeTime, type DisplayMessage } from './assistant-logic.js';
@@ -37,6 +38,8 @@ import { ConfirmDialog } from '../common/ConfirmDialog.js';
 import { MemoryPanel } from './MemoryPanel.js';
 import type { MemoryNote } from '../../engine/assistant-memory.js';
 import { UserFilePicker, type PickerFile } from './UserFilePicker.js';
+import { computeCodeDiff } from './code-diff.js';
+import { ATTACHED_SCRIPT_CODE_CAP } from '../../assistant/types.js';
 import { userFileDisplayName } from '../../assistant/user-files.js';
 
 /**
@@ -46,6 +49,13 @@ import { userFileDisplayName } from '../../assistant/user-files.js';
  * THROTTLE_MS, capping the parser cost to ~20 invocations/second.
  */
 const STREAM_RENDER_THROTTLE_MS = 50;
+
+/**
+ * Distance (px) from the bottom of the transcript within which the view is
+ * still treated as "pinned" — new content auto-scrolls. Past it (the user
+ * scrolled up to read history) their scroll position is left alone.
+ */
+const SCROLL_PIN_THRESHOLD_PX = 64;
 
 /**
  * Display name shown on assistant bubbles' role header. Hard-coded to
@@ -77,6 +87,12 @@ interface AssistantModalProps {
    * can still switch connections per-session inside the modal.
    */
   defaultConnectionId: string;
+  /**
+   * Token budget for the context-fullness gauge denominator (from
+   * `LumiScriptSettings.assistantContextTokens`). The gauge shows the last
+   * turn's prompt tokens as a fraction of this.
+   */
+  contextTokens: number;
   onClose: () => void;
   onBackendMessage: (handler: (msg: unknown) => void) => () => void;
   sendToBackend: (msg: FrontendToBackend) => void;
@@ -94,6 +110,7 @@ interface ConnectionOption {
 export const AssistantModal: FC<AssistantModalProps> = ({
   scripts,
   defaultConnectionId,
+  contextTokens,
   onClose,
   onBackendMessage,
   sendToBackend,
@@ -110,6 +127,14 @@ export const AssistantModal: FC<AssistantModalProps> = ({
   const reasoningRef = useRef('');
   const [isGenerating, setIsGenerating] = useState(false);
   const [input, setInput] = useState('');
+  // Inline edit of the last user message (null = not editing). When set, the
+  // last user bubble renders as an editable textarea; saving resends the edited
+  // content as a fresh turn (see handleEditResend).
+  const [editDraft, setEditDraft] = useState<string | null>(null);
+  // Bumped each time a thread's messages are (re)loaded. Drives the
+  // jump-to-bottom-on-load effect — keyed on this rather than messages.length so
+  // switching to an equal-length thread still scrolls to the tail.
+  const [loadNonce, setLoadNonce] = useState(0);
   // @-mention / attached-script context. `attachedScriptIds` are the chips above
   // the composer — CONVERSATION-SCOPED: they persist with the thread (restored on
   // reload/switch from assistant_thread_loaded, synced to the backend on
@@ -185,6 +210,20 @@ export const AssistantModal: FC<AssistantModalProps> = ({
     completionTokens: 0,
     totalTokens: 0,
   });
+  // Context-fullness gauge: the last turn's prompt-token count (provider or
+  // estimate), shown as a fraction of the configured `contextTokens` budget.
+  // Set on turn completion/abort AND restored from the persisted thread on load
+  // (so the gauge shows immediately, not blank until the next turn). null hides it.
+  const [contextFill, setContextFill] = useState<{ promptTokens: number; estimated: boolean } | null>(null);
+  // Manual "Compact now" in flight — disables the button + composer until the
+  // backend returns assistant_compacted.
+  const [compacting, setCompacting] = useState(false);
+  // Context-breakdown popover (click the gauge): open state + the fetched
+  // per-segment estimates (null until the on-demand request resolves).
+  const [breakdownOpen, setBreakdownOpen] = useState(false);
+  const [contextBreakdown, setContextBreakdown] = useState<ContextBreakdown | null>(null);
+  const [breakdownFailed, setBreakdownFailed] = useState(false);
+  const gaugeWrapRef = useRef<HTMLSpanElement>(null);
   // Threads (multi-thread management).
   const [threads, setThreads] = useState<AssistantThreadIndexEntry[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
@@ -207,13 +246,24 @@ export const AssistantModal: FC<AssistantModalProps> = ({
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  // Whether the transcript is scrolled near the bottom (updated on real user
+  // scroll, not during streaming — see handleTranscriptScroll). Gates
+  // auto-scroll so a stream doesn't yank the user back down while they read.
+  const isPinnedToBottomRef = useRef(true);
 
-  // Schedule throttled flush of the streaming ref into React state.
+  // Schedule a throttled flush of the streaming refs into React state. A single
+  // timer drives BOTH the content and the reasoning bubble: tokens accumulate
+  // into refs at full IPC speed, but the React state that re-runs the markdown
+  // + Prism render only updates every STREAM_RENDER_THROTTLE_MS. Flushing
+  // reasoning here (rather than calling setStreamingReasoning per token) caps
+  // reasoning-driven re-renders to the same ~20Hz — thinking models otherwise
+  // emit a reasoning token stream that forced a full-modal re-render per token.
   const scheduleStreamFlush = () => {
     if (streamThrottleRef.current !== null) return;
     streamThrottleRef.current = setTimeout(() => {
       streamThrottleRef.current = null;
       setStreaming(streamingRef.current);
+      setStreamingReasoning(reasoningRef.current);
     }, STREAM_RENDER_THROTTLE_MS);
   };
 
@@ -235,6 +285,20 @@ export const AssistantModal: FC<AssistantModalProps> = ({
       }
     };
   }, []);
+
+  // Abort an in-flight turn if the modal closes mid-stream. Otherwise the
+  // backend keeps generating (and streaming) to an unmounted frontend — wasted
+  // model spend + WebSocket traffic with nothing rendering it. A ref mirrors
+  // isGenerating so the unmount cleanup reads the live value, not a stale one.
+  const isGeneratingRef = useRef(false);
+  isGeneratingRef.current = isGenerating;
+  useEffect(() => {
+    return () => {
+      if (isGeneratingRef.current) {
+        sendToBackend({ type: 'assistant_abort' });
+      }
+    };
+  }, [sendToBackend]);
 
   // Subscribe to backend messages for the lifetime of the modal.
   useEffect(() => {
@@ -266,7 +330,7 @@ export const AssistantModal: FC<AssistantModalProps> = ({
           break;
         case 'assistant_reasoning':
           reasoningRef.current += msg.token;
-          setStreamingReasoning(reasoningRef.current);
+          scheduleStreamFlush();
           break;
         case 'assistant_tool_call':
           setMessages((prev) => [
@@ -296,6 +360,7 @@ export const AssistantModal: FC<AssistantModalProps> = ({
           if (msg.usage) {
             const u = msg.usage;
             setLastTurnUsage(u);
+            setContextFill({ promptTokens: u.occupancyTokens ?? u.promptTokens, estimated: u.estimated ?? false });
             setTotalUsage((prev) => ({
               promptTokens:     prev.promptTokens     + u.promptTokens,
               completionTokens: prev.completionTokens + u.completionTokens,
@@ -325,6 +390,7 @@ export const AssistantModal: FC<AssistantModalProps> = ({
           if (msg.usage) {
             const u = msg.usage;
             setLastTurnUsage(u);
+            setContextFill({ promptTokens: u.occupancyTokens ?? u.promptTokens, estimated: u.estimated ?? false });
             setTotalUsage((prev) => ({
               promptTokens:     prev.promptTokens     + u.promptTokens,
               completionTokens: prev.completionTokens + u.completionTokens,
@@ -351,18 +417,52 @@ export const AssistantModal: FC<AssistantModalProps> = ({
           break;
         case 'assistant_thread_loaded':
           setActiveThreadId(msg.threadId);
-          setMessages(historyToDisplay(msg.messages, msg.appliedEvents));
+          setMessages(historyToDisplay(msg.messages, msg.appliedEvents, msg.compactedThrough));
+          setLoadNonce((n) => n + 1);
           clearStreamingState();
           setStreamingReasoning('');
           reasoningRef.current = '';
           setIsGenerating(false);
-          setLastTurnUsage(null);
-          setTotalUsage({ promptTokens: 0, completionTokens: 0, totalTokens: 0 });
+          // Restore the persisted usage strip (last turn + lifetime total) so it
+          // survives thread switches, like the gauge — not a per-session reset.
+          setLastTurnUsage(msg.lastTurnUsage ?? null);
+          setTotalUsage(msg.totalUsage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 });
+          // Restore the persisted context-fullness gauge (undefined → hidden).
+          setContextFill(
+            msg.lastPromptTokens !== undefined
+              ? { promptTokens: msg.lastPromptTokens, estimated: msg.lastPromptEstimated ?? false }
+              : null,
+          );
+          // The breakdown is thread-specific + on-demand — close it on a switch
+          // so a stale breakdown can't linger against the new thread.
+          setBreakdownOpen(false);
+          setContextBreakdown(null);
           setError(null);
           // Restore this thread's attached-script + file chips (empty for new threads).
           setAttachedScriptIds(msg.contextScriptIds);
           setAttachedFilePaths(msg.contextFilePaths);
           setMention(null);
+          break;
+        case 'assistant_compacted': {
+          const wasManual = compacting;
+          setCompacting(false);
+          if (msg.ok && msg.occupancyTokens !== undefined) {
+            // Gauge drops to the new (estimated) occupancy. For auto-compaction,
+            // this turn's assistant_completed then refines it to the real number.
+            setContextFill({ promptTokens: msg.occupancyTokens, estimated: msg.estimated ?? false });
+            // Manual compaction has no streaming turn to signal "done" — a
+            // transient toast confirms it (the "compacted here" divider appears on
+            // the next reload). Auto-compaction's signal is the gauge drop itself.
+            if (wasManual) setApplyToast({ kind: 'success', text: 'Context compacted — older messages summarized.' });
+          } else if (!msg.ok && msg.error) {
+            // Transient toast, not the sticky error banner — these are benign
+            // ("nothing to compact", "busy", "conversation changed").
+            setApplyToast({ kind: 'error', text: msg.error });
+          }
+          break;
+        }
+        case 'assistant_context_breakdown':
+          setContextBreakdown({ corpus: msg.corpus, memory: msg.memory, chat: msg.chat, attachments: msg.attachments });
           break;
         case 'user_files':
           setUserFiles(msg.files);
@@ -448,12 +548,55 @@ export const AssistantModal: FC<AssistantModalProps> = ({
     sendToBackend({ type: 'request_assistant_threads' });
   }, [sendToBackend]);
 
-  // Auto-scroll to the latest content.
-  useEffect(() => {
+  // Recompute the "pinned to bottom" flag on real user scroll. Cheap — fires
+  // only on actual scroll events, never on the ~20Hz streaming flush.
+  const handleTranscriptScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
-    el.scrollTop = el.scrollHeight;
+    isPinnedToBottomRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_PIN_THRESHOLD_PX;
+  };
+
+  // Auto-scroll to the latest content — but only while pinned near the bottom,
+  // and deferred to an animation frame so the scrollHeight read happens at
+  // paint time instead of forcing a synchronous reflow on every streaming flush.
+  useEffect(() => {
+    if (!isPinnedToBottomRef.current) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    const raf = requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+    });
+    return () => cancelAnimationFrame(raf);
   }, [messages.length, streaming]);
+
+  // Jump to the bottom when a thread (re)loads. Separate from the streaming
+  // auto-scroll above, and keyed on loadNonce (NOT messages.length) so it (a)
+  // also fires when switching to an equal-length thread and (b) never runs on a
+  // per-streaming-flush render — so it adds no streaming-perf cost. A single
+  // scrollTop=scrollHeight lands SHORT because content-visibility reports
+  // off-screen bubbles at their 160px estimate until they enter the viewport;
+  // re-pinning across a few frames lets scrollHeight settle to the true tail.
+  // Stops once the height is stable for two frames (or a small frame cap), so it
+  // costs nothing once the thread has landed.
+  useEffect(() => {
+    if (loadNonce === 0) return;
+    isPinnedToBottomRef.current = true;
+    const el = scrollRef.current;
+    if (!el) return;
+    let raf = 0;
+    let frames = 0;
+    let stableFor = 0;
+    let prevHeight = -1;
+    const settle = () => {
+      el.scrollTop = el.scrollHeight;
+      if (el.scrollHeight === prevHeight) stableFor += 1;
+      else { stableFor = 0; prevHeight = el.scrollHeight; }
+      if (stableFor < 2 && frames++ < 20) raf = requestAnimationFrame(settle);
+    };
+    raf = requestAnimationFrame(settle);
+    return () => cancelAnimationFrame(raf);
+  }, [loadNonce]);
 
   // Apply-toast auto-dismiss — success fades after 4s, errors stick longer
   // (8s) since the user may need to read the error message.
@@ -481,6 +624,8 @@ export const AssistantModal: FC<AssistantModalProps> = ({
       return;
     }
     setError(null);
+    // A fresh send always re-pins to the bottom even if the user had scrolled up.
+    isPinnedToBottomRef.current = true;
     sendToBackend({
       type: 'assistant_send',
       content,
@@ -605,6 +750,46 @@ export const AssistantModal: FC<AssistantModalProps> = ({
     setIsGenerating(true);
   };
 
+  // ── Edit & resend the last user message ─────────────────────────────────────
+  // Offered only when the last user turn already has an assistant reply (a
+  // completed, persisted exchange); the failed-turn case is covered by Retry.
+  const canEditLast =
+    !isGenerating && editDraft === null && lastUserIdx !== -1 && lastUserIdx < lastAssistantIdx;
+
+  const startEditLast = useCallback(() => {
+    setEditDraft(messages[lastUserIdx]?.content ?? '');
+  }, [messages, lastUserIdx]);
+
+  const handleEditResend = () => {
+    if (editDraft === null || isGenerating) return;
+    const content = editDraft.trim();
+    if (!content) return;
+    if (!connectionId) {
+      setError('Pick a connection before resending — see the dropdown at the top of the modal.');
+      return;
+    }
+    // Optimistically replace the last user bubble's content and drop everything
+    // after it (its assistant reply / tool rows); the backend trims the matching
+    // history and regenerates a fresh reply.
+    setMessages((prev) => {
+      const next = prev.slice(0, lastUserIdx + 1);
+      next[lastUserIdx] = { ...next[lastUserIdx]!, content };
+      return next;
+    });
+    setEditDraft(null);
+    setError(null);
+    isPinnedToBottomRef.current = true;
+    sendToBackend({
+      type: 'assistant_send',
+      content,
+      connectionId,
+      editLast: true,
+      ...(attachedScriptIds.length > 0 ? { contextScriptIds: attachedScriptIds } : {}),
+      ...(attachedFilePaths.length > 0 ? { contextFilePaths: attachedFilePaths } : {}),
+    });
+    setIsGenerating(true);
+  };
+
   const handleNewThread = () => {
     if (isGenerating) return;
     sendToBackend({ type: 'assistant_new_thread' });
@@ -656,17 +841,66 @@ export const AssistantModal: FC<AssistantModalProps> = ({
     sendToBackend({ type: 'assistant_abort' });
   };
 
+  const handleCompact = () => {
+    if (isGenerating || compacting) return;
+    if (!connectionId) {
+      setError('Pick a connection before compacting — see the dropdown at the top of the modal.');
+      return;
+    }
+    setCompacting(true);
+    sendToBackend({ type: 'assistant_compact', connectionId });
+  };
+
+  // Toggle the context-breakdown popover; fetch fresh estimates on open.
+  const toggleBreakdown = () => {
+    setBreakdownOpen((open) => {
+      if (open) return false;
+      setContextBreakdown(null);
+      setBreakdownFailed(false);
+      sendToBackend({ type: 'request_context_breakdown' });
+      return true;
+    });
+  };
+  // Close the breakdown popover on a click outside it.
+  useEffect(() => {
+    if (!breakdownOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (gaugeWrapRef.current && !gaugeWrapRef.current.contains(e.target as Node)) setBreakdownOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [breakdownOpen]);
+  // Don't spin forever — surface a fallback if the estimate doesn't arrive
+  // (covers the rare case where the backend has no active thread/user to reply).
+  useEffect(() => {
+    if (!breakdownOpen || contextBreakdown) return;
+    const t = setTimeout(() => setBreakdownFailed(true), 6000);
+    return () => clearTimeout(t);
+  }, [breakdownOpen, contextBreakdown]);
+
   /** "Apply to script" — invoked from the code-block apply button via the
    *  AssistantApplyContext. Sends the raw code + fence-language hint;
    *  backend classifies trigger vs library, generates a name, prepends a
    *  provenance header, and creates the script. Result surfaces via
    *  `assistant_apply_success` / `assistant_apply_error`. */
-  const applyContextValue = {
-    attachedScripts: attachedScripts.map((s) => ({ id: s.id, name: s.name, type: s.type })),
-    onApply: (code: string, languageHint: string | undefined, targetScriptId?: string) => {
+  // Stable {id,name,type} projection of the attached scripts, KEYED ON THE VALUE
+  // SIGNATURE rather than the `attachedScripts` array identity. `attachedScripts`
+  // gets a fresh identity whenever the `scripts` prop does — e.g. an unrelated
+  // script autosave/edit pushes a new list while Lisa is open — which would
+  // otherwise churn `applyContextValue` below and re-highlight every code block
+  // in the transcript (the same Prism storm the streaming memo fixed, just
+  // triggered by script edits). The signature only changes when an attached
+  // script's id/name/type actually changes, so the context value stays stable.
+  const applyScriptsSig = JSON.stringify(attachedScripts.map((s) => [s.id, s.name, s.type]));
+  const applyScripts = useMemo(
+    () => attachedScripts.map((s) => ({ id: s.id, name: s.name, type: s.type })),
+    [applyScriptsSig],
+  );
+  const onApply = useCallback(
+    (code: string, languageHint: string | undefined, targetScriptId?: string) => {
       if (targetScriptId) {
         // Updating an existing script overwrites its code — gate on a confirm.
-        const target = attachedScripts.find((s) => s.id === targetScriptId);
+        const target = applyScripts.find((s) => s.id === targetScriptId);
         setPendingApply({
           code,
           languageHint,
@@ -681,7 +915,30 @@ export const AssistantModal: FC<AssistantModalProps> = ({
         });
       }
     },
-  };
+    [applyScripts, sendToBackend],
+  );
+  // Memoized so the Provider value identity is STABLE across re-renders — both
+  // streaming-tick re-renders AND unrelated `scripts`-prop churns (see above). A
+  // fresh value forces every AssistantApplyContext consumer (every fenced code
+  // block's apply button) to re-render, piercing MarkdownContent's `memo` and
+  // re-running Prism highlighting over every code block in the whole transcript.
+  const applyContextValue = useMemo(
+    () => ({ attachedScripts: applyScripts, onApply }),
+    [applyScripts, onApply],
+  );
+  // Diff the target script's CURRENT code against the code Lisa wants to apply,
+  // so the user reviews the exact overwrite instead of trusting a blind
+  // whole-file replace. `scripts` carries the full current code (NOT the 24K
+  // capped view Lisa sees), so a tail Lisa couldn't see surfaces here as deleted
+  // lines. Recomputed only while the confirm is open.
+  const applyDiff = useMemo(() => {
+    if (!pendingApply) return null;
+    const current = scripts.find((s) => s.id === pendingApply.targetScriptId)?.code ?? '';
+    return {
+      diff: computeCodeDiff(current, pendingApply.code),
+      wasTruncated: current.length > ATTACHED_SCRIPT_CODE_CAP,
+    };
+  }, [pendingApply, scripts]);
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     // When the @-mention menu has candidates, it owns the nav keys.
@@ -813,7 +1070,7 @@ export const AssistantModal: FC<AssistantModalProps> = ({
             </div>
 
             <AssistantApplyContext.Provider value={applyContextValue}>
-              <main className="ls-asst-body" ref={scrollRef}>
+              <main className="ls-asst-body" ref={scrollRef} onScroll={handleTranscriptScroll}>
                 {messages.length === 0 && !streaming && !isGenerating && (
                   <div className="ls-asst-empty">
                     <p>Ask about LumiScript or Spindle APIs. Try one of these:</p>
@@ -833,9 +1090,44 @@ export const AssistantModal: FC<AssistantModalProps> = ({
                   </div>
                 )}
 
-                {messages.map((m, i) => (
-                  <MessageBubble key={i} message={m} />
-                ))}
+                {messages.map((m, i) =>
+                  i === lastUserIdx && editDraft !== null ? (
+                    <div key={i} className="ls-asst-edit-box">
+                      <textarea
+                        className="ls-asst-edit-input"
+                        value={editDraft}
+                        onChange={(e) => setEditDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleEditResend(); }
+                          else if (e.key === 'Escape') { e.preventDefault(); setEditDraft(null); }
+                        }}
+                        rows={Math.min(8, Math.max(2, editDraft.split('\n').length))}
+                        autoFocus
+                      />
+                      <div className="ls-asst-edit-actions">
+                        <button type="button" className="ls-asst-edit-cancel" onClick={() => setEditDraft(null)}>
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          className="ls-asst-edit-save"
+                          onClick={handleEditResend}
+                          disabled={!editDraft.trim()}
+                        >
+                          Save &amp; resend
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <MessageBubble
+                      key={i}
+                      message={m}
+                      scrollRoot={scrollRef}
+                      eager={i >= messages.length - 1}
+                      {...(i === lastUserIdx && canEditLast ? { onEdit: startEditLast } : {})}
+                    />
+                  )
+                )}
 
                 {(streaming || streamingReasoning) && (
                   <MessageBubble
@@ -863,7 +1155,7 @@ export const AssistantModal: FC<AssistantModalProps> = ({
                         type="button"
                         className="ls-asst-retry-btn"
                         onClick={handleRetry}
-                        disabled={isGenerating}
+                        disabled={isGenerating || compacting}
                         title="Re-send the last message"
                       >
                         <RotateCcw size={12} />
@@ -882,6 +1174,53 @@ export const AssistantModal: FC<AssistantModalProps> = ({
             </AssistantApplyContext.Provider>
 
             <div className="ls-asst-usage-bar" aria-live="polite">
+              {contextFill && contextTokens > 0 && (() => {
+                const pct = contextFill.promptTokens / contextTokens;
+                // Label/title show the TRUE percent (can exceed 100% — the
+                // "over budget, older turns dropping" signal); only the fill-bar
+                // width below is clamped to 100%.
+                const pctDisplay = Math.round(pct * 100);
+                const level = pct >= 0.9 ? 'crit' : pct >= 0.75 ? 'warn' : 'ok';
+                return (
+                  <span className="ls-asst-gauge-wrap" ref={gaugeWrapRef}>
+                    <button
+                      type="button"
+                      className={`ls-asst-usage-gauge ls-asst-usage-gauge-${level}`}
+                      title={`Context window: ${contextFill.estimated ? '~' : ''}${formatTokens(contextFill.promptTokens)} of ${formatTokens(contextTokens)} tokens (${pctDisplay}%). Click for a breakdown of what's filling it.`}
+                      onClick={toggleBreakdown}
+                      aria-label="Context usage — click for a breakdown"
+                    >
+                      <span className="ls-asst-usage-gauge-track">
+                        <span
+                          className="ls-asst-usage-gauge-fill"
+                          style={{ width: `${Math.min(100, pctDisplay)}%` }}
+                        />
+                      </span>
+                      <span className="ls-asst-usage-label">{contextFill.estimated ? '~' : ''}{pctDisplay}% ctx</span>
+                    </button>
+                    {breakdownOpen && (
+                      contextBreakdown
+                        ? <ContextBreakdownPopover breakdown={contextBreakdown} budget={contextTokens} onClose={() => setBreakdownOpen(false)} />
+                        : <div className="ls-asst-bd-popover ls-asst-bd-loading">{breakdownFailed ? "Couldn't compute the breakdown — try reopening." : 'Calculating breakdown…'}</div>
+                    )}
+                  </span>
+                );
+              })()}
+              {contextFill && contextTokens > 0 && (
+                <button
+                  type="button"
+                  className="ls-asst-compact-btn"
+                  onClick={handleCompact}
+                  disabled={isGenerating || compacting}
+                  title="Compact now — summarize the older messages to free up context, keeping the recent ones verbatim. Most useful once the conversation is long; it also runs automatically as the context nears full."
+                  aria-label="Compact conversation context"
+                >
+                  {compacting ? <Loader2 size={11} className="ls-asst-spin" /> : <FoldVertical size={11} />}
+                </button>
+              )}
+              {contextFill && contextTokens > 0 && lastTurnUsage && (
+                <span className="ls-asst-usage-dot">·</span>
+              )}
               {lastTurnUsage && (
                 <>
                   <span
@@ -984,7 +1323,7 @@ export const AssistantModal: FC<AssistantModalProps> = ({
                   onBlur={() => setMention(null)}
                   placeholder="Ask Lisa…  (Enter to send · Shift+Enter for newline · @ to attach a script)"
                   rows={2}
-                  disabled={isGenerating}
+                  disabled={isGenerating || compacting}
                 />
                 {isGenerating ? (
                   <button
@@ -1000,7 +1339,7 @@ export const AssistantModal: FC<AssistantModalProps> = ({
                     type="button"
                     className="ls-asst-send"
                     onClick={handleSend}
-                    disabled={!input.trim()}
+                    disabled={!input.trim() || compacting}
                     title="Send (Enter)"
                   >
                     <Send size={14} />
@@ -1024,6 +1363,7 @@ export const AssistantModal: FC<AssistantModalProps> = ({
             // Lisa's modal backdrop is z-index 10001; sit above it so the
             // confirm isn't occluded (default overlay z-index is 9999).
             overlayZIndex={10002}
+            wide
             onConfirm={() => {
               sendToBackend({
                 type: 'assistant_apply_to_script',
@@ -1036,12 +1376,52 @@ export const AssistantModal: FC<AssistantModalProps> = ({
             onCancel={() => setPendingApply(null)}
           >
             <p className="ls-confirm-message">
-              This replaces the entire code of <strong>{pendingApply.scriptName}</strong> with
-              the code from this block.
+              Review the changes to <strong>{pendingApply.scriptName}</strong> before overwriting
+              {applyDiff && !applyDiff.diff.identical && (
+                <>
+                  {' '}— <span className="ls-apply-diff-stat-add">+{applyDiff.diff.added}</span>
+                  {' / '}<span className="ls-apply-diff-stat-del">−{applyDiff.diff.removed}</span> lines
+                </>
+              )}.
             </p>
+            {applyDiff?.diff.identical ? (
+              <div className="ls-confirm-warning">
+                <AlertTriangle size={12} />
+                <span>Lisa's code is identical to the current script — applying changes nothing.</span>
+              </div>
+            ) : (
+              <div className="ls-apply-diff" role="group" aria-label={`Proposed changes to ${pendingApply.scriptName}`}>
+                {applyDiff?.diff.rows.map((r, idx) =>
+                  r.type === 'gap' ? (
+                    <div key={idx} className="ls-apply-diff-row ls-apply-diff-gap">
+                      ⋯ {r.count} unchanged line{r.count === 1 ? '' : 's'}
+                    </div>
+                  ) : (
+                    <div key={idx} className={`ls-apply-diff-row ls-apply-diff-${r.type}`}>
+                      <span className="ls-apply-diff-gutter">{r.type === 'add' ? '+' : r.type === 'del' ? '−' : ' '}</span>
+                      <span className="ls-apply-diff-text">{r.text === '' ? ' ' : r.text}</span>
+                    </div>
+                  ),
+                )}
+                {applyDiff?.diff.truncatedRows && (
+                  <div className="ls-apply-diff-row ls-apply-diff-gap">
+                    … diff truncated — review the rest in the editor after applying.
+                  </div>
+                )}
+              </div>
+            )}
+            {applyDiff?.wasTruncated && (
+              <div className="ls-confirm-warning">
+                <AlertTriangle size={12} />
+                <span>
+                  This script is longer than Lisa can see ({ATTACHED_SCRIPT_CODE_CAP.toLocaleString()} chars),
+                  so she may not have had the full file — check the diff for code being removed.
+                </span>
+              </div>
+            )}
             <div className="ls-confirm-warning">
               <AlertTriangle size={12} />
-              <span>The current code is overwritten — this can't be undone.</span>
+              <span>Overwrites the current code — this can't be undone.</span>
             </div>
           </ConfirmDialog>
         )}
@@ -1205,13 +1585,44 @@ const ThreadSidebar: FC<ThreadSidebarProps> = ({
 
 // ─── Message bubble ──────────────────────────────────────────────────────────
 
-const MessageBubble: FC<{ message: DisplayMessage; streaming?: boolean }> = ({
+const MessageBubble = memo(({
   message,
   streaming,
+  onEdit,
+  scrollRoot,
+  eager,
+}: {
+  message: DisplayMessage;
+  streaming?: boolean;
+  onEdit?: () => void;
+  scrollRoot?: { current: HTMLElement | null } | null;
+  eager?: boolean;
 }) => {
   // Reasoning disclosure: expanded during streaming, collapsed for finalised
   // bubbles (history density). Each bubble instance owns its own toggle.
   const [reasoningExpanded, setReasoningExpanded] = useState(!!streaming);
+  // Lazy content: defer the expensive markdown + Prism render of off-screen
+  // historical bubbles until they scroll near the viewport. Opening a long /
+  // code-heavy thread otherwise markdown-parses + syntax-highlights EVERY bubble
+  // in one synchronous commit — seconds of main-thread freeze plus a starved WS
+  // heartbeat (the "connection lost"). The streaming bubble and the eager (last)
+  // bubble render rich immediately, so the part of the thread you actually look
+  // at on open never flashes. Once rich, a bubble stays rich (state never resets).
+  const bubbleRef = useRef<HTMLDivElement>(null);
+  const [rich, setRich] = useState(!!streaming || !!eager);
+  useEffect(() => {
+    if (rich) return;
+    const el = bubbleRef.current;
+    if (!el || typeof IntersectionObserver === 'undefined') { setRich(true); return; }
+    const obs = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) { setRich(true); obs.disconnect(); }
+      },
+      { root: scrollRoot?.current ?? null, rootMargin: '600px 0px' },
+    );
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [rich, scrollRoot]);
 
   if (message.role === 'tool') {
     return (
@@ -1232,12 +1643,20 @@ const MessageBubble: FC<{ message: DisplayMessage; streaming?: boolean }> = ({
       </div>
     );
   }
+  if (message.role === 'compacted') {
+    return (
+      <div className="ls-asst-compacted">
+        <FoldVertical size={11} />
+        <span>Earlier messages compacted — Lisa sees a summary of everything above this point</span>
+      </div>
+    );
+  }
   // Display label: assistant bubbles show the persona's name ("Lisa")
   // instead of the bare 'assistant' role. User / error / tool labels are
   // unchanged.
   const roleLabel = message.role === 'assistant' ? ASSISTANT_DISPLAY_NAME : message.role;
   return (
-    <div className={`ls-asst-bubble ls-asst-bubble-${message.role}${message.aborted ? ' ls-asst-bubble-aborted' : ''}`}>
+    <div ref={bubbleRef} className={`ls-asst-bubble ls-asst-bubble-${message.role}${message.aborted ? ' ls-asst-bubble-aborted' : ''}`}>
       <div className="ls-asst-bubble-role">
         <span>
           {roleLabel}
@@ -1245,6 +1664,17 @@ const MessageBubble: FC<{ message: DisplayMessage; streaming?: boolean }> = ({
         </span>
         {message.role === 'assistant' && message.content && (
           <CopyButton text={message.content} className="ls-asst-bubble-copy" title="Copy reply" />
+        )}
+        {message.role === 'user' && onEdit && (
+          <button
+            type="button"
+            className="ls-asst-bubble-edit"
+            onClick={onEdit}
+            title="Edit & resend"
+            aria-label="Edit and resend this message"
+          >
+            <Pencil size={12} />
+          </button>
         )}
       </div>
       {message.reasoning && (
@@ -1266,9 +1696,12 @@ const MessageBubble: FC<{ message: DisplayMessage; streaming?: boolean }> = ({
         </div>
       )}
       <div className="ls-asst-bubble-content">
-        <MarkdownContent text={message.content} />
+        {rich
+          ? <MarkdownContent text={message.content} />
+          : <div className="ls-asst-bubble-deferred">{message.content}</div>}
         {streaming && <span className="ls-asst-cursor">▍</span>}
       </div>
     </div>
   );
-};
+});
+MessageBubble.displayName = 'MessageBubble';

@@ -378,6 +378,16 @@ export class TriggerRegistry {
    */
   private pendingReloadPollTimers = new Map<string, ReturnType<typeof setInterval>>();
 
+  /**
+   * Scripts whose registered live state must be wiped — WITHOUT re-running the
+   * body — once their in-flight work drains. Queued by `fireEngineSwitchWipe`
+   * when an engine switch hits a script mid-run; drained by the same two paths
+   * as `pendingReload` (event-handler completion + the idle poll). A queued
+   * full reload supersedes a queued wipe: the reload wipes before re-running,
+   * so both drains consume this flag when a reload is also pending.
+   */
+  private pendingEngineSwitchWipe = new Set<string>();
+
   constructor(
     private readonly getDeps: () => TriggerDeps,
     private readonly sendToFrontend: (msg: BackendToFrontend) => void,
@@ -642,6 +652,9 @@ export class TriggerRegistry {
           // so we don't have two drain paths racing; this event-handler
           // path wins for the trigger-event case.
           const pending = this.pendingReload.get(currentScript.id);
+          // A queued engine-switch wipe is subsumed by a queued reload (the
+          // reload wipes before re-running), so consume the flag either way.
+          const wipeQueued = this.pendingEngineSwitchWipe.delete(currentScript.id);
           if (pending !== undefined) {
             this.pendingReload.delete(currentScript.id);
             this.clearPendingReloadPoll(currentScript.id);
@@ -650,6 +663,14 @@ export class TriggerRegistry {
             const latest = this.getDeps().scriptStorage.getScript(currentScript.id);
             if (latest && latest.enabled && latest.type === 'trigger') {
               void this.fireReload(latest, pending);
+            }
+          } else if (wipeQueued) {
+            this.clearPendingReloadPoll(currentScript.id);
+            const latest = this.getDeps().scriptStorage.getScript(currentScript.id);
+            if (latest && latest.enabled && latest.type === 'trigger') {
+              // Re-checks in-flight internally — re-queues itself if another
+              // run started between this drain check and the call.
+              void this.fireEngineSwitchWipe(latest);
             }
           }
         }
@@ -725,6 +746,11 @@ export class TriggerRegistry {
       // (the script is going away; the deferred reload is moot).
       this.pendingReload.delete(scriptId);
       this.clearPendingReloadPoll(scriptId);
+      // The script is going away, so a deferred engine-switch state-wipe queued
+      // for it is moot too — drop it, else a stale entry could fire against a
+      // later re-registration of the same id. Its poll timer (shared with the
+      // pending-reload poll) was just cleared above.
+      this.pendingEngineSwitchWipe.delete(scriptId);
     }
   }
 
@@ -773,6 +799,9 @@ export class TriggerRegistry {
       this.pendingReload.clear();
       for (const t of this.pendingReloadPollTimers.values()) clearInterval(t);
       this.pendingReloadPollTimers.clear();
+      // Drop any deferred engine-switch state-wipes too (their poll timers live
+      // in the pending-reload timer map cleared just above).
+      this.pendingEngineSwitchWipe.clear();
     }
   }
 
@@ -1269,6 +1298,44 @@ export class TriggerRegistry {
   }
 
   /**
+   * Engine-switch support — wipe a script's registered live state (handlers,
+   * UI elements, timers, streams, injections…) on BOTH engines WITHOUT
+   * re-running the body. Used for enabled event-driven scripts when the user
+   * switches the script engine: their next natural trigger fire re-runs the
+   * body under the new engine anyway, so an immediate auto re-run would only
+   * burn cost (potentially real money — LLM calls, agentic loops) rebuilding
+   * state the next fire rebuilds regardless. Startup-triggered scripts must
+   * NOT take this path — their next natural run is the next extension
+   * activation, so dropping their state without a re-run would leave them
+   * inert (no panels, macros, or handlers) for the rest of the session; the
+   * engine-switch fan-out sends those through the full `fireReload` instead.
+   *
+   * In-flight semantics mirror `fireReload`'s manual path: if the script has
+   * a run or handler invocation in flight, DEFER (queue + poll) rather than
+   * wipe immediately. Wiping mid-run would let the still-executing body
+   * re-register state on the OLD engine after the wipe passed — recreating
+   * exactly the split-brain the engine-switch fan-out exists to prevent.
+   */
+  async fireEngineSwitchWipe(script: Script): Promise<void> {
+    const inFlight = (this.runningCounts.get(script.id) ?? 0) > 0
+                     || scriptHasActiveDispatch(script.id);
+    if (inFlight) {
+      this.pendingEngineSwitchWipe.add(script.id);
+      this.schedulePendingReloadPoll(script.id);
+      return;
+    }
+    const deps = this.getDeps();
+    if (deps.wipeScriptStateForReload) {
+      await deps.wipeScriptStateForReload(script.id);
+    } else {
+      // Test-rig fallback — mirrors fireReload's partial wipe when the full
+      // wipe hook isn't wired.
+      clearBroadcastByScriptId(script.id);
+      clearCommandHandlerByScriptId(script.id);
+    }
+  }
+
+  /**
    * Phase F follow-up — armed by `fireReload` when a reload is deferred.
    * Polls every 1 s for the "script idle" condition (both `runningCounts`
    * cleared AND no entries in host-dispatcher's `activeRuns` for this
@@ -1289,7 +1356,20 @@ export class TriggerRegistry {
       // Idle now — stop polling + drain.
       this.clearPendingReloadPoll(scriptId);
       const pending = this.pendingReload.get(scriptId);
-      if (pending === undefined) return;
+      // A queued engine-switch wipe is subsumed by a queued reload (the
+      // reload wipes before re-running), so consume the flag either way.
+      const wipeQueued = this.pendingEngineSwitchWipe.delete(scriptId);
+      if (pending === undefined) {
+        if (wipeQueued) {
+          const latest = this.getDeps().scriptStorage.getScript(scriptId);
+          if (latest && latest.enabled && latest.type === 'trigger') {
+            // Re-checks in-flight internally — re-queues itself if another
+            // run started between this drain check and the call.
+            void this.fireEngineSwitchWipe(latest);
+          }
+        }
+        return;
+      }
       this.pendingReload.delete(scriptId);
       const latest = this.getDeps().scriptStorage.getScript(scriptId);
       if (latest && latest.enabled && latest.type === 'trigger') {

@@ -4,6 +4,9 @@ User-facing reference material for LumiScript — the Lumiverse scripting extens
 
 ## Contents
 
+- [**Documentation index**](./index.md) — start here: the full concept / guide / cookbook tree, plus how scripts fire and what `api` is.
+- [**What's new in v2.0**](./whats-new-v2.md) — the headline QuickJS isolate engine, the new `api.*` surface, and the one upgrade heads-up (private-network egress).
+- [**Execution engine & isolation**](./concepts/engine.md) — the v2.0 engine choice (AsyncFunction vs the QuickJS isolate) and per-script isolation, with the related [worker pool](./concepts/workers.md), [network egress](./guides/network.md), and [diagnostics](./guides/diagnostics.md) settings.
 - [**CLI tools**](./cli-tools.md) — `pack2js` and `js2pack`, for converting between LumiScript pack archives and directories of individual `.js` files. Use these when you want to edit scripts in your own editor, keep them under version control, or author packs by hand.
 
 More docs will land here as the feature surface grows.

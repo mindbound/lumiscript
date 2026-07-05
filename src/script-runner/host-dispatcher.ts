@@ -94,6 +94,7 @@ import type {
 import type {
   AdvancedModalDismissedNotice,
   FloatWidgetPositionNotice,
+  EngineTelemetry,
 } from '../types/script-runner-ipc.js';
 import {
   removeMacro as macroStoreRemove,
@@ -250,6 +251,10 @@ function setChildHandle(
 
 /** Drop the registration for a worker key. Returns `true` if an entry existed. */
 function deleteChildHandle(key: ScriptRunnerWorkerKey): boolean {
+  // Drop the carried-forward RSS so a respawn reusing this key starts from a
+  // fresh measurement instead of the disposed worker's last-known peak. This is
+  // the teardown funnel for every removal path (eviction, shutdown, crash-exit).
+  workerLastKnownRss.delete(key);
   return childHandles.delete(key);
 }
 
@@ -457,6 +462,36 @@ export function setWorkerCountReader(fn: WorkerCountReader): void {
   workerCountReader = fn;
 }
 
+// #11 — `engineMode` setting reader. Mirrors the workerCount reader: wired by
+// `backend.ts` cold-start init (`setEngineModeReader`) to pull the live value from
+// the settings store, and READ per-dispatch when building the RunScriptRequest so a
+// settings change takes effect on the next run (no respawn). Default 'asyncfn' keeps
+// the shipped engine as the safe fallback if backend forgets to wire.
+type EngineModeReader = () => 'asyncfn' | 'quickjs';
+let engineModeReader: EngineModeReader = () => 'asyncfn';
+
+/** Wire the engineMode reader. Called once during `backend.ts` cold-start init
+ *  alongside `setWorkerCountReader`. Idempotent: re-calling replaces the reader. */
+export function setEngineModeReader(fn: EngineModeReader): void {
+  engineModeReader = fn;
+}
+
+// The `streamQueueCap` setting reader — same pattern: read per-dispatch onto the RunScriptRequest so the
+// child refreshes its generateStream queue cap on the next run. Default 512 matches DEFAULT_SETTINGS.
+let streamQueueCapReader: () => number = () => 512;
+export function setStreamQueueCapReader(fn: () => number): void {
+  streamQueueCapReader = fn;
+}
+
+// The `contextModel` setting reader — read per-dispatch onto the RunScriptRequest like engineMode. UNLIKE
+// engineMode, the child only applies a CHANGE on a fresh worker (a live context pool can't be re-partitioned
+// mid-flight), so update_settings respawns the QuickJS worker(s) on a flip and the fresh child picks the new
+// model up here. Default 'shared' matches DEFAULT_SETTINGS.
+let contextModelReader: () => 'shared' | 'per-script' = () => 'shared';
+export function setContextModelReader(fn: () => 'shared' | 'per-script'): void {
+  contextModelReader = fn;
+}
+
 /**
  * Returns the workerKey hosting `scriptId`. Assigns lazily on first lookup
  * via least-loaded distribution across the configured pool. Sticky:
@@ -565,6 +600,9 @@ const EVICTION_SWEEP_INTERVAL_MS = 60_000;
  * contribution for this cycle.
  */
 const EVICTION_MEMORY_QUERY_TIMEOUT_MS = 2_000;
+// Test-only override so a sweep test can force the null-reading (timed-out)
+// path without a real 2s wait. null → use the constant above.
+let evictionMemoryQueryTimeoutMsOverride: number | null = null;
 
 /**
  * Hard-coded minimum warm workers — never evict below this count while
@@ -597,6 +635,15 @@ let evictionConfigReader: EvictionConfigReader = () => ({
  */
 export function setEvictionConfigReader(fn: EvictionConfigReader): void {
   evictionConfigReader = fn;
+}
+
+/**
+ * Test-only — override the per-worker memory-query timeout (ms) so a sweep test
+ * can force the null-reading (timed-out) path without a real 2s wait. Pass null
+ * to restore the production timeout. Reset automatically by `__resetForTests`.
+ */
+export function __setEvictionMemoryQueryTimeoutForTests(ms: number | null): void {
+  evictionMemoryQueryTimeoutMsOverride = ms;
 }
 
 /**
@@ -636,6 +683,24 @@ let lastEvictionReason: string | null = null;
 // running long-lived tool / panel scripts, anomalous if the user has
 // none of those.
 let totalEvictionsSkippedByPin: number = 0;
+
+// Last successful OS RSS reading (bytes) per spawned worker, recorded by the
+// eviction sweep's memory pass. When a later reading times out or the query
+// send fails, the sweep carries this value forward into the ceiling sum instead
+// of treating the worker as free: a worker too busy to answer the stats ping
+// within the query timeout (e.g. a QuickJS worker mid-GC-pause near its WASM
+// heap ceiling) is precisely the one whose memory pressure the ceiling is meant
+// to react to, so omitting it would suppress the eviction it warrants. Dropped
+// on worker teardown (deleteChildHandle) so a respawned worker starts from a
+// fresh measurement rather than inheriting the disposed worker's peak.
+const workerLastKnownRss = new Map<ScriptRunnerWorkerKey, number>();
+
+// Diagnostics counter — how many per-worker memory readings the eviction sweep
+// substituted with a carried-forward last-known value because the live query
+// returned null (timeout / send failure). Sustained growth means workers are
+// routinely too busy to answer the stats ping, so the ceiling sum is leaning on
+// carried-forward estimates rather than fresh readings. Reset by __resetForTests.
+let totalMemoryReadingsCarriedForward: number = 0;
 
 // v0.28.0+ — Diagnostics-only counters. Separate from `restartAttempts`
 // (which is the *current backoff index* and resets to 0 after a stable
@@ -777,6 +842,28 @@ function getOrCreateObjReverseMap(scriptId: string): WeakMap<object, string> {
   return map;
 }
 
+/**
+ * Release a single persistent handle by its canonical JS object (audit C13-01).
+ * Used by the collection-handle-cache's LRU eviction to keep `persistentHandles`
+ * in lockstep with the cache: when the cache drops a Collection wrapper, drop its
+ * handle too — otherwise the handle table grows unbounded even as the cache is
+ * capped, and a re-request would mint a SECOND handle for the same name.
+ *
+ * No-op if the object was never registered as a persistent handle for this
+ * script. Parent-side only: the child's proxy for an evicted handle (if the
+ * script still holds a reference) will get a clean RunCompletedError on next
+ * use — acceptable for the pathological case the cap exists to bound.
+ */
+export function releasePersistentHandleByObj(scriptId: string, obj: unknown): void {
+  if (obj === null || typeof obj !== 'object') return;
+  const revMap = persistentObjToHandleId.get(scriptId);
+  if (revMap === undefined) return;
+  const handleId = revMap.get(obj);
+  if (handleId === undefined) return;
+  persistentHandles.get(scriptId)?.delete(handleId);
+  revMap.delete(obj);
+}
+
 // ─── Per-script broadcast forwarders (Phase 6) ──────────────────────────────
 //
 // When a child script registers `api.broadcast.on(event, handler)`, the
@@ -876,6 +963,9 @@ async function sendRunHandlerRequest(
   kind:      RunHandlerRequest['kind'],
   args:      unknown[],
   timeoutMs: number,
+  // #11 P7-F4 — the caller run's scriptId, populated ONLY on the api.tools.invoke path so the quickjs
+  // fire can fast-reject a self-reentrant invoke. Undefined for host/FE-initiated fires.
+  callerScriptId?: string,
 ): Promise<HandlerResult> {
   // Phase C1 — route to the worker that hosts this script. C1 always
   // resolves to DEFAULT_WORKER_KEY; C2 distributes per-script.
@@ -925,12 +1015,21 @@ async function sendRunHandlerRequest(
     kind,
     args,
     timeoutMs,
+    // Thread the script's allowDangerous so the quickjs fire path can gate in-VM fetch per-fire
+    // (the asyncfn closure already captured the right fetch at body-run time). Mirrors the
+    // body-run RunScriptRequest's `allowDangerous: script.allowDangerous`.
+    allowDangerous:    snapshot.script.allowDangerous,
+    // #11 P7-F3 — the script identity, so the quickjs fire re-seeds globalThis.script (no residue).
+    scriptName:        snapshot.script.name,
+    scriptType:        snapshot.script.type,
     // Live activeContext at fire time — child wraps the handler in
     // `liveContextStore.run({ chatId, characterId }, ...)` so sync
     // getters (`api.chat.getChatId()` etc.) return live values for
     // long-lived registered handlers, not the script-load snapshot.
     chatIdAtFire:      getActiveChatId(),
     characterIdAtFire: getActiveCharacterId(),
+    // #11 P7-F4 — only present on the api.tools.invoke self-fire path; JSON.stringify drops undefined.
+    ...(callerScriptId !== undefined ? { callerScriptId } : {}),
   };
 
   return new Promise<HandlerResult>((resolve, reject) => {
@@ -1818,6 +1917,18 @@ const activeRuns  = new Map<string, ActiveRun>();
 const scriptBodyActiveRunByScript = new Map<string, string>();
 
 /**
+ * #11 field-test hygiene — dedup the resolveActiveRun fallback audit log. A PERSISTENTLY-orphaned
+ * recurring dispatcher — e.g. the live-rendering `setInterval(() => tab.root.update(...))` pattern the
+ * fallback above exists to support, whose originating run was retired (a reload / engine switch) — would
+ * otherwise emit the info line on EVERY fire (~1/sec forever), drowning the backend log. We log the
+ * FIRST reroute per (policy, script, dead-runId, handle/method) — enough to flag the orphan — and
+ * suppress the identical repeats. ROUTING IS UNCHANGED; only the log is deduped. Bounded so a long
+ * session can't grow it without limit (clear-and-re-arm past the cap); cleared in __resetForTests.
+ */
+const loggedFallbackKeys = new Set<string>();
+const LOGGED_FALLBACK_CAP = 500;
+
+/**
  * Per-script "fallback" onConsole. Populated at every script-body dispatch
  * (`dispatchRunScript`) when the caller provides an `onConsole` option;
  * read by `handleConsoleEntry` when the runId-keyed `activeRuns` lookup
@@ -2117,20 +2228,34 @@ function resolveActiveRun(
   const fallback = activeRuns.get(latestRunId);
   if (!fallback) return undefined;
 
-  // Audit-trail log. Includes policy + (when relevant) targetHandle/runIdSource/method
-  // so the operator can correlate with downstream warns.
-  const detail = policy === 'register-handler'
-    ? 'register-handler'
-    : `api dispatch (source=${ctx.runIdSource ?? 'unknown'}` +
-      (ctx.targetHandle
-        ? `, handle=${ctx.targetHandle.kind}/${ctx.targetHandle.id})`
-        : ctx.method && HANDLE_RETURNING_METHODS[ctx.method] !== undefined
-          ? `, factory=${ctx.method}→${HANDLE_RETURNING_METHODS[ctx.method]})`
-          : ')');
-  spindle.log.info(
-    `[script-runner] ${detail} fallback: runId ${ctx.runId} no longer active; ` +
-    `routing to script's current run ${latestRunId} (script ${ctx.scriptId})`,
-  );
+  // Audit-trail log — deduped so a persistently-orphaned recurring dispatcher (a leaked live-render
+  // interval that outlived its run) logs ONCE, not on every fire. Key on the stable orphan identity
+  // (policy, script, dead-runId, handle/method) — NOT the rotating fallback target — so it stays a
+  // single line even as latestRunId advances across reloads.
+  const handleKey = ctx.targetHandle
+    ? `${ctx.targetHandle.kind}/${ctx.targetHandle.id}`
+    : ctx.method ?? '';
+  const fallbackKey = `${policy}|${ctx.scriptId}|${ctx.runId}|${handleKey}`;
+  if (!loggedFallbackKeys.has(fallbackKey)) {
+    // Bound growth over a long session; clearing just re-arms logging (harmless).
+    if (loggedFallbackKeys.size >= LOGGED_FALLBACK_CAP) loggedFallbackKeys.clear();
+    loggedFallbackKeys.add(fallbackKey);
+    // Includes policy + (when relevant) targetHandle/runIdSource/method so the operator can correlate
+    // with downstream warns. Built only when we actually log (skipped on the suppressed hot path).
+    const detail = policy === 'register-handler'
+      ? 'register-handler'
+      : `api dispatch (source=${ctx.runIdSource ?? 'unknown'}` +
+        (ctx.targetHandle
+          ? `, handle=${ctx.targetHandle.kind}/${ctx.targetHandle.id})`
+          : ctx.method && HANDLE_RETURNING_METHODS[ctx.method] !== undefined
+            ? `, factory=${ctx.method}→${HANDLE_RETURNING_METHODS[ctx.method]})`
+            : ')');
+    spindle.log.info(
+      `[script-runner] ${detail} fallback: runId ${ctx.runId} no longer active; ` +
+      `routing to script's current run ${latestRunId} (script ${ctx.scriptId}) ` +
+      `(further identical reroutes suppressed)`,
+    );
+  }
   return fallback;
 }
 
@@ -2552,14 +2677,26 @@ function handleRegisterHandler(msg: RegisterHandler): void {
             ? Math.max(1_000, deadlineHint - Date.now())
             : 60_000;
 
+        // #11 P7-F4 (Tier 0) — api.tools.invoke stamps the caller's scriptId via the internal
+        // __lsCallerScriptId marker on ctx. Extract it for the self-reentrant-invoke fast-reject, and
+        // STRIP it so the child handler's ctx is exactly what it would have been (undefined for a plain
+        // api.tools.invoke; the real Council ctx otherwise). callerScriptId travels on the fire IPC.
+        let callerScriptId: string | undefined;
+        let forwardCtx: ToolInvocationContext | undefined = ctxArg;
+        if (ctxArg?.__lsCallerScriptId !== undefined) {
+          callerScriptId = ctxArg.__lsCallerScriptId;
+          const { __lsCallerScriptId: _drop, ...rest } = ctxArg;
+          forwardCtx = Object.keys(rest).length > 0 ? rest : undefined;
+        }
         return sendRunHandlerRequest(
           msg.scriptId,
           msg.handlerId,
           'tool',
           // Pass undefined explicitly when no ctx — JSON.stringify drops
           // it from the wire, child-side `handlerArgs[1]` is undefined.
-          ctxArg !== undefined ? [args, ctxArg] : [args],
+          forwardCtx !== undefined ? [args, forwardCtx] : [args],
           handlerTimeoutMs,
+          callerScriptId,
         ).then((result) => {
           if (!result.ok) {
             throw new Error(result.error?.message ?? 'tool handler failed');
@@ -2796,6 +2933,55 @@ function handleRegisterHandler(msg: RegisterHandler): void {
         } catch (err) {
           spindle.log.warn(
             `[script-runner] worldInfo.registerInterceptor failed (script ${msg.scriptId}): ${String(err)}`,
+          );
+        }
+      } else {
+        logLateRegisterSkip(msg);
+      }
+      break;
+    }
+
+    case 'messageTagHandler': {
+      // v1.4 — handler signature: (event: MessageTagEvent) => void | Promise<void>.
+      // Fire-and-forget: the fire is delivered UP from the FE; we forward it into
+      // the child and discard the result. Persistent (like commandsOnInvoked) —
+      // the canonical returns a sync unsub stored under handlerId for unregister +
+      // teardown. The `activeOrLatestForScript` fallback lets a fire that arrives
+      // after the registering run completes route to the script's current run.
+      const wrapper = (
+        event: import('../types/script.js').MessageTagEvent,
+      ): void | Promise<void> =>
+        sendRunHandlerRequest(
+          msg.scriptId,
+          msg.handlerId,
+          'messageTagHandler',
+          [event],
+          5_000,
+        ).then((result) => {
+          if (!result.ok) {
+            spindle.log.warn(
+              `[script-runner] onMessageTag handler threw for ${msg.scriptId}: ${result.error?.message ?? 'unknown'}`,
+            );
+          }
+          // void return — discard result.value.
+        });
+
+      const active = activeOrLatestForScript(msg.scriptId, msg.runId);
+      if (active) {
+        try {
+          // Pass the child's handlerId via options.id so the backend registry
+          // key, FE id, and fired-event routing all share ONE id.
+          const canonicalUnsub = active.api.chat.onMessageTag(
+            msg.tagName,
+            wrapper,
+            // `id` is read defensively by the canonical to align the registry /
+            // FE / fired-event ids; cast past the excess-property check.
+            { ...(msg.options ?? {}), id: msg.handlerId } as import('../types/script.js').MessageTagOptions,
+          );
+          recordHandlerCleanup(msg.scriptId, msg.handlerId, canonicalUnsub);
+        } catch (err) {
+          spindle.log.warn(
+            `[script-runner] chat.onMessageTag failed (script ${msg.scriptId}): ${String(err)}`,
           );
         }
       } else {
@@ -3215,6 +3401,7 @@ function handleUnregisterHandler(msg: UnregisterHandler): void {
     case 'macroInterceptor':
     case 'contentProcessor':
     case 'worldInfoInterceptor':
+    case 'messageTagHandler':
     case 'domEventListener':
     case 'domDelegate':
     case 'inputBarActionClick':
@@ -4561,6 +4748,25 @@ async function handleShowAdvancedModalRequest(
       value:     handle.modalId,
     };
   } catch (err) {
+    // open-failure-teardown (audit parity#2) — a SYNCHRONOUS throw from the canonical
+    // showAdvancedModal (e.g. the per-script modal stack-limit) happens BEFORE
+    // storePendingAdvancedModal + the host onDismiss wiring, so the inner `await openPromise`
+    // teardown-notice path above never runs and no notice reaches the child. Send one for the
+    // VM-supplied modalId so a synchronously-registered onDismiss fires 'teardown' + the modal
+    // state drops — matching asyncfn's defensive openAck-reject fan-out. Idempotent / fires-once
+    // on both engines (FIFO IPC delivers this notice before the ok:false api-response, so the
+    // child's dismiss path runs before the proxy's openAck rejects).
+    const failedModalId = (req.args[0] as { _modalId?: unknown } | undefined)?._modalId;
+    if (typeof failedModalId === 'string' && failedModalId.length > 0) {
+      const notice: AdvancedModalDismissedNotice = {
+        type:    'advanced-modal-dismissed',
+        modalId: failedModalId,
+        reason:  'teardown',
+      };
+      bumpWorkerActivity(active.workerKey);
+      try { getChildHandle(active.workerKey)?.send(notice); }
+      catch { /* channel down */ }
+    }
     return {
       type:      'api-response',
       requestId,
@@ -6322,6 +6528,14 @@ export async function dispatchRunScript(
     timeoutMs:          request.timeoutMs,
     grantedPermissions: Array.from(request.grantedPermissions),
     allowDangerous:     script.allowDangerous,
+    // #11 — LumiScriptSettings-driven per-dispatch (engine-toggle-wiring). Reads the
+    // live `engineMode` setting; a settings change takes effect on the NEXT run (the
+    // engine is chosen per-run, both executors are in the child bundle). Default
+    // 'asyncfn' via the reader's fallback. The child may still DEGRADE quickjs→asyncfn
+    // if the WASM module won't instantiate (cold-start-fallback, child-entry runOne).
+    engineMode:         engineModeReader(),
+    streamQueueCap:     streamQueueCapReader(),
+    contextModel:       contextModelReader(),
     chatIdAtStart:      getActiveChatId(),
     characterIdAtStart: getActiveCharacterId(),
     // Phase 9d.X — sync-array-read snapshots at dispatch time. The proxy
@@ -6439,7 +6653,13 @@ export async function dispatchRunScript(
  * Called from backend.ts's `update_script` (on disable) and
  * `delete_script` cases — the same teardown path that runs the canonical
  * `clearByScriptId` for tools / macros / interceptors / etc. This call
- * is the parallel cleanup for the child-process side of LumiScript.
+ * is the parallel cleanup for the child-process side of LumiScript. Also
+ * called from `wipeScriptStateForReload` with `reason='reload'`.
+ *
+ * `reason` (#11 P7-2) rides on the IPC to govern the quickjs per-script
+ * context lifecycle: the default 'disable' (also delete) disposes the
+ * context; 'reload' preserves it (sweeps stale handlers only). No effect
+ * under contextModel='shared'. See `ScriptUnregisterMessage.reason`.
  *
  * Performs in order:
  *   1. Sends `'script-unregister'` IPC to the child. Child's
@@ -6458,7 +6678,7 @@ export async function dispatchRunScript(
  * Idempotent on missing scriptId — safe to call multiple times or for a
  * script that never registered anything in the script runner.
  */
-export function unregisterScriptFromChild(scriptId: string): void {
+export function unregisterScriptFromChild(scriptId: string, reason: 'disable' | 'reload' = 'disable'): void {
   // Send IPC first so the child can process its own cleanup before any
   // late api-requests it might still have queued reach the parent and
   // hit our about-to-be-cleared lookup tables.
@@ -6474,6 +6694,9 @@ export function unregisterScriptFromChild(scriptId: string): void {
     const msg: ScriptUnregisterMessage = {
       type: 'script-unregister',
       scriptId,
+      // #11 P7-2 — 'reload' tells the child to keep the quickjs per-script context
+      // (sweep handlers only); 'disable'/'delete' disposes it. See ScriptUnregisterMessage.
+      reason,
     };
     try { handle.send(msg); }
     catch (err) {
@@ -6523,6 +6746,20 @@ export function unregisterScriptFromChild(scriptId: string): void {
   // sent above. Drop the counter so it can't strand a phantom in-flight
   // signal past the script's lifetime.
   broadcastHandlerInFlight.delete(scriptId);
+
+  // audit C5-03 — sweep any in-flight LLM streams owned by this script. The
+  // `script-unregister` IPC above tears down the CHILD consumer, but the
+  // PARENT's for-await pump + the upstream HTTP request keep running until the
+  // iterator is cancelled. Mirror the dead-worker sweep (cleanupRunsForDeadWorker)
+  // filtered by scriptId: `.return()` the upstream iterator (the pump's finally
+  // removes the entry) and drop the routing + abort maps.
+  for (const [requestId, entry] of pendingStreams) {
+    if (entry.scriptId === scriptId) {
+      void entry.iterator.return(undefined).catch(() => { /* defensive */ });
+      pendingStreams.delete(requestId);
+      abortControllers.delete(requestId);
+    }
+  }
 
   // Phase 9d.4.x — drop activeRuns owned by this script. With the script-body
   // activeRun lifecycle now extending past `run-result`, full teardown happens
@@ -6690,6 +6927,12 @@ export async function rebalanceWorkerPool(): Promise<void> {
   for (const [scriptId, assigned] of scriptWorkerAssignments) {
     if (overCap.includes(assigned)) {
       releaseScriptFromWorker(scriptId);
+      // audit C5-02 — the over-cap worker is shut down just below, so any
+      // broadcast handlers it had in flight for this script are dead and will
+      // never fire `broadcast-handler-finished`. Clear the counter so it can't
+      // strand a phantom in-flight signal (which would permanently exempt the
+      // script's NEXT worker from eviction + block hot-reload for it).
+      broadcastHandlerInFlight.delete(scriptId);
       releasedCount.set(assigned, (releasedCount.get(assigned) ?? 0) + 1);
     }
   }
@@ -6704,6 +6947,24 @@ export async function rebalanceWorkerPool(): Promise<void> {
 
   spindle.log.info(
     `[script-runner] rebalance complete — shut down ${overCap.length} over-cap worker(s): ${overCap.join(', ')}`,
+  );
+}
+
+/**
+ * #11 P7 — gracefully restart EVERY live worker. Used on a `contextModel` flip, where the QuickJS context
+ * pool must be rebuilt under the new isolation model (a live pool can't be safely re-partitioned mid-flight —
+ * pinned cross-run handlers, in-flight runs, mixed per-context memory limits). Each worker is stopped via
+ * `shutdownWorker` (idempotent; keeps the key respawnable + the runner's shared subscriptions intact); the
+ * next dispatch respawns a fresh worker that re-sends the script snapshot and builds contexts under the new
+ * model. Callers should fire-reload enabled scripts AFTER this so the re-run dispatches land on the fresh
+ * workers. No-op when no worker is currently spawned.
+ */
+export async function restartAllWorkers(): Promise<void> {
+  const keys = [...childHandles.keys()];
+  if (keys.length === 0) return;
+  await Promise.all(keys.map((k) => shutdownWorker(k)));
+  spindle.log.info(
+    `[script-runner] restarted ${keys.length} worker(s) to rebuild QuickJS contexts under the new context model`,
   );
 }
 
@@ -6756,7 +7017,7 @@ export async function queryWorkerMemoryBytes(workerKey: ScriptRunnerWorkerKey): 
       settled = true;
       pendingDiagnosticStats.delete(requestId);
       resolve(null);
-    }, EVICTION_MEMORY_QUERY_TIMEOUT_MS);
+    }, evictionMemoryQueryTimeoutMsOverride ?? EVICTION_MEMORY_QUERY_TIMEOUT_MS);
 
     pendingDiagnosticStats.set(requestId, (stats) => {
       if (settled) return;
@@ -7039,9 +7300,37 @@ export async function evictionSweep(): Promise<void> {
   const memReadings = await Promise.all(
     remaining.map(async (k) => ({ key: k, bytes: await queryWorkerMemoryBytes(k) })),
   );
-  let totalBytes = 0;
-  for (const r of memReadings) {
+  // Resolve each worker's effective RSS for the ceiling sum. A successful reading
+  // is recorded as the worker's new last-known value; a null reading (query
+  // timeout / send failure) carries the last-known value forward rather than
+  // counting the worker as free — otherwise a worker thrashing under GC (the one
+  // most likely to miss the stats ping AND most likely to be near its heap
+  // ceiling) would be silently dropped from the very sum meant to evict it. A
+  // worker with no prior reading still contributes 0 (nothing to carry), as before.
+  let totalBytes  = 0;
+  let carriedThisSweep = 0;
+  const effective: { key: ScriptRunnerWorkerKey; bytes: number | null }[] = memReadings.map((r) => {
+    if (r.bytes !== null) {
+      workerLastKnownRss.set(r.key, r.bytes);
+      return { key: r.key, bytes: r.bytes };
+    }
+    const carried = workerLastKnownRss.get(r.key);
+    if (carried !== undefined) {
+      carriedThisSweep++;
+      return { key: r.key, bytes: carried };
+    }
+    return { key: r.key, bytes: null };
+  });
+  for (const r of effective) {
     if (r.bytes !== null) totalBytes += r.bytes;
+  }
+  if (carriedThisSweep > 0) {
+    totalMemoryReadingsCarriedForward += carriedThisSweep;
+    spindle.log.warn(
+      `[script-runner] eviction memory pass carried forward ${carriedThisSweep} last-known RSS ` +
+      `reading(s) — worker(s) did not answer the stats ping in time; ceiling sum is ` +
+      `${Math.round(totalBytes / 1024 / 1024)} MB (may still under-count any never-measured worker)`,
+    );
   }
   if (totalBytes <= config.memoryCeilingBytes) return;
 
@@ -7061,7 +7350,7 @@ export async function evictionSweep(): Promise<void> {
   // Same telemetry-bump rationale as the idle pass — pinned-skips are
   // counted imperatively so steady-state diagnostics reflect them.
   const lruCandidates: { key: ScriptRunnerWorkerKey; bytes: number | null; lastActivity: number }[] = [];
-  for (const r of memReadings) {
+  for (const r of effective) {
     if (workerHasActiveRun(r.key)) continue;
     if (workerHostsPinningRegistration(r.key)) {
       totalEvictionsSkippedByPin++;
@@ -7412,6 +7701,13 @@ export function __getPendingDrawerTabRegisterKeysForTests(): string[] {
   return Array.from(pendingDrawerTabRegisters.keys());
 }
 
+/** @internal — #11 parity sweep: mirrors the widget/modal/drawer-tab awaiter getters
+ *  (the only Option-B create-awaiter that lacked one) so a test can poll the app-mount
+ *  create-await table and echo `notifyAppMountCreated` without racing the async register. */
+export function __getPendingAppMountCreateIdsForTests(): string[] {
+  return Array.from(pendingAppMountCreates.keys());
+}
+
 // ─── Test-only restart-logic overrides + inspectors (Phase 11.B.3) ──────────
 
 /**
@@ -7682,6 +7978,13 @@ export interface WorkerPoolDiagnostics {
      * scripts present would be anomalous.
      */
     totalEvictionsSkippedByPin: number;
+    /**
+     * Count of per-worker memory readings the sweep substituted with a
+     * carried-forward last-known value because the live query timed out or
+     * failed. Sustained growth means the ceiling sum is leaning on stale
+     * estimates — workers are too busy to answer the stats ping.
+     */
+    totalMemoryReadingsCarriedForward: number;
   };
   settings: {
     idleTimeoutMs:      number;
@@ -7740,6 +8043,7 @@ export function getWorkerPoolDiagnostics(): WorkerPoolDiagnostics {
       lastEvictionAt,
       lastEvictionReason,
       totalEvictionsSkippedByPin,
+      totalMemoryReadingsCarriedForward,
     },
     settings: {
       idleTimeoutMs:      config.idleTimeoutMs,
@@ -7839,6 +8143,13 @@ export async function queryRunnerStats(
   );
   if (successful.length === 0) return null;
 
+  // #11 observability — aggregate the per-worker QuickJS-engine telemetry. Two aggregation rules
+  // (see EngineTelemetry's field docs): SUM the summable counters + live gauges across workers; take a
+  // REPRESENTATIVE value for per-child config (contextModel/poolCap/perCtxLimitBytes — identical per
+  // child) + the cold-start / lastEvictionAt time fields. Omitted entirely if NO worker reported engine
+  // stats (older/hung child), so the panel renders its "Not probed" row.
+  const engine = aggregateEngineTelemetry(successful.map((r) => r.engine));
+
   return {
     type:        'diagnostic-stats-response',
     requestId:   'aggregate',  // synthetic; this response is parent-constructed
@@ -7849,6 +8160,51 @@ export async function queryRunnerStats(
     cpuUserUs:   successful.reduce((s, r) => s + r.cpuUserUs,   0),
     cpuSystemUs: successful.reduce((s, r) => s + r.cpuSystemUs, 0),
     uptimeSec:   Math.max(...successful.map((r) => r.uptimeSec)),
+    ...(engine !== undefined ? { engine } : {}),
+  };
+}
+
+/**
+ * #11 observability — fold N per-worker {@link EngineTelemetry} reports into one aggregate. Returns
+ * `undefined` when no worker reported engine stats (leave the field off so the panel shows "Not probed").
+ * SUM the summable counters + live gauges; REPRESENTATIVE for per-child config + time fields (see the
+ * field docs on EngineTelemetry). `coldStartOk` is the AND over PROBED children (any degraded child
+ * flips it false); `coldStartProbed` is the OR (at least one child probed).
+ */
+export function aggregateEngineTelemetry(
+  reports: ReadonlyArray<EngineTelemetry | undefined>,
+): EngineTelemetry | undefined {
+  const probed = reports.filter((e): e is EngineTelemetry => e !== undefined);
+  if (probed.length === 0) return undefined;
+  const sum = (pick: (e: EngineTelemetry) => number): number =>
+    probed.reduce((s, e) => s + pick(e), 0);
+  return {
+    // Representative per-child config + probe results (NOT summed).
+    contextModel:     probed[0]!.contextModel,
+    poolCap:          probed[0]!.poolCap,
+    perCtxLimitBytes: probed[0]!.perCtxLimitBytes,
+    coldStartProbed:  probed.some((e) => e.coldStartProbed),
+    coldStartOk:      probed.every((e) => !e.coldStartProbed || e.coldStartOk),
+    coldStartMs:      Math.max(...probed.map((e) => e.coldStartMs)),
+    lastEvictionAt:   Math.max(...probed.map((e) => e.lastEvictionAt)),
+    // Summable counters + live gauges.
+    quickjsRuns:       sum((e) => e.quickjsRuns),
+    asyncfnRuns:       sum((e) => e.asyncfnRuns),
+    degradedRuns:      sum((e) => e.degradedRuns),
+    quickjsRunErrors:  sum((e) => e.quickjsRunErrors),
+    quickjsFireErrors: sum((e) => e.quickjsFireErrors),
+    quickjsTimeouts:   sum((e) => e.quickjsTimeouts),
+    asyncfnRunErrors:  sum((e) => e.asyncfnRunErrors),
+    asyncfnTimeouts:   sum((e) => e.asyncfnTimeouts),
+    reentrantRejects:  sum((e) => e.reentrantRejects),
+    inVmOom:           sum((e) => e.inVmOom),
+    contextEvictions:  sum((e) => e.contextEvictions),
+    overCapTolerated:  sum((e) => e.overCapTolerated),
+    streamsOpened:     sum((e) => e.streamsOpened),
+    streamsCancelled:  sum((e) => e.streamsCancelled),
+    liveContexts:      sum((e) => e.liveContexts),
+    pinnedContexts:    sum((e) => e.pinnedContexts),
+    reservedContexts:  sum((e) => e.reservedContexts),
   };
 }
 
@@ -7878,10 +8234,17 @@ export function __resetForTests(): void {
   // this, a test that sets `setWorkerCountReader(() => N)` would leak the
   // configured N into other test files that just call `__resetForTests`.
   workerCountReader = () => 1;
+  streamQueueCapReader = () => 512; // #11 P5-4 — restore the stream-queue-cap reader default
+  // #11 — restore the engineMode reader default so a test's setEngineModeReader
+  // doesn't leak the selected engine into another test file.
+  engineModeReader = () => 'asyncfn';
+  contextModelReader = () => 'shared'; // #11 P7 — restore the context-model reader default (test isolation)
   // Phase E — eviction state. Clear last-activity timestamps + restore
   // the eviction-config reader's safe default; stop any in-flight sweep
   // timer so tests don't see surprise eviction during their own setup.
   workerLastActivity.clear();
+  workerLastKnownRss.clear();                  // drop carried-forward RSS between tests
+  evictionMemoryQueryTimeoutMsOverride = null; // restore the real 2s query timeout
   evictionConfigReader = () => ({
     idleTimeoutMs:      30 * 60 * 1000,
     memoryCeilingBytes: 512 * 1024 * 1024,
@@ -7895,6 +8258,7 @@ export function __resetForTests(): void {
   lastEvictionAt             = null;
   lastEvictionReason         = null;
   totalEvictionsSkippedByPin = 0;
+  totalMemoryReadingsCarriedForward = 0;
   openAwaitTimeoutOverride   = null;
   restartBackoffOverride     = null;
   stabilityThresholdOverride = null;
@@ -7912,6 +8276,7 @@ export function __resetForTests(): void {
   pendingRuns.clear();
   activeRuns.clear();
   scriptBodyActiveRunByScript.clear();
+  loggedFallbackKeys.clear(); // #11 field-test hygiene — re-arm the fallback-log dedup between tests
   trackingSetsByRunId.clear();
   pendingHandlerCalls.clear();
   abortControllers.clear();

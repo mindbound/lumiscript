@@ -43,6 +43,27 @@ export interface ScriptMetadata {
   tags?: string[];
 }
 
+/**
+ * Provenance stamped on a script installed from a character-card bundle
+ * (`extensions.lumiscript`). The re-import de-dup key is (`bundleCardId`,
+ * `bundleId`). See notes/card-embedded-scripts-design.md.
+ */
+export interface ScriptBundleProvenance {
+  /** Author-assigned stable id of the card bundle — NOT the host character
+   *  UUID (the host regenerates that on every import). */
+  bundleCardId: string;
+  /** Author-assigned id of this script within the bundle. */
+  bundleId: string;
+  /** The host character UUID this was last installed from (provenance only). */
+  hostCharacterId?: string;
+  /** Display name of the source bundle / character. */
+  bundleName?: string;
+  /** `metadata.version` at install time — drives update-if-newer on re-import. */
+  version?: string;
+  /** Hash of the code at install time — detects local edits before overwrite. */
+  sourceHash?: string;
+}
+
 /** Core script record stored in user storage */
 export interface Script {
   id: string;
@@ -73,6 +94,21 @@ export interface Script {
   createdAt: number;   // Unix ms
   updatedAt: number;   // Unix ms
   metadata?: ScriptMetadata;
+  /** Set when this script was installed from a character-card bundle (#12). */
+  bundledFrom?: ScriptBundleProvenance;
+}
+
+/**
+ * True if this trigger script re-runs immediately on an engine switch. A script with an
+ * `ls:startup` trigger only runs naturally at extension activation, so dropping its registered
+ * live state (handlers, panels, macros…) without a re-run would leave it inert for the rest of
+ * the session. Event-driven scripts skip the auto re-run instead: their state is wiped at the
+ * switch and repopulates on their next natural trigger fire — avoiding auto-running potentially
+ * expensive bodies (LLM calls, long loops). Shared by the backend's engine-switch fan-out and the
+ * settings confirm modal so the modal's counts always match what the switch actually does.
+ */
+export function scriptRunsOnStartup(script: Pick<Script, 'triggers'>): boolean {
+  return (script.triggers ?? []).includes('ls:startup');
 }
 
 /**
@@ -103,6 +139,39 @@ export interface LumiScriptSettings {
    * Default: 60 000 (60 s).  Range: 5 000 – 300 000.
    */
   scriptTimeoutMs: number;
+  /**
+   * Which sandbox engine runs script bodies + handler fires.
+   *   - 'asyncfn'  (default): the shipped `new AsyncFunction` engine.
+   *   - 'quickjs'  (experimental): the QuickJS-WASM isolate — stronger sandbox
+   *      isolation. Behaviorally faithful to asyncfn (dual-engine parity harness)
+   *      bar one documented divergence (self-`api.tools.invoke` — see
+   *      docs/api-stability.md). Switching engines fire-reloads active scripts so
+   *      their handlers re-register under the new engine (see `update_settings`).
+   * Read live per-dispatch (`engineModeReader` in host-dispatcher); persisted GLOBAL
+   * (not per-script). Default: 'asyncfn'.
+   */
+  engineMode: 'asyncfn' | 'quickjs';
+  /**
+   * The QuickJS engine's context-isolation model. Only has an effect under `engineMode: 'quickjs'`.
+   *   - 'shared'     (default): one QuickJS context backs every script — lower memory; LumiScript's own
+   *      scaffolding is frozen, so the residual is third-party library object-internal mutation (e.g.
+   *      `z.object = evil`) bleeding across a script's own subsequent runs.
+   *   - 'per-script' (experimental): each script gets its OWN context — its own `globalThis` + zod/
+   *      Handlebars/api bundle, a per-context memory cap, and an LRU pool — so one script can't poison
+   *      another's runtime.
+   * Switching this respawns the QuickJS worker(s) + fire-reloads active scripts so all contexts rebuild
+   * under the new model (see `update_settings`). Persisted GLOBAL. Default: 'shared'.
+   */
+  contextModel: 'shared' | 'per-script';
+  /**
+   * Max chunks the QuickJS engine will buffer for a single `api.llm.generateStream`
+   * that isn't being consumed fast enough (or at all). A stream opened under the
+   * QuickJS engine can outlive the run that created it, so its chunk queue is bounded:
+   * once this many chunks are queued undrained, the stream is cancelled with an error
+   * so it can't grow without limit. Only affects the QuickJS engine.
+   * Default: 512.  Range: 16 – 100 000.
+   */
+  streamQueueCap: number;
   /**
    * Number of concurrent script-runner worker subprocesses to spawn.
    * Larger values distribute scripts across more processes for better fault
@@ -138,6 +207,16 @@ export interface LumiScriptSettings {
    * ceiling.
    * Default: 512 (MB).  Range: 64 – 8 192.
    *
+   * NOTE: this bounds each worker's whole-process OS RSS, so a worker
+   * running the QuickJS engine weighs substantially more than an
+   * AsyncFunction worker — it carries the WASM runtime (~112 MB baseline)
+   * plus per-script context heap (up to ~512 MB for a fully-loaded
+   * per-script pool). The same ceiling therefore evicts and respawns much
+   * more aggressively under QuickJS; raise it accordingly when running the
+   * QuickJS engine across several workers. It is independent of the
+   * engine's own per-context memory cap, which is a fixed internal limit
+   * not derived from this setting.
+   *
    * Phase E (v1.0 runtime-isolation): consumed by the eviction sweep.
    */
   workerMemoryCeilingMb: number;
@@ -147,6 +226,17 @@ export interface LumiScriptSettings {
    * Default: 500.  Range: 50 – 2 000.
    */
   consoleHistoryLimit: number;
+  /**
+   * User-managed allowlist of PRIVATE hosts that outbound HTTP (`allowDangerous` bare `fetch` +
+   * `api.utils.http.*`) may reach DIRECTLY, bypassing the default SSRF block. All outbound HTTP is otherwise
+   * routed through the host's cors proxy → `safeFetch`, which blocks loopback / LAN / link-local / cloud-
+   * metadata addresses. This is the escape hatch for intentional local access — a local model server
+   * (Ollama `localhost:11434`, ComfyUI `localhost:8188`, …), a LAN device — so scripts you trust can reach
+   * services you name. Entries are IP literals or `localhost` (± a port), matched LITERALLY against the URL
+   * host (a hostname that merely RESOLVES to an allowlisted IP does NOT match — no rebinding bypass). Pairs
+   * with the per-script `allowDangerous` gate. Default: [] (nothing private is reachable).
+   */
+  allowedPrivateHosts: string[];
   // ─── Editor ──────────────────────────────────────────────────────────────────
   /**
    * Monaco editor font size in pixels.  Affects the code editor only; reference
@@ -154,6 +244,13 @@ export interface LumiScriptSettings {
    * Default: 12.  Range: 10 – 24.
    */
   editorFontSize: number;
+  /**
+   * Show the Monaco editor's IntelliSense — autocomplete suggestions, `api.*`
+   * signature help, and hover docs. When off, those popups are suppressed
+   * (syntax-error squiggles are unaffected).
+   * Default: true.
+   */
+  editorIntellisense: boolean;
   /**
    * Debounce (in milliseconds) between the last keystroke and autosave.
    * Larger values reduce backend round-trips while typing, at the cost of
@@ -195,6 +292,16 @@ export interface LumiScriptSettings {
    */
   assistantMaxIterations: number;
   /**
+   * Token budget for Lisa's model-facing context window. Her per-turn prompt
+   * (system turn + windowed history) is trimmed to fit this, and the chat's
+   * fullness gauge reads against it. The host doesn't expose a model's real
+   * context length, so this is a manual setting; the default (200K) sits under
+   * the common ~256K floor of modern models and well under 1M-context ones.
+   * Lower it for small/local models; raise it for big windows. UI range:
+   * 8K – 1,000K.
+   */
+  assistantContextTokens: number;
+  /**
    * Generation defaults passed through `RunTurnOptions.parameters` to the
    * underlying `spindle.generate.rawStream` call. The three numeric fields
    * are OPTIONAL — blank / undefined means "no override; use the
@@ -208,6 +315,22 @@ export interface LumiScriptSettings {
   assistantTopP?: number;
   assistantMaxTokens?: number;
   assistantParallelToolCalls: boolean;
+  /**
+   * Whether Lisa auto-compacts a conversation once its context fills past the
+   * threshold — folding older turns into a summary so the chat can continue
+   * without overflowing. Fires an LLM summary call in the background after a
+   * turn, so it's opt-out for the cost/latency-averse (manual "Compact now"
+   * still works regardless). Default: true.
+   */
+  assistantAutoCompact: boolean;
+  /**
+   * Whether Lisa marks the stable part of her system prompt (persona + the
+   * ~44K-token API cheat-sheet) with a prompt-cache breakpoint, so caching
+   * providers (Anthropic et al.) read it from cache instead of re-billing it on
+   * every turn. Harmless no-op on providers that don't cache. Default: true;
+   * turn off only if a provider misbehaves with cache markers.
+   */
+  assistantPromptCaching: boolean;
 }
 
 export const DEFAULT_TRIGGER_TEMPLATE =
@@ -232,6 +355,13 @@ module.exports = {
 export const DEFAULT_SETTINGS: LumiScriptSettings = {
   enabled: true,
   scriptTimeoutMs: 60_000,
+  // #11 — the AsyncFunction engine is the default; the QuickJS isolate is opt-in.
+  // Flipping this default to 'quickjs' is the P8 "make it default" one-liner.
+  engineMode: 'asyncfn',
+  // #11 P7 — one shared QuickJS context by default; per-script isolation is opt-in (and only effective
+  // under engineMode 'quickjs'). Flipping to 'per-script' via Settings is the context-model rollout knob.
+  contextModel: 'shared',
+  streamQueueCap: 512,
   // v1.0 — multi-worker default. Phases A–F shipped; Sections 1–8 of
   // the manual test pass came back green; the disable-mid-flight bug
   // cluster closed; tracker pair migrated to the broadcast pattern as
@@ -241,15 +371,20 @@ export const DEFAULT_SETTINGS: LumiScriptSettings = {
   workerIdleTimeoutMs: 30 * 60 * 1000,
   workerMemoryCeilingMb: 512,
   consoleHistoryLimit: 500,
+  allowedPrivateHosts: [],
   editorFontSize: 12,
+  editorIntellisense: true,
   autosaveDebounceMs: 1_200,
   defaultTriggerTemplate: DEFAULT_TRIGGER_TEMPLATE,
   defaultLibraryTemplate: DEFAULT_LIBRARY_TEMPLATE,
   assistantMaxIterations: 8,
+  assistantContextTokens: 200_000,
   // Generation defaults — temperature / topP / maxTokens are intentionally
   // omitted (undefined). The "no override; use connection preset" semantic
   // is meaningful state — only set them if the user explicitly tweaks.
   assistantParallelToolCalls: true,
+  assistantAutoCompact: true,
+  assistantPromptCaching: true,
 };
 
 // ─── Execution ────────────────────────────────────────────────────────────────
@@ -294,6 +429,8 @@ export interface LumiScriptAPI {
   users: UsersAPI;
   /** Running Lumiverse backend + frontend versions. Free tier. */
   version: VersionAPI;
+  /** Read the extension's runtime permission grant set. Free tier. */
+  permissions: PermissionsAPI;
   variables: VariablesAPI;
   json: JSONAPI;
   utils: UtilsAPI;
@@ -802,6 +939,17 @@ export interface ChatAPI {
   isMessageHidden(id: string): Promise<boolean>;
 
   /**
+   * Set the active chat's CSS containment mode.
+   *   - `'bounded'` (default): extension- and card-injected content is clamped
+   *     inside the bounded message stream.
+   *   - `'extension-relaxed'`: `position: fixed` content injected into a message
+   *     paints at viewport scope instead of being clamped — e.g. a full-bleed
+   *     overlay authored by an injected-DOM or card script.
+   * Operates on the active chat. Requires app_manipulation permission.
+   */
+  setStyleMode(mode: 'bounded' | 'extension-relaxed'): Promise<void>;
+
+  /**
    * Register a message content processor — a handler that fires before a
    * user-initiated message write reaches SQLite (create, update, swipe_add,
    * swipe_update, auto-inserted greetings) AND on per-message display
@@ -852,6 +1000,78 @@ export interface ChatAPI {
    * scripts). Use for diagnostics. Excludes the live handler reference.
    */
   listContentProcessors(): RegisteredMessageContentProcessorInfo[];
+
+  /**
+   * Subscribe to a message tag — react when the model (or user) emits an inline
+   * tag like `<dice>20</dice>` in a chat message. Returns an unsubscribe
+   * function; call it to stop receiving the tag. Subscriptions are also cleaned
+   * up automatically when the owning script is disabled, deleted, or finishes a
+   * one-shot run. Requires `chat_mutation` permission.
+   *
+   * **Delivery (v1):** the handler fires **once per completed message** that
+   * contains a match. Streaming partials are NOT delivered, and an edit re-fires
+   * with the new content. Delivery is render-coupled and best-effort: a message
+   * that completes while scrolled far off-screen may not deliver until it is
+   * viewed again — so **handlers should be idempotent**. The handler's return
+   * value is ignored (an async handler is awaited only for status tracking).
+   *
+   * `options.attrs` narrows to tags whose attributes include the given pairs
+   * (subset match — `{ type: 'd20' }` matches `<roll type="d20">`).
+   * `options.removeFromMessage` (default `true`) strips the matched tag from the
+   * RENDERED message; the stored message is unchanged.
+   *
+   * @example
+   * const off = api.chat.onMessageTag('dice', (ev) => {
+   *   console.log('rolled', ev.content, 'in message', ev.messageId);
+   * }, { removeFromMessage: true });
+   * // later: off();
+   */
+  onMessageTag(
+    tagName: string,
+    handler: (event: MessageTagEvent) => void | Promise<void>,
+    options?: MessageTagOptions,
+  ): () => void;
+}
+
+/**
+ * Payload delivered to an `api.chat.onMessageTag` handler when a matching tag is
+ * found in a completed chat message. Mirrors the host's tag-intercept shape.
+ */
+export interface MessageTagEvent {
+  /** The matched tag name (no brackets), e.g. `'dice'` for `<dice>…</dice>`. */
+  tagName: string;
+  /** Parsed tag attributes, e.g. `<roll type="d20">` → `{ type: 'd20' }`. */
+  attrs: Record<string, string>;
+  /** The inner text between the open/close tags. */
+  content: string;
+  /** The full matched substring, including the tags. */
+  fullMatch: string;
+  /** Id of the message the tag was found in (when available). */
+  messageId?: string;
+  /** Id of the chat the message belongs to (when available). */
+  chatId?: string;
+  /** True if the matched message is a user message (vs assistant). */
+  isUser?: boolean;
+  /**
+   * True if the match came from a still-streaming render. v1 only delivers
+   * completed (`isStreaming: false`) matches, so this is always `false` for now —
+   * reserved for the streaming opt-in (see notes/message-tag-delivery-roadmap.md).
+   */
+  isStreaming?: boolean;
+}
+
+/** Options for `api.chat.onMessageTag`. */
+export interface MessageTagOptions {
+  /**
+   * Only fire for tags whose attributes include these key/value pairs (subset
+   * match). Omit to match the tag regardless of attributes.
+   */
+  attrs?: Record<string, string>;
+  /**
+   * Strip the matched tag from the RENDERED message (the stored message is
+   * untouched). Defaults to `true`; set `false` to leave the tag visible.
+   */
+  removeFromMessage?: boolean;
 }
 
 // ─── LLM API ─────────────────────────────────────────────────────────────────
@@ -1532,6 +1752,25 @@ export interface VersionAPI {
   getFrontend(): Promise<string>;
 }
 
+// ─── Permissions API ────────────────────────────────────────────────────────
+
+export interface PermissionsAPI {
+  /**
+   * The Spindle permissions currently granted to the LumiScript extension
+   * (e.g. `['chat_mutation', 'generation', ...]`). Permissions are
+   * extension-level, not per-script — this reflects what the user granted the
+   * whole extension. Free tier (no permission required).
+   */
+  getGranted(): Promise<string[]>;
+  /**
+   * Whether a specific permission is currently granted. Use as a pre-flight
+   * check before a gated call — `if (await api.permissions.has('images')) { … }`
+   * — to degrade gracefully instead of catching a `PERMISSION_DENIED` error
+   * after the fact. Free tier (no permission required).
+   */
+  has(permission: string): Promise<boolean>;
+}
+
 // ─── Variables API ────────────────────────────────────────────────────────────
 
 export interface VariableStore {
@@ -1593,6 +1832,13 @@ export interface HttpRequestOptions {
    * value you passed in to determine the body's shape.
    */
   responseType?: 'text' | 'arraybuffer';
+  /**
+   * An `AbortSignal` to cancel the request in flight (e.g. from `AbortController`).
+   * Honored only for requests that take the direct path (a user-allowlisted local host); the SSRF-safe
+   * proxy path can't be cancelled, so a signal there is accepted but has no effect. On abort the returned
+   * promise rejects with an `AbortError`.
+   */
+  signal?: AbortSignal;
 }
 
 export interface HttpResponse {
@@ -1604,6 +1850,15 @@ export interface HttpResponse {
    * omitted; `Uint8Array` when `'arraybuffer'`.
    */
   body: string | Uint8Array;
+  /**
+   * Every `Set-Cookie` header from the response, preserved individually.
+   * `headers['set-cookie']` collapses multiple cookies into one comma-joined
+   * (and, because cookie `Expires` values contain commas, ambiguous) value —
+   * this array keeps them separate. Only populated for requests that took the
+   * direct path (a user-allowlisted local host); the SSRF-safe proxy path can't
+   * supply per-cookie values, so this is absent there.
+   */
+  setCookies?: string[];
 }
 
 export interface UtilsAPI {
@@ -2533,6 +2788,25 @@ export interface PersonaUpdateInput {
   metadata?: Record<string, unknown>;
 }
 
+/** A global add-on — a named, sortable injectable content block (persona-adjacent). */
+export interface PersonaAddonInfo {
+  id: string;
+  label: string;
+  content: string;
+  sortOrder: number;
+  metadata: Record<string, unknown>;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Partial update for a global add-on — only the provided fields change. */
+export interface PersonaAddonUpdateInput {
+  label?: string;
+  content?: string;
+  sortOrder?: number;
+  metadata?: Record<string, unknown>;
+}
+
 export interface PersonasAPI {
   /** List personas. Requires personas permission. */
   list(options?: { limit?: number; offset?: number }): Promise<{ data: Persona[]; total: number }>;
@@ -2559,6 +2833,22 @@ export interface PersonasAPI {
    * Only requires personas permission (not world_books).
    */
   getWorldBook(personaId: string): Promise<WorldInfo | null>;
+  /**
+   * Global add-ons — named, sortable injectable content blocks that pair with a
+   * generation's persona add-on states (the enable/disable map in
+   * `ChatGenerationOptions.personaAddonStates`). This resolves those add-on IDs
+   * to their label / content. Authoring and removal stay in the host UI;
+   * scripts can list, read, and update existing add-ons. Requires personas
+   * permission.
+   */
+  addons: {
+    /** List global add-ons (paginated). Requires personas permission. */
+    list(options?: { limit?: number; offset?: number }): Promise<{ data: PersonaAddonInfo[]; total: number }>;
+    /** Get a global add-on by ID. Returns null if not found. Requires personas permission. */
+    get(addonId: string): Promise<PersonaAddonInfo | null>;
+    /** Update a global add-on (partial — only the provided fields change). Requires personas permission. */
+    update(addonId: string, input: PersonaAddonUpdateInput): Promise<PersonaAddonInfo>;
+  };
 }
 
 // ─── Databanks API ───────────────────────────────────────────────────────────
@@ -3918,6 +4208,34 @@ export interface WorldInfoAPI {
    * Requires world_books permission.
    */
   getCapturedActive(chatId?: string): Promise<ActivatedWorldInfoEntry[]>;
+
+  /**
+   * Global (all-chats) activation. The user's "global" world books apply to
+   * EVERY chat, independent of character / chat scope. Book references accept a
+   * name or UUID (resolved like `get` / `update` / `delete`); the returned
+   * arrays are world-book IDs. Requires world_books permission.
+   *
+   * Read the IDs of the globally-active world books.
+   */
+  getGlobal(): Promise<string[]>;
+  /**
+   * Replace the set of globally-active world books. Returns the applied ID
+   * list (refs the host can't resolve to an existing book are dropped).
+   * Requires world_books permission.
+   */
+  setGlobal(refs: WorldInfoRef[]): Promise<string[]>;
+  /**
+   * Activate a single world book globally (add to the global set). Returns the
+   * updated global ID list. Throws if the book doesn't exist. Requires
+   * world_books permission.
+   */
+  activateGlobal(ref: WorldInfoRef): Promise<string[]>;
+  /**
+   * Deactivate a single globally-active world book (remove from the global
+   * set). No-op if it wasn't active. Returns the updated global ID list.
+   * Requires world_books permission.
+   */
+  deactivateGlobal(ref: WorldInfoRef): Promise<string[]>;
 
   /**
    * Register a world-info interceptor — a handler that runs BEFORE world
@@ -5590,6 +5908,28 @@ export interface DOMDelegateOptions {
    * event. Default: `false` (compose with the host).
    */
   stopPropagation?: boolean;
+
+  /**
+   * When `true`, ALSO intercept events on elements inside the host's OPEN
+   * shadow-DOM "islands" — the isolated subtrees Lumiverse renders when a
+   * message's HTML contains a `<style>` tag or several inline styles. Without
+   * this, controls the LLM emits inside a styled block (e.g. `<button>` /
+   * `<input>` / `<select>` choice UIs) are unreachable: their events retarget
+   * to the island host at `document.body`, so a light-DOM selector never
+   * matches. Default: `false`.
+   *
+   * Notes:
+   * - Only `mode: 'open'` islands are reachable (Lumiverse's are open).
+   * - `change` / `submit` are `composed: false` and only surface because this
+   *   mode attaches the listener *inside* the shadow root.
+   * - Selectors are matched relative to the island: a leading
+   *   `[data-component="MessageContent"] ` scope prefix is stripped and the
+   *   host placement re-validated in light DOM. Selectors that reference a
+   *   light-DOM ancestor mid-string, or span the boundary via `>` / sibling
+   *   combinators, fall back to light-DOM-only matching.
+   * - Pairs with `root: 'chat'`.
+   */
+  pierceShadow?: boolean;
 }
 
 /**
@@ -6305,6 +6645,13 @@ export interface ToolInvocationContext {
    * option.
    */
   contextMessages?: LLMMessage[];
+  /**
+   * @internal #11 P7-F4 — the invoking script's id, stamped by `api.tools.invoke` so the quickjs fire
+   * path can fast-reject a self-reentrant invoke. The host tool wrapper EXTRACTS and STRIPS this before
+   * the child handler's ctx is built, so a user tool handler never receives it (ctx stays `undefined`
+   * for `api.tools.invoke`, as documented). Not part of the public contract — do not read it.
+   */
+  __lsCallerScriptId?: string;
 }
 
 /**
@@ -6887,6 +7234,39 @@ export type DbFilter<T = DbRecord> =
   | ((record: T) => boolean);
 
 /**
+ * Per-collection retention policy (opt-in). Enforced lazily ON INSERT
+ * (`insert` / `insertMany`) — there is no background timer, so a collection
+ * that stops receiving inserts keeps its records until the next insert.
+ * Reads, `update`, and `delete` never prune.
+ *
+ * Both bounds may be combined. Per insert: expiry (`maxAgeMs`) is applied to
+ * the EXISTING records first, then the newly-inserted record(s) are appended,
+ * then `maxRecords` caps the total by dropping the oldest (by insertion order).
+ * Applying expiry before the append means a freshly-inserted record is never
+ * pruned by `maxAgeMs` in the same call (even if given an explicitly old
+ * `createdAt`), so `insert()` never returns a record it didn't persist. When an
+ * `insertMany` batch is larger than `maxRecords`, only the records that survive
+ * the cap are returned (and broadcast). Pruning is silent — no
+ * `ls:collection:deleted` event fires for auto-pruned records.
+ *
+ * Available from LumiScript 1.4.0+.
+ */
+export interface DbRetention {
+  /**
+   * Keep at most this many records. On insert, once the collection would
+   * exceed this count the oldest records (by insertion order) are dropped
+   * until it fits. Must be a positive integer.
+   */
+  maxRecords?: number;
+  /**
+   * Drop records older than this many milliseconds (measured from each
+   * record's `createdAt`) when an insert touches the collection. Must be a
+   * positive number.
+   */
+  maxAgeMs?: number;
+}
+
+/**
  * Options for `api.db.collection(name, opts)`.
  */
 export interface CollectionOpts<T extends DbRecord = DbRecord> {
@@ -6911,6 +7291,14 @@ export interface CollectionOpts<T extends DbRecord = DbRecord> {
    * surface the issue.
    */
   schema?: ZodLike<T>;
+  /**
+   * Optional retention policy — auto-prune old records on insert. See
+   * {@link DbRetention}. Omit for unbounded retention (the default). Like
+   * `schema`, the policy from the FIRST `collection()` call for a given
+   * (scope, name) wins; later calls with a different policy reuse the cached
+   * handle.
+   */
+  retention?: DbRetention;
 }
 
 /**

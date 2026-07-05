@@ -428,3 +428,208 @@ describe('dom-handler — shared components bridge (comp_*)', () => {
     expect(inst.compHandle.focus).toHaveBeenCalledTimes(1);
   });
 });
+
+// ── pierceShadow: delegation into open shadow-DOM islands (v1.6.0) ───────────
+// Lumiverse isolates styled assistant HTML into open shadow roots; a delegation
+// flagged `pierceShadow` attaches a capture listener INSIDE each island so its
+// controls become reachable (incl. `change`, which is composed:false and never
+// escapes the root). These tests drive the real handler against happy-dom shadow
+// roots created under a [data-message-id] → [data-component="MessageContent"] row.
+
+/** Build a message row containing a MessageContent host with an OPEN shadow root.
+ *  Mirrors the host's IsolatedHtml shape closely enough for discovery + matching. */
+function makeIsland(messageId: string, shadowHTML: string): { host: HTMLElement; shadow: ShadowRoot } {
+  const row = document.createElement('div');
+  row.setAttribute('data-message-id', messageId);
+  const part = document.createElement('div');
+  part.setAttribute('data-part', 'character');
+  const mc = document.createElement('div');
+  mc.setAttribute('data-component', 'MessageContent');
+  const host = document.createElement('div');
+  const shadow = host.attachShadow({ mode: 'open' });
+  shadow.innerHTML = shadowHTML;
+  mc.appendChild(host);
+  part.appendChild(mc);
+  row.appendChild(part);
+  document.body.appendChild(row);
+  return { host, shadow };
+}
+
+const PIERCE_BTN = '[data-component="MessageContent"] button';
+
+describe('pierceShadow — delegation into open shadow-DOM islands', () => {
+  test('click inside an island dispatches, with message resolved off the host', () => {
+    const { shadow } = makeIsland('m1', '<button class="probe">go</button>');
+    const { handler, sent } = install();
+    handler({
+      type: 'dom_delegate_register', scriptId: 's1', delegationId: 'd1',
+      selector: PIERCE_BTN, event: 'click', root: 'chat', pierceShadow: true,
+    });
+
+    shadow.querySelector<HTMLElement>('.probe')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+
+    const evt = sent.find((m) => m.type === 'dom_delegate_event' && m.delegationId === 'd1');
+    expect(evt).toBeDefined();
+    expect(evt.data.matched.tagName).toBe('BUTTON');
+    expect(evt.data.message?.id).toBe('m1');
+    expect(evt.data.message?.role).toBe('assistant');
+  });
+
+  test('change on an islanded <select> dispatches (composed:false still caught)', () => {
+    const { shadow } = makeIsland('m1',
+      '<select class="sel"><option value="a">A</option><option value="b">B</option></select>');
+    const { handler, sent } = install();
+    handler({
+      type: 'dom_delegate_register', scriptId: 's1', delegationId: 'd2',
+      selector: '[data-component="MessageContent"] select', event: 'change', root: 'chat', pierceShadow: true,
+    });
+
+    const sel = shadow.querySelector<HTMLSelectElement>('.sel')!;
+    sel.value = 'b';
+    sel.dispatchEvent(new Event('change', { bubbles: true })); // composed defaults false
+
+    const evt = sent.find((m) => m.type === 'dom_delegate_event' && m.delegationId === 'd2');
+    expect(evt).toBeDefined();
+    expect(evt.data.matched.value).toBe('b');
+  });
+
+  test('a composed click fires exactly once (no document.body double-dispatch)', () => {
+    const { shadow } = makeIsland('m1', '<button class="probe">go</button>');
+    const { handler, sent } = install();
+    handler({
+      type: 'dom_delegate_register', scriptId: 's1', delegationId: 'd3',
+      selector: PIERCE_BTN, event: 'click', root: 'chat', pierceShadow: true,
+    });
+
+    shadow.querySelector<HTMLElement>('.probe')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+
+    const hits = sent.filter((m) => m.type === 'dom_delegate_event' && m.delegationId === 'd3');
+    expect(hits.length).toBe(1);
+  });
+
+  test('still matches light-DOM controls when pierceShadow is on', () => {
+    document.body.innerHTML =
+      '<div data-message-id="m1"><div data-part="character"><div data-component="MessageContent">' +
+      '<button class="probe">go</button></div></div></div>';
+    const { handler, sent } = install();
+    handler({
+      type: 'dom_delegate_register', scriptId: 's1', delegationId: 'd4',
+      selector: PIERCE_BTN, event: 'click', root: 'chat', pierceShadow: true,
+    });
+
+    document.querySelector<HTMLElement>('.probe')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    expect(sent.find((m) => m.type === 'dom_delegate_event' && m.delegationId === 'd4')).toBeDefined();
+  });
+
+  test('a non-pierce delegation does NOT reach islanded controls', () => {
+    const { shadow } = makeIsland('m1', '<button class="probe">go</button>');
+    const { handler, sent } = install();
+    handler({
+      type: 'dom_delegate_register', scriptId: 's1', delegationId: 'd5',
+      selector: PIERCE_BTN, event: 'click', root: 'chat', // no pierceShadow
+    });
+
+    shadow.querySelector<HTMLElement>('.probe')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+
+    expect(sent.find((m) => m.type === 'dom_delegate_event' && m.delegationId === 'd5')).toBeUndefined();
+  });
+
+  test('comma-separated MessageContent-scoped selector matches inside the island', () => {
+    const { shadow } = makeIsland('m1', '<textarea class="note"></textarea>');
+    const { handler, sent } = install();
+    handler({
+      type: 'dom_delegate_register', scriptId: 's1', delegationId: 'd6',
+      selector: '[data-component="MessageContent"] input, [data-component="MessageContent"] select, [data-component="MessageContent"] textarea',
+      event: 'change', root: 'chat', pierceShadow: true,
+    });
+
+    const ta = shadow.querySelector<HTMLTextAreaElement>('.note')!;
+    ta.value = 'hi';
+    ta.dispatchEvent(new Event('change', { bubbles: true }));
+
+    const evt = sent.find((m) => m.type === 'dom_delegate_event' && m.delegationId === 'd6');
+    expect(evt).toBeDefined();
+    expect(evt.data.matched.tagName).toBe('TEXTAREA');
+    expect(evt.data.matched.value).toBe('hi');
+  });
+
+  test('honours a messageId filter for in-shadow matches', () => {
+    const a = makeIsland('m1', '<button class="probe">a</button>');
+    const b = makeIsland('m2', '<button class="probe">b</button>');
+    const { handler, sent } = install();
+    handler({
+      type: 'dom_delegate_register', scriptId: 's1', delegationId: 'd7',
+      selector: PIERCE_BTN, event: 'click', root: 'chat', messageId: 'm1', pierceShadow: true,
+    });
+
+    // Click in m2 — filtered out (host resolves to 'm2' !== bound 'm1').
+    b.shadow.querySelector<HTMLElement>('.probe')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+    expect(sent.find((m) => m.type === 'dom_delegate_event' && m.delegationId === 'd7')).toBeUndefined();
+
+    // Click in m1 — fires.
+    a.shadow.querySelector<HTMLElement>('.probe')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+    expect(sent.find((m) => m.type === 'dom_delegate_event' && m.delegationId === 'd7')?.data.message?.id).toBe('m1');
+  });
+
+  test('cleanup detaches in-shadow listeners (no dispatch after teardown)', () => {
+    const { shadow } = makeIsland('m1', '<button class="probe">go</button>');
+    const { handler, sent } = install();
+    handler({
+      type: 'dom_delegate_register', scriptId: 's1', delegationId: 'd8',
+      selector: PIERCE_BTN, event: 'click', root: 'chat', pierceShadow: true,
+    });
+
+    activeCleanup?.();           // tear the handler down
+    activeCleanup = undefined;   // prevent the afterEach double-call
+
+    shadow.querySelector<HTMLElement>('.probe')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+
+    expect(sent.find((m) => m.type === 'dom_delegate_event' && m.delegationId === 'd8')).toBeUndefined();
+  });
+
+  test('an island appearing AFTER registration is discovered via the observer', async () => {
+    const { handler, sent } = install();
+    handler({
+      type: 'dom_delegate_register', scriptId: 's1', delegationId: 'd9',
+      selector: PIERCE_BTN, event: 'click', root: 'chat', pierceShadow: true,
+    });
+
+    // No island present at registration. Mount one now — the MutationObserver
+    // should discover it on the coalesced rescan.
+    const { shadow } = makeIsland('m1', '<button class="probe">late</button>');
+    await waitFor(() => {
+      const probe = shadow.querySelector<HTMLElement>('.probe');
+      probe?.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+      return sent.some((m) => m.type === 'dom_delegate_event' && m.delegationId === 'd9');
+    });
+
+    expect(sent.some((m) => m.type === 'dom_delegate_event' && m.delegationId === 'd9')).toBe(true);
+  });
+
+  test('a selector with a comma inside an attribute value decomposes without corruption', () => {
+    // The old split(',') decomposition turned this into a malformed selector that
+    // made closest() throw; the prefix-strip approach keeps the list intact.
+    const { shadow } = makeIsland('m1', '<input name="a,b" class="probe" />');
+    const { handler, sent } = install();
+    handler({
+      type: 'dom_delegate_register', scriptId: 's1', delegationId: 'd10',
+      selector: '[data-component="MessageContent"] input[name="a,b"]', event: 'change', root: 'chat', pierceShadow: true,
+    });
+
+    const inp = shadow.querySelector<HTMLInputElement>('.probe')!;
+    inp.value = 'x';
+    inp.dispatchEvent(new Event('change', { bubbles: true }));
+
+    const evt = sent.find((m) => m.type === 'dom_delegate_event' && m.delegationId === 'd10');
+    expect(evt).toBeDefined();
+    expect(evt.data.matched.tagName).toBe('INPUT');
+  });
+});

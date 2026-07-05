@@ -61,6 +61,8 @@ export interface ConfirmDialogProps {
    * 10001, so dialogs opened from it must pass a higher value (e.g. 10002).
    */
   overlayZIndex?: number;
+  /** Widen the card (e.g. to host a code diff). Default is the narrow confirm width. */
+  wide?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -75,6 +77,7 @@ export const ConfirmDialog: FC<ConfirmDialogProps> = ({
   variant = 'default',
   hideCancel = false,
   overlayZIndex,
+  wide = false,
   onConfirm,
   onCancel,
 }) => {
@@ -140,7 +143,7 @@ export const ConfirmDialog: FC<ConfirmDialogProps> = ({
       onClick={e => { if (e.target === e.currentTarget) onCancel(); }}
     >
       <div
-        className="ls-modal-card ls-confirm-card"
+        className={'ls-modal-card ls-confirm-card' + (wide ? ' ls-confirm-card-wide' : '')}
         ref={cardRef}
         onClick={e => e.stopPropagation()}
         role="alertdialog"

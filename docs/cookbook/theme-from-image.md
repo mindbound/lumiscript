@@ -62,6 +62,6 @@ Enable it and open chats with different characters: the accent, backgrounds, and
 
 ## See also
 
-- [Theming the host UI](../guides/theme.md) — the full `api.theme` surface, per-script attribution, mode-keyed variants, and the variable set.
+- [Theming the host UI](../guides/theme.md) — the full `api.theme` surface, per-script attribution, mode-keyed variants, and the [token reference](../guides/theme.md#token-reference).
 - [Permissions](../concepts/permissions.md) — `app_manipulation` (theme) plus `chats` / `characters` (the avatar lookup).
 - [Storage model](../concepts/storage-model.md) — `api.images` provenance for `imageId`, if you theme from uploaded or generated images.

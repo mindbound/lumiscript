@@ -192,7 +192,7 @@
   border-color: var(--lumiverse-accent, rgb(147, 112, 219));
 }
 .ls-asst-empty code {
-  font-family: var(--lumiverse-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-family: var(--lumiverse-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   font-size: 11px;
   background: rgba(255, 255, 255, 0.06);
   padding: 1px 4px;
@@ -208,6 +208,13 @@
   padding: 8px 12px;
   border-radius: var(--lumiverse-radius-sm, 6px);
   max-width: 80%;
+  /* Skip layout/paint for bubbles scrolled out of view in long threads. The
+     browser caches each bubble's real height after its first render (the
+     `auto` keyword) and uses 160px only as the pre-render estimate, so per-frame
+     layout/paint cost stays bounded to roughly the visible window instead of
+     the whole transcript. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 160px;
 }
 .ls-asst-bubble-user {
   align-self: flex-end;
@@ -255,6 +262,90 @@
   background: var(--lumiverse-fill-3, rgba(255, 255, 255, 0.12));
 }
 
+/* Hover-revealed "edit & resend" pencil in the user bubble's role row. */
+.ls-asst-bubble-edit {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 4px;
+  background: transparent;
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.55));
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms, color 120ms, background 120ms;
+}
+.ls-asst-bubble:hover .ls-asst-bubble-edit,
+.ls-asst-bubble-edit:focus-visible {
+  opacity: 1;
+}
+.ls-asst-bubble-edit:hover {
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.92));
+  background: var(--lumiverse-fill-3, rgba(255, 255, 255, 0.12));
+}
+
+/* Inline editor shown in place of the last user bubble while editing it. */
+.ls-asst-edit-box {
+  align-self: flex-end;
+  width: 100%;
+  max-width: 80%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ls-asst-edit-input {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  padding: 8px 12px;
+  border-radius: var(--lumiverse-radius-sm, 6px);
+  background: rgba(147, 112, 219, 0.16);
+  border: 1px solid rgba(147, 112, 219, 0.45);
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.92));
+  font: inherit;
+  line-height: 1.45;
+  outline: none;
+}
+.ls-asst-edit-input:focus {
+  border-color: rgba(147, 112, 219, 0.7);
+}
+.ls-asst-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.ls-asst-edit-cancel,
+.ls-asst-edit-save {
+  padding: 4px 10px;
+  border-radius: 5px;
+  font-size: 12px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background 120ms, color 120ms, border-color 120ms, opacity 120ms;
+}
+.ls-asst-edit-cancel {
+  background: transparent;
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.55));
+  border-color: var(--lumiverse-border, rgba(255, 255, 255, 0.14));
+}
+.ls-asst-edit-cancel:hover {
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.92));
+  background: var(--lumiverse-fill-3, rgba(255, 255, 255, 0.10));
+}
+.ls-asst-edit-save {
+  background: rgba(147, 112, 219, 0.9);
+  color: #fff;
+}
+.ls-asst-edit-save:hover:not(:disabled) {
+  background: rgb(147, 112, 219);
+}
+.ls-asst-edit-save:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* User-stopped bubble. */
 .ls-asst-bubble-aborted .ls-asst-bubble-content {
   opacity: 0.78;
@@ -267,6 +358,17 @@
 .ls-asst-bubble-content {
   white-space: pre-wrap;
   word-break: break-word;
+}
+/* Raw-text placeholder for an off-screen bubble whose markdown render is
+   deferred until it scrolls near the viewport (load perf — see MessageBubble).
+   Shows the source text so the height + content are roughly right before the
+   upgrade to the rendered markdown. */
+.ls-asst-bubble-deferred {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 13px;
+  line-height: 1.5;
+  opacity: 0.8;
 }
 
 /* ── Reasoning disclosure ──────────────────────────────────────────────── */
@@ -303,7 +405,7 @@
 }
 .ls-asst-reasoning-content {
   margin-top: 6px;
-  font-family: var(--lumiverse-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-family: var(--lumiverse-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   font-size: 11px;
   line-height: 1.5;
   color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.65));
@@ -358,6 +460,23 @@
 }
 .ls-asst-applied svg { flex-shrink: 0; color: rgb(142, 209, 134); }
 .ls-asst-applied strong { color: var(--lumiverse-text, rgba(255, 255, 255, 0.9)); font-weight: 600; }
+
+/* "Compacted here" transcript marker — a centered pill marking the boundary
+   above which Lisa's context is a summary (the full thread is still shown). */
+.ls-asst-compacted {
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px auto;
+  padding: 3px 12px;
+  font-size: 10.5px;
+  border-radius: 999px;
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.55));
+  background: var(--lumiverse-fill-1, rgba(255, 255, 255, 0.03));
+  border: 1px dashed var(--lumiverse-border-light, rgba(128, 128, 128, 0.22));
+}
+.ls-asst-compacted svg { flex-shrink: 0; color: var(--lumiverse-accent, rgb(147, 112, 219)); opacity: 0.85; }
 
 /* ── Memory panel (editable view of Lisa's persistent notes) ─────────────── */
 .ls-mem-panel {
@@ -638,7 +757,7 @@
 .ls-asst-usage-num {
   font-weight: 600;
   color: var(--lumiverse-text, rgba(255, 255, 255, 0.78));
-  font-family: var(--lumiverse-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-family: var(--lumiverse-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
 }
 .ls-asst-usage-label {
   text-transform: uppercase;
@@ -647,6 +766,126 @@
 }
 .ls-asst-usage-sep,
 .ls-asst-usage-dot { opacity: 0.5; }
+
+/* Context-fullness gauge — last turn's prompt tokens ÷ the configured budget.
+   A slim fill bar that ramps colour toward the (Tier-2) compaction threshold. */
+/* Gauge wrapper — anchors the click-popover above the gauge button. */
+.ls-asst-gauge-wrap { position: relative; display: inline-flex; }
+.ls-asst-usage-gauge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  /* It's a <button> now — strip native chrome so it reads as the bar. */
+  border: none;
+  background: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+}
+.ls-asst-usage-gauge-track {
+  position: relative;
+  width: 46px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--lumiverse-border-light, rgba(128, 128, 128, 0.20));
+  overflow: hidden;
+}
+.ls-asst-usage-gauge-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--lumiverse-accent, rgb(147, 112, 219));
+  transition: width 200ms ease;
+}
+.ls-asst-usage-gauge-warn .ls-asst-usage-gauge-fill { background: rgb(214, 158, 46); }
+.ls-asst-usage-gauge-crit .ls-asst-usage-gauge-fill { background: rgb(214, 90, 70); }
+.ls-asst-usage-gauge-warn .ls-asst-usage-label { color: rgb(214, 158, 46); }
+.ls-asst-usage-gauge-crit .ls-asst-usage-label { color: rgb(214, 90, 70); }
+
+/* "Compact now" button — sits in the usage strip next to the gauge. */
+.ls-asst-compact-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  border: none;
+  background: transparent;
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.50));
+  cursor: pointer;
+  border-radius: 4px;
+  transition: color 120ms ease, background 120ms ease;
+}
+.ls-asst-compact-btn:hover:not(:disabled) {
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.85));
+  background: var(--lumiverse-fill-hover, rgba(255, 255, 255, 0.08));
+}
+.ls-asst-compact-btn:disabled { opacity: 0.4; cursor: default; }
+
+/* ── Context-breakdown popover (click the gauge) ───────────────────────── */
+.ls-asst-bd-popover {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 30;
+  width: 260px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--lumiverse-fill-2, rgb(32, 32, 38));
+  border: 1px solid var(--lumiverse-border-light, rgba(128, 128, 128, 0.28));
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
+  font-size: 11.5px;
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.88));
+  cursor: default;
+}
+.ls-asst-bd-loading { width: 200px; color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.55)); }
+.ls-asst-bd-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.ls-asst-bd-title { font-weight: 600; font-variant-numeric: tabular-nums; }
+.ls-asst-bd-close {
+  border: none; background: none; padding: 0 2px; cursor: pointer; line-height: 1;
+  font-size: 15px; color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.55));
+}
+.ls-asst-bd-close:hover { color: var(--lumiverse-text, rgba(255, 255, 255, 0.9)); }
+.ls-asst-bd-bar {
+  display: flex;
+  height: 8px;
+  width: 100%;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--lumiverse-border-light, rgba(128, 128, 128, 0.20));
+  margin-bottom: 8px;
+}
+.ls-asst-bd-seg { height: 100%; }
+.ls-asst-bd-legend { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.ls-asst-bd-legend li { display: flex; align-items: center; gap: 6px; }
+.ls-asst-bd-swatch { width: 9px; height: 9px; border-radius: 2px; flex-shrink: 0; }
+.ls-asst-bd-label { flex: 1; }
+.ls-asst-bd-tok {
+  font-variant-numeric: tabular-nums;
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.6));
+  font-family: var(--lumiverse-font-mono, ui-monospace, monospace);
+}
+.ls-asst-bd-note {
+  margin: 8px 0 0;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.45));
+}
+.ls-asst-bd-over { margin: 6px 0 0; font-size: 10.5px; font-weight: 600; color: rgb(214, 158, 46); }
+/* Segment + swatch colours (corpus / memory / chat / attachments / free). */
+.ls-asst-bd-corpus { background: rgb(90, 130, 210); }
+.ls-asst-bd-memory { background: var(--lumiverse-accent, rgb(147, 112, 219)); }
+.ls-asst-bd-chat { background: rgb(110, 180, 120); }
+.ls-asst-bd-attachments { background: rgb(214, 158, 46); }
+.ls-asst-bd-free { background: var(--lumiverse-border-light, rgba(128, 128, 128, 0.25)); }
 
 /* ── Composer (footer) ─────────────────────────────────────────────────── */
 
@@ -1203,7 +1442,7 @@
 
 .ls-asst-md-inline-code,
 .ls-asst-md code {
-  font-family: var(--lumiverse-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-family: var(--lumiverse-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   font-size: 0.92em;
   padding: 1px 5px;
   background: rgba(255, 255, 255, 0.08);
@@ -1217,44 +1456,64 @@
 
 /* ── Code-block wrapper + "Apply to script" button ─────────────────────── */
 
-/* Wrapper around each fenced code block — provides the positioning context
-   for the absolutely-placed apply button and supplies the outer 8px
-   vertical margin (the inner SyntaxHighlighter's customStyle margin is
-   zeroed to make room for this wrapper). */
+/* Wrapper around each fenced code block — supplies the outer 8px vertical
+   margin (the inner SyntaxHighlighter's customStyle margin is zeroed). The
+   header bar and highlighter are both in normal flow; the only positioned
+   descendant is the apply drop-down menu, anchored to .ls-asst-md-apply-wrap. */
 .ls-asst-md-code-wrap {
-  position: relative;
   margin: 8px 0;
 }
 
-/* Action row — top-right of a code block. Holds Copy (always present) and,
-   when an AssistantApplyContext provider is mounted (the modal), Apply.
-   Revealed together on hover / focus-within so the block stays clean at rest. */
+/* Header bar above the code — language label (left) + the Copy / Apply controls
+   (right). It sits in normal flow ABOVE the highlighter rather than floating
+   over its top-right corner, so the buttons can never overlap the first code
+   line. Rounded top corners pair with the highlighter's rounded bottom (set in
+   MarkdownContent) so the bar and the code read as a single block. */
 .ls-asst-md-code-actions {
-  position: absolute;
-  top: 6px;
-  right: 6px;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px 4px 10px;
+  background: rgba(0, 0, 0, 0.58);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 6px 6px 0 0;
+}
+/* Language tag (e.g. js / ts / json) — dim, monospace, left of the bar. */
+.ls-asst-md-code-lang {
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: lowercase;
+  color: var(--lumiverse-text-dim, rgba(255, 255, 255, 0.4));
+  /* Host mono token — shared with inline code and the other mono surfaces. */
+  font-family: var(--lumiverse-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  /* Never let a pathological fence tag crowd or wrap the Copy / Apply buttons. */
+  min-width: 0;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Buttons cluster — pinned to the right edge of the bar. */
+.ls-asst-md-code-buttons {
+  display: flex;
+  align-items: center;
   gap: 4px;
-  opacity: 0;
-  transition: opacity 120ms;
+  margin-left: auto;
 }
-.ls-asst-md-code-wrap:hover .ls-asst-md-code-actions,
-.ls-asst-md-code-wrap:focus-within .ls-asst-md-code-actions {
-  opacity: 1;
-}
-/* Shared chrome for the Copy + Apply controls. */
+/* Shared chrome for the Copy + Apply controls — light icon buttons that read as
+   part of the header bar (transparent at rest, accent on hover). */
 .ls-asst-md-copy,
 .ls-asst-md-apply {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 3px 8px;
+  padding: 2px 7px;
   font-size: 10.5px;
   font-weight: 500;
-  background: var(--lumiverse-fill-3, rgba(255, 255, 255, 0.12));
-  color: var(--lumiverse-text, rgba(255, 255, 255, 0.92));
-  border: 1px solid var(--lumiverse-border-light, rgba(128, 128, 128, 0.28));
+  background: transparent;
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.65));
+  border: 1px solid transparent;
   border-radius: 4px;
   cursor: pointer;
   transition: background 120ms, border-color 120ms, color 120ms;
@@ -1271,11 +1530,6 @@
    menu directly beneath the button. */
 .ls-asst-md-apply-wrap {
   position: relative;
-}
-.ls-asst-md-apply-wrap .ls-asst-md-apply {
-  position: static;
-  top: auto;
-  right: auto;
 }
 .ls-asst-md-apply-menu {
   position: absolute;

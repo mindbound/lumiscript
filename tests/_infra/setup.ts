@@ -14,6 +14,7 @@ import { clearAll as clearTools } from '../../src/engine/tool-store.js';
 import { clearAll as clearMacros } from '../../src/engine/macro-store.js';
 import { clearAll as clearRpc } from '../../src/engine/rpc-store.js';
 import { clearAll as clearBroadcast } from '../../src/engine/broadcast-bus.js';
+import { _clearDbCache } from '../../src/engine/db-cache.js';
 import { resetContext } from '../../src/engine/binding.js';
 import { executionStatusStore } from '../../src/engine/execution-status.js';
 import { clearAllCommandHandlers } from '../../src/engine/api/commands.js';
@@ -29,6 +30,7 @@ import { __reset as resetMessageContentProcessorRegistry } from '../../src/engin
 import { __reset as resetDrawerTabRegistry }            from '../../src/engine/drawer-tab-registry.js';
 import { __reset as resetInputBarActionRegistry }      from '../../src/engine/input-bar-action-registry.js';
 import { __reset as resetWorldInfoInterceptorRegistry } from '../../src/engine/world-info-interceptor-registry.js';
+import { __reset as resetMessageTagHandlerRegistry }    from '../../src/engine/message-tag-handler-registry.js';
 import { __reset as resetFloatWidgetRegistry }         from '../../src/engine/float-widget-registry.js';
 import { __reset as resetAppMountRegistry }            from '../../src/engine/app-mount-registry.js';
 import { __reset as resetAdvancedModalRegistry }       from '../../src/engine/advanced-modal-registry.js';
@@ -40,6 +42,24 @@ import { __resetForTests as resetThemeStore }           from '../../src/engine/t
 // init-time side effects (only function bodies touch spindle.*).
 import { __resetForTests as resetHostDispatcher } from '../../src/script-runner/host-dispatcher.js';
 import { __resetForTests as resetApiProxy }       from '../../src/script-runner/api-proxy.js';
+// child-entry holds module-level `activeProxies` (and the unhandledRejection
+// rate-limit state). These persist across test FILES in the shared bun
+// process; without a per-test reset, a seam-seeded entry (the
+// unhandledRejection-guard test's `_setActiveProxyForTests` stub) survives
+// into whatever file bun runs next. The broadcast routers iterate every
+// `activeProxies` entry, so a leaked stub there used to crash an e2e file's
+// `routeApiResponse` on CI (filesystem-order-dependent — only reproduced when
+// the guard file sorted before the e2e file). Reset both here so child-entry
+// state is isolated per test, mirroring host-dispatcher / api-proxy.
+import {
+  _clearActiveProxiesForTests,
+  _resetUnhandledRejectionRateStateForTests,
+  _setEngineModeForTests,
+} from '../../src/script-runner/child-entry.js';
+// #11 P7-2 — dispose the per-script QuickJS context pool + reset contextModel to 'shared' between
+// tests, so a per-script-context test can't leak a context (or a pinned contextModel) into the next
+// file (the CI-readdir flake class). Cheap under 'shared' (empty pool; the shared record is reused).
+import { _disposeContextForTests, _setQuickJSAvailabilityForTests, _resetEngineTelemetryForTests, setVmTimerScheduler } from '../../src/script-runner/qjs-engine.js';
 
 // `dom-handler.ts` imports DOMPurify at module load — before any per-file DOM env
 // (`useDOM()`) registers a window — so its DOMPurify has no DOM and `.sanitize` is
@@ -76,6 +96,7 @@ beforeEach(() => {
   resetDrawerTabRegistry();
   resetInputBarActionRegistry();
   resetWorldInfoInterceptorRegistry();
+  resetMessageTagHandlerRegistry();
   resetFloatWidgetRegistry();
   resetAppMountRegistry();
   resetAdvancedModalRegistry();
@@ -83,4 +104,25 @@ beforeEach(() => {
   // Script-runner subsystem — Phase 11.A
   resetHostDispatcher();
   resetApiProxy();
+  // child-entry module-level state (activeProxies + rejection rate-limit).
+  // Prevents cross-file leakage of seam-seeded proxy stubs (see import note).
+  _clearActiveProxiesForTests();
+  _resetUnhandledRejectionRateStateForTests();
+  // #11 — clear the per-process engine-mode override so a parity test that
+  // pins engineMode='quickjs' can't leak into the next file's runs.
+  _setEngineModeForTests(undefined);
+  // #11 cold-start-fallback — re-arm the real WASM-availability probe so a degrade test forcing
+  // 'unavailable' can't leak into another file's quickjs runs (which would silently run under asyncfn).
+  _setQuickJSAvailabilityForTests(undefined);
+  // #11 P7-2 — dispose any per-script quickjs contexts + reset contextModel to 'shared'.
+  _disposeContextForTests();
+  // #11 observability — zero the engine telemetry counters so a run/fire/evict in one file can't
+  // bleed into another file's assertions (and the over-cap warn latch is re-armed).
+  _resetEngineTelemetryForTests();
+  // #11 P5-2 — clear the injected VM timer scheduler so a test's real/mock scheduler (or the child
+  // default export's real one) can't leak into another file's quickjs runs.
+  setVmTimerScheduler(undefined);
+  // api.db collection cache (module-global) — clear so a cached collection from
+  // one test can't leak into the next.
+  _clearDbCache();
 });

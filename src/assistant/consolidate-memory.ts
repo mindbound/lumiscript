@@ -15,7 +15,7 @@
 
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
 
-import { appendNote, loadNotes, saveNotes, type MemoryNote } from '../engine/assistant-memory.js';
+import { appendNote, loadNotes, commitNotesIfUnchanged, type MemoryNote } from '../engine/assistant-memory.js';
 
 /** Below this, consolidation isn't worth a round-trip. */
 const MIN_NOTES_TO_CONSOLIDATE = 6;
@@ -105,7 +105,15 @@ export async function consolidateMemory(
     return { ok: false, error: 'Consolidation produced no valid notes — memory left unchanged.' };
   }
 
-  await saveNotes(userId, rebuilt);
+  // G-04 — commit under the per-user write lock with a re-validate: if a
+  // remember/forget/appendNotes landed during the LLM round-trip above, the
+  // store no longer matches our pre-round-trip `notes` snapshot, so leave it
+  // unchanged (this module's validate-or-leave-unchanged contract) rather than
+  // clobber that concurrent write with our stale rebuild.
+  const committed = await commitNotesIfUnchanged(userId, notes, rebuilt);
+  if (!committed) {
+    return { ok: false, error: 'Your memory changed during consolidation (a note was added or edited) — left unchanged. Try again.' };
+  }
   return { ok: true, before: notes.length, after: rebuilt.length };
 }
 

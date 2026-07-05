@@ -43,6 +43,7 @@ export const TRIGGER_EVENT_GROUPS: EventGroup[] = [
       { name: 'CHAT_CHANGED',         description: 'A chat was updated (rename, metadata, or message reattribution). Does NOT fire on navigation — use CHAT_SWITCHED for open/close.' },
       { name: 'CHAT_SWITCHED',        description: 'The user opened a chat or returned to the home screen. data.chatId is the new chatId, or null on return-to-home.' },
       { name: 'CHAT_FORKED',          description: 'A chat was forked (branched) from a message into a new chat sharing the source character. data carries sourceChatId, forkedChatId, chat, branchId, forkedAtMessageId, forkedAtMessageIndex. Emitted by the host branch-chat flow on newer Lumiverse builds.' },
+      { name: 'CHARACTER_CREATED',    description: 'A character was created OR imported (including card import). data.character is the new character record (carries its extensions blob). NOTE: LumiScript also uses this internally for card-embedded-script detection — your handler runs alongside that.' },
       { name: 'CHARACTER_EDITED',     description: 'A character card was saved' },
       { name: 'CHARACTER_DELETED',    description: 'A character was deleted' },
       { name: 'CHARACTER_DUPLICATED', description: 'A character was duplicated' },
@@ -74,6 +75,12 @@ export const TRIGGER_EVENT_GROUPS: EventGroup[] = [
       { name: 'CONNECTION_PROFILE_LOADED', description: 'A connection profile was activated' },
       { name: 'REGEX_SCRIPT_CHANGED',      description: 'A regex find/replace script was created, updated, duplicated, reordered, or had its enabled state toggled. data.id + data.script (RegexScriptInfo). Requires regex_scripts permission. v0.27.0+.' },
       { name: 'REGEX_SCRIPT_DELETED',      description: 'A regex find/replace script was deleted. data.id. Requires regex_scripts permission. v0.27.0+.' },
+    ],
+  },
+  {
+    label: 'System',
+    events: [
+      { name: 'PERMISSION_CHANGED', description: 'A Lumiverse permission was granted to or revoked from LumiScript. data: { extensionId, permission, granted (new state), allGranted (full list) }. Use to (re)initialize a feature when its permission is granted, or degrade gracefully when revoked.' },
     ],
   },
 ];

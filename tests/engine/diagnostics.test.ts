@@ -18,7 +18,9 @@
 import { describe, test, expect, beforeEach } from 'bun:test';
 import {
   collectBackendDiagnostics,
+  compactDiagnostics,
   type DiagnosticsCollectorDeps,
+  type DiagnosticsReport,
   type AssistantProbeResult,
 } from '../../src/engine/diagnostics.js';
 import { setActiveContext, resetContext } from '../../src/engine/binding.js';
@@ -76,11 +78,12 @@ beforeEach(() => {
 // ─── Top-level shape ────────────────────────────────────────────────────────
 
 describe('collectBackendDiagnostics — shape', () => {
-  test('returns six sections in stable order', () => {
+  test('returns seven sections in stable order', () => {
     const report = collectBackendDiagnostics(makeDeps());
-    expect(report.sections).toHaveLength(6);
+    expect(report.sections).toHaveLength(7);
+    // #11 observability — the "Engine (QuickJS-WASM)" section slots in after script-runner.
     expect(report.sections.map(s => s.id)).toEqual([
-      'lumiscript', 'scriptRunner', 'activeContext', 'registrations', 'storage', 'assistant',
+      'lumiscript', 'scriptRunner', 'engine', 'activeContext', 'registrations', 'storage', 'assistant',
     ]);
   });
 
@@ -99,6 +102,133 @@ describe('collectBackendDiagnostics — shape', () => {
       report.summary.failures + report.summary.warnings +
       report.summary.passes   + report.summary.info;
     expect(totalSummed).toBe(totalChecks);
+  });
+});
+
+// ─── Section B2 — Engine (QuickJS-WASM) ─────────────────────────────────────
+
+/** #11 observability — a zeroed EngineTelemetry (the stock 'shared', never-probed state a child
+ *  reports before any quickjs run), overridable per field. */
+function makeEngine(overrides?: Partial<import('../../src/types/script-runner-ipc.js').EngineTelemetry>):
+  import('../../src/types/script-runner-ipc.js').EngineTelemetry {
+  return {
+    coldStartProbed: false, coldStartOk: false, coldStartMs: 0,
+    quickjsRuns: 0, asyncfnRuns: 0, degradedRuns: 0,
+    quickjsRunErrors: 0, quickjsFireErrors: 0, quickjsTimeouts: 0,
+    asyncfnRunErrors: 0, asyncfnTimeouts: 0,
+    reentrantRejects: 0, inVmOom: 0, contextEvictions: 0, overCapTolerated: 0, lastEvictionAt: 0,
+    streamsOpened: 0, streamsCancelled: 0,
+    contextModel: 'shared', liveContexts: 0, poolCap: 8, pinnedContexts: 0, reservedContexts: 0,
+    perCtxLimitBytes: 512 * 1024 * 1024,
+    ...overrides,
+  };
+}
+const engineSection = (report: DiagnosticsReport) => report.sections.find(s => s.id === 'engine')!;
+const engineCheck = (report: DiagnosticsReport, label: string) =>
+  engineSection(report).checks.find(c => c.label === label)!;
+
+describe('collectBackendDiagnostics — Section B2 (Engine, QuickJS-WASM)', () => {
+  // The QuickJS section renders only when quickjs is the active engine; force it here.
+  const qjsDeps = (o: Partial<DiagnosticsCollectorDeps> = {}): DiagnosticsCollectorDeps =>
+    makeDeps({ ...o, engineMode: 'quickjs' });
+
+  test('renders a single "Not probed" info row when engineProbe is absent', () => {
+    const report = collectBackendDiagnostics(qjsDeps()); // no engineProbe
+    const section = engineSection(report);
+    expect(section.name).toBe('Engine (QuickJS-WASM)');
+    expect(section.checks).toHaveLength(1);
+    expect(section.checks[0]!.status).toBe('info');
+    expect(section.checks[0]!.message).toContain('Not probed');
+  });
+
+  test('stock shared/never-probed telemetry reads honest-but-quiet (no false warns)', () => {
+    const report = collectBackendDiagnostics(qjsDeps({ engineProbe: makeEngine({ asyncfnRuns: 12 }) }));
+    // Availability: not probed → info, not a warn.
+    expect(engineCheck(report, 'WASM availability').status).toBe('info');
+    // Runs by engine shows the asyncfn denominator.
+    expect(engineCheck(report, 'Runs by engine').message).toContain('0 quickjs / 12 asyncfn');
+    // Pool branch: shared → explicit n/a, never a bare '0/8'.
+    const pool = engineCheck(report, 'Context pool');
+    expect(pool.status).toBe('info');
+    expect(pool.message).toContain('n/a (shared context model');
+    // No warn statuses on a healthy idle engine.
+    expect(engineSection(report).checks.some(c => c.status === 'warn')).toBe(false);
+  });
+
+  test('cold-start success promotes availability to pass with the timing', () => {
+    const report = collectBackendDiagnostics(qjsDeps({
+      engineProbe: makeEngine({ coldStartProbed: true, coldStartOk: true, coldStartMs: 106, quickjsRuns: 3 }),
+    }));
+    const avail = engineCheck(report, 'WASM availability');
+    expect(avail.status).toBe('pass');
+    expect(avail.message).toContain('106ms');
+  });
+
+  test('cold-start failure + degraded runs + timeouts + OOM all surface as warn', () => {
+    const report = collectBackendDiagnostics(qjsDeps({
+      engineProbe: makeEngine({
+        coldStartProbed: true, coldStartOk: false,
+        degradedRuns: 4, quickjsTimeouts: 2, inVmOom: 1,
+      }),
+    }));
+    expect(engineCheck(report, 'WASM availability').status).toBe('warn');
+    expect(engineCheck(report, 'Degraded runs').status).toBe('warn');
+    expect(engineCheck(report, 'Timeouts (→ respawn)').status).toBe('warn');
+    expect(engineCheck(report, 'In-VM out-of-memory').status).toBe('warn');
+  });
+
+  test('per-script model surfaces the live pool + an evictions row; over-cap flips the pool to warn', () => {
+    const report = collectBackendDiagnostics(qjsDeps({
+      engineProbe: makeEngine({
+        contextModel: 'per-script', liveContexts: 9, poolCap: 8, pinnedContexts: 9,
+        reservedContexts: 1, overCapTolerated: 1, contextEvictions: 3, lastEvictionAt: Date.now() - 2000,
+        perCtxLimitBytes: 64 * 1024 * 1024,
+      }),
+    }));
+    const pool = engineCheck(report, 'Context pool');
+    expect(pool.status).toBe('warn'); // overCapTolerated > 0
+    expect(pool.message).toContain('9/8 live');
+    expect(pool.message).toContain('over-cap');
+    // The evictions row only exists under the per-script model.
+    expect(engineCheck(report, 'Context evictions').message).toContain('3 eviction');
+  });
+});
+
+describe('collectBackendDiagnostics — Section B2 (Engine, AsyncFunction)', () => {
+  test('default engineMode (absent) renders the AsyncFunction section, not QuickJS', () => {
+    const report = collectBackendDiagnostics(makeDeps({ engineProbe: makeEngine({ asyncfnRuns: 5 }) }));
+    const section = engineSection(report);
+    expect(section.name).toBe('Engine (AsyncFunction)');
+    // The QuickJS-only rows must NOT bleed into the AsyncFunction section.
+    expect(section.checks.some(c => c.label === 'WASM availability')).toBe(false);
+    expect(section.checks.some(c => c.label === 'Context pool')).toBe(false);
+    // Its own rows are present.
+    expect(engineCheck(report, 'Sandbox').message).toContain('new AsyncFunction');
+    expect(engineCheck(report, 'Runs').message).toContain('5 asyncfn body-run');
+  });
+
+  test('renders a single "Not probed" info row when engineProbe is absent', () => {
+    const report = collectBackendDiagnostics(makeDeps({ engineMode: 'asyncfn' }));
+    const section = engineSection(report);
+    expect(section.name).toBe('Engine (AsyncFunction)');
+    expect(section.checks).toHaveLength(1);
+    expect(section.checks[0]!.message).toContain('Not probed');
+  });
+
+  test('run errors stay info; run timeouts flip Timeouts to warn', () => {
+    const report = collectBackendDiagnostics(makeDeps({
+      engineProbe: makeEngine({ asyncfnRuns: 20, asyncfnRunErrors: 3, asyncfnTimeouts: 2 }),
+    }));
+    expect(engineCheck(report, 'Run errors').status).toBe('info');
+    expect(engineCheck(report, 'Run errors').message).toContain('3 run error');
+    const timeouts = engineCheck(report, 'Timeouts (→ respawn)');
+    expect(timeouts.status).toBe('warn');
+    expect(timeouts.message).toContain('2 asyncfn run timeout');
+  });
+
+  test('idle telemetry reads quiet (no false warns)', () => {
+    const report = collectBackendDiagnostics(makeDeps({ engineProbe: makeEngine() }));
+    expect(engineSection(report).checks.some(c => c.status === 'warn')).toBe(false);
   });
 });
 
@@ -132,6 +262,10 @@ describe('collectBackendDiagnostics — Section A (LumiScript)', () => {
       .checks.find(c => c.label === 'Granted permissions')!;
     expect(withCheck.status).toBe('pass');
     expect(withCheck.message).toContain('3 permission');
+    // Names are listed inline in the message (not just the count) so they survive
+    // compaction into the Lisa read_diagnostics tool.
+    expect(withCheck.message).toContain('chat_mutation');
+    expect(withCheck.message).toContain('generation');
     expect(withCheck.details?.granted).toEqual(['chat_mutation', 'generation', 'interceptor']);
     expect(withoutCheck.status).toBe('warn');
   });
@@ -399,7 +533,7 @@ describe('collectBackendDiagnostics — Section D (registrations)', () => {
             { workerKey: 'worker-1', processId: 'p1', lastActivityMs: Date.now(), assignedScriptCount: 1, assignedScripts: ['script-A'], restartAttempts: 0, rss: null, pinnedByRegistrations: false, pinningScripts: [] },
           ],
           totalAssignedScripts:  1,
-          evictionTelemetry:     { totalEvictions: 0, lastEvictionAt: null, lastEvictionReason: null, totalEvictionsSkippedByPin: 0 },
+          evictionTelemetry:     { totalEvictions: 0, lastEvictionAt: null, lastEvictionReason: null, totalEvictionsSkippedByPin: 0, totalMemoryReadingsCarriedForward: 0 },
           settings:              { idleTimeoutMs: 30 * 60_000, memoryCeilingBytes: 512 * 1024 * 1024 },
         },
       },
@@ -634,7 +768,7 @@ describe('collectBackendDiagnostics — Section B (script-runner)', () => {
           configuredWorkerCount: 4,
           workers:               [],
           totalAssignedScripts:  0,
-          evictionTelemetry:     { totalEvictions: 0, lastEvictionAt: null, lastEvictionReason: null, totalEvictionsSkippedByPin: 0 },
+          evictionTelemetry:     { totalEvictions: 0, lastEvictionAt: null, lastEvictionReason: null, totalEvictionsSkippedByPin: 0, totalMemoryReadingsCarriedForward: 0 },
           settings:              { idleTimeoutMs: 30 * 60_000, memoryCeilingBytes: 512 * 1024 * 1024 },
         },
       },
@@ -664,7 +798,7 @@ describe('collectBackendDiagnostics — Section B (script-runner)', () => {
             { workerKey: 'worker-2', processId: 'def67890xyz', lastActivityMs: Date.now() - 90_000, assignedScriptCount: 2, assignedScripts: ['s-2a', 's-2b'],         restartAttempts: 0, rss: 102 * 1024 * 1024, pinnedByRegistrations: false, pinningScripts: [] },
           ],
           totalAssignedScripts:  5,
-          evictionTelemetry:     { totalEvictions: 0, lastEvictionAt: null, lastEvictionReason: null, totalEvictionsSkippedByPin: 0 },
+          evictionTelemetry:     { totalEvictions: 0, lastEvictionAt: null, lastEvictionReason: null, totalEvictionsSkippedByPin: 0, totalMemoryReadingsCarriedForward: 0 },
           settings:              { idleTimeoutMs: 30 * 60_000, memoryCeilingBytes: 512 * 1024 * 1024 },
         },
       },
@@ -703,6 +837,7 @@ describe('collectBackendDiagnostics — Section B (script-runner)', () => {
               lastEvictionAt:             lastReason ? Date.now() : null,
               lastEvictionReason:         lastReason,
               totalEvictionsSkippedByPin: 0,
+              totalMemoryReadingsCarriedForward: 0,
             },
             settings: { idleTimeoutMs: 30 * 60_000, memoryCeilingBytes: 512 * 1024 * 1024 },
           },
@@ -733,7 +868,7 @@ describe('collectBackendDiagnostics — Section B (script-runner)', () => {
             { workerKey: 'worker-1', processId: 'p1', lastActivityMs: Date.now(), assignedScriptCount: 1, assignedScripts: ['s-only'], restartAttempts: 0, rss: null, pinnedByRegistrations: false, pinningScripts: [] },
           ],
           totalAssignedScripts:  1,
-          evictionTelemetry:     { totalEvictions: 0, lastEvictionAt: null, lastEvictionReason: null, totalEvictionsSkippedByPin: 0 },
+          evictionTelemetry:     { totalEvictions: 0, lastEvictionAt: null, lastEvictionReason: null, totalEvictionsSkippedByPin: 0, totalMemoryReadingsCarriedForward: 0 },
           settings:              { idleTimeoutMs: 30 * 60_000, memoryCeilingBytes: 512 * 1024 * 1024 },
         },
       },
@@ -925,5 +1060,56 @@ describe('collectBackendDiagnostics — Assistant section', () => {
     ).sections.find(s => s.id === 'assistant')!;
     const init = section.checks.find(c => c.label === 'Initialised')!;
     expect(init.status).toBe('info');
+  });
+});
+
+// ─── compactDiagnostics (Lisa read_diagnostics tool) ─────────────────────────
+
+describe('compactDiagnostics', () => {
+  const full: DiagnosticsReport = {
+    generatedAt: 123,
+    summary: { failures: 1, warnings: 2, passes: 3, info: 0 },
+    sections: [
+      {
+        id: 'a',
+        name: 'Section A',
+        checks: [
+          {
+            label: 'Permissions',
+            status: 'pass',
+            message: 'all granted',
+            // The bulky bits that must be dropped:
+            table: { headers: ['h'], rows: [['r1'], ['r2']] },
+            details: { blob: 'x'.repeat(5000) },
+          },
+          { label: 'Triggers', status: 'fail', message: '0 trigger subscriptions' },
+        ],
+      },
+    ],
+  };
+
+  test('keeps section name + each check label/status/message', () => {
+    const c = compactDiagnostics(full);
+    expect(c.generatedAt).toBe(123);
+    expect(c.summary).toEqual({ failures: 1, warnings: 2, passes: 3, info: 0 });
+    expect(c.sections).toEqual([
+      {
+        name: 'Section A',
+        checks: [
+          { label: 'Permissions', status: 'pass', message: 'all granted' },
+          { label: 'Triggers', status: 'fail', message: '0 trigger subscriptions' },
+        ],
+      },
+    ]);
+  });
+
+  test('drops the bulky table / details payloads (and the section id)', () => {
+    const json = JSON.stringify(compactDiagnostics(full));
+    expect(json).not.toContain('table');
+    expect(json).not.toContain('details');
+    expect(json).not.toContain('x'.repeat(5000)); // the big blob is gone
+    expect(json).not.toContain('"id"');           // section id not carried
+    // A compact report stays far smaller than a full one with tables/details.
+    expect(json.length).toBeLessThan(400);
   });
 });

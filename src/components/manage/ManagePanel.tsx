@@ -19,6 +19,7 @@ interface ManagePanelProps {
   isRunning: boolean;
   consoleHistory: Record<string, ConsoleEntry[]>;
   editorFontSize: number;
+  editorIntellisense: boolean;
   autosaveDebounceMs: number;
   onClearConsole: (scriptId: string) => void;
   /**
@@ -38,6 +39,7 @@ export const ManagePanel: FC<ManagePanelProps> = ({
   isRunning,
   consoleHistory,
   editorFontSize,
+  editorIntellisense,
   autosaveDebounceMs,
   onClearConsole,
   onScriptOpened,
@@ -79,6 +81,7 @@ export const ManagePanel: FC<ManagePanelProps> = ({
           isRunning={isRunning}
           consoleHistory={consoleHistory}
           editorFontSize={editorFontSize}
+          editorIntellisense={editorIntellisense}
           autosaveDebounceMs={autosaveDebounceMs}
           onClearConsole={onClearConsole}
           onClose={handleClose}

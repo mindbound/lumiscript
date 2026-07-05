@@ -27,8 +27,10 @@ import {
   __getAssignedScriptCountForTests,
   setWorkerCountReader,
   setEvictionConfigReader,
+  __setEvictionMemoryQueryTimeoutForTests,
   evictionSweep,
   spawnScriptRunner,
+  getWorkerPoolDiagnostics,
 } from '../../src/script-runner/host-dispatcher.js';
 import {
   installMultiWorkerMockIpc,
@@ -239,6 +241,95 @@ describe('Phase E — memory eviction', () => {
       stopCallCount(mock.pairForKey('worker-4').childHandle),
     ];
     expect(stopCounts.reduce((a, b) => a + b, 0)).toBe(3);
+  });
+});
+
+describe('Phase E — memory eviction: null/carried-forward readings', () => {
+  let mock: MultiWorkerMockIpc;
+
+  beforeEach(async () => {
+    __resetForTests();
+    setWorkerCountReader(() => 4);
+    // A worker flagged unresponsive never replies to the stats ping; shrink the
+    // query timeout so the null path resolves in ~25 ms instead of the real 2 s.
+    __setEvictionMemoryQueryTimeoutForTests(25);
+    setEvictionConfigReader(() => ({
+      idleTimeoutMs:      60 * 60 * 1000,          // no idle eviction
+      memoryCeilingBytes: 500 * 1024 * 1024,       // generous; tightened per-test
+    }));
+    mock = installMultiWorkerMockIpc(getSpindle(), {
+      workerKeys: ['worker-1', 'worker-2', 'worker-3', 'worker-4'],
+    });
+    await spawnScriptRunner('test-user', 'worker-1');
+    await spawnScriptRunner('test-user', 'worker-2');
+    await spawnScriptRunner('test-user', 'worker-3');
+    await spawnScriptRunner('test-user', 'worker-4');
+  });
+
+  test('a non-responding worker is carried forward at its last-known RSS (not dropped as free)', async () => {
+    // Sweep #1 — all four answer with 100 MB, total 400 MB ≤ 500 MB ceiling. No
+    // eviction, but each worker's last-known RSS is recorded.
+    mock.setWorkerMemoryBytes('worker-1', 100 * 1024 * 1024);
+    mock.setWorkerMemoryBytes('worker-2', 100 * 1024 * 1024);
+    mock.setWorkerMemoryBytes('worker-3', 100 * 1024 * 1024);
+    mock.setWorkerMemoryBytes('worker-4', 100 * 1024 * 1024);
+    await evictionSweep();
+    expect(stopCallCount(mock.pairForKey('worker-1').childHandle)).toBe(0);
+    expect(getWorkerPoolDiagnostics().evictionTelemetry.totalMemoryReadingsCarriedForward).toBe(0);
+
+    // Now worker-1 goes non-responsive and the ceiling tightens to 350 MB.
+    // Live readings would total 300 MB (workers 2/3/4) ≤ 350 → no eviction — a
+    // silent under-count. Carrying worker-1's last-known 100 MB forward makes the
+    // sum 400 MB > 350, so the sweep correctly evicts. worker-1 is the LRU, so it
+    // is the one torn down (a worker too busy to answer IS a fair eviction target).
+    mock.setWorkerMemoryUnresponsive('worker-1', true);
+    setEvictionConfigReader(() => ({
+      idleTimeoutMs:      60 * 60 * 1000,
+      memoryCeilingBytes: 350 * 1024 * 1024,
+    }));
+    __setWorkerLastActivityForTests('worker-1', Date.now() - 5_000); // oldest → LRU
+    __setWorkerLastActivityForTests('worker-2', Date.now() - 1_000);
+    __setWorkerLastActivityForTests('worker-3', Date.now() - 1_000);
+    __setWorkerLastActivityForTests('worker-4', Date.now() - 1_000);
+
+    await evictionSweep();
+
+    // Exactly one eviction (400 − 100 = 300 ≤ 350 after dropping worker-1), and
+    // the carried-forward reading is counted in the diagnostics telemetry.
+    const stopCounts = [
+      stopCallCount(mock.pairForKey('worker-1').childHandle),
+      stopCallCount(mock.pairForKey('worker-2').childHandle),
+      stopCallCount(mock.pairForKey('worker-3').childHandle),
+      stopCallCount(mock.pairForKey('worker-4').childHandle),
+    ];
+    expect(stopCounts.reduce((a, b) => a + b, 0)).toBe(1);
+    expect(stopCallCount(mock.pairForKey('worker-1').childHandle)).toBe(1);
+    expect(getWorkerPoolDiagnostics().evictionTelemetry.totalMemoryReadingsCarriedForward).toBe(1);
+  });
+
+  test('a never-measured non-responding worker contributes 0 and is not counted as carried', async () => {
+    // worker-1 is unresponsive from the start — no prior reading exists to carry.
+    mock.setWorkerMemoryUnresponsive('worker-1', true);
+    mock.setWorkerMemoryBytes('worker-2', 50 * 1024 * 1024);
+    mock.setWorkerMemoryBytes('worker-3', 50 * 1024 * 1024);
+    mock.setWorkerMemoryBytes('worker-4', 50 * 1024 * 1024);
+    setEvictionConfigReader(() => ({
+      idleTimeoutMs:      60 * 60 * 1000,
+      memoryCeilingBytes: 250 * 1024 * 1024,
+    }));
+
+    await evictionSweep();
+
+    // Total = 150 MB (worker-1 contributes 0, nothing to carry) ≤ 250 → no
+    // eviction, and the carry counter stays 0 (it only counts substituted reads).
+    const stopCounts = [
+      stopCallCount(mock.pairForKey('worker-1').childHandle),
+      stopCallCount(mock.pairForKey('worker-2').childHandle),
+      stopCallCount(mock.pairForKey('worker-3').childHandle),
+      stopCallCount(mock.pairForKey('worker-4').childHandle),
+    ];
+    expect(stopCounts.reduce((a, b) => a + b, 0)).toBe(0);
+    expect(getWorkerPoolDiagnostics().evictionTelemetry.totalMemoryReadingsCarriedForward).toBe(0);
   });
 });
 

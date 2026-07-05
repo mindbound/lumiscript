@@ -1,5 +1,6 @@
 import { describe, test, expect, mock, beforeEach } from 'bun:test';
 import { buildDbAPI } from '../../../src/engine/api/db.js';
+import { buildFilesAPI } from '../../../src/engine/api/files.js';
 import { emit as busEmit, on as busOn, clearAll as busClear } from '../../../src/engine/broadcast-bus.js';
 import { __resetQueues } from '../../../src/engine/db-queue.js';
 import { createTestDeps } from '../../_infra/mock-deps.js';
@@ -527,5 +528,74 @@ describe('api.db.exists', () => {
 
     const { api: apiB } = buildApi({ script: { id: 'script-B' } });
     expect(await apiB.exists('rolls')).toBe(false);
+  });
+});
+
+// ─── retention (C12-09) ──────────────────────────────────────────────────────
+
+describe('api.db.collection — retention', () => {
+  test('maxRecords must be a positive integer', async () => {
+    const { api } = buildApi();
+    await expect(api.collection('r', { retention: { maxRecords: 0 } }))
+      .rejects.toThrow(/maxRecords must be a positive integer/);
+    await expect(api.collection('r', { retention: { maxRecords: -3 } }))
+      .rejects.toThrow(/positive integer/);
+    await expect(api.collection('r', { retention: { maxRecords: 1.5 } }))
+      .rejects.toThrow(/positive integer/);
+  });
+
+  test('maxAgeMs must be a positive number', async () => {
+    const { api } = buildApi();
+    await expect(api.collection('r', { retention: { maxAgeMs: 0 } }))
+      .rejects.toThrow(/maxAgeMs must be a positive number/);
+    await expect(api.collection('r', { retention: { maxAgeMs: -1 } }))
+      .rejects.toThrow(/positive number/);
+    await expect(api.collection('r', { retention: { maxAgeMs: NaN } }))
+      .rejects.toThrow(/positive number/);
+  });
+
+  test('a valid maxRecords policy is enforced on insert', async () => {
+    const { api } = buildApi();
+    const col = await api.collection('capped', { retention: { maxRecords: 2 } });
+    await col.insert({ n: 1 });
+    await col.insert({ n: 2 });
+    await col.insert({ n: 3 });
+    expect(await col.count()).toBe(2);
+    expect((await col.find()).map((r) => r.n)).toEqual([2, 3]);
+  });
+
+  test('insertMany broadcasts inserted events only for records that survive the cap', async () => {
+    const { api } = buildApi();
+    const inserted: unknown[] = [];
+    busOn('ls:collection:inserted', (p) => inserted.push((p as { record: DbRecord }).record.n), 'retn');
+    const col = await api.collection('capped2', { retention: { maxRecords: 2 } });
+    const survivors = await col.insertMany([{ n: 1 }, { n: 2 }, { n: 3 }, { n: 4 }]);
+    expect(survivors.map((r) => r.n)).toEqual([3, 4]);
+    expect(inserted).toEqual([3, 4]);       // no events for the capped-out 1, 2
+    expect(await col.count()).toBe(2);
+  });
+});
+
+// ─── cache coherence: raw api.files.* writer to a db/ path ───────────────────
+
+describe('api.db cache invalidation — raw files.* writer', () => {
+  test('files.userWrite to a collection path invalidates the cache (no stale read)', async () => {
+    const deps = createTestDeps({ script: { allowDangerous: true } });
+    const api = buildDbAPI(deps);
+    const files = buildFilesAPI(deps);
+    // files.* uses the raw write(); patch it to mirror into the same fakeStore
+    // the db layer reads via getJson.
+    const us = (globalThis as any).spindle.userStorage;
+    us.write = mock(async (path: string, data: string) => { fakeStore[path] = JSON.parse(data); });
+
+    const col = await api.collection('rolls');
+    await col.insert({ x: 1 });
+    await col.find();                                   // warm the cache
+    const path = Object.keys(fakeStore)[0]!;            // the collection's resolved db/ path
+    await files.userWrite(path, JSON.stringify([{ id: 'z', injected: true }]));
+
+    const after = await col.find();                     // must re-read disk, not serve stale
+    expect(after).toHaveLength(1);
+    expect((after[0] as DbRecord).injected).toBe(true);
   });
 });

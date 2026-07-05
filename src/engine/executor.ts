@@ -76,6 +76,7 @@ import { buildConnectionsAPI } from './api/connections.js';
 import { buildWebSearchAPI } from './api/web-search.js';
 import { buildUsersAPI } from './api/users.js';
 import { buildVersionAPI } from './api/version.js';
+import { buildPermissionsAPI } from './api/permissions.js';
 import { buildVariablesAPI  } from './api/variables.js';
 import { buildFilesAPI      } from './api/files.js';
 import { buildUIAPI         } from './api/ui.js';
@@ -416,6 +417,7 @@ export function buildScriptAPI(script: Script, options: ExecutorOptions): LumiSc
     webSearch:  buildWebSearchAPI(deps),
     users:      buildUsersAPI(deps),
     version:    buildVersionAPI(),
+    permissions: buildPermissionsAPI(),
     files:      buildFilesAPI(deps),
     enclave:    buildEnclaveAPI(deps),
     ui:         { ...buildUIAPI(deps), dom: buildDOMAPI(deps), components: buildComponentsAPI(deps), events: buildUIEventsAPI(deps) },

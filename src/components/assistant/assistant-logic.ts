@@ -19,7 +19,7 @@ import type { LlmMessagePart } from '../../types/script.js';
 import type { AppliedEvent } from '../../assistant/types.js';
 
 export interface DisplayMessage {
-  role: 'user' | 'assistant' | 'tool' | 'error' | 'applied';
+  role: 'user' | 'assistant' | 'tool' | 'error' | 'applied' | 'compacted';
   content: string;
   /** For tool rows. */
   toolName?: string;
@@ -74,7 +74,7 @@ export function formatRelativeTime(epochMs: number): string {
  *   - `assistant` with array content → tool_use parts emit tool chips
  *     (paired with their result by tool_use_id); text parts emit bubbles
  */
-export function historyToDisplay(history: LlmMessageDTO[], appliedEvents: AppliedEvent[] = []): DisplayMessage[] {
+export function historyToDisplay(history: LlmMessageDTO[], appliedEvents: AppliedEvent[] = [], compactedThrough?: number): DisplayMessage[] {
   // First pass: map tool_use_id → { content, isError }.
   const toolResults = new Map<string, { content: string; isError: boolean }>();
   for (const m of history) {
@@ -104,6 +104,14 @@ export function historyToDisplay(history: LlmMessageDTO[], appliedEvents: Applie
       result.push({ role: 'applied', content: '', scriptName: ev.scriptName, appliedUpdated: ev.updated });
     }
     appliedByCount.delete(count);
+  };
+  // Compaction boundary divider: emitted once, after the `compactedThrough`-th
+  // message (just before the verbatim tail) — "messages above are summarized in
+  // Lisa's context". Undefined / 0 → uncompacted, no divider.
+  const flushCompacted = (count: number) => {
+    if (compactedThrough !== undefined && compactedThrough > 0 && count === compactedThrough) {
+      result.push({ role: 'compacted', content: '' });
+    }
   };
 
   // Second pass: render in order, splicing applied markers after the Nth message.
@@ -145,6 +153,7 @@ export function historyToDisplay(history: LlmMessageDTO[], appliedEvents: Applie
       }
     }
     flushApplied(i + 1);
+    flushCompacted(i + 1);
   }
   // Flush any markers anchored beyond the message count (e.g. messages since
   // trimmed) so they're not silently dropped.

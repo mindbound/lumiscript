@@ -40,6 +40,24 @@ type AnyCollection = unknown;
 // scriptId → ((scope::path) → Collection wrapper)
 const cache = new Map<string, Map<string, AnyCollection>>();
 
+// Per-script LRU cap (audit C13-01). A script that mints many DISTINCT
+// collection names in one long run (e.g. `api.db.collection('chat_' + chatId)`
+// per event) accumulates one cache entry + one dispatcher persistent handle per
+// name, unbounded. Cap the per-script cache and, on eviction, release the
+// evicted wrapper's persistent handle so the two tables stay in lockstep.
+// Generous: normal scripts use a handful of collections and never evict.
+const MAX_COLLECTIONS_PER_SCRIPT = 256;
+
+// Set by backend.ts to `host-dispatcher.releasePersistentHandleByObj` so the
+// engine layer doesn't import the script-runner directly (mirrors the pinning
+// hooks). Invoked with the evicted Collection wrapper on LRU eviction.
+let onEvictCollection: ((scriptId: string, col: AnyCollection) => void) | null = null;
+export function setCollectionEvictHook(
+  fn: ((scriptId: string, col: AnyCollection) => void) | null,
+): void {
+  onEvictCollection = fn;
+}
+
 function makeKey(scope: string, path: string): string {
   return `${scope}::${path}`;
 }
@@ -53,7 +71,17 @@ export function getCachedCollection(
   scope:    string,
   path:     string,
 ): AnyCollection | undefined {
-  return cache.get(scriptId)?.get(makeKey(scope, path));
+  const scriptCache = cache.get(scriptId);
+  if (scriptCache === undefined) return undefined;
+  const key = makeKey(scope, path);
+  const col = scriptCache.get(key);
+  // LRU touch: re-insert so this key moves to the most-recently-used (end)
+  // position, so eviction targets genuinely cold entries first.
+  if (col !== undefined) {
+    scriptCache.delete(key);
+    scriptCache.set(key, col);
+  }
+  return col;
 }
 
 /**
@@ -73,7 +101,39 @@ export function setCachedCollection(
     scriptCache = new Map();
     cache.set(scriptId, scriptCache);
   }
-  scriptCache.set(makeKey(scope, path), col);
+  const key = makeKey(scope, path);
+  // Re-insert so a replace also moves the key to the most-recently-used end.
+  scriptCache.delete(key);
+  scriptCache.set(key, col);
+  // Evict the oldest (least-recently-used) entries past the cap, releasing each
+  // evicted wrapper's persistent handle so `persistentHandles` doesn't keep
+  // growing after the cache is bounded (audit C13-01).
+  while (scriptCache.size > MAX_COLLECTIONS_PER_SCRIPT) {
+    const oldestKey: string | undefined = scriptCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    const evicted = scriptCache.get(oldestKey);
+    scriptCache.delete(oldestKey);
+    if (evicted !== undefined) onEvictCollection?.(scriptId, evicted);
+  }
+}
+
+/**
+ * Evict a SINGLE cached Collection wrapper for `(scriptId, scope, path)` and
+ * release its persistent handle (same handle-release as LRU eviction). Called
+ * from `api.db.collection().drop()` so a dropped collection doesn't strand its
+ * wrapper + a leaked dispatcher persistent handle: the NEXT `collection()` call
+ * for that name then rebuilds a fresh wrapper (picking up any new `opts.schema`
+ * instead of the pre-drop "first wins" one). No-op on miss.
+ */
+export function evictCollection(scriptId: string, scope: string, path: string): void {
+  const scriptCache = cache.get(scriptId);
+  if (scriptCache === undefined) return;
+  const key = makeKey(scope, path);
+  const evicted = scriptCache.get(key);
+  if (evicted === undefined) return;
+  scriptCache.delete(key);
+  if (scriptCache.size === 0) cache.delete(scriptId);
+  onEvictCollection?.(scriptId, evicted);
 }
 
 /**

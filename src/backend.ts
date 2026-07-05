@@ -2,7 +2,7 @@ declare const spindle: import('lumiverse-spindle-types').SpindleAPI
 
 import type { FrontendToBackend } from './types/messages.js';
 import type { LumiScriptSettings, Script } from './types/script.js';
-import { DEFAULT_SETTINGS } from './types/script.js';
+import { DEFAULT_SETTINGS, scriptRunsOnStartup } from './types/script.js';
 import { ScriptStorage } from './storage/script-storage.js';
 import { SettingsStore } from './storage/settings-store.js';
 import { executionStatusStore } from './engine/execution-status.js';
@@ -21,6 +21,9 @@ import {
 import { createHash } from 'node:crypto';
 import { generateUUID } from './utils/uuid.js';
 import { listByMode, listAll, clearEphemeral, clearByScriptId, type InjectionEntry } from './engine/injection-store.js';
+import { prepareCardScriptDetection, applyCardScriptInstall, type PreparedDetection } from './engine/card-scripts-install.js';
+import { extractEmbeddedScripts, computeInstallActions } from './engine/card-scripts.js';
+import { buildCardBundle, buildEmbeddedEntry } from './engine/card-scripts-export.js';
 import { applyLumiScriptInjections } from './engine/interceptor-pipeline.js';
 import {
   dispatch as dispatchMacroInterceptor,
@@ -36,6 +39,7 @@ import {
 } from './engine/message-content-processor-registry.js';
 import {
   dispatch as dispatchWorldInfoInterceptor,
+  hasAnyEntry as hasAnyWorldInfoInterceptor,
   clearByScriptId as clearWorldInfoInterceptorsByScriptId,
   listIdsByScriptId as worldInfoInterceptorIdsByScript,
   diffAndCleanStale as diffAndCleanStaleWorldInfoInterceptors,
@@ -59,6 +63,7 @@ import {
 } from './engine/rpc-store.js';
 import {
   clearByScriptId as clearCollectionHandleCacheByScriptId,
+  setCollectionEvictHook,
 } from './engine/collection-handle-cache.js';
 import { flushThemeOnTeardown } from './engine/api/theme.js';
 import {
@@ -83,6 +88,11 @@ import {
   dispatchClick as dispatchActionClick,
 } from './engine/input-bar-action-registry.js';
 import {
+  listByScript as listTagHandlersByScript,
+  clearByScriptId as clearTagHandlersByScriptId,
+  dispatchTagEvent,
+} from './engine/message-tag-handler-registry.js';
+import {
   liveWidgetsByScript,
   destroyWidget as destroyWidgetInRegistry,
   dropEntry as dropWidgetEntry,
@@ -99,6 +109,7 @@ import {
   dispatchActivation as dispatchTabActivation,
 } from './engine/drawer-tab-registry.js';
 import { resolveContextMenu, resolvePickFile } from './engine/api/ui.js';
+import { setAllowedPrivateHostsReader } from './engine/api/utils.js';
 import {
   dispatchKeyboardChange,
   dispatchDrawerChange,
@@ -117,7 +128,8 @@ import {
   deleteRecord,
   isValidCollectionPath,
 } from './engine/db-admin.js';
-import { on as busOn, clearByScriptId as clearBroadcastByScriptId } from './engine/broadcast-bus.js';
+import { dbCacheKey, invalidateDbCache } from './engine/db-cache.js';
+import { on as busOn, emit as busEmit, clearByScriptId as clearBroadcastByScriptId } from './engine/broadcast-bus.js';
 import { clearCommandHandlerByScriptId } from './engine/api/commands.js';
 import { buildReplayMessages } from './engine/replay.js';
 import {
@@ -133,23 +145,33 @@ import {
   setScriptResolver,
   setSendToFrontend,
   setWorkerCountReader,
+  setEngineModeReader,
+  setStreamQueueCapReader,
+  setContextModelReader,
   setEvictionConfigReader,
   startEvictionSweep,
   rebalanceWorkerPool,
+  restartAllWorkers,
   redistributeAllAssignments,
   unregisterScriptFromChild,
   getRunnerHealth,
   getWorkerPoolDiagnostics,
   queryRunnerStats,
   queryWorkerMemoryBytes,
+  releasePersistentHandleByObj,
   // shutdownScriptRunner — Phase 10 will wire this into teardown
 } from './script-runner/host-dispatcher.js';
 import {
   collectBackendDiagnostics,
+  compactDiagnostics,
+  type DiagnosticsReport,
   type ScriptRunnerProbeResult,
   type AssistantProbeResult,
 } from './engine/diagnostics.js';
-import { runAssistantTurn } from './assistant/agent.js';
+import { runAssistantTurn, estimateMessageTokens, estimateSystemFloorTokens, ATTACHED_SCRIPT_CODE_CAP, ATTACHED_FILE_TEXT_CAP } from './assistant/agent.js';
+import { buildModelHistory } from './assistant/model-history.js';
+import { compactThread, AUTO_COMPACT_THRESHOLD } from './assistant/compaction.js';
+import { buildSessionNotesSection } from './assistant/system-prompt.js';
 import { isEligibleUserFile, normalizeUserPath, MAX_USER_FILE_BYTES, USER_FILES_ROOT, userFileDisplayName, toUserFilePath } from './assistant/user-files.js';
 import {
   memoryIndex as loadMemoryIndex,
@@ -179,6 +201,28 @@ import type { AssistantThread, AssistantThreadIndexEntry } from './assistant/typ
 let activeUserId: string | null = null;
 const grantedPermissions = new Set<string>();
 
+// Card-embedded scripts (#12): detections awaiting the user's consent reply,
+// keyed by requestId (bounded; oldest evicted). Lost on worker respawn — a
+// stale install reply then no-ops (see the `ls_card_scripts_install` handler).
+const pendingCardDetections = new Map<string, PreparedDetection>();
+const MAX_PENDING_CARD_DETECTIONS = 16;
+// Chat-open BANNER re-detects (#12 Phase C) use a SEPARATE bounded map so that
+// high-frequency chat navigation can't LRU-evict a still-open IMPORT consent
+// modal's cached detection (lifecycle audit). De-duped by hostCharacterId, so
+// revisiting a character replaces rather than appends.
+const bannerCardDetections = new Map<string, PreparedDetection>();
+const MAX_BANNER_CARD_DETECTIONS = 8;
+
+/** Look up a cached detection from either the import-consent or banner map. */
+function getCardDetection(requestId: string): PreparedDetection | undefined {
+  return pendingCardDetections.get(requestId) ?? bannerCardDetections.get(requestId);
+}
+/** Remove a cached detection from whichever map holds it. */
+function deleteCardDetection(requestId: string): void {
+  pendingCardDetections.delete(requestId);
+  bannerCardDetections.delete(requestId);
+}
+
 // ─── In-app assistant — module-level state (v0.30.2 persistence) ─────────────
 //
 // Threads persist to `spindle.userStorage` under `assistant/threads/<id>.json`,
@@ -194,6 +238,20 @@ let activeAssistantThread: AssistantThread | null = null;
 let assistantAbortController: AbortController | null = null;
 let assistantStreamedContent = '';
 let assistantInitialized = false;
+// C2-02 — in-flight bootstrap promise, so concurrent cold-start callers dedupe
+// onto one init instead of each passing the `assistantInitialized` check (set
+// only at the very end of bootstrap) and running the full load twice.
+let bootstrapInFlight: Promise<void> | null = null;
+
+/**
+ * Streamed-token coalescing window (ms). The agent fires onToken/onReasoning
+ * once per provider token — a fast model emits hundreds per second. Sending one
+ * `sendToFrontend` frame for each floods the host WebSocket (every frame is
+ * JSON-parsed on the browser main thread) and, on a multi-user server, fans
+ * every token out to all sessions. Instead we buffer tokens and flush at ~30Hz;
+ * the frontend concatenates batches exactly as it did single tokens.
+ */
+const ASSISTANT_TOKEN_COALESCE_MS = 33;
 
 async function refreshPermissions(): Promise<void> {
   try {
@@ -308,6 +366,16 @@ const settingsStore = new SettingsStore<LumiScriptSettings>(
   DEFAULT_SETTINGS,
 );
 
+// #12 Phase B — per-user record of card-bundled scripts the user has dismissed
+// (banner Dismiss) or deleted, so the passive chat-open re-detect (Phase C)
+// doesn't nag about them. The explicit import consent path never consults it.
+// Characters the user has hushed the chat-open banner for THIS SESSION (via the
+// banner's ✕, or by acting on it through Review/install). Session-scoped on
+// purpose: the character-editor tab's "Import to library" is the durable late-
+// import path, so the banner is only a transient discovery nudge — there's no
+// persistent dismissals file to accumulate or hand-clear. Cleared on restart.
+const sessionHushedCharacters = new Set<string>();
+
 // Register {{lumiScriptActive}} + character-var macros at module scope so they
 // are available to the macro engine the instant the worker boots. The
 // isEnabled callback reads from settingsStore.get(), which returns the
@@ -318,8 +386,35 @@ registerLumiScriptMacros(() => settingsStore.get().enabled);
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function send(msg: import('./types/messages.js').BackendToFrontend): void {
-  spindle.sendToFrontend(msg);
+function send(
+  msg: import('./types/messages.js').BackendToFrontend,
+  userId: string | null = activeUserId,
+): void {
+  // Route to the active user's session by default instead of broadcasting to
+  // EVERY connected session (audit C1-02). `spindle.sendToFrontend` with no
+  // userId fans out to all sessions — wasted bandwidth and, on a multi-user
+  // server, one user's scripts / status / storage leaking into another's panel
+  // (incl. the full script code that backs `scripts_updated`). Mirrors
+  // `sendAssistant`. A genuinely all-sessions broadcast would pass an explicit
+  // `userId: null` — there are none today.
+  spindle.sendToFrontend(msg, userId ?? undefined);
+}
+
+/**
+ * Send a Lisa-assistant message to ONLY the target user. `spindle.sendToFrontend`
+ * broadcasts to EVERY connected session when the userId is omitted (see its host
+ * docs) — which both wastes WebSocket bandwidth fanning out to unrelated sessions
+ * and, on a multi-user server, surfaces one user's Lisa conversation, threads,
+ * memory, connections, etc. in another's open modal. Defaults to `activeUserId`
+ * (set at the top of every `onFrontendMessage` handler); pass an explicit
+ * `userId` from any helper that carries its own (e.g. pushAssistantMemory) so it
+ * doesn't depend on the module-level value happening to match.
+ */
+function sendAssistant(
+  payload: import('./types/messages.js').BackendToFrontend,
+  userId: string | null = activeUserId,
+): void {
+  spindle.sendToFrontend(payload, userId ?? undefined);
 }
 
 // Wire host-dispatcher's frontend-send hook so async broadcast handler
@@ -332,6 +427,19 @@ setSendToFrontend((msg) => send(msg as import('./types/messages.js').BackendToFr
 // 1 keeps single-worker behaviour if `settingsStore.get()` returns an
 // older settings shape (pre-Phase-C1 persisted JSON without workerCount).
 setWorkerCountReader(() => settingsStore.get().workerCount ?? 1);
+
+// #11 engine-toggle-wiring — wire the engineMode reader so the dispatcher pins the
+// live-selected engine onto each RunScriptRequest. Default 'asyncfn' if an older
+// persisted settings shape has no engineMode. update_settings fire-reloads scripts
+// on an engineMode change so handlers re-register under the new engine (below).
+setEngineModeReader(() => settingsStore.get().engineMode ?? 'asyncfn');
+setStreamQueueCapReader(() => settingsStore.get().streamQueueCap ?? 512);
+// #11 P7 — wire the contextModel reader so the dispatcher pins the live setting onto each RunScriptRequest.
+// The child applies it only on a clean worker; update_settings respawns the QuickJS worker(s) on a flip.
+setContextModelReader(() => settingsStore.get().contextModel ?? 'shared');
+// SSRF egress allowlist — the guarded outbound-HTTP path (api/utils.ts) reads this live to decide which
+// private hosts take the direct-fetch escape hatch vs the hardened cors→safeFetch path.
+setAllowedPrivateHostsReader(() => settingsStore.get().allowedPrivateHosts ?? []);
 
 // Phase E (v1.0 runtime-isolation) — wire the eviction config reader so
 // the dispatcher's sweep reads live thresholds. Fallback defaults match
@@ -349,6 +457,11 @@ setEvictionConfigReader(() => {
 // workers are spawned, so starting it before the first user-script fire
 // has zero cost.
 startEvictionSweep();
+
+// audit C13-01 — wire the collection-handle-cache's LRU-eviction hook to the
+// dispatcher's persistent-handle release, so a script minting many distinct
+// collection names in one long run can't grow persistentHandles unbounded.
+setCollectionEvictHook(releasePersistentHandleByObj);
 
 function pushScripts(): void {
   send({ type: 'scripts_updated', scripts: scriptStorage.getScripts() });
@@ -660,6 +773,12 @@ if (typeof spindle.registerMessageContentProcessor === 'function') {
 // Forward-compat: same guard pattern as the other interceptor hooks.
 if (typeof spindle.registerWorldInfoInterceptor === 'function') {
   spindle.registerWorldInfoInterceptor(async (dtoCtx) => {
+    // Fast path (audit C1-01): if no script has registered a world-info
+    // interceptor, skip the per-generation deep-copy of the full message +
+    // entry arrays below — dispatch would early-return on the empty registry
+    // anyway, so the copy was pure waste on every generation. The three
+    // sibling interceptor wrappers already check-then-build; this one didn't.
+    if (!hasAnyWorldInfoInterceptor()) return undefined;
     // DTO → LS-type translation. The entries' snake_case fields need
     // camelCase mapping; everything else is structurally identical.
     const lsCtx: import('./types/script.js').WorldInfoInterceptorCtx = {
@@ -764,6 +883,91 @@ const hotReloadTimers = new Map<string, ReturnType<typeof setTimeout>>();
  */
 function shortCodeHash(code: string): string {
   return createHash('sha256').update(code).digest('hex').slice(0, 16);
+}
+
+/** Gap between successive startup-script re-run STARTS on an engine switch. Spacing the starts
+ *  keeps N bodies from bursting simultaneously (toast rate limits, panel churn, a CPU spike) while
+ *  still migrating everything within a few seconds. */
+const ENGINE_SWITCH_RELOAD_SPACING_MS = 250;
+/** Pending spaced re-run timers from the last engine switch — cancelled wholesale if the user
+ *  flips engines again before the previous fan-out finished (the new fan-out re-derives the full
+ *  script set, so cancelling mid-flight loses nothing). */
+let engineSwitchReloadTimers: Array<ReturnType<typeof setTimeout>> = [];
+
+/**
+ * On an `engineMode` OR `contextModel` change, migrate every ENABLED trigger script under the new runtime.
+ * Required because fires route by REGISTRY PRESENCE (`hasVmHandler` [quickjs] vs `handlerClosures`
+ * [asyncfn]), NOT by any wire flag: a bare settings flip would leave old handlers firing under the previous
+ * runtime while new runs register under the new one — a correct-but-inconsistent split-brain that is NOT
+ * self-healing. (For a contextModel flip the worker(s) are respawned first — `restartAllWorkers` — so the
+ * old QuickJS contexts are gone before these re-runs rebuild handlers in the new-model contexts.)
+ *
+ * Migration is SELECTIVE — scripts split by whether their next natural run would come soon enough
+ * to rebuild their state:
+ *
+ *   - Startup-triggered scripts (`ls:startup`) re-run NOW via `fireReload` (wipe + body re-run
+ *     under the new engine). Their next natural run is the next extension activation, so dropping
+ *     their state without a re-run would leave them inert — no panels, macros, or handlers — for
+ *     the rest of the session. The re-runs are SPACED (not fired simultaneously) so many scripts
+ *     drawing UI at once don't burst into toast rate limits or a CPU spike.
+ *
+ *   - Event-driven scripts only get their registered live state WIPED (`fireEngineSwitchWipe`) —
+ *     no body re-run. Their next trigger fire re-runs the body under the new engine and rebuilds
+ *     the state naturally, so an immediate auto re-run would only burn cost (potentially real
+ *     money — LLM calls, agentic loops) for nothing. Both paths defer while a run is in flight,
+ *     so a mid-run script can't re-register state on the old engine after its wipe passed.
+ *
+ * The settings confirm modal derives its "N reload now / M re-arm on next trigger" counts from the
+ * same `scriptRunsOnStartup` predicate, so what the user is told always matches what happens here.
+ */
+function reloadAllEnabledScriptsForRuntimeChange(changeLabel: string): void {
+  // A rapid double-switch cancels the previous fan-out's still-pending re-runs; this call
+  // re-derives the full partition, so every script still converges on the FINAL engine.
+  for (const t of engineSwitchReloadTimers) clearTimeout(t);
+  engineSwitchReloadTimers = [];
+
+  const enabled   = scriptStorage.getEnabledTriggerScripts();
+  const reloadNow = enabled.filter(scriptRunsOnStartup);
+  const dropOnly  = enabled.filter((s) => !scriptRunsOnStartup(s));
+  // Lifecycle milestone: a user changed a runtime setting (engine or context model). Low-frequency (a
+  // settings flip), so no rate-limit; the per-script failure error stays at the catches below.
+  spindle.log.info(
+    `[LumiScript] ${changeLabel}; reloading ${reloadNow.length} startup script(s) now, ` +
+    `${dropOnly.length} event-driven script(s) re-arm on their next trigger`,
+  );
+
+  for (const script of dropOnly) {
+    void triggerRegistry.fireEngineSwitchWipe(script).catch((err) => {
+      spindle.log.error(
+        `[LumiScript] runtime-change state wipe failed for "${script.name}": ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  }
+
+  reloadNow.forEach((script, i) => {
+    const timer = setTimeout(() => {
+      // Re-read at fire time — the script may have been edited, disabled, or deleted while
+      // earlier re-runs in the spaced sequence were still draining.
+      const latest = scriptStorage.getScript(script.id);
+      if (!latest || !latest.enabled || latest.type !== 'trigger') return;
+      const codeHash = shortCodeHash(latest.code); // code is unchanged — only the engine
+      const payload: LsReloadPayload = {
+        reason:           'manual',
+        previousCodeHash: codeHash,
+        currentCodeHash:  codeHash,
+        previousLength:   latest.code.length,
+        currentLength:    latest.code.length,
+      };
+      void triggerRegistry.fireReload(latest, payload).catch((err) => {
+        spindle.log.error(
+          `[LumiScript] runtime-change reload failed for "${latest.name}": ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+    }, i * ENGINE_SWITCH_RELOAD_SPACING_MS);
+    engineSwitchReloadTimers.push(timer);
+  });
 }
 
 /**
@@ -905,6 +1109,14 @@ async function teardownDisabledScript(scriptId: string, disabledScript: Script |
     send({ type: 'ls_input_bar_action_destroy', scriptId, actionId });
   }
   clearActionsByScript(scriptId);
+  // Message-tag interceptors — tell the FE to drop each host interceptor, THEN
+  // clear the registry (symmetric teardown; otherwise the host interceptor zombies
+  // and keeps stripping tags). Handler closures are dropped by the unregister-IPC
+  // / script-unregister cleanup separately.
+  for (const tag of listTagHandlersByScript(scriptId)) {
+    send({ type: 'ls_tag_interceptor_unregister', scriptId, handlerId: tag.id });
+  }
+  clearTagHandlersByScriptId(scriptId);
   // Destroy any float widgets this script still has open. Same
   // lifecycle shape as input-bar actions — fire-and-forget
   // destroy messages, then drop registry entries via the
@@ -1038,6 +1250,11 @@ async function wipeScriptStateForReload(scriptId: string): Promise<void> {
     send({ type: 'ls_input_bar_action_destroy', scriptId, actionId });
   }
   clearActionsByScript(scriptId);
+  // Message-tag interceptors — FE-unregister each, then clear (symmetric teardown).
+  for (const tag of listTagHandlersByScript(scriptId)) {
+    send({ type: 'ls_tag_interceptor_unregister', scriptId, handlerId: tag.id });
+  }
+  clearTagHandlersByScriptId(scriptId);
   for (const widgetId of liveWidgetsByScript(scriptId)) {
     destroyWidgetInRegistry(widgetId);
     send({ type: 'ls_float_widget_destroy', widgetId });
@@ -1066,7 +1283,12 @@ async function wipeScriptStateForReload(scriptId: string): Promise<void> {
   // module-init captures + module-level imports for any libraries
   // `script.require()`'d during the previous run — those re-execute
   // anyway if the body re-loads them).
-  unregisterScriptFromChild(scriptId);
+  //
+  // #11 P7-2 — reason='reload' so the quickjs engine PRESERVES this script's
+  // per-script context (arbitrary `globalThis` + module captures survive the
+  // reload, matching asyncfn, and it skips a ~95ms rebuild). Disable/delete
+  // (the default) disposes the context. "reload is not a disable."
+  unregisterScriptFromChild(scriptId, 'reload');
 }
 
 /**
@@ -1116,6 +1338,17 @@ async function syncTriggers(): Promise<void> {
  */
 async function bootstrapAssistant(userId: string): Promise<void> {
   if (assistantInitialized) return;
+  // Dedupe concurrent callers (the fire-and-forget `void bootstrapAssistant`
+  // cold-start vs a near-simultaneous assistant_send / request_assistant_threads)
+  // onto a single shared init. Cleared once settled so a retry after a failed
+  // boot can run again. (audit C2-02)
+  bootstrapInFlight ??= runAssistantBootstrap(userId).finally(() => {
+    bootstrapInFlight = null;
+  });
+  return bootstrapInFlight;
+}
+
+async function runAssistantBootstrap(userId: string): Promise<void> {
   try {
     assistantThreadIndex = await loadThreadIndex(userId);
   } catch (err) {
@@ -1142,7 +1375,7 @@ async function bootstrapAssistant(userId: string): Promise<void> {
 }
 
 function pushAssistantThreads(): void {
-  spindle.sendToFrontend({
+  sendAssistant({
     type: 'assistant_threads',
     threads: assistantThreadIndex,
     activeThreadId: activeAssistantThread?.id ?? null,
@@ -1185,7 +1418,22 @@ async function listAttachableUserFiles(
 
 function pushActiveThreadLoaded(): void {
   if (!activeAssistantThread) return;
-  spindle.sendToFrontend({
+  // Gauge occupancy: the persisted last-turn value if present; else (threads
+  // created before occupancy was persisted) a local estimate over the current
+  // model-history + the fixed system floor, so the gauge + "Compact now" button
+  // still appear on an older chat. Flagged estimated; the next turn refines it.
+  let gauge: { lastPromptTokens?: number; lastPromptEstimated?: boolean } = {};
+  if (activeAssistantThread.lastPromptTokens !== undefined) {
+    gauge = {
+      lastPromptTokens: activeAssistantThread.lastPromptTokens,
+      lastPromptEstimated: activeAssistantThread.lastPromptEstimated ?? false,
+    };
+  } else if (activeAssistantThread.messages.some((m) => m.role !== 'system')) {
+    const historyTokens = buildModelHistory(activeAssistantThread)
+      .reduce((n, m) => n + estimateMessageTokens(m), 0);
+    gauge = { lastPromptTokens: estimateSystemFloorTokens() + historyTokens, lastPromptEstimated: true };
+  }
+  sendAssistant({
     type: 'assistant_thread_loaded',
     threadId: activeAssistantThread.id,
     title:    activeAssistantThread.title,
@@ -1193,17 +1441,77 @@ function pushActiveThreadLoaded(): void {
     contextScriptIds: activeAssistantThread.contextScriptIds ?? [],
     contextFilePaths: activeAssistantThread.contextFilePaths ?? [],
     appliedEvents: activeAssistantThread.appliedEvents ?? [],
+    ...gauge,
+    ...(activeAssistantThread.lastTurnUsage ? { lastTurnUsage: activeAssistantThread.lastTurnUsage } : {}),
+    ...(activeAssistantThread.totalUsage ? { totalUsage: activeAssistantThread.totalUsage } : {}),
+    ...(activeAssistantThread.compactedThrough !== undefined
+      ? { compactedThrough: activeAssistantThread.compactedThrough }
+      : {}),
   });
+}
+
+/**
+ * Compute + push a per-segment token-estimate breakdown of the active thread's
+ * context occupancy (corpus / memory / chat / attachments) for the gauge's
+ * breakdown popover. ON-DEMAND — the FE requests it when the popover opens. All
+ * LOCAL estimates via estimateMessageTokens (the same yardstick as the gauge);
+ * informational + best-effort, never throws into the caller.
+ */
+async function pushContextBreakdown(userId: string): Promise<void> {
+  try {
+    // Snapshot the thread up front so an await mid-compute can't mix one thread's
+    // chat/attachments with another's if the user switches threads meanwhile.
+    const thread = activeAssistantThread;
+    const corpus = estimateSystemFloorTokens();
+    if (!thread) {
+      // No active thread — still reply (corpus only) so the FE popover never
+      // hangs on its "Calculating…" placeholder.
+      sendAssistant({ type: 'assistant_context_breakdown', corpus, memory: 0, chat: 0, attachments: 0 }, userId);
+      return;
+    }
+    let memIndex = '';
+    try { memIndex = await loadMemoryIndex(userId); } catch { /* leave empty */ }
+    const memory = estimateMessageTokens({ role: 'system', content: buildSessionNotesSection(memIndex) });
+    const chat = buildModelHistory(thread).reduce((n, m) => n + estimateMessageTokens(m), 0);
+    const attachments = await estimateAttachmentTokens(userId, thread);
+    sendAssistant({ type: 'assistant_context_breakdown', corpus, memory, chat, attachments }, userId);
+  } catch (err) {
+    spindle.log.warn(`[LumiScript] pushContextBreakdown failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/** Token estimate for the thread's @-attached scripts (sync) + reserved-folder
+ *  files (read fresh). Mirrors how runAssistantTurn folds them into the system
+ *  prompt; best-effort per item so one unreadable file doesn't drop the rest. */
+async function estimateAttachmentTokens(userId: string, thread: AssistantThread): Promise<number> {
+  let total = 0;
+  const scriptIds = new Set(thread.contextScriptIds ?? []);
+  if (scriptIds.size > 0) {
+    for (const sc of scriptStorage.getScripts()) {
+      if (scriptIds.has(sc.id)) total += estimateMessageTokens({ role: 'user', content: sc.code.slice(0, ATTACHED_SCRIPT_CODE_CAP) });
+    }
+  }
+  for (const rawPath of thread.contextFilePaths ?? []) {
+    try {
+      const path = normalizeUserPath(rawPath);
+      if (!isEligibleUserFile(path)) continue;
+      const st = await spindle.userStorage.stat(path, userId);
+      if (!st.exists || !st.isFile || st.sizeBytes > MAX_USER_FILE_BYTES) continue;
+      const content = await spindle.userStorage.read(path, userId);
+      total += estimateMessageTokens({ role: 'user', content: content.slice(0, ATTACHED_FILE_TEXT_CAP) });
+    } catch { /* skip unreadable / vanished file */ }
+  }
+  return total;
 }
 
 /** Push the user's current memory notes to the Memory panel. Best-effort —
  *  sends an empty list on a read failure rather than breaking the panel. */
 async function pushAssistantMemory(userId: string): Promise<void> {
   try {
-    spindle.sendToFrontend({ type: 'assistant_memory', notes: await loadMemoryNotes(userId) });
+    sendAssistant({ type: 'assistant_memory', notes: await loadMemoryNotes(userId) }, userId);
   } catch (err) {
     spindle.log.warn(`[LumiScript] pushAssistantMemory failed: ${err instanceof Error ? err.message : String(err)}`);
-    spindle.sendToFrontend({ type: 'assistant_memory', notes: [] });
+    sendAssistant({ type: 'assistant_memory', notes: [] }, userId);
   }
 }
 
@@ -1245,6 +1553,209 @@ async function persistActiveThread(userId: string): Promise<void> {
   }
 }
 
+// ─── Diagnostics collection ─────────────────────────────────────────────────
+
+/**
+ * Collect a full backend diagnostics report — runs the async probes (storage
+ * round-trip, script-runner stats IPC, per-worker memory, assistant subsystem,
+ * host versions) and folds them into the synchronous `collectBackendDiagnostics`.
+ * Shared by the `request_diagnostics` FE handler and the Lisa `read_diagnostics`
+ * tool so both observe identical runtime state.
+ *
+ * `userId` scopes the per-user probes (storage + assistant); when undefined those
+ * sections render their "Not probed" rows. In the FE handler the message `userId`
+ * equals `activeUserId`, so this is behaviour-identical to the prior inline code.
+ */
+async function runDiagnostics(userId: string | undefined): Promise<DiagnosticsReport> {
+  // Storage probe — small round-trip read on scripts.json to time userStorage.
+  // Already loaded by the time this fires, so this is just a "can we still read?".
+  const storageStart = Date.now();
+  const storageProbe = await spindle.userStorage.getJson('scripts.json', { userId })
+    .then(() => ({ ok: true as const, latencyMs: Date.now() - storageStart }))
+    .catch((err: unknown) => ({
+      ok: false as const,
+      error: err instanceof Error ? err.message : String(err),
+    }));
+
+  // Script-runner: sync health snapshot + async resource-stats IPC.
+  // queryRunnerStats has its own internal 2s timeout; null means the child
+  // either timed out or wasn't alive. Worker-pool diagnostics: sync state plus
+  // async parallel per-worker memory queries (each bounded by a 2s timeout).
+  const runnerHealth = getRunnerHealth();
+  const runnerStats  = await queryRunnerStats();
+  const poolSnapshot = getWorkerPoolDiagnostics();
+  const perWorkerRss = await Promise.all(
+    poolSnapshot.workers.map(async (w) => ({
+      workerKey: w.workerKey,
+      rss:       await queryWorkerMemoryBytes(w.workerKey),
+    })),
+  );
+  const rssByWorker = new Map<string, number | null>(
+    perWorkerRss.map((r) => [r.workerKey, r.rss]),
+  );
+  const scriptRunner: ScriptRunnerProbeResult = {
+    ...runnerHealth,
+    stats: runnerStats === null
+      ? null
+      : {
+          rss:         runnerStats.rss,
+          heapTotal:   runnerStats.heapTotal,
+          heapUsed:    runnerStats.heapUsed,
+          external:    runnerStats.external,
+          cpuUserUs:   runnerStats.cpuUserUs,
+          cpuSystemUs: runnerStats.cpuSystemUs,
+          uptimeSec:   runnerStats.uptimeSec,
+        },
+    pool: {
+      configuredWorkerCount: poolSnapshot.configuredWorkerCount,
+      workers: poolSnapshot.workers.map((w) => ({
+        workerKey:             w.workerKey,
+        processId:             w.processId,
+        lastActivityMs:        w.lastActivityMs,
+        assignedScriptCount:   w.assignedScriptCount,
+        assignedScripts:       w.assignedScripts,
+        restartAttempts:       w.restartAttempts,
+        rss:                   rssByWorker.get(w.workerKey) ?? null,
+        pinnedByRegistrations: w.pinnedByRegistrations,
+        pinningScripts:        w.pinningScripts,
+      })),
+      totalAssignedScripts: poolSnapshot.totalAssignedScripts,
+      evictionTelemetry:    poolSnapshot.evictionTelemetry,
+      settings:             poolSnapshot.settings,
+    },
+  };
+
+  // Assistant probe — bundles the four "Assistant (Lisa)" checks. Skipped when
+  // there's no active user (userStorage rejects without an id; the collector
+  // renders the "Not probed" info row instead).
+  let assistantProbe: AssistantProbeResult | undefined;
+  if (userId) {
+    const userIdForProbe = userId;
+    const corpusEntries = Object.keys(LOOKUP_TABLE).length;
+
+    // Thread-storage probe. Index load is the gate; per-thread reads are
+    // best-effort (allSettled) — a single corrupted thread shouldn't disqualify
+    // the others. Sum bytes + tally readable from the fulfilled subset, surface
+    // the first per-thread error for context.
+    let indexLoaded     = false;
+    let threadsIndexed  = 0;
+    let threadsReadable = 0;
+    let totalBytes      = 0;
+    let storageError: string | undefined;
+    try {
+      const index = await loadThreadIndex(userIdForProbe);
+      indexLoaded    = true;
+      threadsIndexed = index.length;
+      const reads = await Promise.allSettled(
+        index.map((entry) =>
+          spindle.userStorage.getJson<unknown>(
+            `assistant/threads/${entry.id}.json`,
+            { fallback: null, userId: userIdForProbe },
+          ).then((body) => {
+            if (body === null) throw new Error('thread file missing');
+            // Re-serialise to estimate on-disk byte cost (host parsed for us).
+            totalBytes += JSON.stringify(body).length;
+            threadsReadable += 1;
+          }),
+        ),
+      );
+      const firstFailure = reads.find((r) => r.status === 'rejected');
+      if (firstFailure && firstFailure.status === 'rejected') {
+        const reasonMsg = firstFailure.reason instanceof Error
+          ? firstFailure.reason.message
+          : String(firstFailure.reason);
+        storageError =
+          `${threadsIndexed - threadsReadable} thread file(s) unreadable; first error: ${reasonMsg}`;
+      }
+    } catch (err) {
+      storageError = err instanceof Error ? err.message : String(err);
+    }
+
+    // Connections probe — same spindle.connections.list the modal picker uses.
+    let connectionsCount = 0;
+    let defaultName:     string | undefined;
+    let defaultModel:    string | undefined;
+    let defaultProvider: string | undefined;
+    try {
+      const list = await spindle.connections.list(userIdForProbe);
+      connectionsCount = list.length;
+      const dflt = list.find((conn) => conn.is_default);
+      if (dflt) {
+        defaultName     = dflt.name;
+        defaultModel    = dflt.model;
+        defaultProvider = dflt.provider;
+      }
+    } catch (err) {
+      spindle.log.warn(
+        `[LumiScript] diagnostics: connections probe failed: ` +
+        (err instanceof Error ? err.message : String(err)),
+      );
+    }
+
+    const s = settingsStore.get();
+    assistantProbe = {
+      initialised: assistantInitialized,
+      corpusEntries,
+      storage: {
+        indexLoaded,
+        threadsIndexed,
+        threadsReadable,
+        totalBytes,
+        ...(storageError ? { error: storageError } : {}),
+      },
+      connections: {
+        count: connectionsCount,
+        ...(defaultName     ? { defaultName     } : {}),
+        ...(defaultModel    ? { defaultModel    } : {}),
+        ...(defaultProvider ? { defaultProvider } : {}),
+      },
+      settings: {
+        maxIterations: s.assistantMaxIterations,
+        ...(s.assistantTemperature !== undefined ? { temperature: s.assistantTemperature } : {}),
+        ...(s.assistantTopP        !== undefined ? { topP:        s.assistantTopP        } : {}),
+        ...(s.assistantMaxTokens   !== undefined ? { maxTokens:   s.assistantMaxTokens   } : {}),
+        parallelToolCalls: s.assistantParallelToolCalls,
+      },
+    };
+  }
+
+  // Host versions via the free-tier spindle.version.* surface (host bf974cfb+).
+  // Wrapped in try/catch — older hosts predating this surface throw; diagnostics
+  // still work, just without the explicit version rows.
+  let lumiverseVersions: { backend: string; frontend: string } | undefined;
+  try {
+    const [backendVersion, frontendVersion] = await Promise.all([
+      spindle.version.getBackend(),
+      spindle.version.getFrontend(),
+    ]);
+    lumiverseVersions = { backend: backendVersion, frontend: frontendVersion };
+  } catch (err) {
+    spindle.log.warn(
+      `[LumiScript] diagnostics: spindle.version probe failed ` +
+      `(host probably predates the API) — ` +
+      `${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  return collectBackendDiagnostics({
+    scriptStorage,
+    triggerRegistry,
+    lumiScriptVersion:   spindle.manifest.version,
+    minLumiverseVersion: spindle.manifest.minimum_lumiverse_version ?? '0.0.0',
+    ...(lumiverseVersions !== undefined ? { lumiverseVersions } : {}),
+    grantedPermissions:  [...grantedPermissions],
+    activeUserId:        userId ?? null,
+    storageProbe,
+    scriptRunner,
+    assistantProbe,
+    // #11 observability — the aggregated QuickJS-engine telemetry (folded into runnerStats by
+    // queryRunnerStats). undefined when no worker reported it → the panel shows "Not probed".
+    ...(runnerStats?.engine !== undefined ? { engineProbe: runnerStats.engine } : {}),
+    // The active engine selects which single engine section the panel shows.
+    engineMode: settingsStore.get().engineMode ?? 'asyncfn',
+  });
+}
+
 // ─── Frontend message handler ─────────────────────────────────────────────────
 
 let triggersInitialized = false;
@@ -1261,7 +1772,13 @@ spindle.onFrontendMessage(async (raw, userId) => {
   if (!settingsStore.isLoaded) loadPromises.push(settingsStore.load());
   if (!scriptStorage.store.isLoaded) loadPromises.push(scriptStorage.load());
   if (loadPromises.length > 0) {
-    await Promise.all(loadPromises);
+    // Host userStorage I/O can reject at cold start; catch so this async
+    // onFrontendMessage handler can't leak an unhandled rejection — the cold-
+    // start block runs BEFORE the switch's try/catch, and the backend has no
+    // global unhandledRejection guard.
+    await Promise.all(loadPromises).catch((err) => {
+      spindle.log.warn(`[LumiScript] cold-start storage load failed: ${err instanceof Error ? err.message : String(err)}`);
+    });
     // Reconcile the {{lumiScriptActive}} macro with the just-loaded settings.
     // The macro was registered at module scope with the default (enabled=true);
     // if the user had persisted `enabled: false`, push it through now.
@@ -1287,7 +1804,9 @@ spindle.onFrontendMessage(async (raw, userId) => {
     // of triggers, can run in parallel. Fire-and-forget; on failure we'll
     // lazily retry on the next assistant interaction.
     void bootstrapAssistant(activeUserId);
-    await contextPromise;
+    await contextPromise.catch((err) => {
+      spindle.log.warn(`[LumiScript] cold-start active-context load failed: ${err instanceof Error ? err.message : String(err)}`);
+    });
     publishActiveCharId();
     // Verify the host meets our minimum Lumiverse version (declared in
     // spindle.json). Fire-and-forget: warns via toast + log if the host
@@ -1379,247 +1898,92 @@ spindle.onFrontendMessage(async (raw, userId) => {
 
       // ── Diagnostics panel (v0.28.0+) ────────────────────────────────────
       case 'request_diagnostics': {
-        // Run async probes in parallel: userStorage round-trip + script-
-        // runner stats IPC. Both have their own bounded timeouts/error
-        // handling — we never await indefinitely. After both settle (or
-        // timeout) we build the synchronous collector report and send
-        // it back to the FE.
-        //
-        // Wrapping each probe in its own try/catch (with `.catch(...)`-
-        // style mappers) so a failure in one doesn't drop the whole
-        // report — the section just renders with an `info` / `fail`
-        // marker pointing at the specific subsystem.
-
-        // Storage probe — small round-trip read on scripts.json to time
-        // userStorage. Already loaded by the time this fires, so this
-        // is just a "can we still read?" liveness check.
-        const storageStart = Date.now();
-        const storageProbe = await spindle.userStorage.getJson('scripts.json', { userId })
-          .then(() => ({ ok: true as const, latencyMs: Date.now() - storageStart }))
-          .catch((err: unknown) => ({
-            ok: false as const,
-            error: err instanceof Error ? err.message : String(err),
-          }));
-
-        // Script-runner: sync health snapshot + async resource-stats IPC.
-        // queryRunnerStats has its own internal 2s timeout; null means
-        // the child either timed out or wasn't alive.
-        const runnerHealth = getRunnerHealth();
-        const runnerStats  = await queryRunnerStats();
-        // Phase F (v1.0 runtime-isolation) — worker-pool diagnostics.
-        // Sync state from `getWorkerPoolDiagnostics()` plus async parallel
-        // per-worker memory queries. Total read time bounded by the per-
-        // worker 2 s timeout (parallel — so total ≤ 2 s even with 16 workers).
-        const poolSnapshot = getWorkerPoolDiagnostics();
-        const perWorkerRss = await Promise.all(
-          poolSnapshot.workers.map(async (w) => ({
-            workerKey: w.workerKey,
-            rss:       await queryWorkerMemoryBytes(w.workerKey),
-          })),
-        );
-        const rssByWorker = new Map<string, number | null>(
-          perWorkerRss.map((r) => [r.workerKey, r.rss]),
-        );
-        const scriptRunner: ScriptRunnerProbeResult = {
-          ...runnerHealth,
-          stats: runnerStats === null
-            ? null
-            : {
-                rss:         runnerStats.rss,
-                heapTotal:   runnerStats.heapTotal,
-                heapUsed:    runnerStats.heapUsed,
-                external:    runnerStats.external,
-                cpuUserUs:   runnerStats.cpuUserUs,
-                cpuSystemUs: runnerStats.cpuSystemUs,
-                uptimeSec:   runnerStats.uptimeSec,
-              },
-          pool: {
-            configuredWorkerCount: poolSnapshot.configuredWorkerCount,
-            workers: poolSnapshot.workers.map((w) => ({
-              workerKey:             w.workerKey,
-              processId:             w.processId,
-              lastActivityMs:        w.lastActivityMs,
-              assignedScriptCount:   w.assignedScriptCount,
-              assignedScripts:       w.assignedScripts,
-              restartAttempts:       w.restartAttempts,
-              rss:                   rssByWorker.get(w.workerKey) ?? null,
-              pinnedByRegistrations: w.pinnedByRegistrations,
-              pinningScripts:        w.pinningScripts,
-            })),
-            totalAssignedScripts: poolSnapshot.totalAssignedScripts,
-            evictionTelemetry:    poolSnapshot.evictionTelemetry,
-            settings:             poolSnapshot.settings,
-          },
-        };
-
-        // Assistant probe — bundles the four checks that drive the
-        // "Assistant (Lisa)" section of the report. Corpus count is
-        // constant-time (Object.keys on a bundled record); thread-storage
-        // and connections probes are async with per-step try/catch so a
-        // failure in one doesn't sink the whole section. Skipped when
-        // there's no active user (no userId means userStorage rejects;
-        // surfaced as the "Not probed" info row from the collector).
-        let assistantProbe: AssistantProbeResult | undefined;
-        if (activeUserId) {
-          // Capture as a non-null local so closures inside `index.map`
-          // below don't lose the type narrowing (TS treats the outer
-          // `activeUserId` as `string | null` again inside the callback).
-          const userIdForProbe = activeUserId;
-          const corpusEntries = Object.keys(LOOKUP_TABLE).length;
-
-          // Thread-storage probe. Index load is the gate — if it fails the
-          // rest is moot, just record the error. Per-thread reads are
-          // best-effort: a single corrupted thread file shouldn't disqualify
-          // the others. `Promise.allSettled` collects every outcome; we
-          // sum bytes + tally readable count from the fulfilled subset and
-          // surface the FIRST per-thread error in the details for context.
-          let indexLoaded     = false;
-          let threadsIndexed  = 0;
-          let threadsReadable = 0;
-          let totalBytes      = 0;
-          let storageError: string | undefined;
-          try {
-            const index = await loadThreadIndex(userIdForProbe);
-            indexLoaded    = true;
-            threadsIndexed = index.length;
-            const reads = await Promise.allSettled(
-              index.map((entry) =>
-                spindle.userStorage.getJson<unknown>(
-                  `assistant/threads/${entry.id}.json`,
-                  { fallback: null, userId: userIdForProbe },
-                ).then((body) => {
-                  if (body === null) throw new Error('thread file missing');
-                  // Re-serialise to estimate the on-disk byte cost. The
-                  // host's `getJson` parses for us, so we don't have the
-                  // raw bytes — `JSON.stringify(...).length` is a close
-                  // approximation (modulo whitespace differences). Good
-                  // enough for capacity reporting; we're not bill-grade.
-                  totalBytes += JSON.stringify(body).length;
-                  threadsReadable += 1;
-                }),
-              ),
-            );
-            const firstFailure = reads.find((r) => r.status === 'rejected');
-            if (firstFailure && firstFailure.status === 'rejected') {
-              const reasonMsg = firstFailure.reason instanceof Error
-                ? firstFailure.reason.message
-                : String(firstFailure.reason);
-              storageError =
-                `${threadsIndexed - threadsReadable} thread file(s) unreadable; first error: ${reasonMsg}`;
-            }
-          } catch (err) {
-            storageError = err instanceof Error ? err.message : String(err);
-          }
-
-          // Connections probe — same `spindle.connections.list` call the
-          // modal's picker uses on open. List failure leaves the counts
-          // at zero (no swallowed details — the section's pass/warn logic
-          // already surfaces "zero connections" as a warn row).
-          let connectionsCount = 0;
-          let defaultName:     string | undefined;
-          let defaultModel:    string | undefined;
-          let defaultProvider: string | undefined;
-          try {
-            const list = await spindle.connections.list(userIdForProbe);
-            connectionsCount = list.length;
-            const dflt = list.find((conn) => conn.is_default);
-            if (dflt) {
-              defaultName     = dflt.name;
-              defaultModel    = dflt.model;
-              defaultProvider = dflt.provider;
-            }
-          } catch (err) {
-            spindle.log.warn(
-              `[LumiScript] diagnostics: connections probe failed: ` +
-              (err instanceof Error ? err.message : String(err)),
-            );
-          }
-
-          const s = settingsStore.get();
-          assistantProbe = {
-            initialised: assistantInitialized,
-            corpusEntries,
-            storage: {
-              indexLoaded,
-              threadsIndexed,
-              threadsReadable,
-              totalBytes,
-              ...(storageError ? { error: storageError } : {}),
-            },
-            connections: {
-              count: connectionsCount,
-              ...(defaultName     ? { defaultName     } : {}),
-              ...(defaultModel    ? { defaultModel    } : {}),
-              ...(defaultProvider ? { defaultProvider } : {}),
-            },
-            settings: {
-              maxIterations: s.assistantMaxIterations,
-              ...(s.assistantTemperature !== undefined ? { temperature: s.assistantTemperature } : {}),
-              ...(s.assistantTopP        !== undefined ? { topP:        s.assistantTopP        } : {}),
-              ...(s.assistantMaxTokens   !== undefined ? { maxTokens:   s.assistantMaxTokens   } : {}),
-              parallelToolCalls: s.assistantParallelToolCalls,
-            },
-          };
-        }
-
-        // v1.0.0-rc.2+ — probe the running Lumiverse host versions via
-        // the free-tier `spindle.version.*` surface (added in host
-        // bf974cfb). Wrapped in try/catch because older hosts that
-        // predate this surface would throw — diagnostics still work
-        // on those, just without the explicit version rows.
-        let lumiverseVersions: { backend: string; frontend: string } | undefined;
-        try {
-          const [backendVersion, frontendVersion] = await Promise.all([
-            spindle.version.getBackend(),
-            spindle.version.getFrontend(),
-          ]);
-          lumiverseVersions = { backend: backendVersion, frontend: frontendVersion };
-        } catch (err) {
-          spindle.log.warn(
-            `[LumiScript] diagnostics: spindle.version probe failed ` +
-            `(host probably predates the API) — ` +
-            `${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-
-        const report = collectBackendDiagnostics({
-          scriptStorage,
-          triggerRegistry,
-          lumiScriptVersion:   spindle.manifest.version,
-          minLumiverseVersion: spindle.manifest.minimum_lumiverse_version ?? '0.0.0',
-          ...(lumiverseVersions !== undefined ? { lumiverseVersions } : {}),
-          grantedPermissions:  [...grantedPermissions],
-          activeUserId,
-          storageProbe,
-          scriptRunner,
-          assistantProbe,
-        });
-
+        const report = await runDiagnostics(userId);
         spindle.sendToFrontend({ type: 'diagnostics_report', report });
         break;
       }
 
       // ── In-app assistant ────────────────────────────────────────────────
       case 'assistant_send': {
-        // Skip the user-turn echo on retry: the failed attempt's bubble is
-        // still shown (it was never persisted), so re-echoing would duplicate it.
-        if (!msg.isRetry) {
-          spindle.sendToFrontend({ type: 'assistant_user_turn', content: msg.content });
+        // Single-flight guard (audit C2-01): if a turn is already streaming
+        // (assistantAbortController set), refuse rather than overwrite it.
+        // Overwriting orphans turn-1's abort, lets turn-1's finally null the
+        // controller mid-turn-2, and races two saveThread writes onto one
+        // thread file. The FE also blocks concurrent sends; this enforces the
+        // invariant backend-side, mirroring assistant_compact (2031) /
+        // assistant_switch_thread (2232).
+        if (assistantAbortController) {
+          sendAssistant({
+            type: 'assistant_error',
+            error: 'Busy generating — wait for the current reply to finish.',
+          });
+          break;
+        }
+        // Skip the user-turn echo on retry / edit-resend: the bubble is already
+        // shown on the FE (retry kept it in place; edit-resend updated it), so
+        // re-echoing would duplicate it.
+        if (!msg.isRetry && !msg.editLast) {
+          sendAssistant({ type: 'assistant_user_turn', content: msg.content });
         }
         if (!activeUserId) {
-          spindle.sendToFrontend({
+          sendAssistant({
             type: 'assistant_error',
             error: 'Assistant unavailable: no active user. Make sure Lumiverse has finished loading before opening Lisa.',
           });
           break;
         }
         if (!assistantInitialized) await bootstrapAssistant(activeUserId);
+        // C2-01 cold-start completion: the busy-guard above ran BEFORE the
+        // bootstrap `await`, so on cold start two near-simultaneous sends can
+        // both pass it (controller still null) and both await the SAME bootstrap
+        // promise (shared via the C2-02 memoization). Re-check here: the first
+        // send to resume runs synchronously from this point through the
+        // controller-set below (no await in between), so the second resumes to a
+        // non-null controller and is refused — closing the same double-controller
+        // / racing-saveThread race the guard targets. In steady state the await
+        // above is skipped, so this re-check is a cheap no-op.
+        if (assistantAbortController) {
+          sendAssistant({
+            type: 'assistant_error',
+            error: 'Busy generating — wait for the current reply to finish.',
+          });
+          break;
+        }
         if (!activeAssistantThread) {
-          spindle.sendToFrontend({
+          sendAssistant({
             type: 'assistant_error',
             error: 'Assistant unavailable: failed to initialise thread state.',
           });
           break;
+        }
+        // Edit-and-resend: the prior turn succeeded and is persisted, so drop the
+        // last user turn + everything after it (its assistant reply + any tool
+        // turns) before regenerating with the edited `content`. Cut only at a real
+        // user-turn boundary (role 'user' + string content) so tool_use/tool_result
+        // pairs are never split. (The FE only sends editLast when the last user
+        // turn already has an assistant reply, so a match always exists.)
+        if (msg.editLast) {
+          const hist = activeAssistantThread.messages;
+          let cut = -1;
+          for (let i = hist.length - 1; i >= 0; i--) {
+            const h = hist[i];
+            if (h && h.role === 'user' && typeof h.content === 'string') { cut = i; break; }
+          }
+          if (cut !== -1) {
+            activeAssistantThread.messages = hist.slice(0, cut);
+            // If the trim reached into or before the compaction boundary, the
+            // handoff + compactedThrough no longer describe messages[0..K) — drop
+            // the compaction state so the boundary can't go stale (the next
+            // auto-compact rebuilds it). When `cut` is safely after the boundary,
+            // the compacted prefix is untouched, so the state is kept.
+            if (
+              activeAssistantThread.compactedThrough !== undefined &&
+              cut <= activeAssistantThread.compactedThrough
+            ) {
+              activeAssistantThread.compactedThrough = undefined;
+              activeAssistantThread.handoff = undefined;
+            }
+          }
         }
         // Title derivation on first user message in a brand-new thread.
         const isFirstUserMessage =
@@ -1630,6 +1994,31 @@ spindle.onFrontendMessage(async (raw, userId) => {
         assistantAbortController = new AbortController();
         assistantStreamedContent = '';
         let aborted = false;
+        // Coalesce streamed tokens/reasoning into ~30Hz batches instead of one
+        // WS frame per token (see ASSISTANT_TOKEN_COALESCE_MS). Buffers are
+        // flushed on the timer, before each tool chip, and before any terminal
+        // message; the timer is cleared in `finally` so no stray frame escapes.
+        let tokenBatch = '';
+        let reasoningBatch = '';
+        let assistantBatchTimer: ReturnType<typeof setTimeout> | null = null;
+        const flushAssistantBatches = () => {
+          if (assistantBatchTimer !== null) {
+            clearTimeout(assistantBatchTimer);
+            assistantBatchTimer = null;
+          }
+          if (tokenBatch) {
+            sendAssistant({ type: 'assistant_token', token: tokenBatch });
+            tokenBatch = '';
+          }
+          if (reasoningBatch) {
+            sendAssistant({ type: 'assistant_reasoning', token: reasoningBatch });
+            reasoningBatch = '';
+          }
+        };
+        const scheduleAssistantBatchFlush = () => {
+          if (assistantBatchTimer !== null) return;
+          assistantBatchTimer = setTimeout(flushAssistantBatches, ASSISTANT_TOKEN_COALESCE_MS);
+        };
         try {
           // Generation parameter defaults from settings. Optional numeric
           // fields pass through only when explicitly set ("blank = use
@@ -1702,12 +2091,72 @@ spindle.onFrontendMessage(async (raw, userId) => {
           let memIndexStr = '';
           try { memIndexStr = await loadMemoryIndex(activeUserId); } catch { /* leave empty */ }
 
+          // Auto-compaction (pre-turn): if the PREVIOUS turn left the context over
+          // the threshold, fold the older prefix into a handoff summary BEFORE this
+          // turn so it starts lean. Runs while the composer is disabled (the FE
+          // blocks concurrent sends during generation) — so there's no re-entrancy
+          // window — and shares this turn's abort signal. Opt-out via setting;
+          // preserve-on-failure (compactThread returns null on any error) so it can
+          // never lose data or block the turn. The gauge refreshes naturally from
+          // THIS turn's assistant_completed (no separate event needed for auto).
+          if (
+            s.assistantAutoCompact &&
+            (activeAssistantThread.lastPromptTokens ?? 0) >=
+              s.assistantContextTokens * AUTO_COMPACT_THRESHOLD
+          ) {
+            const compacted = await compactThread(activeAssistantThread, {
+              userId: activeUserId,
+              budget: s.assistantContextTokens,
+              signal: assistantAbortController.signal,
+              ...(msg.connectionId ? { connectionId: msg.connectionId } : {}),
+            });
+            if (compacted) {
+              activeAssistantThread.compactedThrough = compacted.compactedThrough;
+              activeAssistantThread.handoff = compacted.handoff;
+              // Tell the FE so the gauge drops now (the "compacted here" divider
+              // appears on the next thread reload). This turn's assistant_completed
+              // then refines the gauge to the real post-compaction occupancy.
+              sendAssistant({
+                type: 'assistant_compacted',
+                ok: true,
+                occupancyTokens: compacted.occupancyTokens,
+                estimated: true,
+                compactedThrough: compacted.compactedThrough,
+              });
+            }
+          }
+
+          // Model-facing prior history — derived from the thread (reflecting any
+          // compaction just applied) so the LLM's view is shrunk without touching
+          // the full persisted/displayed `messages`. Hoisted so its length lets us
+          // recover this turn's NEW messages (the delta) below, instead of writing
+          // the derived view back — which would round-trip a synthetic handoff into
+          // the canonical record (the v1.1 data-loss class).
+          const modelHistory = buildModelHistory(activeAssistantThread);
           const result = await runAssistantTurn(
             {
-              history: activeAssistantThread.messages,
+              history: modelHistory,
               userInput: msg.content,
               userId: activeUserId,
+              // Lets the `read_diagnostics` tool pull live runtime state through
+              // the same collection path the Settings "View Diagnostics" panel uses.
+              collectDiagnostics: () => runDiagnostics(userId).then(compactDiagnostics),
+              // Read-only view of the active user's library for list_scripts /
+              // read_script — reads the per-user scriptStorage live each call.
+              scriptLibrary: {
+                list: () => scriptStorage.getScripts().map((sc) => ({
+                  id: sc.id, name: sc.name, type: sc.type, enabled: sc.enabled,
+                })),
+                read: (id: string) => {
+                  const sc = scriptStorage.getScript(id);
+                  return sc
+                    ? { id: sc.id, name: sc.name, type: sc.type, enabled: sc.enabled, code: sc.code }
+                    : null;
+                },
+              },
               maxIterations: s.assistantMaxIterations,
+              contextTokens: s.assistantContextTokens,
+              promptCaching: s.assistantPromptCaching,
               signal: assistantAbortController.signal,
               parameters,
               ...(msg.connectionId ? { connectionId: msg.connectionId } : {}),
@@ -1718,41 +2167,159 @@ spindle.onFrontendMessage(async (raw, userId) => {
             {
               onToken: (token) => {
                 assistantStreamedContent += token;
-                spindle.sendToFrontend({ type: 'assistant_token', token });
+                tokenBatch += token;
+                scheduleAssistantBatchFlush();
               },
-              onReasoning: (token) => spindle.sendToFrontend({ type: 'assistant_reasoning', token }),
-              onToolCall: (ev) => spindle.sendToFrontend({
-                type:    'assistant_tool_call',
-                callId:  ev.callId,
-                name:    ev.name,
-                args:    ev.args,
-                result:  ev.result,
-                isError: ev.isError,
-              }),
+              onReasoning: (token) => {
+                reasoningBatch += token;
+                scheduleAssistantBatchFlush();
+              },
+              onToolCall: (ev) => {
+                // Deliver any buffered tokens before the tool chip so the
+                // transcript's text→tool-call order is preserved.
+                flushAssistantBatches();
+                sendAssistant({
+                  type:    'assistant_tool_call',
+                  callId:  ev.callId,
+                  name:    ev.name,
+                  args:    ev.args,
+                  result:  ev.result,
+                  isError: ev.isError,
+                });
+              },
               onAborted: () => { aborted = true; },
             },
           );
-          activeAssistantThread.messages = result.messages.filter((m) => m.role !== 'system');
-          spindle.sendToFrontend({
+          // Flush any tokens/reasoning still buffered so the frontend's
+          // streaming preview + reasoning are complete before assistant_completed
+          // (which reads the accumulated reasoning) replaces the live bubble.
+          flushAssistantBatches();
+          // Append only this turn's NEW messages (everything past the model-facing
+          // history we sent) to the CANONICAL full thread — never replace it with
+          // result.messages, which is the derived/compacted view. Replacing would
+          // round-trip the synthetic handoff into storage AND drop the folded
+          // prefix (the v1.1 data-loss class). The system turn never enters the
+          // record, so the role!=='system' filter is just defensive.
+          activeAssistantThread.messages = [
+            ...activeAssistantThread.messages,
+            ...result.messages.slice(modelHistory.length).filter((m) => m.role !== 'system'),
+          ];
+          // Persist this turn's prompt-token count for the context-fullness gauge
+          // (replayed on thread load). Only update when usage was resolved — an
+          // unreported turn leaves the prior value rather than blanking the gauge.
+          if (result.usage) {
+            activeAssistantThread.lastPromptTokens = result.usage.occupancyTokens ?? result.usage.promptTokens;
+            activeAssistantThread.lastPromptEstimated = result.usage.estimated ?? false;
+            // Persist the strip's in/out + a lifetime running total so they survive
+            // thread switches / modal reopen (like the gauge), not just the session.
+            const u = result.usage;
+            activeAssistantThread.lastTurnUsage = {
+              promptTokens: u.promptTokens,
+              completionTokens: u.completionTokens,
+              totalTokens: u.totalTokens,
+              ...(u.estimated ? { estimated: true } : {}),
+            };
+            const prev = activeAssistantThread.totalUsage;
+            activeAssistantThread.totalUsage = {
+              promptTokens: (prev?.promptTokens ?? 0) + u.promptTokens,
+              completionTokens: (prev?.completionTokens ?? 0) + u.completionTokens,
+              totalTokens: (prev?.totalTokens ?? 0) + u.totalTokens,
+              ...((prev?.estimated || u.estimated) ? { estimated: true } : {}),
+            };
+          }
+          sendAssistant({
             type:    'assistant_completed',
             content: result.content,
             ...(result.usage ? { usage: result.usage } : {}),
           });
           void persistActiveThread(activeUserId);
         } catch (err) {
+          // Flush buffered tokens/reasoning before the terminal message —
+          // assistant_aborted reconstructs from the streamed reasoning the FE
+          // accumulated, so it must arrive first.
+          flushAssistantBatches();
           if (aborted) {
-            spindle.sendToFrontend({
+            sendAssistant({
               type:    'assistant_aborted',
               content: assistantStreamedContent,
             });
           } else {
             const errMsg = err instanceof Error ? err.message : String(err);
             spindle.log.warn(`[LumiScript] assistant_send failed: ${errMsg}`);
-            spindle.sendToFrontend({ type: 'assistant_error', error: errMsg });
+            sendAssistant({ type: 'assistant_error', error: errMsg });
+          }
+        } finally {
+          if (assistantBatchTimer !== null) {
+            clearTimeout(assistantBatchTimer);
+            assistantBatchTimer = null;
+          }
+          assistantAbortController = null;
+          assistantStreamedContent = '';
+        }
+        break;
+      }
+
+      case 'request_context_breakdown': {
+        if (activeUserId) void pushContextBreakdown(activeUserId);
+        break;
+      }
+
+      case 'assistant_compact': {
+        if (!activeUserId || !activeAssistantThread) {
+          // No active thread (e.g. not-yet / failed bootstrap after a reconnect).
+          // Reply anyway so the FE clears its "compacting" spinner.
+          sendAssistant({ type: 'assistant_compacted', ok: false, error: 'Assistant not ready yet — try again in a moment.' });
+          break;
+        }
+        // Refuse mid-generation — a concurrent turn would race the thread state.
+        // (The FE also disables the button while a turn is streaming.)
+        if (assistantAbortController) {
+          sendAssistant({ type: 'assistant_compacted', ok: false, error: 'Busy generating — try again in a moment.' });
+          break;
+        }
+        const cs = settingsStore.get();
+        // C2-03 — advertise compaction as in-flight so the C2-01 assistant_send
+        // busy-guard (which checks `assistantAbortController`) refuses a send
+        // arriving during the ~1-3s compact LLM call. Without this, compact sets
+        // no controller, the send isn't refused, and the two race a saveThread
+        // write onto one thread file. We reuse assistantAbortController purely as
+        // the in-flight marker the send guard already reads; compactThread isn't
+        // wired to the signal, so an abort during compaction stays a no-op
+        // (unchanged behaviour). MUST clear in `finally` — a thrown compact that
+        // left it set would wedge every future send.
+        assistantAbortController = new AbortController();
+        try {
+          // Capture the target thread: compactThread awaits a ~1-3s LLM call, during
+          // which the user could switch threads. If the active thread changed by the
+          // time we resolve, discard rather than write thread A's handoff onto B.
+          const target = activeAssistantThread;
+          const compacted = await compactThread(target, {
+            userId: activeUserId,
+            budget: cs.assistantContextTokens,
+            ...(msg.connectionId ? { connectionId: msg.connectionId } : {}),
+          });
+          if (activeAssistantThread !== target) {
+            sendAssistant({ type: 'assistant_compacted', ok: false, error: 'Conversation changed — compaction cancelled.' });
+            break;
+          }
+          if (compacted) {
+            target.compactedThrough = compacted.compactedThrough;
+            target.handoff = compacted.handoff;
+            target.lastPromptTokens = compacted.occupancyTokens;
+            target.lastPromptEstimated = true;
+            await persistActiveThread(activeUserId);
+            sendAssistant({
+              type: 'assistant_compacted',
+              ok: true,
+              occupancyTokens: compacted.occupancyTokens,
+              estimated: true,
+              compactedThrough: compacted.compactedThrough,
+            });
+          } else {
+            sendAssistant({ type: 'assistant_compacted', ok: false, error: 'Nothing old enough to compact yet — Lisa folds older messages to free space once a conversation grows (and auto-runs near full). Keep chatting and it\'ll become available.' });
           }
         } finally {
           assistantAbortController = null;
-          assistantStreamedContent = '';
         }
         break;
       }
@@ -1796,7 +2363,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
       case 'request_user_files': {
         if (activeUserId) {
           const files = await listAttachableUserFiles(activeUserId);
-          spindle.sendToFrontend({ type: 'user_files', files });
+          sendAssistant({ type: 'user_files', files });
         }
         break;
       }
@@ -1816,7 +2383,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
             }
           }
           const files = await listAttachableUserFiles(activeUserId);
-          spindle.sendToFrontend({ type: 'user_files', files, ...(errs.length ? { error: errs.join(' ') } : {}) });
+          sendAssistant({ type: 'user_files', files, ...(errs.length ? { error: errs.join(' ') } : {}) });
         }
         break;
       }
@@ -1831,7 +2398,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
             }
           }
           const files = await listAttachableUserFiles(activeUserId);
-          spindle.sendToFrontend({ type: 'user_files', files });
+          sendAssistant({ type: 'user_files', files });
         }
         break;
       }
@@ -1873,9 +2440,9 @@ spindle.onFrontendMessage(async (raw, userId) => {
         const res = await consolidateMemory(activeUserId, msg.connectionId);
         if (res.ok) {
           await pushAssistantMemory(activeUserId);
-          spindle.sendToFrontend({ type: 'assistant_memory_consolidated', before: res.before, after: res.after });
+          sendAssistant({ type: 'assistant_memory_consolidated', before: res.before, after: res.after });
         } else {
-          spindle.sendToFrontend({ type: 'assistant_memory_consolidated', before: 0, after: 0, error: res.error });
+          sendAssistant({ type: 'assistant_memory_consolidated', before: 0, after: 0, error: res.error });
         }
         break;
       }
@@ -1888,7 +2455,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
       case 'request_assistant_connections': {
         try {
           const list = await spindle.connections.list(activeUserId ?? undefined);
-          spindle.sendToFrontend({
+          sendAssistant({
             type: 'assistant_connections',
             connections: list.map((c) => ({
               id:        c.id,
@@ -1903,14 +2470,14 @@ spindle.onFrontendMessage(async (raw, userId) => {
             `[LumiScript] request_assistant_connections failed: ` +
             (err instanceof Error ? err.message : String(err)),
           );
-          spindle.sendToFrontend({ type: 'assistant_connections', connections: [] });
+          sendAssistant({ type: 'assistant_connections', connections: [] });
         }
         break;
       }
 
       case 'request_assistant_threads': {
         if (!activeUserId) {
-          spindle.sendToFrontend({ type: 'assistant_threads', threads: [], activeThreadId: null });
+          sendAssistant({ type: 'assistant_threads', threads: [], activeThreadId: null });
           break;
         }
         if (!assistantInitialized) await bootstrapAssistant(activeUserId);
@@ -2025,7 +2592,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
           if (msg.targetScriptId) {
             const target = scriptStorage.getScript(msg.targetScriptId);
             if (!target) {
-              spindle.sendToFrontend({
+              sendAssistant({
                 type:  'assistant_apply_error',
                 error: 'That script no longer exists — it may have been deleted since you attached it.',
               });
@@ -2036,7 +2603,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
             void syncTriggers();
             pushTools();
             recordAppliedEvent(target.name, target.type, true);
-            spindle.sendToFrontend({
+            sendAssistant({
               type:       'assistant_apply_success',
               scriptName: target.name,
               scriptType: target.type,
@@ -2087,7 +2654,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
           void syncTriggers();
           pushTools();
           recordAppliedEvent(derivedName, scriptType, false);
-          spindle.sendToFrontend({
+          sendAssistant({
             type:       'assistant_apply_success',
             scriptName: derivedName,
             scriptType,
@@ -2096,7 +2663,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : String(err);
           spindle.log.warn(`[LumiScript] assistant_apply_to_script failed: ${errMsg}`);
-          spindle.sendToFrontend({ type: 'assistant_apply_error', error: errMsg });
+          sendAssistant({ type: 'assistant_apply_error', error: errMsg });
         }
         break;
       }
@@ -2263,7 +2830,7 @@ spindle.onFrontendMessage(async (raw, userId) => {
         const datePart = new Date().toISOString().slice(0, 10);
         const filename = `lisa-${safeTitle}-${datePart}.md`;
 
-        spindle.sendToFrontend({
+        sendAssistant({
           type:     'assistant_thread_exported',
           threadId: thread.id,
           filename,
@@ -2367,6 +2934,12 @@ spindle.onFrontendMessage(async (raw, userId) => {
             (err instanceof Error ? err.message : String(err)),
           );
         }
+        // Out-of-band delete (bypasses DbStore) — drop the cached array for this
+        // collection so a script's next api.db read doesn't serve phantom records.
+        // Mirrors api.db.collection().drop() (engine/api/db.ts). Invalidate even
+        // if the delete threw (e.g. file already gone): the cache must not outlive
+        // the on-disk collection.
+        invalidateDbCache(dbCacheKey(userId ?? undefined, msg.path));
         // Refresh immediately rather than waiting for the debounced hint.
         await pushCollections(userId);
         break;
@@ -2461,6 +3034,360 @@ spindle.onFrontendMessage(async (raw, userId) => {
         pushScripts();
         void syncTriggers();
         pushTools();
+        break;
+      }
+
+      // ── Card-embedded scripts (#12) — install from a card's consent modal ───
+      case 'ls_card_scripts_install': {
+        // Capture the replying user BEFORE any await — `activeUserId` is a mutable
+        // module global reassigned per incoming FE message, so a concurrent message
+        // on a shared (operator) worker could flip it mid-await and misroute the
+        // post-install toast + editor-tab nudge. (Matches every sibling handler.)
+        const replyUserId = activeUserId;
+        const prepared = getCardDetection(msg.requestId);
+        // Was this consent modal opened from the passive chat-open BANNER? If so,
+        // anything the user reviews but does NOT install is a decline → record it
+        // so the banner stops re-surfacing. (Import-originated installs don't.)
+        const installFromBanner = bannerCardDetections.has(msg.requestId);
+        if (!prepared || prepared.bundleCardId !== msg.bundleCardId) {
+          // Cache miss (worker respawn or LRU eviction between detect + reply) or
+          // mismatched batch — never fabricate an install from FE-supplied data.
+          // Surface it: the FE already closed the modal, so a silent drop would
+          // leave the user thinking the install succeeded.
+          spindle.log.warn(`[LumiScript] card-scripts install: stale/unknown requestId ${msg.requestId} — ignoring`);
+          spindle.toast.warning(
+            'This card-scripts install expired before it could be applied. Re-import the character to try again.',
+            // Scope to the replying user — this carries that user's import
+            // activity and must not fan out to other sessions on a shared worker.
+            { title: 'Card scripts', userId: activeUserId ?? undefined },
+          );
+          break;
+        }
+        // Owner guard: on a shared (operator-scoped) worker the detection was
+        // computed against — and must land in — one specific user's library.
+        // Reject a reply arriving under a DIFFERENT active user. Tolerant of a
+        // null owner (detect ran before any FE session) to avoid false rejects.
+        if (prepared.ownerUserId != null && activeUserId != null && prepared.ownerUserId !== activeUserId) {
+          deleteCardDetection(msg.requestId);
+          spindle.log.warn(`[LumiScript] card-scripts install: owner/active user mismatch for ${msg.requestId} — ignoring`);
+          break;
+        }
+        deleteCardDetection(msg.requestId);
+        // Defensive coercion: incoming FE messages are unvalidated; a non-array
+        // selectedBundleIds would throw in `new Set(...)` AFTER the cache delete,
+        // losing the batch. An empty selection simply installs nothing.
+        const selectedBundleIds = Array.isArray(msg.selectedBundleIds) ? msg.selectedBundleIds : [];
+        const scopedBundleIds = Array.isArray(msg.scopedBundleIds) ? msg.scopedBundleIds : [];
+        const summary = await applyCardScriptInstall({
+          prepared,
+          selectedBundleIds,
+          scopedBundleIds,
+          scriptStorage,
+          genScriptId: generateUUID,
+        });
+        pushScripts();
+        // Banner-originated review: the user engaged with this character's banner,
+        // so hush it for the rest of the session (installed items already exist →
+        // not re-offered; anything they left unchecked won't re-nag until restart).
+        if (installFromBanner) sessionHushedCharacters.add(prepared.hostCharacterId);
+        // An update overwrites a trigger script's `triggers` while preserving
+        // enabled:true, so the TriggerRegistry must re-sync (mirrors update_script).
+        if (summary.updated.length > 0) void syncTriggers();
+        spindle.log.info(`[LumiScript] card-scripts: installed ${summary.installed.length}, updated ${summary.updated.length}, skipped ${summary.skipped}`);
+        const changed = summary.installed.length + summary.updated.length;
+        if (changed > 0) {
+          const parts: string[] = [];
+          if (summary.installed.length) parts.push(`installed ${summary.installed.length}`);
+          if (summary.updated.length) parts.push(`updated ${summary.updated.length}`);
+          const fromCard = prepared.bundleName ? ` from ${prepared.bundleName}` : '';
+          spindle.toast.success(
+            `LumiScript ${parts.join(', ')} script${changed === 1 ? '' : 's'}${fromCard}. ` +
+            `Review and enable ${changed === 1 ? 'it' : 'them'} in the LumiScript panel.`,
+            // Scope to the importing user — the message includes the card name +
+            // their install activity; broadcasting it would leak to other sessions.
+            { title: 'Card scripts', userId: replyUserId ?? undefined },
+          );
+          // Let scripts react to a card-scripts install (e.g. a manager script).
+          busEmit('ls:card-scripts:installed', {
+            bundleCardId: prepared.bundleCardId,
+            hostCharacterId: prepared.hostCharacterId,
+            installed: summary.installed,
+            updated: summary.updated,
+          });
+          // Nudge the character-editor tab (if open) to refresh its installed-
+          // status badges now that the library changed.
+          send({ type: 'ls_card_editor_status_stale' }, replyUserId);
+        }
+        break;
+      }
+
+      // ── Card-embedded scripts (#12) — FE cancelled the consent modal ────────
+      case 'ls_card_scripts_dismiss': {
+        // Cancelling the consent modal is NOT a decline — it just closes the
+        // modal. This fires both for the IMPORT (CHARACTER_CREATED) modal and
+        // for the modal reached via the chat-open banner's "Review". In NEITHER
+        // case do we record a dismissal: the banner re-surfaces on the next
+        // chat-open / Manage-tab recheck. Only the banner's explicit "Dismiss"
+        // (the ✕ → ls_card_scripts_dismiss_available) records one.
+        //
+        // (Field-test correction: a banner-originated cancel USED to record a
+        // dismissal — treating "Review → look → close" as a decline. That
+        // surprised users: clicking Review to inspect the scripts, then closing
+        // without importing, hid the banner permanently. Review is exploratory;
+        // the ✕ is the deliberate "stop showing this".)
+        deleteCardDetection(msg.requestId);
+        break;
+      }
+
+      // ── Card-embedded scripts (#12, Phase C) — chat-open banner "Review" ─────
+      case 'ls_card_scripts_review': {
+        // Re-emit the cached (dismissed-filtered) detection so the normal consent
+        // modal opens. Leave it cached — install/cancel manage its lifecycle.
+        const prepared = getCardDetection(msg.requestId);
+        if (prepared) {
+          send({
+            type: 'ls_card_scripts_detected',
+            requestId: prepared.requestId,
+            hostCharacterId: prepared.hostCharacterId,
+            bundleCardId: prepared.bundleCardId,
+            ...(prepared.bundleName !== undefined ? { bundleName: prepared.bundleName } : {}),
+            items: prepared.items,
+          });
+        } else {
+          // Cache miss (worker respawn / eviction) — the FE already cleared the
+          // banner, so surface it (mirrors the install cache-miss) rather than a
+          // silent dead click.
+          spindle.toast.warning(
+            'This card-scripts prompt expired — re-open the chat to see it again.',
+            { title: 'Card scripts', userId: activeUserId ?? undefined },
+          );
+        }
+        break;
+      }
+
+      // ── Card-embedded scripts (#12, Phase C) — chat-open banner "Dismiss" ────
+      case 'ls_card_scripts_dismiss_available': {
+        // Hush this character's banner for the rest of the session (returns on the
+        // next restart — the editor tab is the durable import path), then free the
+        // cached detection.
+        const prepared = bannerCardDetections.get(msg.requestId);
+        if (prepared) sessionHushedCharacters.add(prepared.hostCharacterId);
+        deleteCardDetection(msg.requestId);
+        break;
+      }
+
+      // ── Card-embedded scripts (#12, Phase C) — pull-based banner recheck ─────
+      case 'recheck_card_scripts': {
+        // Resilience over the one-shot CHAT_SWITCHED push: the FE asks for a
+        // re-detect every time the Manage tab is shown. Re-resolve the LIVE
+        // active character and re-run the same detection — idempotent (banner
+        // detections de-dup by hostCharacterId). Capture the user before the
+        // awaits so the reply can't be misrouted by a concurrent message.
+        const replyUserId = activeUserId;
+        await refreshActiveContext(replyUserId).catch(() => {});
+        const ctx = getActiveContext();
+        if (!ctx.characterId) break;   // no active character → nothing to check
+        const char = await spindle.characters.get(ctx.characterId, replyUserId ?? undefined).catch(() => null);
+        if (!char) break;
+        await handleChatOpenDetect(
+          { id: ctx.characterId, name: char.name ?? null, extensions: (char as { extensions?: unknown }).extensions },
+          replyUserId,
+        );
+        break;
+      }
+
+      // ── Card-editor tab (#12, Phase E) — installed-status of bundled scripts ──
+      case 'ls_card_editor_status': {
+        // Read the SAVED card (authoritative) and compare its bundle against the
+        // user's library so the editor tab can badge each script. Read-only.
+        const replyUserId = activeUserId;
+        const char = await spindle.characters.get(msg.characterId, replyUserId ?? undefined).catch(() => null);
+        if (!char) break;
+        const extracted = extractEmbeddedScripts((char as { extensions?: unknown }).extensions);
+        if (extracted.kind !== 'ok') {
+          send({ type: 'ls_card_editor_status_result', characterId: msg.characterId, statuses: [] }, replyUserId);
+          break;
+        }
+        const installed = scriptStorage.getScripts();
+        const byId = new Map(installed.map((s) => [s.id, s]));
+        const statuses = computeInstallActions(extracted.bundleCardId, extracted.scripts, installed).map((d) => {
+          if (d.action === 'update') {
+            const t = d.existingScriptId ? byId.get(d.existingScriptId) : undefined;
+            return { bundleId: d.entry.bundleId, state: 'update-available' as const, ...(t ? { installedName: t.name, installedEnabled: t.enabled } : {}) };
+          }
+          if (d.action === 'skip') {
+            const t = d.existingScriptId ? byId.get(d.existingScriptId) : undefined;
+            const state = d.skipReason === 'not-newer' ? 'library-newer' as const : 'installed' as const;
+            return { bundleId: d.entry.bundleId, state, ...(t ? { installedName: t.name, installedEnabled: t.enabled } : {}) };
+          }
+          // action 'install' — genuinely new: no identity match AND no content
+          // match (computeInstallActions classifies a content duplicate as a
+          // 'duplicate-code' skip, handled by the skip branch above → 'installed').
+          return { bundleId: d.entry.bundleId, state: 'not-installed' as const };
+        });
+        send({ type: 'ls_card_editor_status_result', characterId: msg.characterId, statuses }, replyUserId);
+        break;
+      }
+
+      // ── Card-editor tab (#12, Phase E) — late-import the card's bundled scripts ──
+      case 'ls_card_editor_import': {
+        // Reuse the standard consent flow: read the SAVED card (backend-authority,
+        // never FE-supplied script data), detect actionable scripts, cache the
+        // detection, and open the existing consent modal (it renders at z-index
+        // 10010, above the editor modal's 10001).
+        const replyUserId = activeUserId;
+        const char = await spindle.characters.get(msg.characterId, replyUserId ?? undefined).catch(() => null);
+        if (!char) {
+          spindle.toast.warning('Could not read this character to import its scripts.', { title: 'Card scripts', userId: replyUserId ?? undefined });
+          break;
+        }
+        const prepared = prepareCardScriptDetection({
+          character: { id: msg.characterId, name: char.name ?? null, extensions: (char as { extensions?: unknown }).extensions },
+          installed: scriptStorage.getScripts(),
+          granted: grantedPermissions,
+          genRequestId: generateUUID,
+        });
+        if (!prepared) {
+          spindle.toast.info('Nothing to import — every bundled script here is already in your library.', { title: 'Card scripts', userId: replyUserId ?? undefined });
+          break;
+        }
+        prepared.ownerUserId = replyUserId;
+        pendingCardDetections.set(prepared.requestId, prepared);
+        while (pendingCardDetections.size > MAX_PENDING_CARD_DETECTIONS) {
+          const oldest = pendingCardDetections.keys().next().value;
+          if (oldest === undefined) break;
+          pendingCardDetections.delete(oldest);
+        }
+        send({
+          type: 'ls_card_scripts_detected',
+          requestId: prepared.requestId,
+          hostCharacterId: prepared.hostCharacterId,
+          bundleCardId: prepared.bundleCardId,
+          ...(prepared.bundleName !== undefined ? { bundleName: prepared.bundleName } : {}),
+          items: prepared.items,
+        }, replyUserId);
+        break;
+      }
+
+      // ── Card-editor tab (#12, Phase E) — bundle-from-here: build entries ─────
+      case 'ls_card_editor_bundle_build': {
+        // Backend-authority: build the embedded entries from the REAL stored
+        // scripts (never FE-supplied code). The FE merges the returned entries
+        // into the edited card's draft. Unknown ids are silently dropped.
+        const replyUserId = activeUserId;
+        const ids = Array.isArray(msg.scriptIds) ? msg.scriptIds : [];
+        const entries = ids
+          .map((id) => scriptStorage.getScript(id))
+          .filter((s): s is NonNullable<typeof s> => s != null)
+          .map((s) => buildEmbeddedEntry(s));
+        send({ type: 'ls_card_editor_bundle_entries', requestId: msg.requestId, entries }, replyUserId);
+        break;
+      }
+
+      // ── Card-embedded scripts (#12, Phase 3) — character picker options ──────
+      case 'ls_list_characters': {
+        // Capture the requesting user BEFORE the await — `send()` defaults to the
+        // mutable module-level activeUserId, which a concurrent message could flip
+        // mid-await on an operator-scoped worker (misrouting the reply).
+        const replyUserId = activeUserId;
+        try {
+          // Generous single-page cap — covers the vast majority of libraries; the
+          // FE surfaces `total` so it can flag a truncated list.
+          const result = await spindle.characters.list({ limit: 500, userId: replyUserId ?? undefined });
+          // Resolve each character's avatar to a URL for the picker thumbnails:
+          // image_id → ImageDTO.url via one images.get per character (parallel;
+          // bounded by the 500-char list cap). A missing image_id or a failed
+          // lookup simply omits avatarUrl — the FE falls back to an initial bubble,
+          // so a broken/absent image never breaks the list.
+          const characters = await Promise.all(result.data.map(async (c) => {
+            const base = { id: c.id, name: c.name };
+            if (!c.image_id) return base;
+            try {
+              const img = await spindle.images.get(c.image_id, replyUserId ?? undefined);
+              return img?.url ? { ...base, avatarUrl: img.url } : base;
+            } catch {
+              return base;
+            }
+          }));
+          send({ type: 'ls_characters_list', characters, total: result.total }, replyUserId);
+        } catch (err) {
+          spindle.log.warn(`[LumiScript] ls_list_characters failed: ${err instanceof Error ? err.message : String(err)}`);
+          send({ type: 'ls_characters_list', characters: [], total: 0 }, replyUserId);
+        }
+        break;
+      }
+
+      // ── Card-embedded scripts (#12, Phase 3) — bundle scripts into a card ────
+      case 'ls_card_scripts_export': {
+        // Freeze the requesting user (replies fire after host-API awaits; the
+        // mutable activeUserId could otherwise misroute them on a shared worker)
+        // and echo the request token so the FE can drop a stale/abandoned result.
+        const replyUserId = activeUserId;
+        const requestId = msg.requestId;
+        const fail = (error: string): void => {
+          send({ type: 'ls_card_scripts_export_result', requestId, ok: false, error }, replyUserId);
+        };
+        // Writing a character's extensions needs the `characters` permission.
+        if (!grantedPermissions.has('characters')) {
+          fail('LumiScript needs the “characters” permission to write scripts into a card. Grant it in Lumiverse → Extensions.');
+          break;
+        }
+        // Backend-authority: load the real scripts from storage by id; never trust
+        // FE-supplied script content. Skip ids that no longer resolve.
+        const ids = Array.isArray(msg.scriptIds) ? msg.scriptIds : [];
+        const selected = ids
+          .map((id) => scriptStorage.getScript(id))
+          .filter((s): s is NonNullable<typeof s> => s != null);
+        if (selected.length === 0) {
+          fail('None of the selected scripts could be found.');
+          break;
+        }
+        try {
+          const uid = replyUserId ?? undefined;
+          const character = await spindle.characters.get(msg.characterId, uid);
+          if (!character) {
+            fail('The target character could not be found.');
+            break;
+          }
+          // Reuse an existing bundleCardId on the target so re-exports update the
+          // same logical bundle rather than spawning a parallel install; else mint.
+          const existingLumiscript = (character as { extensions?: Record<string, unknown> }).extensions?.lumiscript as { bundleCardId?: unknown } | undefined;
+          const reusedId = typeof existingLumiscript?.bundleCardId === 'string' && existingLumiscript.bundleCardId.trim() !== ''
+            ? existingLumiscript.bundleCardId
+            : undefined;
+          const bundleCardId = reusedId ?? generateUUID();
+          const envelope = buildCardBundle(selected, bundleCardId);
+          // Write ONLY our namespaced key. The host shallow-merges it onto the
+          // character's CURRENT extensions, leaving every other top-level key
+          // untouched — so we must NOT re-send a read-back snapshot (that would
+          // clobber any sibling key a concurrent writer changed during this
+          // round-trip). The `get` above is solely for bundleCardId reuse.
+          await spindle.characters.update(msg.characterId, { extensions: { lumiscript: envelope } }, uid);
+          const written = envelope.scripts.length;
+          const dropped = selected.length - written; // selected scripts that shared a bundle identity → de-duped
+          send({
+            type: 'ls_card_scripts_export_result',
+            requestId,
+            ok: true,
+            characterName: character.name,
+            bundleCardId,
+            scriptCount: written,
+            droppedCount: dropped,
+          }, replyUserId);
+          const mergedNote = dropped > 0
+            ? ` (${dropped} shared a bundle id and ${dropped === 1 ? 'was' : 'were'} merged)`
+            : '';
+          spindle.toast.success(
+            `Bundled ${written} script${written === 1 ? '' : 's'} into ${character.name}${mergedNote}. ` +
+            `Export the card to share ${written === 1 ? 'it' : 'them'}.`,
+            { title: 'Card scripts', userId: uid },
+          );
+          spindle.log.info(`[LumiScript] card-scripts export: ${written} script(s)${dropped > 0 ? ` (${dropped} merged)` : ''} → character ${msg.characterId} (bundleCardId ${bundleCardId})`);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          spindle.log.warn(`[LumiScript] ls_card_scripts_export failed: ${message}`);
+          fail(`Failed to write scripts into the card: ${message}`);
+        }
         break;
       }
 
@@ -2636,6 +3563,11 @@ spindle.onFrontendMessage(async (raw, userId) => {
           send({ type: 'ls_input_bar_action_destroy', scriptId: msg.id, actionId });
         }
         clearActionsByScript(msg.id);
+        // Message-tag interceptors — FE-unregister each, then clear (symmetric teardown).
+        for (const tag of listTagHandlersByScript(msg.id)) {
+          send({ type: 'ls_tag_interceptor_unregister', scriptId: msg.id, handlerId: tag.id });
+        }
+        clearTagHandlersByScriptId(msg.id);
         // Destroy float widgets — see the matching block in `update_script`.
         for (const widgetId of liveWidgetsByScript(msg.id)) {
           destroyWidgetInRegistry(widgetId);
@@ -2661,6 +3593,9 @@ spindle.onFrontendMessage(async (raw, userId) => {
         // before the storage record disappears.
         unregisterScriptFromChild(msg.id);
         await scriptStorage.deleteScript(msg.id);
+        // (Deleting a bundled script no longer suppresses its chat-open banner —
+        // dismissals are session-scoped now, and you may well want to re-import it
+        // later. The banner re-offers it next session; the editor tab, anytime.)
         pushScripts();
         void syncTriggers();
         pushTools();
@@ -2874,6 +3809,16 @@ spindle.onFrontendMessage(async (raw, userId) => {
         break;
       }
 
+      // ── Message-tag interceptor fired ──────────────────────────────────
+      // Frontend sends this when a registered interceptor matches a COMPLETED
+      // message (the FE bridge filters streaming partials + dedupes). Route to
+      // the script's handler by handlerId; the registry forwards it into the
+      // child and swallows per-handler errors (the child reports them).
+      case 'ls_tag_interceptor_fired': {
+        dispatchTagEvent(msg.scriptId, msg.handlerId, msg.event);
+        break;
+      }
+
       // ── Input bar action register confirmation ─────────────────────────
       // Phase 9d.4.e-1-a "Option B" — frontend echo confirming the action
       // is mounted + click-echo wired. Routes to the script-runner host-
@@ -2936,6 +3881,11 @@ spindle.onFrontendMessage(async (raw, userId) => {
 
       // ── Settings ─────────────────────────────────────────────────────────
       case 'update_settings': {
+        // #11 — capture engineMode BEFORE the merge so we can react only to a REAL
+        // change (the workerCount branch below uses presence-of-key because rebalance
+        // is idempotent; an engineMode reload is disruptive, so gate on prev !== next).
+        const prevEngineMode   = settingsStore.get().engineMode ?? 'asyncfn';
+        const prevContextModel = settingsStore.get().contextModel ?? 'shared';
         await settingsStore.update(msg.patch);
         pushSettings();
         void syncTriggers(); // handles the master enabled/disabled toggle
@@ -2948,6 +3898,31 @@ spindle.onFrontendMessage(async (raw, userId) => {
         // self-contained and any failure surfaces via the spindle log.
         if (msg.patch && Object.prototype.hasOwnProperty.call(msg.patch, 'workerCount')) {
           void rebalanceWorkerPool();
+        }
+        // #11 engine-toggle-wiring — on a REAL engineMode change, fire-reload enabled
+        // scripts so handlers re-register under the new engine (avoids split-brain).
+        const nextEngineMode = settingsStore.get().engineMode ?? 'asyncfn';
+        if (
+          msg.patch &&
+          Object.prototype.hasOwnProperty.call(msg.patch, 'engineMode') &&
+          nextEngineMode !== prevEngineMode
+        ) {
+          reloadAllEnabledScriptsForRuntimeChange(`engineMode changed ${prevEngineMode}→${nextEngineMode}`);
+        }
+        // #11 P7 — on a REAL contextModel change, RESPAWN the QuickJS worker(s) so all contexts rebuild
+        // under the new isolation model (a live pool can't be re-partitioned mid-flight), THEN fire-reload
+        // enabled scripts so their handlers re-register in the fresh contexts. The respawn precedes the
+        // reload so the re-run dispatches land on fresh workers. Value-diff gated like engineMode (a
+        // respawn+reload is disruptive). Only observable under engineMode 'quickjs', but the migration is
+        // engine-agnostic so running it regardless is safe.
+        const nextContextModel = settingsStore.get().contextModel ?? 'shared';
+        if (
+          msg.patch &&
+          Object.prototype.hasOwnProperty.call(msg.patch, 'contextModel') &&
+          nextContextModel !== prevContextModel
+        ) {
+          await restartAllWorkers();
+          reloadAllEnabledScriptsForRuntimeChange(`context model changed ${prevContextModel}→${nextContextModel}`);
         }
         break;
       }
@@ -3230,11 +4205,12 @@ spindle.onFrontendMessage(async (raw, userId) => {
  * this). The next chat-open overwrites both fields atomically via the
  * two-phase update above.
  */
-spindle.on('CHAT_SWITCHED', (payload: unknown) => {
+spindle.on('CHAT_SWITCHED', (payload: unknown, userId?: string) => {
   const p = payload as { chatId?: unknown } | null;
   if (!p) return;
   const newChatId = typeof p.chatId === 'string' ? p.chatId : null;
   if (!newChatId) return;   // chat-close — leave context unchanged
+  const switchUserId = userId ?? null;   // captured for the passive re-detect below
 
   // Phase 1: sync chatId update for binding-gate semantics.
   setActiveContext({ chatId: newChatId });
@@ -3258,6 +4234,11 @@ spindle.on('CHAT_SWITCHED', (payload: unknown) => {
       const chat = await spindle.chats.get(newChatId, activeUserId ?? undefined);
       if (!chat) return;
       const char = await spindle.characters.get(chat.character_id, activeUserId ?? undefined).catch(() => null);
+      // A newer CHAT_SWITCHED may have landed while we awaited the host RPCs. If
+      // so this closure is STALE — don't overwrite the active context or fire a
+      // banner for a character the user already navigated away from (lifecycle
+      // audit: stale-late-resolution race).
+      if (getActiveContext().chatId !== newChatId) return;
       setActiveContext({
         characterId:   chat.character_id,
         characterName: char?.name ?? null,
@@ -3267,6 +4248,14 @@ spindle.on('CHAT_SWITCHED', (payload: unknown) => {
       // the panel's display name updates without an explicit refresh.
       const updated = getActiveContext();
       send({ type: 'active_context', characterId: updated.characterId, characterName: updated.characterName, chatId: updated.chatId });
+      // #12 Phase C — passive chat-open re-detect: surface a banner (not a modal)
+      // if this character bundles scripts the user doesn't have and hasn't dismissed.
+      if (char) {
+        void handleChatOpenDetect(
+          { id: chat.character_id, name: char.name ?? null, extensions: (char as { extensions?: unknown }).extensions },
+          switchUserId,
+        );
+      }
     } catch (err) {
       // Non-fatal — manifests as the original bug shape (null /
       // stale characterId), which the tool-invocation.ts sanity
@@ -3311,6 +4300,150 @@ spindle.on('CHARACTER_EDITED', (payload: unknown) => {
     }
   }
 });
+
+// Card-embedded scripts (#12): on character create/import, detect scripts in the
+// card's `extensions` and ask the user (FE consent modal) which to install.
+spindle.on('CHARACTER_CREATED', (payload: unknown, userId?: string) => {
+  void handleCharacterCreated(payload, userId ?? null);
+});
+
+// Card-embedded scripts (#12, Phase D): on character delete, offer (default-keep)
+// to remove the scripts that card installed. CHARACTER_DELETED is undocumented —
+// the payload is parsed defensively.
+spindle.on('CHARACTER_DELETED', (payload: unknown, userId?: string) => {
+  void handleCharacterDeleted(payload, userId ?? null);
+});
+
+async function handleCharacterDeleted(payload: unknown, eventUserId: string | null): Promise<void> {
+  try {
+    if (!scriptStorage.store.isLoaded) return;
+    if (eventUserId != null && activeUserId != null && eventUserId !== activeUserId) return;
+    // Undocumented payload — try the common id locations, then bail if none.
+    const p = payload as { id?: unknown; characterId?: unknown; character?: { id?: unknown; name?: unknown } } | null;
+    const deletedId =
+      typeof p?.id === 'string' ? p.id
+      : typeof p?.characterId === 'string' ? p.characterId
+      : typeof p?.character?.id === 'string' ? p.character.id
+      : null;
+    if (!deletedId) return;
+    const deletedName = typeof p?.character?.name === 'string' ? p.character.name : null;
+    // Scripts whose provenance points at THIS deleted character instance. NB:
+    // not a guaranteed 1:1 tie (a bundled script may be generic), so this is an
+    // OFFER, never an auto-delete; the FE defaults to keep.
+    const orphaned = scriptStorage.getScripts().filter((s) => s.bundledFrom?.hostCharacterId === deletedId);
+    if (orphaned.length === 0) return;
+    // The host's CHARACTER_DELETED payload carries only the id — and the
+    // character is already gone, so it can't be re-fetched for a name. Fall
+    // back to the source-bundle name we recorded in provenance at install time
+    // so the offer can name the deleted card instead of saying "A character".
+    const characterName =
+      deletedName ?? orphaned.find((s) => s.bundledFrom?.bundleName)?.bundledFrom?.bundleName ?? null;
+    send({
+      type: 'ls_card_scripts_deleted_offer',
+      characterName,
+      scripts: orphaned.map((s) => ({
+        id: s.id,
+        name: s.name,
+        type: s.type,
+        ...(s.triggers && s.triggers.length > 0 ? { triggers: s.triggers } : {}),
+        ...(s.bindings && s.bindings.length > 0 ? { bindingNames: s.bindings.map((b) => b.displayName) } : {}),
+        sizeChars: s.code.length,
+      })),
+    }, eventUserId ?? activeUserId);
+  } catch (err) {
+    spindle.log.warn(`[LumiScript] CHARACTER_DELETED card-scripts cleanup offer failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+async function handleCharacterCreated(payload: unknown, eventUserId: string | null): Promise<void> {
+  try {
+    if (!scriptStorage.store.isLoaded) return; // pre-cold-start imports are not retro-detected
+    // On a shared (operator-scoped) worker, CHARACTER_CREATED is delivered for
+    // EVERY user's import. The detection is computed against — and the modal
+    // routed to — `activeUserId` (last FE sender). Skip an import the host
+    // attributes to a different user so we never surface one user's import,
+    // de-duped against another user's library, to the wrong user. No-op on the
+    // single-user posture (eventUserId === activeUserId).
+    if (eventUserId != null && activeUserId != null && eventUserId !== activeUserId) return;
+    const character = (payload as { character?: { id?: string; name?: string | null; extensions?: unknown } } | null)?.character;
+    if (!character?.id) return;
+    const prepared = prepareCardScriptDetection({
+      character: { id: character.id, name: character.name ?? null, extensions: character.extensions },
+      installed: scriptStorage.getScripts(),
+      granted: grantedPermissions,
+      genRequestId: generateUUID,
+    });
+    if (!prepared) return;
+    // Stamp the user this detection was computed for / routed to; the install
+    // handler asserts the reply arrives under the same active user.
+    prepared.ownerUserId = activeUserId;
+    pendingCardDetections.set(prepared.requestId, prepared);
+    while (pendingCardDetections.size > MAX_PENDING_CARD_DETECTIONS) {
+      const oldest = pendingCardDetections.keys().next().value;
+      if (oldest === undefined) break;
+      pendingCardDetections.delete(oldest);
+    }
+    send({
+      type: 'ls_card_scripts_detected',
+      requestId: prepared.requestId,
+      hostCharacterId: prepared.hostCharacterId,
+      bundleCardId: prepared.bundleCardId,
+      ...(prepared.bundleName !== undefined ? { bundleName: prepared.bundleName } : {}),
+      items: prepared.items,
+    });
+  } catch (err) {
+    spindle.log.warn(`[LumiScript] CHARACTER_CREATED card-scripts detect failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/**
+ * #12 Phase C — passive chat-open re-detect. Unlike the import path (which always
+ * offers), this FILTERS OUT scripts the user dismissed/deleted and surfaces a
+ * NON-blocking banner instead of the consent modal. Caches a dismissed-filtered
+ * detection so the banner's "Review" can re-emit it as `ls_card_scripts_detected`.
+ */
+async function handleChatOpenDetect(
+  character: { id: string; name?: string | null; extensions?: unknown },
+  eventUserId: string | null,
+): Promise<void> {
+  try {
+    if (!scriptStorage.store.isLoaded) return;
+    if (eventUserId != null && activeUserId != null && eventUserId !== activeUserId) return;
+    // Hushed for this session (the user ✕'d the banner, or acted on it) — don't
+    // re-nag about this character until the next restart.
+    if (sessionHushedCharacters.has(character.id)) return;
+    const prepared = prepareCardScriptDetection({
+      character: { id: character.id, name: character.name ?? null, extensions: character.extensions },
+      installed: scriptStorage.getScripts(),
+      granted: grantedPermissions,
+      genRequestId: generateUUID,
+    });
+    if (!prepared) return;
+    const offerable = prepared.items.filter((i) => i.action === 'install' || i.action === 'update');
+    if (offerable.length === 0) return;   // nothing to surface (all up-to-date)
+    const filtered: PreparedDetection = { ...prepared, ownerUserId: activeUserId };
+    // Banner detections live in their OWN bounded map (not the import-consent
+    // cache) so chat navigation can't evict a pending import modal. De-dup by
+    // hostCharacterId: re-visiting a character replaces its prior banner entry.
+    for (const [rid, det] of bannerCardDetections) {
+      if (det.hostCharacterId === filtered.hostCharacterId) bannerCardDetections.delete(rid);
+    }
+    bannerCardDetections.set(filtered.requestId, filtered);
+    while (bannerCardDetections.size > MAX_BANNER_CARD_DETECTIONS) {
+      const oldest = bannerCardDetections.keys().next().value;
+      if (oldest === undefined) break;
+      bannerCardDetections.delete(oldest);
+    }
+    send({
+      type: 'ls_card_scripts_available',
+      requestId: filtered.requestId,
+      characterName: character.name ?? null,
+      count: offerable.length,
+    }, eventUserId ?? activeUserId);
+  } catch (err) {
+    spindle.log.warn(`[LumiScript] chat-open card-scripts re-detect failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
 
 spindle.on('PERSONA_CHANGED', (payload: unknown) => {
   const p = payload as { persona?: { id?: string; name?: string } } | null;
@@ -3387,7 +4520,7 @@ spindle.permissions.onDenied(({ permission, operation }) => {
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
-;(async () => {
+void (async () => {
   await refreshPermissions();
   // Active context is populated lazily:
   // - On the first `get_active_context` frontend message (calls spindle.chats.getActive with userId)

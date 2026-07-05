@@ -67,7 +67,23 @@ If you're tempted to write one as documentation, consider an honest variant — 
 
 ## Handling permission denial gracefully
 
-LumiScript scripts don't have an introspection API for "is permission X granted?" — there's no `api.permissions.getGranted()`, no `script.allowDangerous` exposed to user code. The only path is **reactive**: call the gated method, catch the thrown error, branch on it. The error messages are stable enough to match by prefix:
+There are two complementary approaches.
+
+**Proactive — check before you call (preferred).** As of **v2.0**, `api.permissions` gives scripts introspection into what's granted, with no permission of its own required:
+
+```js
+// Is a specific permission granted?
+if (await api.permissions.has('images')) {
+  await api.images.upload(bytes);
+}
+
+// …or read the whole granted set:
+const granted = await api.permissions.getGranted(); // e.g. ['chat_mutation', 'generation', …]
+```
+
+`script.allowDangerous` is *not* exposed to user code, so the surfaces it gates (outbound HTTP, encrypted enclave, file I/O) can't be preflighted this way — probe those reactively.
+
+**Reactive — call and catch.** Call the gated method, catch the thrown error, and branch on it. The error messages are stable enough to match by prefix:
 
 - A missing Spindle permission throws an `Error` whose `.message` starts with `PERMISSION_DENIED:<permission-name>`. Most denials use the standard format `PERMISSION_DENIED:<name> — grant this permission to use this API` and emit a `[LumiScript] ...` warning to the backend log before throwing. One known exception: `cors_proxy` throws `PERMISSION_DENIED:cors_proxy — grant this permission to use api.utils.http` with no backend warn (the check lives outside the shared `assertPerm` helper). Match by prefix (`startsWith('PERMISSION_DENIED:<name>')`), not by the full message, to stay forward-compatible.
 - A missing `allowDangerous` throws an `Error` whose `.message` contains the literal phrase `must have "Allow Dangerous" enabled` (formatted with the script's name). This path also emits a `[LumiScript] ...` warning to the backend log.

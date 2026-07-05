@@ -123,4 +123,33 @@ describe('api.db.collection: canonical-side dedup', () => {
     const a2 = await apiA.collection('events', { scope: 'character' });
     expect(a2).not.toBe(a1);
   });
+
+  // ── drop() eviction (audit tail: drop()-evict) ────────────────────────────
+  test('drop() evicts the cached wrapper; next collection() is fresh', async () => {
+    const api = buildDbAPI(createTestDeps({ script: { id: 'tracker' } }));
+
+    const before = await api.collection('events', { scope: 'character' });
+    expect(cacheCount('tracker')).toBe(1);
+
+    await api.drop('events', 'character');
+    expect(cacheCount('tracker')).toBe(0);   // wrapper evicted on drop
+
+    const after = await api.collection('events', { scope: 'character' });
+    expect(after).not.toBe(before);          // fresh wrapper, not the stale pre-drop one
+    expect(cacheCount('tracker')).toBe(1);
+  });
+
+  test('drop() evicts ONLY the dropped (scope, path), leaving siblings cached', async () => {
+    const api = buildDbAPI(createTestDeps({ script: { id: 'tracker' } }));
+
+    const events  = await api.collection('events',  { scope: 'character' });
+    const history = await api.collection('history', { scope: 'character' });
+    expect(cacheCount('tracker')).toBe(2);
+
+    await api.drop('events', 'character');
+    expect(cacheCount('tracker')).toBe(1);   // only 'events' evicted
+
+    expect(await api.collection('history', { scope: 'character' })).toBe(history);   // survives
+    expect(await api.collection('events',  { scope: 'character' })).not.toBe(events); // rebuilt
+  });
 });

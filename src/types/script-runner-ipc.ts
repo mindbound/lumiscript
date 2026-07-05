@@ -42,6 +42,7 @@ import type {
   MacroInterceptorOptions,
   MessageContentProcessorOptions,
   WorldInfoInterceptorOptions,
+  MessageTagOptions,
   DOMListenOptions,
   DOMDelegateOptions,
   AdvancedModalDismissReason,
@@ -149,6 +150,25 @@ export interface RunScriptRequest {
   /** Whether the script has the `allowDangerous` flag (gates http etc.). */
   allowDangerous:     boolean;
   /**
+   * #11 — which sandbox engine runs the user body: `'asyncfn'` (the
+   * `new AsyncFunction` path, default) or `'quickjs'` (the QuickJS-WASM
+   * isolate). Optional for forward-compat with older parents; the child
+   * defaults to `'asyncfn'` when unset.
+   */
+  engineMode?:        'asyncfn' | 'quickjs';
+  /**
+   * The QuickJS engine's `api.llm.generateStream` chunk-queue cap (LumiScriptSettings.streamQueueCap).
+   * The child refreshes its module-level cap from this at each run start; absent → keep the current cap.
+   */
+  streamQueueCap?:    number;
+  /**
+   * #11 P7 — the QuickJS context-isolation model (LumiScriptSettings.contextModel). The child applies it at
+   * run start, but ONLY on a clean child (no context built yet) — a live context pool can't be safely
+   * re-partitioned mid-flight, so a real change takes effect after the QuickJS worker respawn that
+   * update_settings performs on a flip. Absent → keep the current model ('shared').
+   */
+  contextModel?:      'shared' | 'per-script';
+  /**
    * Phase 9d.1 — snapshot of the active chat / character ID at run-dispatch
    * time. Used by the child to implement sync-returning api methods like
    * `api.chat.getChatId()` locally without an IPC roundtrip.
@@ -255,6 +275,7 @@ export type HandlerKind =
   | 'contentProcessor'       // 9d.3.d
   | 'macroInterceptor'       // 9d.3.d
   | 'worldInfoInterceptor'   // v0.27.0 — api.worldInfo.registerInterceptor() handler
+  | 'messageTagHandler'      // v1.4 — api.chat.onMessageTag() message-tag interceptor
   | 'domEventListener'       // 9d.4.c-2 — DOMHandle.on() event handler
   | 'domDelegate'            // v0.27.1 — api.ui.dom.delegate() event-delegated handler
   | 'inputBarActionClick'    // 9d.4.e-1-b — InputBarActionHandle.onClick() click handler
@@ -294,6 +315,25 @@ export interface RunHandlerRequest {
   /** Async-loop timeout for this handler invocation (mirrors RunScriptRequest.timeoutMs). */
   timeoutMs:   number;
   /**
+   * Whether the firing script has the `allowDangerous` flag (gates http/fetch), mirroring
+   * `RunScriptRequest.allowDangerous`. The asyncfn engine bakes the right `fetch` into the
+   * handler closure at body-run time, so it doesn't need this; the quickjs engine fires the
+   * closure in a FRESH run context whose in-VM `__lsFetch` reads `run.allowDangerous` per-fire,
+   * so the flag must travel on the fire IPC (else an allowDangerous script's fired handler
+   * cannot fetch under quickjs — a parity gap vs asyncfn).
+   */
+  allowDangerous:    boolean;
+  /**
+   * The firing script's identity (id/name/type). The quickjs engine re-seeds `globalThis.script`
+   * at fire-start from these so a fired handler reading `script.id/name/type` sees ITS OWN script,
+   * not the last body-run's residue (which under a shared context could be ANOTHER script) —
+   * #11 P7-F3 data-script-residue. The asyncfn engine gets this via the handler closure's lexical
+   * capture of its registration run, so it doesn't need the fields on the wire. `scriptId` above
+   * is the same id (kept for the existing registry/routing lookups).
+   */
+  scriptName:        string;
+  scriptType:        string;
+  /**
    * Live activeContext snapshot taken at handler-fire time (parent-side, from
    * `binding.ts`). Used by the child to override sync getters
    * (`api.chat.getChatId()`, future symmetric `characterId` getters) for
@@ -310,6 +350,16 @@ export interface RunHandlerRequest {
    */
   chatIdAtFire:      string | null;
   characterIdAtFire: string | null;
+  /**
+   * #11 P7-F4 (Tier 0) — the scriptId of the run that CAUSED this fire, when the fire is a
+   * script-initiated `api.tools.invoke`. Populated only on that path (undefined for host/FE-initiated
+   * fires — Council tool calls, events, broadcasts, DOM). The quickjs fire path uses it to fast-reject
+   * a SELF-reentrant invoke (a script awaiting its OWN tool): that fire would block on the runChain the
+   * caller run still holds → deadlock → timeout → whole-child respawn. When `callerScriptId === scriptId`
+   * AND the owner's own run holds the lock, the fire rejects with a catchable error instead. asyncfn is
+   * unaffected (its fires call the handler directly, no runChain).
+   */
+  callerScriptId?:   string;
 }
 
 /**
@@ -335,6 +385,21 @@ export interface HandlerResult {
 export interface ScriptUnregisterMessage {
   type:     'script-unregister';
   scriptId: string;
+  /**
+   * #11 P7-2 — why the script is being unregistered. Governs the quickjs
+   * engine's per-script context lifecycle (contextModel='per-script'):
+   *   - 'disable' / 'delete' (the default when omitted) is a full teardown —
+   *     the child disposes the script's whole QuickJSContext, so the pool
+   *     can't grow unbounded across create/delete churn.
+   *   - 'reload' is NOT a teardown (the script keeps running with new code —
+   *     see `wipeScriptStateForReload`: "reload is not a disable"). The child
+   *     sweeps the stale handler dups but PRESERVES the context, matching
+   *     asyncfn's reload (arbitrary `globalThis` + module captures survive)
+   *     and skipping a ~95ms context rebuild.
+   * Ignored under contextModel='shared' (the single context is reused across
+   * every script and is never disposed per-script).
+   */
+  reason?:  'disable' | 'reload';
 }
 
 /**
@@ -811,6 +876,19 @@ export type RegisterHandler =
       hasHandler: true;
     }
   | {
+      // v1.4 — api.chat.onMessageTag() message-tag interceptor. `tagName` is the
+      // tag to intercept; `options` carries attrs + removeFromMessage. Same
+      // child-generates-handlerId pattern as worldInfoInterceptor.
+      type:      'register-handler';
+      kind:      'messageTagHandler';
+      runId:     string;
+      scriptId:  string;
+      handlerId: string;
+      tagName:   string;
+      options?:  MessageTagOptions;
+      hasHandler: true;
+    }
+  | {
       type:      'register-handler';
       kind:      'domEventListener';
       runId:     string;
@@ -989,6 +1067,71 @@ export type BroadcastHandlerLifecycleNotice =
     };
 
 /**
+ * #11 observability — the QuickJS-engine telemetry snapshot a child folds into its
+ * `DiagnosticStatsResponse` (the flag-gated isolate engine's field-diagnostics). Produced by
+ * `qjs-engine.ts`'s `getEngineTelemetry()`; aggregated across workers by host-dispatcher's
+ * `queryRunnerStats`; rendered in the diagnostics panel's "Engine (QuickJS-WASM)" section.
+ *
+ * Two field classes with DIFFERENT cross-worker aggregation rules (see queryRunnerStats):
+ *  - COUNTERS (cumulative-since-spawn, SUMMABLE integers): every `*Runs` / `*Errors` / `*Timeouts` /
+ *    `reentrantRejects` / `inVmOom` / `contextEvictions` / `overCapTolerated`, plus the live
+ *    `liveContexts` / `pinnedContexts` / `reservedContexts` gauges (a total across workers is meaningful).
+ *  - REPRESENTATIVE (per-child config / probe result, NOT summed): `contextModel` / `poolCap` /
+ *    `perCtxLimitBytes` (identical per child) and the cold-start fields / `lastEvictionAt`.
+ * Keep this a plain-data shape (no methods) so it crosses the IPC boundary intact.
+ */
+export interface EngineTelemetry {
+  /** True once the child's warmup probe has resolved (distinguishes "not probed" from ok=false). */
+  coldStartProbed:   boolean;
+  /** Did the WASM module instantiate on this child's platform. */
+  coldStartOk:       boolean;
+  /** WASM instantiate wall-time (ms); 0 until probed / on failure. */
+  coldStartMs:       number;
+  /** Body-runs dispatched on the quickjs engine (resolved engine, post-degrade). SUM. */
+  quickjsRuns:       number;
+  /** Body-runs dispatched on the asyncfn engine. SUM. */
+  asyncfnRuns:       number;
+  /** quickjs-requested runs that degraded to asyncfn (WASM uninstantiable). SUM. */
+  degradedRuns:      number;
+  /** quickjs body-runs that threw a non-timeout error. SUM. */
+  quickjsRunErrors:  number;
+  /** quickjs handler-fires that threw a non-timeout, non-reentrant error. SUM. */
+  quickjsFireErrors: number;
+  /** quickjs run/fire timeouts (each → child respawn). SUM. */
+  quickjsTimeouts:   number;
+  /** asyncfn body-runs that threw a non-timeout error (user-script throws land here too). SUM. */
+  asyncfnRunErrors:  number;
+  /** asyncfn runs that hit their timeout (each → child respawn). SUM. */
+  asyncfnTimeouts:   number;
+  /** F4 self-`api.tools.invoke` fast-rejects. SUM. */
+  reentrantRejects:  number;
+  /** In-VM out-of-memory errors (per-context memory-limit hits). SUM. */
+  inVmOom:           number;
+  /** Per-script contexts evicted (idle-TTL + cap). SUM. */
+  contextEvictions:  number;
+  /** Over-cap inserts accepted because every other context was pinned/mid-run. SUM. */
+  overCapTolerated:  number;
+  /** generateStream streams opened. SUM. */
+  streamsOpened:     number;
+  /** generateStream streams force-closed before a normal end (break / overflow / teardown). SUM. */
+  streamsCancelled:  number;
+  /** Date.now() of the last eviction (0 = none). REPRESENTATIVE (max across workers). */
+  lastEvictionAt:    number;
+  /** Active context model ('shared' = prod default). REPRESENTATIVE. */
+  contextModel:      'shared' | 'per-script';
+  /** Live per-script contexts (0 under 'shared'). SUM. */
+  liveContexts:      number;
+  /** POOL_CAP — the per-child hard bound on live per-script contexts. REPRESENTATIVE. */
+  poolCap:           number;
+  /** Live per-script contexts currently pinned. SUM. */
+  pinnedContexts:    number;
+  /** In-flight body-run context acquisitions. SUM. */
+  reservedContexts:  number;
+  /** Per-context WASM memory ceiling (bytes). REPRESENTATIVE. */
+  perCtxLimitBytes:  number;
+}
+
+/**
  * Child's response to a `DiagnosticStatsRequest`. Carries a snapshot of
  * the child process's resource usage at the moment of receipt. Numbers
  * map to standard Node-compat `process.memoryUsage()` /
@@ -1014,6 +1157,13 @@ export interface DiagnosticStatsResponse {
   cpuSystemUs: number;
   /** Process uptime in seconds. */
   uptimeSec: number;
+  /**
+   * #11 observability — QuickJS-engine telemetry snapshot. Optional: a child built before this
+   * field existed (or one that never imported the engine) omits it, so consumers must treat
+   * `undefined` as "not probed" (the panel renders a single info row). The aggregate response
+   * from `queryRunnerStats` also omits it when NO worker reported engine stats.
+   */
+  engine?: EngineTelemetry;
 }
 
 export type ChildToParentMessage =

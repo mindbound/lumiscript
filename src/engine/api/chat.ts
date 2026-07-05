@@ -29,8 +29,12 @@ import type {
   MessageContentProcessorHandle,
   RegisteredMessageContentProcessorInfo,
   ChatGenerationOptions,
+  MessageTagEvent,
+  MessageTagOptions,
 } from '../../types/script.js';
 import { type APIBuildDeps, assertPerm, assertDangerous, requireChatId, shielded } from './shared.js';
+import { registerTagHandler, removeTagHandler } from '../message-tag-handler-registry.js';
+import { generateUUID } from '../../utils/uuid.js';
 import {
   addInjection,
   removeInjection as storeRemove,
@@ -318,6 +322,20 @@ export function buildChatAPI(deps: APIBuildDeps): LumiScriptAPI['chat'] {
       return shielded(spindle.chat.isMessageHidden(id, msgId));
     },
 
+    // ── Chat style mode ────────────────────────────────────────────────────
+    //
+    // Relaxes the chat container's CSS containment so `position: fixed`
+    // content injected into a message paints at viewport scope. Gated by
+    // `app_manipulation` (host requires it) rather than `chat_mutation` — it
+    // manipulates the host app shell, not message data. Operates on the active
+    // chat like the rest of this namespace.
+
+    setStyleMode: (mode: 'bounded' | 'extension-relaxed') => {
+      assertPerm('app_manipulation', hasPerm, script.name);
+      const id = requireChatId(activeContext);
+      return shielded(spindle.chat.setStyleMode(id, mode));
+    },
+
     // ── Message content processor (per-script handler registration) ────────
     //
     // Multiplexed at LS backend startup behind one
@@ -357,6 +375,47 @@ export function buildChatAPI(deps: APIBuildDeps): LumiScriptAPI['chat'] {
       // Diagnostic surface — un-gated, mirrors `api.macros.list()`. Returns a
       // snapshot across all scripts (handlers themselves are excluded).
       return listProcessors();
+    },
+
+    // v1.4 — message-tag interceptor. The FE owns the actual host
+    // `ctx.messages.registerTagInterceptor`; here we record the handler in the
+    // backend registry (so a fired tag routed up from the FE finds it) and send
+    // the FE register message. The handler passed in is the host-dispatcher's
+    // wrapper (forwards the fire into the child); a script reaches this via the
+    // proxy. Rides the existing `chat_mutation` gate (exposes message content +
+    // strips render output).
+    onMessageTag(
+      tagName: string,
+      handler: (event: MessageTagEvent) => void | Promise<void>,
+      options?: MessageTagOptions,
+    ): () => void {
+      assertPerm('chat_mutation', hasPerm, script.name);
+      // The host-dispatcher threads the child's handlerId in via `options.id`
+      // so the registry key, FE id, and fired-event routing all share ONE id.
+      // A direct call without it falls back to a fresh id.
+      const id = (options as { id?: string } | undefined)?.id ?? generateUUID();
+      // Strip the internal `id` before it reaches the FE-facing options.
+      let feOptions: MessageTagOptions | undefined;
+      if (options) {
+        const { id: _id, ...rest } = options as MessageTagOptions & { id?: string };
+        void _id;
+        feOptions = Object.keys(rest).length > 0 ? rest : undefined;
+      }
+      registerTagHandler(script.id, script.name, id, tagName, handler, feOptions);
+      spindle.sendToFrontend({
+        type:      'ls_tag_interceptor_register',
+        scriptId:  script.id,
+        handlerId: id,
+        tagName,
+        ...(feOptions !== undefined ? { options: feOptions } : {}),
+      });
+      return () => {
+        // Idempotent — ownership-scoped + no-ops if already gone (e.g. after a
+        // teardown sweep). Only tell the FE to unregister if we actually had it.
+        if (removeTagHandler(script.id, id)) {
+          spindle.sendToFrontend({ type: 'ls_tag_interceptor_unregister', scriptId: script.id, handlerId: id });
+        }
+      };
     },
   };
 }

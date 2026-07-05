@@ -31,6 +31,7 @@
 
 import type { ScriptStorage } from '../storage/script-storage.js';
 import type { TriggerRegistry } from './trigger-registry.js';
+import type { EngineTelemetry } from '../types/script-runner-ipc.js';
 import { getActiveContext } from './binding.js';
 import { listAll as listInjections } from './injection-store.js';
 import { listAll as listTools } from './tool-store.js';
@@ -49,6 +50,7 @@ import { countLiveWidgetsByScript } from './float-widget-registry.js';
 import { countLiveAppMountsByScript } from './app-mount-registry.js';
 import { countLiveModalsByScript } from './advanced-modal-registry.js';
 import { countByScript as countInputBarActionsByScript } from './input-bar-action-registry.js';
+import { countByScriptId as countMessageTagInterceptors } from './message-tag-handler-registry.js';
 import {
   listElementInjectMessages,
   listStyleReplayMessages,
@@ -128,6 +130,35 @@ export interface DiagnosticsReport {
   };
   /** Sections in stable order. Future sections appended, not reordered. */
   sections: DiagnosticSection[];
+}
+
+/**
+ * Slimmed report for LLM consumption (the Lisa `read_diagnostics` tool).
+ * Keeps the high-signal prose — section names + each check's label / status /
+ * message — and drops the bulky `table` / `details` payloads (the modal's
+ * drill-down) that would balloon the token cost. The check `message` fields are
+ * already written for human display, so they read well to the model; a typical
+ * compact report is ~3–6 KB vs the full ~8–15 KB.
+ */
+export interface CompactDiagnostics {
+  generatedAt: number;
+  summary: DiagnosticsReport['summary'];
+  sections: Array<{
+    name: string;
+    checks: Array<{ label: string; status: DiagnosticStatus; message: string }>;
+  }>;
+}
+
+/** Project a full {@link DiagnosticsReport} down to its {@link CompactDiagnostics} form. */
+export function compactDiagnostics(report: DiagnosticsReport): CompactDiagnostics {
+  return {
+    generatedAt: report.generatedAt,
+    summary: report.summary,
+    sections: report.sections.map((s) => ({
+      name: s.name,
+      checks: s.checks.map((c) => ({ label: c.label, status: c.status, message: c.message })),
+    })),
+  };
 }
 
 /** Optional async-probe result threaded in by the caller. */
@@ -293,6 +324,13 @@ export interface ScriptRunnerProbeResult {
        * non-zero.
        */
       totalEvictionsSkippedByPin: number;
+      /**
+       * Per-worker memory readings the sweep substituted with a carried-
+       * forward last-known value because the live query timed out / failed.
+       * Surfaced in the "Evictions" diagnostics row when non-zero — a signal
+       * the ceiling sum is leaning on stale estimates.
+       */
+      totalMemoryReadingsCarriedForward: number;
     };
     settings: {
       idleTimeoutMs:      number;
@@ -354,6 +392,20 @@ export interface DiagnosticsCollectorDeps {
    * When present, drives the "Assistant (Lisa)" section's checks.
    */
   assistantProbe?:     AssistantProbeResult;
+  /**
+   * #11 observability — aggregated QuickJS-engine telemetry from the script-runner children
+   * (`queryRunnerStats().engine`). `undefined` when the caller skipped the probe OR no worker
+   * reported engine stats (older/hung child); the "Engine (QuickJS-WASM)" section then renders a
+   * single "Not probed" info row. Counters read 0 + the pool snapshot reads 'shared'/empty until
+   * quickjs is actually selected in the field (the engine is default-off, flag-gated).
+   */
+  engineProbe?:        EngineTelemetry;
+  /**
+   * The active script engine (LumiScriptSettings.engineMode, default 'asyncfn'). Selects which single
+   * engine section is emitted — "Engine (AsyncFunction)" or "Engine (QuickJS-WASM)" — so the panel always
+   * shows the engine actually in use. Absent → treated as 'asyncfn' (the default engine).
+   */
+  engineMode?:         'asyncfn' | 'quickjs';
 }
 
 // ─── Entry point ────────────────────────────────────────────────────────────
@@ -368,6 +420,8 @@ export function collectBackendDiagnostics(deps: DiagnosticsCollectorDeps): Diagn
   const sections: DiagnosticSection[] = [
     buildLumiScriptSection(deps),
     buildScriptRunnerSection(deps),
+    // Only the ACTIVE engine's section renders (they share the slot + id — mutually exclusive).
+    (deps.engineMode === 'quickjs' ? buildEngineSection(deps) : buildAsyncFnSection(deps)),
     buildActiveContextSection(deps),
     buildRegistrationsSection(deps),
     buildStorageSection(deps),
@@ -461,7 +515,11 @@ function buildLumiScriptSection(deps: DiagnosticsCollectorDeps): DiagnosticSecti
     label:   'Granted permissions',
     status:  deps.grantedPermissions.length > 0 ? 'pass' : 'warn',
     message: deps.grantedPermissions.length > 0
-      ? `${deps.grantedPermissions.length} permission(s) granted`
+      // Name the permissions inline (not just a count): the compact form fed to
+      // the Lisa `read_diagnostics` tool drops `details`, and "which permission
+      // is missing" is a top cause of "why does api.* silently fail". Enriches
+      // the markdown export for free; stays well under the tool-result cap.
+      ? `${deps.grantedPermissions.length} permission(s) granted: ${[...deps.grantedPermissions].sort().join(', ')}`
       : 'No permissions granted — extension features will be degraded',
     details: { granted: [...deps.grantedPermissions].sort() },
   });
@@ -509,8 +567,8 @@ function buildScriptRunnerSection(deps: DiagnosticsCollectorDeps): DiagnosticSec
     status:  probe.childAlive ? 'pass' : 'fail',
     message: probe.childAlive
       ? aliveWorkerCount === 1
-        ? 'Running — 1 worker alive (see Workers table below for per-worker details)'
-        : `Running — ${aliveWorkerCount} workers alive (see Workers table below for per-worker details)`
+        ? 'Running — 1 worker alive (see the Workers check below for per-worker details)'
+        : `Running — ${aliveWorkerCount} workers alive (see the Workers check below for per-worker details)`
       : 'Not running — no workers alive (post-crash or pre-spawn state)',
   });
 
@@ -738,17 +796,25 @@ function buildScriptRunnerSection(deps: DiagnosticsCollectorDeps): DiagnosticSec
     // A growing "N skipped" number alongside "no evictions" reads like a
     // bug to users who don't know the internals; better to omit it.
     const ev = p.evictionTelemetry;
+    // Unlike the pinned-skip counter, a non-zero carried-forward count IS
+    // actionable — it means the memory-ceiling sum has been leaning on stale
+    // last-known readings because a worker was too busy to answer the stats
+    // ping in time — so it's appended to the message when present.
+    const carriedNote = ev.totalMemoryReadingsCarriedForward > 0
+      ? ` (${ev.totalMemoryReadingsCarriedForward} memory reading(s) carried forward from a non-responding worker)`
+      : '';
     checks.push({
       label:   'Evictions (this session)',
       status:  'info',
-      message: ev.totalEvictions === 0
+      message: (ev.totalEvictions === 0
         ? 'No evictions since LumiScript loaded'
-        : `${ev.totalEvictions} eviction(s)${ev.lastEvictionReason ? ` — last reason: ${ev.lastEvictionReason}` : ''}`,
+        : `${ev.totalEvictions} eviction(s)${ev.lastEvictionReason ? ` — last reason: ${ev.lastEvictionReason}` : ''}`) + carriedNote,
       details: {
         totalEvictions:             ev.totalEvictions,
         lastEvictionAt:             ev.lastEvictionAt,
         lastEvictionReason:         ev.lastEvictionReason,
         totalEvictionsSkippedByPin: ev.totalEvictionsSkippedByPin,
+        totalMemoryReadingsCarriedForward: ev.totalMemoryReadingsCarriedForward,
       },
     });
   }
@@ -831,6 +897,224 @@ function formatSeconds(sec: number): string {
   return `${(min / 60).toFixed(1)}h`;
 }
 
+// ─── Section B2 — Engine (QuickJS-WASM) ─────────────────────────────────────
+//
+// #11 observability — field-diagnostics for the flag-gated QuickJS isolate engine. Everything here
+// reads 0 / 'shared' / 'not probed' until quickjs is actually selected in the field (the engine is
+// default-off), so the section is honest-but-quiet on a stock asyncfn install. `warn` is reserved for
+// the genuine trouble signals (cold-start failure, degraded runs, timeouts, in-VM OOM, over-cap
+// tolerated); plain counters + the pool snapshot are `info`. Pool rows branch on contextModel so a
+// field dev is never misled into reading a bare '0/8' as an exercised pool.
+
+function buildEngineSection(deps: DiagnosticsCollectorDeps): DiagnosticSection {
+  // Not probed — no worker reported engine stats (no child alive, an older child predating the
+  // `engine` field, or a caller that skipped the runner probe). Mirror the script-runner section's
+  // single info row rather than guessing values.
+  if (deps.engineProbe === undefined) {
+    return {
+      id:   'engine',
+      name: 'Engine (QuickJS-WASM)',
+      checks: [
+        { label: 'Status', status: 'info', message: 'Not probed (no worker reported engine telemetry)' },
+      ],
+    };
+  }
+
+  const e = deps.engineProbe;
+  const checks: DiagnosticCheck[] = [];
+
+  // WASM availability — the primary "is the isolate usable on this platform" signal.
+  checks.push({
+    label:   'WASM availability',
+    status:  !e.coldStartProbed ? 'info' : e.coldStartOk ? 'pass' : 'warn',
+    message: !e.coldStartProbed
+      ? 'Not probed this session — no run has selected the quickjs engine yet (default is AsyncFunction)'
+      : e.coldStartOk
+        ? `Instantiated in ${e.coldStartMs}ms — isolate engine usable`
+        : 'WASM module failed to instantiate — all quickjs runs degrade to the AsyncFunction engine',
+    details: { coldStartProbed: e.coldStartProbed, coldStartOk: e.coldStartOk, coldStartMs: e.coldStartMs },
+  });
+
+  // Engine mix — the quickjs-vs-asyncfn run split (the rollout's adoption denominator).
+  checks.push({
+    label:   'Runs by engine',
+    status:  'info',
+    message: `${e.quickjsRuns} quickjs / ${e.asyncfnRuns} asyncfn body-run(s)`,
+    details: { quickjsRuns: e.quickjsRuns, asyncfnRuns: e.asyncfnRuns },
+  });
+
+  // Degraded runs — quickjs-requested runs that fell back (a platform / cold-start-failure signal).
+  checks.push({
+    label:   'Degraded runs',
+    status:  e.degradedRuns > 0 ? 'warn' : 'pass',
+    message: e.degradedRuns > 0
+      ? `${e.degradedRuns} run(s) degraded quickjs→asyncfn (WASM uninstantiable on this platform)`
+      : 'None — no quickjs run has fallen back to AsyncFunction',
+    details: { degradedRuns: e.degradedRuns },
+  });
+
+  // Errors — non-timeout run + fire errors. Info, not warn: a user script legitimately throwing also
+  // lands here, so this is a rate to eyeball against the run counts, not a health verdict on its own.
+  checks.push({
+    label:   'Engine errors',
+    status:  'info',
+    message: `${e.quickjsRunErrors} run error(s), ${e.quickjsFireErrors} fire error(s) (excludes timeouts + self-invoke rejects)`,
+    details: { quickjsRunErrors: e.quickjsRunErrors, quickjsFireErrors: e.quickjsFireErrors },
+  });
+
+  // Timeouts — each one forced a whole-child respawn. The load-bearing stability signal.
+  checks.push({
+    label:   'Timeouts (→ respawn)',
+    status:  e.quickjsTimeouts > 0 ? 'warn' : 'pass',
+    message: e.quickjsTimeouts > 0
+      ? `${e.quickjsTimeouts} quickjs run/fire timeout(s) — each respawned the child`
+      : 'None — no quickjs run/fire hit its execution timeout',
+    details: { quickjsTimeouts: e.quickjsTimeouts },
+  });
+
+  // In-VM OOM — a per-context memory-limit hit. Warn: worth surfacing even once.
+  checks.push({
+    label:   'In-VM out-of-memory',
+    status:  e.inVmOom > 0 ? 'warn' : 'pass',
+    message: e.inVmOom > 0
+      ? `${e.inVmOom} in-VM OOM error(s) — a script hit the per-context WASM memory ceiling`
+      : 'None — no run exhausted its per-context WASM memory budget',
+    details: { inVmOom: e.inVmOom },
+  });
+
+  // Reentrant rejects — expected user errors (a script invoked its own tool mid-run). Info-only.
+  checks.push({
+    label:   'Self-invoke rejects',
+    status:  'info',
+    message: `${e.reentrantRejects} self-\`api.tools.invoke\` fast-reject(s) (an expected user error, not an engine fault)`,
+    details: { reentrantRejects: e.reentrantRejects },
+  });
+
+  // Streams — generateStream usage. Cancelled = broke early / overflowed / torn down before a normal end.
+  checks.push({
+    label:   'Streams (generateStream)',
+    status:  'info',
+    message: `${e.streamsOpened} opened, ${e.streamsCancelled} cancelled early`,
+    details: { streamsOpened: e.streamsOpened, streamsCancelled: e.streamsCancelled },
+  });
+
+  // Context pool — branch on the model so 'shared' (prod default) never reads as an exercised pool.
+  if (e.contextModel === 'shared') {
+    checks.push({
+      label:   'Context pool',
+      status:  'info',
+      message: 'n/a (shared context model — the per-script pool is inactive until the rollout flip)',
+      details: { contextModel: e.contextModel, poolCap: e.poolCap, perCtxLimitBytes: e.perCtxLimitBytes },
+    });
+  } else {
+    checks.push({
+      label:   'Context pool',
+      status:  e.overCapTolerated > 0 ? 'warn' : 'info',
+      message:
+        `${e.liveContexts}/${e.poolCap} live context(s) — ${e.pinnedContexts} pinned, ` +
+        `${e.reservedContexts} reserved, ${formatBytes(e.perCtxLimitBytes)}/ctx` +
+        (e.overCapTolerated > 0 ? `; ${e.overCapTolerated} over-cap insert(s) tolerated (all pinned)` : ''),
+      details: {
+        contextModel:     e.contextModel,
+        liveContexts:     e.liveContexts,
+        poolCap:          e.poolCap,
+        pinnedContexts:   e.pinnedContexts,
+        reservedContexts: e.reservedContexts,
+        perCtxLimitBytes: e.perCtxLimitBytes,
+        overCapTolerated: e.overCapTolerated,
+      },
+    });
+    checks.push({
+      label:   'Context evictions',
+      status:  'info',
+      message: e.contextEvictions > 0
+        ? `${e.contextEvictions} eviction(s) (idle-TTL + cap); last ${formatSeconds((Date.now() - e.lastEvictionAt) / 1000)} ago`
+        : 'None — no per-script context has been reaped',
+      details: { contextEvictions: e.contextEvictions, lastEvictionAt: e.lastEvictionAt },
+    });
+  }
+
+  return {
+    id:   'engine',
+    name: 'Engine (QuickJS-WASM)',
+    checks,
+  };
+}
+
+// ─── Section B2 (AsyncFunction variant) — Engine (AsyncFunction) ─────────────
+//
+// Field-diagnostics for the DEFAULT in-process AsyncFunction engine — the counterpart to
+// buildEngineSection. Only one engine section renders (collectBackendDiagnostics picks by the active
+// engineMode), so a stock install shows this one. Same honesty convention: `warn` is reserved for genuine
+// trouble (run timeouts, each of which respawns the child); runs/errors/streams are `info`. It omits the
+// WASM / cold-start / in-VM-OOM / context-pool rows, which don't exist for the in-process engine, and reads
+// from the run/error/timeout/stream counters shared with the QuickJS section.
+
+function buildAsyncFnSection(deps: DiagnosticsCollectorDeps): DiagnosticSection {
+  if (deps.engineProbe === undefined) {
+    return {
+      id:   'engine',
+      name: 'Engine (AsyncFunction)',
+      checks: [
+        { label: 'Status', status: 'info', message: 'Not probed (no worker reported engine telemetry)' },
+      ],
+    };
+  }
+
+  const e = deps.engineProbe;
+  const checks: DiagnosticCheck[] = [];
+
+  // Sandbox — the AsyncFunction engine's isolation model (the counterpart to the QuickJS "WASM
+  // availability" row). No WASM / context pool; isolation is the supervised child + respawn ladder.
+  checks.push({
+    label:   'Sandbox',
+    status:  'pass',
+    message: 'In-process `new AsyncFunction` in the supervised child subprocess — no WASM isolate or per-script context pool; isolation is the child heartbeat watchdog + respawn ladder (see Script-runner subprocess)',
+  });
+
+  // Runs — asyncfn body-runs (the default engine's throughput). quickjs runs are shown only if any exist
+  // (e.g. left from a prior quickjs session before the setting was flipped back).
+  checks.push({
+    label:   'Runs',
+    status:  'info',
+    message: `${e.asyncfnRuns} asyncfn body-run(s)` + (e.quickjsRuns > 0 ? ` (+${e.quickjsRuns} quickjs)` : ''),
+    details: { asyncfnRuns: e.asyncfnRuns, quickjsRuns: e.quickjsRuns },
+  });
+
+  // Run errors — non-timeout throws. Info, not warn: a user script legitimately throwing lands here too,
+  // so read it as a rate against the run count, not a health verdict on its own.
+  checks.push({
+    label:   'Run errors',
+    status:  'info',
+    message: `${e.asyncfnRunErrors} run error(s) (excludes timeouts; a user script throwing counts here too)`,
+    details: { asyncfnRunErrors: e.asyncfnRunErrors },
+  });
+
+  // Timeouts — each one SIGKILLed + respawned the child. The load-bearing stability signal.
+  checks.push({
+    label:   'Timeouts (→ respawn)',
+    status:  e.asyncfnTimeouts > 0 ? 'warn' : 'pass',
+    message: e.asyncfnTimeouts > 0
+      ? `${e.asyncfnTimeouts} asyncfn run timeout(s) — each respawned the child`
+      : 'None — no asyncfn run hit its execution timeout',
+    details: { asyncfnTimeouts: e.asyncfnTimeouts },
+  });
+
+  // Streams — generateStream usage (engine-neutral; the asyncfn engine opens streams too).
+  checks.push({
+    label:   'Streams (generateStream)',
+    status:  'info',
+    message: `${e.streamsOpened} opened, ${e.streamsCancelled} cancelled early`,
+    details: { streamsOpened: e.streamsOpened, streamsCancelled: e.streamsCancelled },
+  });
+
+  return {
+    id:   'engine',
+    name: 'Engine (AsyncFunction)',
+    checks,
+  };
+}
+
 // ─── Section C — Active context ─────────────────────────────────────────────
 
 function buildActiveContextSection(deps: DiagnosticsCollectorDeps): DiagnosticSection {
@@ -888,11 +1172,13 @@ function buildRegistrationsSection(deps: DiagnosticsCollectorDeps): DiagnosticSe
   let appMounts       = 0;
   let advancedModals  = 0;
   let inputBarActions = 0;
+  let messageTagInterceptors = 0;
   for (const s of scripts) {
     floatWidgets    += countLiveWidgetsByScript(s.id);
     appMounts       += countLiveAppMountsByScript(s.id);
     advancedModals  += countLiveModalsByScript(s.id);
     inputBarActions += countInputBarActionsByScript(s.id);
+    messageTagInterceptors += countMessageTagInterceptors(s.id);
   }
 
   const checks: DiagnosticCheck[] = [
@@ -984,6 +1270,11 @@ function buildRegistrationsSection(deps: DiagnosticsCollectorDeps): DiagnosticSe
         label:   'Input-bar actions',
         status:  'info',
         message: `${inputBarActions} registered`,
+      },
+      {
+        label:   'Message-tag interceptors',
+        status:  'info',
+        message: `${messageTagInterceptors} registered`,
       },
   ];
 

@@ -25,7 +25,10 @@ import type {
   UIKeyboardState,
   UIDrawerState,
   UISettingsState,
+  MessageTagEvent,
+  MessageTagOptions,
 } from './script.js';
+import type { DetectedCardScript, EmbeddedScriptEntry } from './card-scripts.js';
 import type { CollectionSummary, CollectionStats } from '../engine/db-admin.js';
 
 // ─── Shared payload shapes ────────────────────────────────────────────────────
@@ -44,6 +47,107 @@ export interface VariablesSnapshot {
 // ─── Frontend → Backend ───────────────────────────────────────────────────────
 
 export type FrontendToBackend =
+  // ── Card-embedded scripts (#12): FE confirms which detected scripts to install ──
+  // BACKEND-AUTHORITY INVARIANT (Phase 1 must uphold): the backend is the source of
+  // truth. It caches the full DetectedCardScript[] by requestId at detect time; on
+  // this reply it MUST intersect selectedBundleIds with the cached install/update
+  // decisions, ignore unknown/skip bundleIds, and treat a cache miss (e.g. worker
+  // respawn between detect and install) as a hard error — re-detect, never fabricate
+  // an install (no script data rides on this message by design).
+  | {
+      type: 'ls_card_scripts_install';
+      /** Correlates with the cached `ls_card_scripts_detected` batch. */
+      requestId: string;
+      /** Author-assigned bundle id of the batch — lets the BE assert the reply
+       *  matches the cached batch before installing. */
+      bundleCardId: string;
+      /** bundleIds the user chose to install/update (subset of the detected set). */
+      selectedBundleIds: string[];
+      /** bundleIds (subset of selected) to scope to the imported character — the
+       *  installed script gets a single character binding to the host character
+       *  instead of running globally (#12 Q1). Absent → none scoped (all global). */
+      scopedBundleIds?: string[];
+    }
+  | {
+      // ── Card-embedded scripts (#12): FE dismisses a detection without installing ──
+      // Sent on Cancel / Esc so the backend can free the cached PreparedDetection
+      // (which holds the full embedded script source) promptly, rather than letting
+      // it linger until the bounded-cache LRU evicts it. Best-effort; a missing
+      // requestId is a harmless no-op.
+      type: 'ls_card_scripts_dismiss';
+      requestId: string;
+    }
+  | {
+      // ── Card-embedded scripts (#12, Phase 3): bundle scripts INTO a character ──
+      // BACKEND-AUTHORITY: the FE supplies only the chosen script ids + target
+      // character; the backend loads the real script bodies from storage, builds
+      // the envelope, and writes it via spindle.characters.update (never trusts
+      // FE-supplied script content).
+      type: 'ls_card_scripts_export';
+      /** Per-submit token echoed back on the result so the FE can ignore a stale
+       *  result from an abandoned earlier submit (modal is persistently mounted). */
+      requestId: string;
+      /** Ids of installed scripts to bundle (loaded backend-side from storage). */
+      scriptIds: string[];
+      /** Target character UUID whose `extensions.lumiscript` receives the bundle. */
+      characterId: string;
+    }
+  | {
+      // ── Card-embedded scripts (#12, Phase 3): FE requests the character list ──
+      // Populates the target-character picker in the bundle modal. Backend replies
+      // `ls_characters_list`.
+      type: 'ls_list_characters';
+    }
+  | {
+      // ── Card-embedded scripts (#12, Phase C): chat-open banner "Review" ──
+      // The user clicked Review on the passive banner — re-emit the cached
+      // detection as `ls_card_scripts_detected` so the normal consent modal opens.
+      type: 'ls_card_scripts_review';
+      requestId: string;
+    }
+  | {
+      // ── Card-embedded scripts (#12, Phase C): chat-open banner "Dismiss" ──
+      // The user dismissed the banner — record the offered (bundleCardId, bundleId)
+      // pairs so they aren't re-surfaced by a future chat-open re-detect. (Distinct
+      // from `ls_card_scripts_dismiss`, the import-modal cancel, which does NOT
+      // record — importing is the explicit trust act.)
+      type: 'ls_card_scripts_dismiss_available';
+      requestId: string;
+    }
+  | {
+      // ── Card-embedded scripts (#12, Phase C): pull-based banner recheck ──
+      // Sent by the FE whenever the Manage tab is shown (mount + every switch
+      // back). The backend re-runs the chat-open detection against the LIVE
+      // active character and (re-)surfaces `ls_card_scripts_available` if there
+      // is anything offerable. This makes the banner resilient to the one-shot
+      // CHAT_SWITCHED push being missed (panel not mounted / cleared by a later
+      // active_context / ordering) — the user reliably sees it when they look.
+      type: 'recheck_card_scripts';
+    }
+  | {
+      // ── Card-editor tab (#12, Phase E): request the installed-status of the
+      // bundled scripts in the character being edited (drives the per-script
+      // badges). The backend reads the SAVED card + compares against the user's
+      // library via computeInstallActions. ──
+      type: 'ls_card_editor_status';
+      characterId: string;
+    }
+  | {
+      // ── Card-editor tab (#12, Phase E): late-import the edited character's
+      // bundled scripts. Opens the standard consent modal (backend reads the
+      // SAVED card — never FE-supplied script data). ──
+      type: 'ls_card_editor_import';
+      characterId: string;
+    }
+  | {
+      // ── Card-editor tab (#12, Phase E): bundle-from-here. Ask the backend to
+      // build embedded entries for these library script ids (from real storage,
+      // backend-authority) so the FE can merge them into the edited card's draft
+      // `extensions.lumiscript`. ──
+      type: 'ls_card_editor_bundle_build';
+      requestId: string;
+      scriptIds: string[];
+    }
   | {
       /**
        * Emitted by the frontend as the very first message on mount — before
@@ -314,6 +418,18 @@ export type FrontendToBackend =
     }
   | {
       /**
+       * Fired by the frontend when a registered message-tag interceptor matches
+       * a COMPLETED message (the FE bridge filters out streaming partials and
+       * dedupes per `messageId:tagName:fullMatch`). Backend routes to the
+       * script's handler by `handlerId`. Fire-and-forget — no response.
+       */
+      type: 'ls_tag_interceptor_fired';
+      scriptId: string;
+      handlerId: string;
+      event: MessageTagEvent;
+    }
+  | {
+      /**
        * Fired by the frontend AFTER a registered input-bar action has been
        * mounted: `ctx.ui.registerInputBarAction` succeeded, the handle is
        * stored in the per-frontend `actions` Map, and the click-echo wiring
@@ -574,6 +690,15 @@ export type FrontendToBackend =
        * history. Ineligible / missing / oversized paths are skipped.
        */
       contextFilePaths?: string[];
+      /**
+       * Edit-and-resend of the last user turn. The previous turn SUCCEEDED and
+       * is persisted, so the backend trims the last user message + its assistant
+       * reply (and any tool turns between) from the thread before regenerating
+       * with this (edited) `content`. Like `isRetry`, the FE already shows the
+       * edited bubble, so the `assistant_user_turn` echo is skipped. Only sent
+       * when the last user turn already has a subsequent assistant reply.
+       */
+      editLast?: boolean;
     }
   // "New chat" — creates a new thread and switches the active thread to it.
   | { type: 'assistant_reset' }
@@ -660,11 +785,121 @@ export type FrontendToBackend =
   // field" intent. Backend follows up with the standard `settings_updated`
   // broadcast so the inputs re-render empty.
   | { type: 'assistant_reset_generation_defaults' }
+  // Manual context compaction ("Compact now") — fold the older part of the
+  // active thread into a handoff summary now. `connectionId` runs the summary on
+  // the user's chosen connection (mirrors assistant_memory_consolidate).
+  | { type: 'assistant_compact'; connectionId?: string }
+  // Request a breakdown of what's filling the context window (corpus / memory /
+  // chat / attachments token estimates) — sent when the user opens the gauge's
+  // breakdown popover, answered with assistant_context_breakdown.
+  | { type: 'request_context_breakdown' }
 ;
 
 // ─── Backend → Frontend ───────────────────────────────────────────────────────
 
 export type BackendToFrontend =
+  // ── Card-embedded scripts (#12): BE asks the FE to show the consent modal ──
+  | {
+      type: 'ls_card_scripts_detected';
+      /** Correlates the later `ls_card_scripts_install` reply. */
+      requestId: string;
+      /** Host character UUID the bundle was imported into (provenance). */
+      hostCharacterId: string;
+      /** Author-assigned stable bundle id (de-dup anchor). */
+      bundleCardId: string;
+      bundleName?: string;
+      /** Per-script decision + permission analysis for the modal. */
+      items: DetectedCardScript[];
+    }
+  | {
+      // ── Card-embedded scripts (#12, Phase C): passive chat-open banner ──
+      // The open character bundles scripts the user doesn't have (and hasn't
+      // dismissed). Surfaced as a non-blocking banner, NOT an auto-modal. The
+      // FE replies `ls_card_scripts_review` (→ opens the modal) or
+      // `ls_card_scripts_dismiss_available` (→ records the dismissal).
+      type: 'ls_card_scripts_available';
+      /** Correlates the banner's review/dismiss reply to the cached detection. */
+      requestId: string;
+      characterName: string | null;
+      /** Count of offerable (install/update, not-dismissed) bundled scripts. */
+      count: number;
+    }
+  | {
+      // ── Card-editor tab (#12, Phase E): installed-status reply. One entry per
+      // bundled script in the edited card, telling the tab whether the user
+      // already has it. Gated on `characterId` so a stale reply for a since-
+      // switched character is ignored. ──
+      type: 'ls_card_editor_status_result';
+      characterId: string;
+      statuses: {
+        bundleId: string;
+        state: 'installed' | 'not-installed' | 'update-available' | 'library-newer';
+        /** Name of the installed copy (when state !== 'not-installed'). */
+        installedName?: string;
+        /** Whether the installed copy is enabled. */
+        installedEnabled?: boolean;
+      }[];
+    }
+  | {
+      // ── Card-editor tab (#12, Phase E): a library change happened (a card-
+      // scripts install completed) — nudge the editor tab to re-request status
+      // so its badges refresh. No payload; the tab re-asks for its own card. ──
+      type: 'ls_card_editor_status_stale';
+    }
+  | {
+      // ── Card-editor tab (#12, Phase E): backend-built embedded entries for a
+      // `ls_card_editor_bundle_build` request. The FE merges these into the
+      // edited card's draft `extensions.lumiscript`. ──
+      type: 'ls_card_editor_bundle_entries';
+      requestId: string;
+      entries: EmbeddedScriptEntry[];
+    }
+  | {
+      // ── Card-embedded scripts (#12, Phase D): a card was deleted ──
+      // Offer (non-destructive default) to remove the scripts that card installed.
+      // The FE fires the existing `delete_script` per chosen id on confirm — no
+      // backend remove-handler needed.
+      type: 'ls_card_scripts_deleted_offer';
+      characterName: string | null;
+      /** Scripts whose provenance points at the deleted character instance, with
+       *  enough to render each one's shape (type / event hooks / size / bindings). */
+      scripts: {
+        id: string;
+        name: string;
+        type: ScriptType;
+        triggers?: string[];
+        /** Display names of the script's character/chat bindings, if any. */
+        bindingNames?: string[];
+        /** Code length in chars, for the size pill. */
+        sizeChars: number;
+      }[];
+    }
+  | {
+      // ── Card-embedded scripts (#12, Phase 3): character picker options ──
+      type: 'ls_characters_list';
+      /** `avatarUrl` (when resolvable from the character's image) drives the
+       *  picker dropdown's thumbnail; absent → the FE shows an initial bubble. */
+      characters: { id: string; name: string; avatarUrl?: string }[];
+      /** Host's total character count — lets the FE flag a truncated list. */
+      total: number;
+    }
+  | {
+      // ── Card-embedded scripts (#12, Phase 3): result of an export/bundle ──
+      type: 'ls_card_scripts_export_result';
+      /** Echoes the request's token — the FE ignores results for a non-current submit. */
+      requestId: string;
+      ok: boolean;
+      /** Resolved target character name (success only). */
+      characterName?: string;
+      /** The bundleCardId written (new or reused) — success only. */
+      bundleCardId?: string;
+      /** Number of scripts actually written into the envelope (success only). */
+      scriptCount?: number;
+      /** Selected scripts dropped because they shared a bundle identity (success only). */
+      droppedCount?: number;
+      /** Failure reason (failure only). */
+      error?: string;
+    }
   | {
       type: 'scripts_updated';
       scripts: Script[];
@@ -787,6 +1022,11 @@ export type BackendToFrontend =
        */
       preventDefault?: boolean | ConditionalPreventDefault;
       stopPropagation?: boolean;
+      /**
+       * When `true`, also attach in-shadow listeners so this delegation reaches
+       * controls inside the host's open shadow-DOM islands. Default: `false`.
+       */
+      pierceShadow?: boolean;
     }
   | { type: 'dom_delegate_unregister'; delegationId: string; event: string }
   | { type: 'dom_cleanup_script';  scriptId: string }
@@ -948,6 +1188,33 @@ export type BackendToFrontend =
         iconUrl?: string;
         enabled?: boolean;
       };
+    }
+  // ─── Message-tag interceptor lifecycle (backend → frontend) ─────────
+  | {
+      /**
+       * Register a message-tag interceptor. The frontend calls
+       * `ctx.messages.registerTagInterceptor({ tagName, attrs, removeFromMessage })`
+       * and stores the host unsubscribe keyed by `handlerId`. When the host
+       * fires for a COMPLETED message the FE echoes `ls_tag_interceptor_fired`.
+       * One host interceptor per registration (host fires all per-tag).
+       */
+      type: 'ls_tag_interceptor_register';
+      scriptId: string;
+      handlerId: string;
+      tagName: string;
+      options?: MessageTagOptions;
+    }
+  | {
+      /**
+       * Unregister a message-tag interceptor — the frontend calls the stored
+       * host unsubscribe for `handlerId` and drops it. Sent on the script's
+       * `onMessageTag` unsubscribe AND in the disable/delete/reload teardown
+       * sweep (before the backend registry is cleared) so no host interceptor
+       * is left zombied.
+       */
+      type: 'ls_tag_interceptor_unregister';
+      scriptId: string;
+      handlerId: string;
     }
   | {
       /** Update the label of a registered input-bar action. */
@@ -1221,6 +1488,9 @@ export type BackendToFrontend =
         promptTokens: number;
         completionTokens: number;
         totalTokens: number;
+        /** Context occupancy — size of the latest single prompt (for the
+         *  fullness gauge), vs `promptTokens` which sums iterations for billing. */
+        occupancyTokens?: number;
         estimated?: boolean;
       };
     }
@@ -1234,6 +1504,9 @@ export type BackendToFrontend =
         promptTokens: number;
         completionTokens: number;
         totalTokens: number;
+        /** Context occupancy — size of the latest single prompt (for the
+         *  fullness gauge), vs `promptTokens` which sums iterations for billing. */
+        occupancyTokens?: number;
         estimated?: boolean;
       };
     }
@@ -1270,6 +1543,18 @@ export type BackendToFrontend =
       /** Apply markers to interleave into the reconstructed transcript. Empty
        *  for threads with no applies (or persisted before this shipped). */
       appliedEvents: import('../assistant/types.js').AppliedEvent[];
+      /** Persisted prompt-token count of the thread's last turn, for the
+       *  context-fullness gauge. Undefined for new / pre-gauge threads. */
+      lastPromptTokens?: number;
+      /** Whether `lastPromptTokens` was a local estimate (gauge shows `~`). */
+      lastPromptEstimated?: boolean;
+      /** Compaction boundary, if this thread has been compacted — anchors the
+       *  "compacted here" transcript divider on reload. Undefined = uncompacted. */
+      compactedThrough?: number;
+      /** Last turn's in/out/total usage + lifetime thread total — replayed so the
+       *  usage strip survives thread switches. Undefined for pre-this threads. */
+      lastTurnUsage?: { promptTokens: number; completionTokens: number; totalTokens: number; estimated?: boolean };
+      totalUsage?: { promptTokens: number; completionTokens: number; totalTokens: number; estimated?: boolean };
     }
   // Success confirmation for `assistant_apply_to_script` — carries the
   // generated script name + classified type so the modal can render a
@@ -1305,5 +1590,27 @@ export type BackendToFrontend =
       threadId: string;
       filename: string;
       content: string;
+    }
+  // Context compaction happened (auto pre-turn, or manual) — the older prefix was
+  // folded into a handoff. `ok:true` carries the new (lower) occupancy for the
+  // fullness gauge + the new boundary for the transcript divider; `ok:false`
+  // carries a reason (nothing old enough to fold, or the summary call failed —
+  // the thread is left uncompacted either way).
+  | {
+      type: 'assistant_compacted';
+      ok: boolean;
+      occupancyTokens?: number;
+      estimated?: boolean;
+      compactedThrough?: number;
+      error?: string;
+    }
+  // Per-segment token-estimate breakdown of the current context occupancy, for
+  // the gauge's breakdown popover. All LOCAL estimates (shown with ~), in tokens.
+  | {
+      type: 'assistant_context_breakdown';
+      corpus: number;       // persona + API cheat-sheet (the fixed prefix)
+      memory: number;       // saved-notes / session-notes section
+      chat: number;         // the conversation history
+      attachments: number;  // @-attached scripts + files (0 if none)
     }
 ;

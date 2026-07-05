@@ -5,7 +5,7 @@ Compute something fresh each turn — the time of day, how deep the scene is, a 
 ## What you'll use
 
 - `api.chat.inject(id, content, options?)` — register a prompt injection under a stable `id`. Re-injecting with the same `id` **overwrites** the previous content — that's what keeps it fresh. Requires the `interceptor` permission (declared in LumiScript's manifest by default). ([Permissions](../concepts/permissions.md))
-- `MESSAGE_SENT` as the trigger — it fires once per user-initiated send, *before* the prompt for the reply is assembled. ([Trigger model](../concepts/trigger-model.md))
+- `MESSAGE_SENT` as the trigger — it fires when a message is created (guard on `data.message.is_user` for *your* sends), a moment *before* the prompt for the reply is assembled. ([Trigger model](../concepts/trigger-model.md))
 - `globalThis` — a synchronous per-process counter, here only to make "this changes every turn" visible. ([Storage model](../concepts/storage-model.md))
 
 The idea up front: **an injection is keyed by its `id` and lives until you remove it.** "Dynamic per turn" isn't a special mode — it's calling `inject` again each turn with the same `id` and freshly-computed content. The newest call wins, so the model always reads current values.
@@ -17,9 +17,13 @@ The idea up front: **an injection is keyed by its `id` and lives until you remov
 // Inject a fresh "scene context" note before each model reply.
 // Permission: interceptor.
 //
-// MESSAGE_SENT fires once per USER send, a moment before the prompt for the
-// reply is assembled. Build the note and inject it SYNCHRONOUSLY (no awaits
-// before the inject) so it lands in THIS turn's generation — see "How it works".
+// MESSAGE_SENT fires for every message created — including the assistant's
+// empty placeholder — so guard on is_user to run only on YOUR sends (otherwise
+// the counter below climbs twice per turn). On a user send it fires a moment
+// before the prompt for the reply is assembled, so build the note and inject it
+// SYNCHRONOUSLY (no awaits before the inject) so it lands in THIS turn's
+// generation — see "How it works".
+if (!data.message.is_user) return;
 
 // 1. Compute the note synchronously — values that change from turn to turn.
 const now  = new Date();
@@ -49,7 +53,7 @@ Enable it, open a chat, and send a few messages. The note never appears in the t
 
 **Re-inject to refresh; the `id` is the identity.** `inject('scene-context', …)` registers — or replaces — one injection slot named `scene-context`. There is no separate "update" call; overwriting *is* the update. Because the body re-runs on every send, the slot always holds this turn's note. Use a random `id` each time instead and you'd stack a fresh note every turn rather than replacing the old one.
 
-**Why `MESSAGE_SENT`, and why inject synchronously.** `MESSAGE_SENT` fires once per user send, *before* the prompt for the reply is assembled — so an injection registered in its handler is read by the very next generation. The margin is thin: the host emits the event a microtask ahead of assembly, so a **synchronous** inject (like this one) lands in time, but `await`-ing slow work first can slip you past assembly and into the *following* turn (see the gotcha). There is no assistant-side `MESSAGE_SENT` — the reply arrives on the separate `GENERATION_ENDED` event — so this body only ever runs on user turns, exactly when fresh context is wanted.
+**Why `MESSAGE_SENT`, and why inject synchronously.** On a user send, `MESSAGE_SENT` fires *before* the prompt for the reply is assembled — so an injection registered in its handler is read by the very next generation. The margin is thin: the host emits the event a microtask ahead of assembly, so a **synchronous** inject (like this one) lands in time, but `await`-ing slow work first can slip you past assembly and into the *following* turn (see the gotcha). `MESSAGE_SENT` also fires for the assistant's empty placeholder, so the `is_user` guard keeps this body to user turns — exactly when fresh context is wanted; the finished reply arrives on the separate `GENERATION_ENDED` event.
 
 **`mode`, `role`, and `depth`.** The default `mode: 'intercept'` splices your content into the fully-assembled message array right before it reaches the model — reliable, no host cooperation required. (There's also `mode: 'context'`, which enriches the assembler *before* assembly, but whether it's consumed depends on host support — prefer `intercept`.) `role` is the message role the content rides as — `'system'` by default, which is right for out-of-character notes. `depth` counts from the **end** of the array: `0` appends after everything (most recent, most salient), `1` inserts before the last message, and so on. End-position is usually what you want for "right now" notes — it sits closest to the generation.
 
@@ -65,13 +69,13 @@ Enable it, open a chat, and send a few messages. The note never appears in the t
 ## Gotchas
 
 - **Awaited work can miss the current turn.** `intercept` mode reads whatever is in the slot *at assembly time*, and assembly runs barely a tick after `MESSAGE_SENT`. A synchronous compute (like the clock above) lands well before it. But if you `await` something slow before injecting — an LLM call, a network fetch, even a storage read — generation may already be assembling, and your content lands in the *next* turn's prompt instead. Keep the inject synchronous; or keep the slot populated under a stable `id` and accept a one-turn lag (often fine); or move the expensive work to the prior turn's `GENERATION_ENDED`.
-- **`MESSAGE_SENT` is user-only.** It does not fire for the assistant's reply — that arrives on `GENERATION_ENDED`. If you want to react *after* the model speaks rather than before, wire to `GENERATION_ENDED` instead; its payload is `{ generationId, chatId, messageId, content }`, with no `message` object.
+- **`MESSAGE_SENT` fires for every message creation, not just yours.** The host emits it for the assistant's empty placeholder (and greetings, manual inserts) too — guard on `data.message.is_user` (as the script does) to react to user sends only. If you want to react *after* the model speaks rather than before, wire to `GENERATION_ENDED` instead; its payload is `{ generationId, chatId, messageId, content }`, with no `message` object.
 - **`interceptor`, not `allowDangerous`.** `api.chat.inject` is gated by the `interceptor` permission and nothing else. The one member of this family that additionally needs `allowDangerous` is `clearAllInjections`, which wipes *every* script's injections — `clearInjections()` (just yours) does not.
 - **`depth` counts from the end, not the start.** `depth: 0` is the end of the array (after the latest message), not the beginning. If a note is landing somewhere surprising, you've probably got the direction inverted.
 
 ## See also
 
-- [Trigger model](../concepts/trigger-model.md) — `MESSAGE_SENT` (user-only, pre-assembly) vs `GENERATION_ENDED` (the assistant-side counterpart), and how to read each one's payload.
+- [Trigger model](../concepts/trigger-model.md) — `MESSAGE_SENT` (fires on every message creation — guard `is_user`; pre-assembly) vs `GENERATION_ENDED` (generated assistant text), and how to read each one's payload.
 - [Permissions](../concepts/permissions.md) — what `interceptor` gates and how denial degrades.
 - [Custom macros](../guides/macros.md) and [World info](../guides/world-info.md) — the other two channels for getting script-computed content into a prompt.
 - [Storage model](../concepts/storage-model.md) — where the state you inject should actually live between turns.

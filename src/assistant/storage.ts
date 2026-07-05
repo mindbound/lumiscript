@@ -96,7 +96,11 @@ export async function saveThread(
 ): Promise<AssistantThread> {
   const stamped: AssistantThread =
     opts?.bumpUpdatedAt === false ? thread : { ...thread, updatedAt: Date.now() };
-  await spindle.userStorage.setJson(threadPath(stamped.id), stamped, { indent: 2, userId });
+  // Compact (no indent): thread bodies are machine-read and grow with the
+  // conversation, so the per-turn JSON.stringify + write cost is O(thread size)
+  // — pretty-printing roughly doubles it for no benefit. (The small, human-
+  // inspected index file stays indented; see saveThreadIndex.)
+  await spindle.userStorage.setJson(threadPath(stamped.id), stamped, { userId });
   return stamped;
 }
 

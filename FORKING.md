@@ -77,7 +77,7 @@ Lumiverse loads installed extensions from `data/extensions/<identifier>/repo/`, 
 2. **Build:** `bun run build`.
 3. **Install:** either point Lumiverse's "install from URL" flow at your fork's GitHub repo, or place the built tree directly at `data/extensions/` and toggle the extension on in Lumiverse's Extensions panel.
 
-`minimum_lumiverse_version` in `spindle.json` is the floor for the host version that supports the manifest features the extension uses (e.g. `requested_capabilities` landed in Lumiverse 0.9.9). Bump it if your fork relies on newer manifest features.
+`minimum_lumiverse_version` in `spindle.json` is the floor for the host version that supports the manifest features the extension uses. LumiScript currently sets it to `1.0.4` (the latest stable Lumiverse at the v2.0 release). Bump it if your fork relies on newer manifest features, or lower it if you've verified an older host works for your fork.
 
 Lumiverse must be restarted (or the extension toggled off/on) to pick up new builds.
 

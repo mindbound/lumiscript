@@ -4,12 +4,17 @@
  * highlighting, scope labels). `copyToClipboard` is omitted — it's a thin
  * try/catch over `navigator.clipboard.writeText` with no logic of its own.
  */
-import { describe, test, expect } from 'bun:test';
+import { describe, test, expect, afterEach } from 'bun:test';
 import {
   formatBytes,
   formatValue,
   formatTimeAgo,
   highlightJson,
+  highlightBodyCapped,
+  cachedRecordHtml,
+  _clearHighlightCache,
+  _highlightCacheSize,
+  RECORD_BODY_HIGHLIGHT_CAP,
   SCOPE_LABEL_SHORT,
   SCOPE_LABEL_LONG,
 } from '../../../src/components/storage/utils.js';
@@ -120,5 +125,59 @@ describe('formatValue', () => {
     const circular: Record<string, unknown> = {};
     circular.self = circular;
     expect(formatValue(circular)).toBe('[object Object]');
+  });
+});
+
+describe('highlightBodyCapped', () => {
+  test('short body → identical to highlightJson (no cap, no marker)', () => {
+    const pretty = JSON.stringify({ a: 1, b: 'x', c: true }, null, 2);
+    expect(highlightBodyCapped(pretty)).toBe(highlightJson(pretty));
+  });
+
+  test('over-cap body → truncates, marks, stays shorter than uncapped', () => {
+    const pretty = JSON.stringify({ blob: 'y'.repeat(RECORD_BODY_HIGHLIGHT_CAP + 500) }, null, 2);
+    const capped = highlightBodyCapped(pretty);
+    expect(capped).toContain('more chars truncated');
+    expect(capped.length).toBeLessThan(highlightJson(pretty).length);
+  });
+
+  test('a mid-string-literal cut still yields balanced <span> markup', () => {
+    // A single huge string value: slicing at the cap lands mid-string-literal,
+    // which must NOT leave an unclosed <span class="ls-json-string">. The
+    // highlighter only wraps fully-matched tokens, so spans stay balanced.
+    const pretty = JSON.stringify({ s: 'z'.repeat(RECORD_BODY_HIGHLIGHT_CAP * 2) }, null, 2);
+    const capped = highlightBodyCapped(pretty);
+    const opens  = (capped.match(/<span\b/g) ?? []).length;
+    const closes = (capped.match(/<\/span>/g) ?? []).length;
+    expect(opens).toBe(closes);
+  });
+});
+
+describe('cachedRecordHtml', () => {
+  afterEach(() => _clearHighlightCache());
+
+  test('same key → builds once and returns the same string reference', () => {
+    let builds = 0;
+    const build = (): string => { builds++; return `<span>${builds}</span>`; };
+    const a = cachedRecordHtml('r1:1', build);
+    const b = cachedRecordHtml('r1:1', build);
+    expect(builds).toBe(1);
+    expect(b).toBe(a); // reference-stable → React skips the innerHTML re-parse
+  });
+
+  test('a bumped version key → fresh build (edits bust the cache)', () => {
+    let builds = 0;
+    const build = (): string => { builds++; return `html-${builds}`; };
+    cachedRecordHtml('r1:1', build);
+    cachedRecordHtml('r1:2', build); // updatedAt bumped on edit
+    expect(builds).toBe(2);
+  });
+
+  test('LRU stays bounded and evicts the oldest past the cap', () => {
+    for (let i = 0; i < 600; i++) cachedRecordHtml(`k${i}:1`, () => `h${i}`);
+    expect(_highlightCacheSize()).toBeLessThanOrEqual(512);
+    let rebuilt = 0;
+    cachedRecordHtml('k0:1', () => { rebuilt++; return 'h0'; }); // oldest → evicted → rebuilds
+    expect(rebuilt).toBe(1);
   });
 });

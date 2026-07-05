@@ -26,6 +26,10 @@ import {
   notifyFloatWidgetCreated,
   notifyInputBarActionRegistered,
   notifyDrawerTabRegistered,
+  __getPendingAdvancedModalOpenIdsForTests,
+  __getPendingInputBarActionRegisterKeysForTests,
+  __getPendingFloatWidgetCreateIdsForTests,
+  __getPendingDrawerTabRegisterKeysForTests,
 } from '../../src/script-runner/host-dispatcher.js';
 import { setupE2E } from '../_infra/script-runner-fixture.js';
 import type { Script } from '../../src/types/script.js';
@@ -90,6 +94,22 @@ function getSpindle(): MockSpindle {
   return (globalThis as unknown as { spindle: MockSpindle }).spindle;
 }
 
+/**
+ * Robustly simulate the frontend's open / register echo. The parent registers
+ * its open-await ASYNCHRONOUSLY, and how many event-loop turns that takes varies
+ * by platform + bun build — a fixed-tick deferral is enough on Windows but NOT
+ * on Linux CI (echo fires before the awaiter is registered, `notify*` no-ops,
+ * the 3s open-await times out, run hangs). So POLL the pending-awaiter table
+ * until the awaiter is actually registered, THEN echo. Zero timing/platform
+ * assumptions; the iteration cap is a safety net well under OPEN_AWAIT_TIMEOUT_MS.
+ */
+async function echoWhenAwaiterReady(isRegistered: () => boolean, echo: () => void): Promise<void> {
+  for (let i = 0; i < 2000 && !isRegistered(); i++) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  }
+  echo();
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 describe('e2e: Option B handle-returning special-case routes', () => {
@@ -102,7 +122,7 @@ describe('e2e: Option B handle-returning special-case routes', () => {
       const opts = req.args[0] as { _modalId: string };
       observedModalId = opts._modalId;
       // Simulate the FE echo arriving — resolves the parent's awaiter.
-      notifyAdvancedModalOpened(observedModalId);
+      void echoWhenAwaiterReady(() => __getPendingAdvancedModalOpenIdsForTests().includes(opts._modalId), () => notifyAdvancedModalOpened(opts._modalId));
     });
 
     const result = await dispatchRunScript(
@@ -129,7 +149,7 @@ describe('e2e: Option B handle-returning special-case routes', () => {
     const unsub = watchApiRequest(spindle, 'ui.createFloatWidget', (req) => {
       const opts = req.args[0] as { _widgetId: string };
       observedWidgetId = opts._widgetId;
-      notifyFloatWidgetCreated(observedWidgetId);
+      void echoWhenAwaiterReady(() => __getPendingFloatWidgetCreateIdsForTests().includes(opts._widgetId), () => notifyFloatWidgetCreated(opts._widgetId));
     });
 
     const result = await dispatchRunScript(
@@ -156,7 +176,7 @@ describe('e2e: Option B handle-returning special-case routes', () => {
       // The proxy ships them through directly.
       const opts = req.args[0] as { id: string };
       expect(opts.id).toBe(userActionId);
-      notifyInputBarActionRegistered(scriptId, opts.id);
+      void echoWhenAwaiterReady(() => __getPendingInputBarActionRegisterKeysForTests().includes(`${scriptId}:${opts.id}`), () => notifyInputBarActionRegistered(scriptId, opts.id));
     });
 
     const result = await dispatchRunScript(
@@ -181,7 +201,7 @@ describe('e2e: Option B handle-returning special-case routes', () => {
     const unsub = watchApiRequest(spindle, 'ui.registerDrawerTab', (req) => {
       const opts = req.args[0] as { id: string };
       expect(opts.id).toBe(userTabId);
-      notifyDrawerTabRegistered(scriptId, opts.id);
+      void echoWhenAwaiterReady(() => __getPendingDrawerTabRegisterKeysForTests().includes(`${scriptId}:${opts.id}`), () => notifyDrawerTabRegistered(scriptId, opts.id));
     });
 
     const result = await dispatchRunScript(

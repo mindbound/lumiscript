@@ -26,6 +26,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import { ChildToParentMessageSchema, findMostSpecificIpcIssue } from '../../src/types/script-runner-ipc-schemas.js';
+import { getEngineTelemetry } from '../../src/script-runner/qjs-engine.js';
 
 // ─── Happy paths — every ChildToParentMessage variant accepted ──────────────
 
@@ -237,6 +238,30 @@ describe('ChildToParentMessageSchema — happy paths (every variant)', () => {
       cpuSystemUs: 30_000,
       uptimeSec:   12.34,
     }).success).toBe(true);
+  });
+
+  // #11 observability — the engine telemetry rides the SAME message under a `.strict()` union. A REAL
+  // getEngineTelemetry() snapshot must validate (guards against schema↔runtime drift — the exact class
+  // of bug where a strict-schema miss silently drops the whole stats response, memory/CPU included).
+  test('accepts DiagnosticStatsResponse with the engine telemetry snapshot', () => {
+    expect(ChildToParentMessageSchema.safeParse({
+      type:        'diagnostic-stats-response',
+      requestId:   'req-1',
+      rss:         50_000_000, heapTotal: 30_000_000, heapUsed: 20_000_000, external: 1_000_000,
+      cpuUserUs:   100_000, cpuSystemUs: 30_000, uptimeSec: 12.34,
+      engine:      getEngineTelemetry(), // real runtime shape
+    }).success).toBe(true);
+  });
+
+  test('rejects a DiagnosticStatsResponse whose engine object carries an unknown key (strict)', () => {
+    const res = ChildToParentMessageSchema.safeParse({
+      type:        'diagnostic-stats-response',
+      requestId:   'req-1',
+      rss:         50_000_000, heapTotal: 30_000_000, heapUsed: 20_000_000, external: 1_000_000,
+      cpuUserUs:   100_000, cpuSystemUs: 30_000, uptimeSec: 12.34,
+      engine:      { ...getEngineTelemetry(), bogusField: 1 },
+    });
+    expect(res.success).toBe(false);
   });
 
   test('accepts HandlerResult (ok branch)', () => {

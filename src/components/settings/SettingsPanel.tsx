@@ -1,16 +1,51 @@
-import { FC, useState, useEffect, useMemo } from 'react';
-import { Code2, BookMarked, Terminal, Timer, Type, FileCode2, Activity, MessageCircle, Trash2, RotateCcw, Cpu, Shuffle } from 'lucide-react';
+import { FC, useState, useEffect, useMemo, type CSSProperties } from 'react';
+import { Code2, BookMarked, Terminal, Timer, Type, FileCode2, Activity, MessageCircle, Trash2, RotateCcw, Cpu, Shuffle, Globe } from 'lucide-react';
 import type { Script, LumiScriptSettings } from '../../types/script.js';
 import type { BackendToFrontend, FrontendToBackend } from '../../types/messages.js';
-import { DEFAULT_SETTINGS } from '../../types/script.js';
+import { DEFAULT_SETTINGS, scriptRunsOnStartup } from '../../types/script.js';
+import { parseAllowlistEntry, isDirectEligibleHost } from '../../engine/egress-allowlist.js';
 import { DiagnosticsModal } from '../diagnostics/DiagnosticsModal.js';
 import { AssistantModal } from '../assistant/AssistantModal.js';
-import { LS_OPEN_ASSISTANT_EVENT, dispatchOpenAssistant } from '../assistant/openAssistant.js';
+import { LS_OPEN_ASSISTANT_EVENT } from '../assistant/openAssistant.js';
 import { HostSelect } from '../common/HostSelect.js';
+import { ConfirmDialog } from '../common/ConfirmDialog.js';
 
 // Connection rows as pushed by the backend's `assistant_connections` reply —
 // derived from the message contract so the shape can't drift.
 type AssistantConnRow = Extract<BackendToFrontend, { type: 'assistant_connections' }>['connections'][number];
+
+// ─── Engine-switch confirm modal styling ────────────────────────────────────
+// The confirm dialog is portal-rendered under <body>, where `--lumiverse-*`
+// tokens don't cascade, so colours are hard-coded rgb() (same convention as the
+// card-bundle modal this layout mirrors). Structure: an intro paragraph, then a
+// labelled section + read-only script list for each of the two migration paths.
+const esText  = 'rgb(222,223,230)';
+const esMuted = 'rgba(222,223,230,0.6)';
+const esNote:         CSSProperties = { color: esMuted, fontSize: 12,   lineHeight: 1.5,  margin: '0 0 10px' };
+const esSectionLabel: CSSProperties = { color: esText,  fontSize: 12,   fontWeight: 600,  margin: '14px 0 4px' };
+const esSubNote:      CSSProperties = { color: esMuted, fontSize: 11.5, lineHeight: 1.45, margin: '0 0 6px' };
+const esFoot:         CSSProperties = { color: esMuted, fontSize: 11.5, lineHeight: 1.45, margin: '14px 0 0' };
+const esList:         CSSProperties = { maxHeight: 132, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 2, margin: '0 0 2px' };
+const esRow:          CSSProperties = { display: 'flex', alignItems: 'center', gap: 8, padding: '3px 2px' };
+const esName:         CSSProperties = {
+  fontWeight: 600, fontSize: 12.5, color: esText,
+  flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+};
+
+/** A read-only, scrollable column of script names with a leading action icon —
+ *  presentational counterpart to the card-bundle picker (no checkboxes). */
+function renderEngineSwitchScriptList(list: Script[], Icon: typeof RotateCcw) {
+  return (
+    <div style={esList}>
+      {list.map((s) => (
+        <div key={s.id} style={esRow}>
+          <Icon size={11} style={{ color: esMuted, flexShrink: 0 }} />
+          <span style={esName} title={s.name}>{s.name}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 interface SettingsPanelProps {
   onBackendMessage: (handler: (msg: unknown) => void) => () => void;
@@ -33,6 +68,25 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
   // v1.0.0-rc.9 — LLM connections for the "Default connection" picker below.
   // null = not yet loaded (picker disabled); [] = loaded, none configured.
   const [assistantConnections, setAssistantConnections] = useState<AssistantConnRow[] | null>(null);
+  // #11 engine-toggle — the engine the user picked but hasn't confirmed yet. Switching engines
+  // reloads all active scripts, so the dropdown stashes the choice here and only dispatches on confirm.
+  const [pendingEngineMode, setPendingEngineMode] = useState<'asyncfn' | 'quickjs' | null>(null);
+  // The host <select> commits its display optimistically on selection, but we don't change
+  // settings.engineMode until the user confirms — so on Cancel the dropdown would keep showing the
+  // un-chosen engine (and, worse, a re-pick of the real value would no-op the guard below). Bumping this
+  // key on Cancel remounts the dropdown so it re-reads the true value. (Confirm needs no remount: the
+  // display already shows the new value, and settings catches up via the settings_updated round-trip.)
+  const [engineSelectResetKey, setEngineSelectResetKey] = useState(0);
+  // #11 P7 context-model toggle — mirrors the engine toggle. Switching the QuickJS context-isolation
+  // model respawns the QuickJS worker(s) and reloads active scripts, so the dropdown stashes the pending
+  // choice and only dispatches on confirm; its reset key remounts the dropdown on Cancel to re-read the
+  // true value (same reasoning as engineSelectResetKey above).
+  const [pendingContextModel, setPendingContextModel] = useState<'shared' | 'per-script' | null>(null);
+  const [contextModelSelectResetKey, setContextModelSelectResetKey] = useState(0);
+  // Outbound-egress allowlist editor — the host currently being typed into the "add" field, plus
+  // an inline validation message (null = valid/empty). The committed list is settings.allowedPrivateHosts.
+  const [newHost, setNewHost] = useState('');
+  const [hostError, setHostError] = useState<string | null>(null);
 
   useEffect(() => {
     const unsub = onBackendMessage((raw) => {
@@ -64,6 +118,10 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
   const triggerCount = scripts.filter(s => s.type === 'trigger').length;
   const libraryCount = scripts.filter(s => s.type === 'library').length;
 
+  // #11 P7 — the context-isolation setting only applies under the QuickJS engine; gates the Isolation
+  // control's enabled/displayed state below.
+  const engineIsQuickjs = (settings.engineMode ?? 'asyncfn') === 'quickjs';
+
   // Options for the default-connection picker: a "Lumiverse default" sentinel
   // (value '') ahead of every configured connection. Memoized for a stable
   // array identity into HostSelect.
@@ -79,8 +137,63 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
     [assistantConnections],
   );
 
+  // Runtime-switch impact counts for the confirm modals (shared by the engine and the context-isolation
+  // switch — both migrate every enabled trigger the same way). Same predicate the backend fan-out uses
+  // (scriptRunsOnStartup), so what the modal says always matches what the switch actually does:
+  // startup-triggered scripts re-run now; event-driven ones re-arm on their next trigger.
+  const engineSwitchImpact = useMemo(() => {
+    const enabledTriggers = scripts.filter((s) => s.enabled && s.type === 'trigger');
+    return {
+      startup: enabledTriggers.filter(scriptRunsOnStartup),
+      event:   enabledTriggers.filter((s) => !scriptRunsOnStartup(s)),
+    };
+  }, [scripts]);
+
+  // #11 engine-toggle — the two sandbox engines. Stable identity for HostSelect.
+  const engineModeOptions = useMemo(
+    () => [
+      { value: 'asyncfn', label: 'AsyncFunction',                 sublabel: 'Default engine' },
+      { value: 'quickjs', label: 'QuickJS (experimental isolate)', sublabel: 'Stronger WASM sandbox isolation' },
+    ],
+    [],
+  );
+
+  // #11 P7 context-model toggle — the QuickJS context-isolation model. Stable identity for HostSelect.
+  const contextModelOptions = useMemo(
+    () => [
+      { value: 'shared',     label: 'Shared context',      sublabel: 'One sandbox for all scripts (default)' },
+      { value: 'per-script', label: 'Per-script isolation', sublabel: 'Each script in its own sandbox' },
+    ],
+    [],
+  );
+
   const handleToggleEnabled = (enabled: boolean) => {
     sendToBackend({ type: 'update_settings', patch: { enabled } });
+  };
+
+  // Outbound-egress allowlist — the hosts the user permits scripts to reach DIRECTLY, bypassing the
+  // SSRF-safe proxy that otherwise blocks loopback / LAN / link-local addresses. The backend re-validates
+  // every entry when a request is made; the check here only guides input. Only fixed addresses are
+  // accepted (an IP literal or localhost, optionally with a port) — a plain hostname would resolve at
+  // connect time with no pinning, so it is rejected here and, as defence in depth, also by the backend.
+  const allowedHosts = settings.allowedPrivateHosts ?? [];
+  const addAllowedHost = () => {
+    const parsed = parseAllowlistEntry(newHost);
+    if (!parsed || !isDirectEligibleHost(parsed.host)) {
+      setHostError('Enter an IP address or localhost, optionally with a port — e.g. localhost:11434, 192.168.1.50, or [::1]:8080.');
+      return;
+    }
+    // Normalize to a stable display form (the parser already lowercased the host; re-bracket IPv6).
+    const normalized = parsed.host.includes(':')
+      ? `[${parsed.host}]${parsed.port ? `:${parsed.port}` : ''}`
+      : `${parsed.host}${parsed.port ? `:${parsed.port}` : ''}`;
+    if (allowedHosts.includes(normalized)) { setNewHost(''); setHostError(null); return; }
+    sendToBackend({ type: 'update_settings', patch: { allowedPrivateHosts: [...allowedHosts, normalized] } });
+    setNewHost('');
+    setHostError(null);
+  };
+  const removeAllowedHost = (host: string) => {
+    sendToBackend({ type: 'update_settings', patch: { allowedPrivateHosts: allowedHosts.filter((h) => h !== host) } });
   };
 
   return (
@@ -127,6 +240,48 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
           Script Execution
         </div>
 
+        {/* #11 engine-toggle — sandbox engine. QuickJS is the experimental WASM isolate.
+            Changing it confirms first (switching reloads all active scripts). */}
+        <div className="ls-settings-field">
+          <label className="ls-settings-field-label" title="Which sandbox engine runs script bodies + handler fires. AsyncFunction is the default. QuickJS is an experimental WASM isolate with stronger sandboxing — behaviourally faithful to AsyncFunction bar one documented divergence (a script invoking its OWN tool). Switching engines reloads all active scripts so their handlers re-register under the new engine.">
+            Engine
+          </label>
+          <HostSelect
+            key={engineSelectResetKey}
+            options={engineModeOptions}
+            value={settings.engineMode ?? 'asyncfn'}
+            onChange={(v) => {
+              const next = v === 'quickjs' ? 'quickjs' : 'asyncfn';
+              if (next !== (settings.engineMode ?? 'asyncfn')) setPendingEngineMode(next);
+            }}
+            ariaLabel="Script engine"
+          />
+        </div>
+
+        {/* #11 P7 context-model — QuickJS context-isolation model. Has NO effect under AsyncFunction (which
+            runs every script in one shared realm), so the control is disabled unless the QuickJS engine is
+            selected. While disabled it DISPLAYS 'Shared context' — AsyncFunction's effective posture (one
+            sandbox for all scripts), so the locked-in mode reads unambiguously — but the persisted value is
+            NOT changed: a per-script preference is preserved and shown again when the engine returns to
+            QuickJS. Under QuickJS, switching respawns the worker(s) and reloads active scripts, so it
+            confirms first (same reload impact as an engine switch). */}
+        <div className="ls-settings-field">
+          <label className="ls-settings-field-label" title="QuickJS engine only — disabled while AsyncFunction is selected, which runs every script in one shared sandbox (shown here as 'Shared context'). 'Shared context' runs every script in one QuickJS context (default). 'Per-script isolation' gives each script its own context — its own globalThis and library instances — so one script cannot observe or poison another's sandbox. Switching respawns the QuickJS worker(s) and reloads all active scripts.">
+            Isolation
+          </label>
+          <HostSelect
+            key={contextModelSelectResetKey}
+            options={contextModelOptions}
+            value={engineIsQuickjs ? (settings.contextModel ?? 'shared') : 'shared'}
+            disabled={!engineIsQuickjs}
+            onChange={(v) => {
+              const next = v === 'per-script' ? 'per-script' : 'shared';
+              if (next !== (settings.contextModel ?? 'shared')) setPendingContextModel(next);
+            }}
+            ariaLabel="Script context isolation"
+          />
+        </div>
+
         {/* Execution timeout */}
         <div className="ls-settings-field">
           <label className="ls-settings-field-label" title="Async execution timeout. If a script does not complete within this period it is aborted with a timeout error.">
@@ -161,6 +316,94 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
               sendToBackend({ type: 'update_settings', patch: { consoleHistoryLimit: limit } });
             }}
           />
+        </div>
+
+        {/* Stream buffer cap (QuickJS engine) — max undrained generateStream chunks before the stream is cancelled */}
+        <div className="ls-settings-field">
+          <label className="ls-settings-field-label" title="QuickJS engine only. Max chunks buffered for a single api.llm.generateStream that is not being consumed fast enough (or at all) — once this many chunks are queued undrained, the stream is cancelled with an error so it can't grow without limit.">
+            Stream buffer
+          </label>
+          <input
+            type="number"
+            className="ls-number-input"
+            min={16}
+            max={100000}
+            value={settings.streamQueueCap ?? 512}
+            onChange={e => {
+              const cap = Math.max(16, Math.min(100000, Number(e.target.value) || 512));
+              sendToBackend({ type: 'update_settings', patch: { streamQueueCap: cap } });
+            }}
+          />
+        </div>
+      </div>
+
+      {/* Network — the user-managed allowlist of private hosts that outbound HTTP (bare `fetch`
+          and `api.utils.http.*`) may reach directly. By default every request is routed through an
+          SSRF-safe proxy that resolves + pins DNS and blocks loopback / LAN / link-local addresses;
+          entries here are the deliberate local exceptions (a local model server, a LAN device),
+          named by the user and never writable by a script. */}
+      <div className="ls-settings-section">
+        <div className="ls-settings-section-label">
+          <Globe size={11} />
+          Network
+        </div>
+
+        <div
+          className="ls-settings-template-label"
+          title="Hosts that outbound HTTP may reach directly, bypassing the private-address block. By default every request goes through an SSRF-safe proxy that blocks loopback / LAN / link-local addresses. Only fixed addresses are accepted: an IP literal or localhost, optionally with a port. Omit the port to allow any port on that host, or include one to scope to a single port. This list lives in your settings and is never writable by a script."
+        >
+          Allowed private hosts
+        </div>
+
+        <div className="ls-allowlist">
+          {allowedHosts.length === 0 ? (
+            <div className="ls-allowlist-empty">None — every request uses the SSRF-safe path.</div>
+          ) : (
+            <div className="ls-allowlist-list">
+              {allowedHosts.map((h) => (
+                <div key={h} className="ls-allowlist-row">
+                  <span className="ls-allowlist-host" title={h}>{h}</span>
+                  <button
+                    type="button"
+                    className="ls-allowlist-remove"
+                    title={`Remove ${h}`}
+                    aria-label={`Remove ${h}`}
+                    onClick={() => removeAllowedHost(h)}
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="ls-allowlist-add">
+            <input
+              type="text"
+              className="ls-allowlist-input"
+              placeholder="localhost:11434"
+              spellCheck={false}
+              autoCapitalize="off"
+              autoCorrect="off"
+              value={newHost}
+              onChange={(e) => { setNewHost(e.target.value); if (hostError) setHostError(null); }}
+              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addAllowedHost(); } }}
+            />
+            <button
+              type="button"
+              className="ls-btn ls-accent"
+              disabled={!newHost.trim()}
+              onClick={addAllowedHost}
+            >
+              Add
+            </button>
+          </div>
+
+          {hostError ? (
+            <div className="ls-allowlist-error">{hostError}</div>
+          ) : (
+            <div className="ls-allowlist-hint">Examples: localhost, localhost:11434, 192.168.1.50, [::1]:8080</div>
+          )}
         </div>
       </div>
 
@@ -284,6 +527,19 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
             }}
           />
         </div>
+
+        {/* IntelliSense toggle */}
+        <div className="ls-toggle-row" title="Show the editor's IntelliSense — autocomplete suggestions, api.* signature help, and hover docs. Turn off to suppress the popups (syntax-error squiggles stay). Takes effect immediately.">
+          <label className="ls-toggle">
+            <input
+              type="checkbox"
+              checked={settings.editorIntellisense}
+              onChange={e => sendToBackend({ type: 'update_settings', patch: { editorIntellisense: e.target.checked } })}
+            />
+            <span className="ls-toggle-slider" />
+          </label>
+          <span style={{ fontSize: 12 }}>IntelliSense</span>
+        </div>
       </div>
 
       {/* Templates — pre-seeded starter code for new scripts */}
@@ -391,6 +647,24 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
           />
         </div>
 
+        <div className="ls-settings-field">
+          <label className="ls-settings-field-label" title="Token budget for Lisa's context window. Her per-turn prompt is trimmed to fit this, and the fullness gauge in chat reads against it. The app can't detect a model's real context length, so set this to match your model: 200K suits most modern models; lower it for small/local models, raise it for 1M-context ones.">
+            Context budget (tokens)
+          </label>
+          <input
+            type="number"
+            className="ls-number-input"
+            min={8000}
+            max={1000000}
+            step={1000}
+            value={settings.assistantContextTokens}
+            onChange={e => {
+              const n = Math.max(8000, Math.min(1_000_000, Number(e.target.value) || 200_000));
+              sendToBackend({ type: 'update_settings', patch: { assistantContextTokens: n } });
+            }}
+          />
+        </div>
+
         {/* Generation defaults — passed to runAssistantTurn via parameters.
             Numeric fields use "blank = no override; use connection preset"
             semantic. Empty input value → undefined in settings → field
@@ -483,6 +757,30 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
           <span style={{ fontSize: 12 }}>Parallel tool calls</span>
         </div>
 
+        <div className="ls-toggle-row" title="When on, Lisa automatically summarizes the older part of a long conversation once its context fills past ~85%, so the chat can keep going without overflowing. The summary runs as a background LLM call on the turn that crosses the line. Turn off to compact only manually (the “Compact now” button in chat still works).">
+          <label className="ls-toggle">
+            <input
+              type="checkbox"
+              checked={settings.assistantAutoCompact}
+              onChange={e => sendToBackend({ type: 'update_settings', patch: { assistantAutoCompact: e.target.checked } })}
+            />
+            <span className="ls-toggle-slider" />
+          </label>
+          <span style={{ fontSize: 12 }}>Auto-compact context</span>
+        </div>
+
+        <div className="ls-toggle-row" title="When on, Lisa marks the stable part of her system prompt (her persona + the API cheat-sheet) for prompt caching, so caching providers (Anthropic and others) read it from cache instead of re-billing ~44K tokens every turn — a large cost/latency saving. Harmless on providers that don't cache. Turn off only if a provider misbehaves with cache markers.">
+          <label className="ls-toggle">
+            <input
+              type="checkbox"
+              checked={settings.assistantPromptCaching}
+              onChange={e => sendToBackend({ type: 'update_settings', patch: { assistantPromptCaching: e.target.checked } })}
+            />
+            <span className="ls-toggle-slider" />
+          </label>
+          <span style={{ fontSize: 12 }}>Cache system prompt</span>
+        </div>
+
         <div className="ls-settings-subheading">Conversation management</div>
 
         <button
@@ -493,16 +791,6 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
         >
           <Trash2 size={11} style={{ marginRight: 4 }} />
           Clear all threads
-        </button>
-
-        <button
-          type="button"
-          className="ls-btn"
-          onClick={() => dispatchOpenAssistant()}
-          title="Open the in-app code assistant. Quality depends on the LLM connection you're using."
-        >
-          <MessageCircle size={11} style={{ marginRight: 4 }} />
-          Ask Lisa
         </button>
       </div>
 
@@ -517,10 +805,114 @@ export const SettingsPanel: FC<SettingsPanelProps> = ({
         <AssistantModal
           scripts={scripts}
           defaultConnectionId={settings.assistantConnectionId ?? ''}
+          contextTokens={settings.assistantContextTokens}
           onClose={() => setAssistantOpen(false)}
           onBackendMessage={onBackendMessage}
           sendToBackend={sendToBackend}
         />
+      )}
+      {/* #11 engine-toggle — confirm before switching engines (reloads startup scripts, wipes the rest). */}
+      {pendingEngineMode && (
+        <ConfirmDialog
+          title="Switch script engine?"
+          confirmLabel="Switch & reload"
+          variant="danger"
+          onConfirm={() => {
+            sendToBackend({ type: 'update_settings', patch: { engineMode: pendingEngineMode } });
+            setPendingEngineMode(null);
+          }}
+          onCancel={() => { setPendingEngineMode(null); setEngineSelectResetKey((k) => k + 1); }}
+        >
+          <p style={esNote}>
+            Switching to {pendingEngineMode === 'quickjs' ? 'the QuickJS isolate' : 'AsyncFunction'} changes
+            which sandbox runs your scripts. Each script's live state — handlers, panels, timers — belongs to
+            one engine and can't be moved, so it is rebuilt under the new engine.
+          </p>
+
+          {/* #11 P7 — per-script isolation is a QuickJS-only capability; note that it goes dormant when
+              leaving QuickJS, and reassure the user their choice is kept (restored on switching back). */}
+          {pendingEngineMode === 'asyncfn' && (settings.contextModel ?? 'shared') === 'per-script' && (
+            <p style={esNote}>
+              Per-script isolation applies only to the QuickJS engine, so it will be inactive while
+              AsyncFunction runs your scripts. Your choice is kept and takes effect again if you switch back
+              to QuickJS.
+            </p>
+          )}
+
+          {engineSwitchImpact.startup.length > 0 && (
+            <>
+              <div style={esSectionLabel}>Re-run now ({engineSwitchImpact.startup.length})</div>
+              <p style={esSubNote}>
+                Startup scripts re-run immediately (spaced out) — panels, toasts, and any LLM calls they
+                make on startup happen again.
+              </p>
+              {renderEngineSwitchScriptList(engineSwitchImpact.startup, RotateCcw)}
+            </>
+          )}
+
+          {engineSwitchImpact.event.length > 0 && (
+            <>
+              <div style={esSectionLabel}>State cleared ({engineSwitchImpact.event.length})</div>
+              <p style={esSubNote}>
+                Event-driven scripts have their live state cleared now and re-arm on their next trigger —
+                no automatic re-run.
+              </p>
+              {renderEngineSwitchScriptList(engineSwitchImpact.event, Timer)}
+            </>
+          )}
+
+          <p style={esFoot}>
+            In-flight runs finish on the current engine first, and any in-memory (non-persisted) state is
+            reset. Consider disabling expensive startup scripts before switching.
+          </p>
+        </ConfirmDialog>
+      )}
+      {/* #11 P7 context-model — confirm before switching isolation (respawns the QuickJS worker(s), reloads). */}
+      {pendingContextModel && (
+        <ConfirmDialog
+          title="Switch script isolation?"
+          confirmLabel="Switch & reload"
+          variant="danger"
+          onConfirm={() => {
+            sendToBackend({ type: 'update_settings', patch: { contextModel: pendingContextModel } });
+            setPendingContextModel(null);
+          }}
+          onCancel={() => { setPendingContextModel(null); setContextModelSelectResetKey((k) => k + 1); }}
+        >
+          <p style={esNote}>
+            Switching to {pendingContextModel === 'per-script' ? 'per-script isolation' : 'a shared context'} changes
+            how the QuickJS engine sandboxes your scripts. The QuickJS worker is respawned so every context is
+            rebuilt under the new model, and each script's live state — handlers, panels, timers — is rebuilt
+            with it.
+          </p>
+
+          {engineSwitchImpact.startup.length > 0 && (
+            <>
+              <div style={esSectionLabel}>Re-run now ({engineSwitchImpact.startup.length})</div>
+              <p style={esSubNote}>
+                Startup scripts re-run immediately (spaced out) — panels, toasts, and any LLM calls they
+                make on startup happen again.
+              </p>
+              {renderEngineSwitchScriptList(engineSwitchImpact.startup, RotateCcw)}
+            </>
+          )}
+
+          {engineSwitchImpact.event.length > 0 && (
+            <>
+              <div style={esSectionLabel}>State cleared ({engineSwitchImpact.event.length})</div>
+              <p style={esSubNote}>
+                Event-driven scripts have their live state cleared now and re-arm on their next trigger —
+                no automatic re-run.
+              </p>
+              {renderEngineSwitchScriptList(engineSwitchImpact.event, Timer)}
+            </>
+          )}
+
+          <p style={esFoot}>
+            This setting only affects the QuickJS engine. In-flight runs finish first, and any in-memory
+            (non-persisted) state is reset.
+          </p>
+        </ConfirmDialog>
       )}
     </div>
   );

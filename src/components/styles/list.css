@@ -173,6 +173,22 @@
 .ls-folder-header:hover .ls-folder-rename {
   opacity: 1;
 }
+/* Remove-folder affordance — mirrors .ls-folder-rename (hover-revealed), with a
+   destructive red hover to signal it re-homes the folder's scripts to No folder. */
+.ls-folder-remove {
+  display: inline-flex;
+  opacity: 0;
+  padding: 1px;
+  border-radius: 3px;
+  transition: opacity var(--lumiverse-transition-fast, 0.15s), background var(--lumiverse-transition-fast, 0.15s), color var(--lumiverse-transition-fast, 0.15s);
+}
+.ls-folder-remove:hover {
+  background: rgba(239, 68, 68, 0.14);
+  color: rgb(239, 68, 68);
+}
+.ls-folder-header:hover .ls-folder-remove {
+  opacity: 1;
+}
 .ls-folder-name {
   flex: 1;
   text-align: left;

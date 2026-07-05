@@ -11,18 +11,26 @@
  * Current tools:
  *   - `lookup_api(method)` — return the full LookupEntry for one method,
  *     keyed by fully-qualified name. O(1) dict access into LOOKUP_TABLE.
+ *   - `remember` / `recall` / `forget` — durable per-user notes.
+ *   - `read_diagnostics()` — compact snapshot of backend runtime state
+ *     (script-runner health, registrations, permissions, active context),
+ *     served by a host-supplied collector (RunTurnOptions.collectDiagnostics).
+ *   - `list_scripts()` / `read_script(id)` — read-only view of the user's
+ *     script library (RunTurnOptions.scriptLibrary), so the assistant can reason
+ *     across scripts the user didn't @-attach (conflicts, shared channels).
  *
  * Future tools (deferred to expansion options in the design doc — gated on
  * opt-in flags):
- *   - `read_current_script()` — read the user's currently-open script (opt-in).
- *   - `read_diagnostics()`    — read the LumiScript diagnostics report.
+ *   - `read_current_script()` — read the script currently OPEN in the editor
+ *     buffer (distinct from read_script, which reads any saved script by id).
  *
  * See `notes/code-assistant-design.md` § S4 for the design rationale.
  */
 
 import { LOOKUP_TABLE } from './corpus/lookup-table.js';
-import type { LookupEntry } from './types.js';
+import type { LookupEntry, AssistantScriptLibrary } from './types.js';
 import { remember, recall, forget } from '../engine/assistant-memory.js';
+import type { CompactDiagnostics } from '../engine/diagnostics.js';
 
 // ─── Tool schemas (for api.llm.generateWithTools) ────────────────────────────
 
@@ -106,6 +114,50 @@ const FORGET_SPEC: AssistantToolSpec = {
   },
 };
 
+// ─── Diagnostics tool — read-only snapshot of backend runtime state ───────────
+
+const READ_DIAGNOSTICS_SPEC: AssistantToolSpec = {
+  name: 'read_diagnostics',
+  description:
+    'Read a live snapshot of LumiScript\'s backend runtime state for THIS user — the same data as the Settings → "View Diagnostics" panel, compacted. ' +
+    'Returns sections of checks (each with a status of pass/warn/fail/info and a human-readable message) covering: granted permissions, script enrollment (enabled vs disabled, trigger vs library), trigger/macro/tool/injection registrations, the script-runner subprocess health (workers alive, restart count), the active chat/character/user context, storage reachability, and the assistant subsystem. ' +
+    'Call this to diagnose "why isn\'t my script firing / why didn\'t my trigger run / why is my api.* call failing?" — read the fail and warn checks first, they pinpoint the problem. Takes no arguments.',
+  parameters: {
+    type: 'object',
+    properties: {},
+    additionalProperties: false,
+  },
+};
+
+// ─── Script-library tools — read-only view of the user's scripts ─────────────
+
+const LIST_SCRIPTS_SPEC: AssistantToolSpec = {
+  name: 'list_scripts',
+  description:
+    'List THIS user\'s LumiScript scripts — id, name, type (trigger / library / etc.) and enabled state, no code. ' +
+    'Use this to see the whole library when reasoning about cross-script interactions the user did NOT @-attach: macro / command-name collisions, shared api.broadcast channels, duplicate triggers, or "which of my scripts does X". Follow up with read_script(id) for the actual code. Takes no arguments.',
+  parameters: {
+    type: 'object',
+    properties: {},
+    additionalProperties: false,
+  },
+};
+
+const READ_SCRIPT_SPEC: AssistantToolSpec = {
+  name: 'read_script',
+  description:
+    'Read the full current code of one of THIS user\'s scripts by id (get ids from list_scripts). ' +
+    'Use when you need to inspect a script the user did NOT @-attach — to check for conflicts, explain its behaviour, or compare two scripts. Returns the live code from storage (not a cached copy). A very large script may be truncated in the tool result.',
+  parameters: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', description: 'The script id (from list_scripts).' },
+    },
+    required: ['id'],
+    additionalProperties: false,
+  },
+};
+
 /**
  * All tool specs the assistant has available. Pass directly into
  * `api.llm.generateWithTools(messages, ASSISTANT_TOOLS, ...)`.
@@ -115,6 +167,9 @@ export const ASSISTANT_TOOLS: readonly AssistantToolSpec[] = Object.freeze([
   REMEMBER_SPEC,
   RECALL_SPEC,
   FORGET_SPEC,
+  READ_DIAGNOSTICS_SPEC,
+  LIST_SCRIPTS_SPEC,
+  READ_SCRIPT_SPEC,
 ]);
 
 // ─── Tool handlers ───────────────────────────────────────────────────────────
@@ -328,6 +383,94 @@ async function handleForget(args: Record<string, unknown>, userId: string): Prom
   };
 }
 
+// ─── Diagnostics tool handler ────────────────────────────────────────────────
+
+/**
+ * Run the host-supplied diagnostics collector and return its compact report.
+ * The collector (RunTurnOptions.collectDiagnostics) is owned by the backend —
+ * it runs the async probes (storage, script-runner IPC, assistant) and compacts
+ * the result. Absent when the turn wasn't given one → reports unavailable.
+ */
+async function handleReadDiagnostics(
+  collect: (() => Promise<CompactDiagnostics>) | undefined,
+): Promise<ToolResult> {
+  if (!collect) {
+    return {
+      content: JSON.stringify({ error: 'Diagnostics are unavailable in this context.' }),
+      isError: true,
+    };
+  }
+  try {
+    const report = await collect();
+    return { content: JSON.stringify(report), isError: false };
+  } catch (err) {
+    return {
+      content: JSON.stringify({
+        error: `Failed to collect diagnostics: ${err instanceof Error ? err.message : String(err)}`,
+      }),
+      isError: true,
+    };
+  }
+}
+
+// ─── Script-library tool handlers ────────────────────────────────────────────
+
+function handleListScripts(lib: AssistantScriptLibrary | undefined): ToolResult {
+  if (!lib) {
+    return { content: JSON.stringify({ error: 'The script library is unavailable in this context.' }), isError: true };
+  }
+  try {
+    const scripts = lib.list();
+    return { content: JSON.stringify({ count: scripts.length, scripts }), isError: false };
+  } catch (err) {
+    return {
+      content: JSON.stringify({ error: `Failed to list scripts: ${err instanceof Error ? err.message : String(err)}` }),
+      isError: true,
+    };
+  }
+}
+
+/**
+ * Char budget for a script's code in a `read_script` result. Truncating INSIDE
+ * the `code` field (vs letting agent.ts's outer TOOL_RESULT_CHAR_CAP clip the
+ * JSON mid-string) keeps the result valid JSON and tells the model the script's
+ * true size. Sized so the serialized result stays under the 40k outer cap even
+ * after JSON-escaping expands the code; an over-budget script falls back to the
+ * outer cap (still safe, just the generic marker).
+ */
+const READ_SCRIPT_CODE_CAP = 30_000;
+
+function handleReadScript(args: Record<string, unknown>, lib: AssistantScriptLibrary | undefined): ToolResult {
+  if (!lib) {
+    return { content: JSON.stringify({ error: 'The script library is unavailable in this context.' }), isError: true };
+  }
+  const id = typeof args.id === 'string' ? args.id : '';
+  if (!id) return { content: JSON.stringify({ error: 'read_script requires an `id`.' }), isError: true };
+  try {
+    const script = lib.read(id);
+    if (!script) {
+      return { content: JSON.stringify({ error: `No script with id "${id}". Call list_scripts to see available ids.` }), isError: true };
+    }
+    if (script.code.length > READ_SCRIPT_CODE_CAP) {
+      const truncated = {
+        ...script,
+        code: script.code.slice(0, READ_SCRIPT_CODE_CAP) +
+          `\n\n/* … [read_script truncated this script: ${script.code.length} characters total, ` +
+          `showing the first ${READ_SCRIPT_CODE_CAP}.] */`,
+        truncated: true,
+        fullLength: script.code.length,
+      };
+      return { content: JSON.stringify(truncated), isError: false };
+    }
+    return { content: JSON.stringify(script), isError: false };
+  } catch (err) {
+    return {
+      content: JSON.stringify({ error: `Failed to read script: ${err instanceof Error ? err.message : String(err)}` }),
+      isError: true,
+    };
+  }
+}
+
 // ─── Dispatch ────────────────────────────────────────────────────────────────
 
 /**
@@ -337,14 +480,19 @@ async function handleForget(args: Record<string, unknown>, userId: string): Prom
  * returned string, and feeds it back to the LLM as the tool's reply.
  *
  * Async because the memory tools (`remember` / `recall` / `forget`) touch
- * `userStorage`; `lookup_api` stays a pure synchronous lookup, just returned
- * from the async fn. Unknown tool names return an error envelope rather than
- * throwing — keeps the loop resilient if the LLM hallucinates a tool name.
+ * `userStorage` and `read_diagnostics` calls the host-supplied collector;
+ * `lookup_api` stays a pure synchronous lookup, just returned from the async
+ * fn. Unknown tool names return an error envelope rather than throwing — keeps
+ * the loop resilient if the LLM hallucinates a tool name.
  */
 export async function dispatchAssistantTool(
   name: string,
   args: Record<string, unknown>,
-  ctx: { userId: string },
+  ctx: {
+    userId: string;
+    collectDiagnostics?: () => Promise<CompactDiagnostics>;
+    scriptLibrary?: AssistantScriptLibrary;
+  },
 ): Promise<ToolResult> {
   switch (name) {
     case 'lookup_api':
@@ -355,6 +503,12 @@ export async function dispatchAssistantTool(
       return handleRecall(args, ctx.userId);
     case 'forget':
       return handleForget(args, ctx.userId);
+    case 'read_diagnostics':
+      return handleReadDiagnostics(ctx.collectDiagnostics);
+    case 'list_scripts':
+      return handleListScripts(ctx.scriptLibrary);
+    case 'read_script':
+      return handleReadScript(args, ctx.scriptLibrary);
     default:
       return {
         content: JSON.stringify({

@@ -33,6 +33,10 @@ import {
   notifyFloatWidgetCreated,
   notifyInputBarActionRegistered,
   notifyDrawerTabRegistered,
+  __getPendingAdvancedModalOpenIdsForTests,
+  __getPendingInputBarActionRegisterKeysForTests,
+  __getPendingFloatWidgetCreateIdsForTests,
+  __getPendingDrawerTabRegisterKeysForTests,
 } from '../../src/script-runner/host-dispatcher.js';
 import { setupE2E } from '../_infra/script-runner-fixture.js';
 import type { Script } from '../../src/types/script.js';
@@ -85,6 +89,23 @@ function getSpindle(): MockSpindle {
   return (globalThis as unknown as { spindle: MockSpindle }).spindle;
 }
 
+/**
+ * Robustly simulate the frontend's open / register echo. The parent registers
+ * its open-await ASYNCHRONOUSLY, and how many event-loop turns that takes varies
+ * by platform + bun build — a fixed-tick deferral is enough on Windows but NOT
+ * on Linux CI (where the echo fires before the awaiter is registered, `notify*`
+ * no-ops, and the 3s open-await then times out, hanging the run to 5s). So POLL
+ * the pending-awaiter table until the awaiter is actually registered, THEN echo.
+ * Zero timing/platform assumptions; the iteration cap is a safety net well under
+ * the host's OPEN_AWAIT_TIMEOUT_MS (3000ms).
+ */
+async function echoWhenAwaiterReady(isRegistered: () => boolean, echo: () => void): Promise<void> {
+  for (let i = 0; i < 2000 && !isRegistered(); i++) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  }
+  echo();
+}
+
 // ─── handleInternalAdvancedModalRequest ─────────────────────────────────────
 
 describe('e2e: handleInternalAdvancedModalRequest', () => {
@@ -94,7 +115,7 @@ describe('e2e: handleInternalAdvancedModalRequest', () => {
 
     const unsubOpen = watchApiRequest(spindle, 'ui.showAdvancedModal', (req) => {
       const opts = req.args[0] as { _modalId: string };
-      notifyAdvancedModalOpened(opts._modalId);
+      void echoWhenAwaiterReady(() => __getPendingAdvancedModalOpenIdsForTests().includes(opts._modalId), () => notifyAdvancedModalOpened(opts._modalId));
     });
     let setTitleArgs: unknown[] | null = null;
     const unsubSet = watchApiRequest(spindle, 'ui._advModal.setTitle', (req) => {
@@ -123,7 +144,7 @@ describe('e2e: handleInternalAdvancedModalRequest', () => {
 
     const unsubOpen = watchApiRequest(spindle, 'ui.showAdvancedModal', (req) => {
       const opts = req.args[0] as { _modalId: string };
-      notifyAdvancedModalOpened(opts._modalId);
+      void echoWhenAwaiterReady(() => __getPendingAdvancedModalOpenIdsForTests().includes(opts._modalId), () => notifyAdvancedModalOpened(opts._modalId));
     });
     let dismissArgs: unknown[] | null = null;
     const unsubDismiss = watchApiRequest(spindle, 'ui._advModal.dismiss', (req) => {
@@ -157,7 +178,7 @@ describe('e2e: handleInternalInputBarActionRequest', () => {
     const actionId = 'my-action';
 
     const unsubReg = watchApiRequest(spindle, 'ui.registerInputBarAction', () => {
-      notifyInputBarActionRegistered(scriptId, actionId);
+      void echoWhenAwaiterReady(() => __getPendingInputBarActionRegisterKeysForTests().includes(`${scriptId}:${actionId}`), () => notifyInputBarActionRegistered(scriptId, actionId));
     });
     // Wrap captures in an object so TS doesn't narrow the bare variable
     // to its `null` initializer post-closure-declaration (control-flow
@@ -188,7 +209,7 @@ describe('e2e: handleInternalInputBarActionRequest', () => {
     const actionId = 'my-action';
 
     const unsubReg = watchApiRequest(spindle, 'ui.registerInputBarAction', () => {
-      notifyInputBarActionRegistered(scriptId, actionId);
+      void echoWhenAwaiterReady(() => __getPendingInputBarActionRegisterKeysForTests().includes(`${scriptId}:${actionId}`), () => notifyInputBarActionRegistered(scriptId, actionId));
     });
     const captured: Record<string, unknown[]> = {};
     const unsubs = [
@@ -226,8 +247,9 @@ describe('e2e: handleInternalFloatWidgetRequest', () => {
 
     let observedWidgetId: string | null = null;
     const unsubReg = watchApiRequest(spindle, 'ui.createFloatWidget', (req) => {
-      observedWidgetId = (req.args[0] as { _widgetId: string })._widgetId;
-      notifyFloatWidgetCreated(observedWidgetId);
+      const widgetId = (req.args[0] as { _widgetId: string })._widgetId;
+      observedWidgetId = widgetId;
+      void echoWhenAwaiterReady(() => __getPendingFloatWidgetCreateIdsForTests().includes(widgetId), () => notifyFloatWidgetCreated(widgetId));
     });
     const captured: Record<string, unknown[]> = {};
     const unsubs = [
@@ -267,7 +289,7 @@ describe('e2e: handleInternalDrawerTabRequest', () => {
     const tabId = 'my-tab';
 
     const unsubReg = watchApiRequest(spindle, 'ui.registerDrawerTab', () => {
-      notifyDrawerTabRegistered(scriptId, tabId);
+      void echoWhenAwaiterReady(() => __getPendingDrawerTabRegisterKeysForTests().includes(`${scriptId}:${tabId}`), () => notifyDrawerTabRegistered(scriptId, tabId));
     });
     const captured: Record<string, unknown[]> = {};
     const unsubs = [
@@ -308,7 +330,7 @@ describe('e2e: handleInternalDrawerTabRequest', () => {
     const tabId = 'my-tab';
 
     const unsubReg = watchApiRequest(spindle, 'ui.registerDrawerTab', () => {
-      notifyDrawerTabRegistered(scriptId, tabId);
+      void echoWhenAwaiterReady(() => __getPendingDrawerTabRegisterKeysForTests().includes(`${scriptId}:${tabId}`), () => notifyDrawerTabRegistered(scriptId, tabId));
     });
     const captured: { args?: unknown[] } = {};
     const unsubSet = watchApiRequest(spindle, 'ui._drawerTab.setBadge', (req) => {

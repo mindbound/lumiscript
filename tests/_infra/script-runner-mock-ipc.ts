@@ -306,6 +306,14 @@ export interface MultiWorkerMockIpc {
    * without bringing up the full child runtime.
    */
   setWorkerMemoryBytes(workerKey: string, bytes: number): void;
+  /**
+   * Phase E test support — make this worker stop answering
+   * `diagnostic-stats-request` IPCs (simulating a worker too busy — e.g. mid
+   * GC-pause — to reply). The dispatcher's memory query then times out and
+   * resolves null, exercising the carry-forward path. Pair with
+   * `__setEvictionMemoryQueryTimeoutForTests` so the timeout fires quickly.
+   */
+  setWorkerMemoryUnresponsive(workerKey: string, unresponsive: boolean): void;
 }
 
 export function installMultiWorkerMockIpc(
@@ -333,6 +341,9 @@ export function installMultiWorkerMockIpc(
   // configure via `setWorkerMemoryBytes`. Auto-replies to
   // `diagnostic-stats-request` sent to a worker.
   const memoryBytesByWorker = new Map<string, number>();
+  // Workers flagged here suppress the diagnostic-stats auto-reply so the
+  // dispatcher's memory query times out (carry-forward path).
+  const unresponsiveWorkers = new Set<string>();
 
   for (let i = 0; i < opts.workerKeys.length; i++) {
     const workerKey = opts.workerKeys[i]!;
@@ -377,7 +388,8 @@ export function installMultiWorkerMockIpc(
         if (
           payload !== null &&
           typeof payload === 'object' &&
-          (payload as { type?: unknown }).type === 'diagnostic-stats-request'
+          (payload as { type?: unknown }).type === 'diagnostic-stats-request' &&
+          !unresponsiveWorkers.has(workerKey)
         ) {
           const requestId = (payload as { requestId?: string }).requestId;
           const rss       = memoryBytesByWorker.get(workerKey) ?? 0;
@@ -522,12 +534,20 @@ export function installMultiWorkerMockIpc(
       lifecycleHandlers.clear();
       parentMessageHandlers.clear();
       memoryBytesByWorker.clear();
+      unresponsiveWorkers.clear();
     },
     setWorkerMemoryBytes(workerKey: string, bytes: number): void {
       if (!byKey.has(workerKey)) {
         throw new Error(`MultiWorkerMockIpc: cannot set memory for unknown workerKey '${workerKey}'`);
       }
       memoryBytesByWorker.set(workerKey, bytes);
+    },
+    setWorkerMemoryUnresponsive(workerKey: string, unresponsive: boolean): void {
+      if (!byKey.has(workerKey)) {
+        throw new Error(`MultiWorkerMockIpc: cannot set responsiveness for unknown workerKey '${workerKey}'`);
+      }
+      if (unresponsive) unresponsiveWorkers.add(workerKey);
+      else unresponsiveWorkers.delete(workerKey);
     },
   };
 }

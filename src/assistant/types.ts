@@ -7,6 +7,47 @@
  */
 
 /**
+ * Max characters of code inlined per attached script — the most Lisa "sees" of a
+ * script she's been @-attached. Longer scripts are truncated with a marker so a
+ * single huge file can't blow the context window; the AssistantModal apply-diff
+ * also reads this to warn when a script is longer than Lisa could have seen.
+ * Lives here (not agent.ts) so the frontend can import it without pulling the
+ * backend assistant module into its bundle.
+ */
+export const ATTACHED_SCRIPT_CODE_CAP = 24_000;
+
+// ─── Script-library tools (read_diagnostics' siblings) ───────────────────────
+
+/** One entry in the `list_scripts` tool result — metadata only, no code. */
+export interface AssistantScriptSummary {
+  id: string;
+  name: string;
+  type: string;
+  enabled: boolean;
+}
+
+/** The `read_script` tool result — a single script's metadata + full code. */
+export interface AssistantScriptDetail extends AssistantScriptSummary {
+  code: string;
+}
+
+/**
+ * Read-only view of the backend's loaded script library, supplied to the
+ * assistant turn so the `list_scripts` / `read_script` tools can reason across
+ * scripts the user didn't `@`-attach. An id outside the library resolves to
+ * `null`. Backed by the process-global `scriptStorage` — the SAME store that
+ * `@`-attach resolution and the script-list push already read. NOTE: that store
+ * is a single-active-user cache (loaded once for the active operator, not
+ * re-scoped per call), so these tools inherit exactly that scope; on a
+ * hypothetical multi-operator-per-worker deployment it would reflect the
+ * first-loaded operator rather than the turn's user.
+ */
+export interface AssistantScriptLibrary {
+  list: () => AssistantScriptSummary[];
+  read: (id: string) => AssistantScriptDetail | null;
+}
+
+/**
  * Persona definition for the assistant's voice and behaviour.
  *
  * Mirrors the LumiScript Council member shape (`CouncilMemberContext.name` /
@@ -209,6 +250,39 @@ export interface AssistantThread {
    *  Parallel to `messages` — never sent to the LLM. Optional; older threads
    *  load without it. */
   appliedEvents?: AppliedEvent[];
+  /** Prompt-token count of this thread's most recent turn — drives the chat's
+   *  context-fullness gauge (tokens ÷ budget) and is replayed on thread load so
+   *  the gauge is populated the moment a thread opens, not blank until the next
+   *  turn. Provider-reported when available, else the local countText estimate.
+   *  Optional; brand-new + pre-gauge threads load as undefined (gauge hidden
+   *  until a turn produces a count). */
+  lastPromptTokens?: number;
+  /** True when `lastPromptTokens` came from the local `spindle.tokens.countText`
+   *  estimate rather than provider usage — the gauge renders a `~` then. */
+  lastPromptEstimated?: boolean;
+  /** The most recent turn's token usage (in / out / total) — replayed on load so
+   *  the "this turn" segment of the usage strip survives thread switches / modal
+   *  reopen, like the gauge. Optional; older / brand-new threads load as undefined. */
+  lastTurnUsage?: { promptTokens: number; completionTokens: number; totalTokens: number; estimated?: boolean };
+  /** Lifetime token usage across ALL turns in this thread — replayed on load so
+   *  "total · this thread" is a true running total, not a per-session one. Optional;
+   *  older threads start accumulating from their next turn. */
+  totalUsage?: { promptTokens: number; completionTokens: number; totalTokens: number; estimated?: boolean };
+  /** ── Tier-2 compaction marker (context-window management) ────────────────
+   *  Index into `messages` marking the compaction boundary: messages
+   *  `[0..compactedThrough)` are collapsed into the single `handoff` summary
+   *  for the MODEL's view only (see `buildModelHistory`), so the LLM sees
+   *  `[handoff, ...messages.slice(compactedThrough)]`. `messages` itself — the
+   *  full record shown to the user and persisted — is NEVER touched, so
+   *  compaction is non-destructive and cannot lose data. Dormant until
+   *  compaction ships; undefined = the thread has never been compacted (the
+   *  model sees the full history). */
+  compactedThrough?: number;
+  /** The compaction summary prepended to the model-facing history when
+   *  `compactedThrough` is set — transient in-thread task state only (durable
+   *  cross-session facts are harvested into the memory system instead).
+   *  Undefined when uncompacted. */
+  handoff?: string;
 }
 
 /**

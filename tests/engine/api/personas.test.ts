@@ -129,3 +129,61 @@ describe('getWorldBook', () => {
     expect(await api.getWorldBook('p-1')).toBeNull();
   });
 });
+
+// ─── personas.addons (spindle.global_addons) ─────────────────────────────────
+
+describe('personas.addons', () => {
+  const addonDTO = {
+    id: 'addon-1',
+    label: 'Tone',
+    content: 'Be concise.',
+    sort_order: 5,
+    metadata: { pinned: true },
+    created_at: 1000,
+    updated_at: 2000,
+  };
+
+  test('list maps GlobalAddonDTO → PersonaAddonInfo (snake_case → camelCase)', async () => {
+    mockSpindle.global_addons.list.mockReturnValueOnce(
+      Promise.resolve({ data: [addonDTO], total: 1 }),
+    );
+    const api = buildApi();
+    const result = await api.addons.list();
+    expect(result.total).toBe(1);
+    expect(result.data[0]).toEqual({
+      id: 'addon-1',
+      label: 'Tone',
+      content: 'Be concise.',
+      sortOrder: 5,
+      metadata: { pinned: true },
+      createdAt: 1000,
+      updatedAt: 2000,
+    });
+  });
+
+  test('get returns the mapped add-on, or null when absent', async () => {
+    mockSpindle.global_addons.get.mockReturnValueOnce(Promise.resolve(addonDTO));
+    const api = buildApi();
+    expect((await api.addons.get('addon-1'))!.sortOrder).toBe(5);
+
+    mockSpindle.global_addons.get.mockReturnValueOnce(Promise.resolve(null));
+    expect(await api.addons.get('missing')).toBeNull();
+  });
+
+  test('update maps input to snake_case (sortOrder → sort_order), omitting undefined fields', async () => {
+    mockSpindle.global_addons.update.mockReturnValueOnce(Promise.resolve(addonDTO));
+    const api = buildApi();
+    const result = await api.addons.update('addon-1', { content: 'New.', sortOrder: 9 });
+    expect(result.label).toBe('Tone'); // returns the mapped result DTO
+    const call = mockSpindle.global_addons.update.mock.calls[0] as any;
+    expect(call[0]).toBe('addon-1');
+    expect(call[1]).toEqual({ content: 'New.', sort_order: 9 }); // only provided fields, snake-cased
+  });
+
+  test('all three require personas permission', async () => {
+    const api = buildApi({ hasPerm: () => false });
+    await expect(api.addons.list()).rejects.toThrow('PERMISSION_DENIED');
+    await expect(api.addons.get('addon-1')).rejects.toThrow('PERMISSION_DENIED');
+    await expect(api.addons.update('addon-1', {})).rejects.toThrow('PERMISSION_DENIED');
+  });
+});

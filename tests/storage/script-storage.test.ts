@@ -176,6 +176,19 @@ describe('duplicateScript', () => {
     const copy2 = await storage.duplicateScript(original.id);
     expect(copy2!.name).toBe('My Script (copy) (2)');
   });
+
+  test('a duplicate does NOT inherit the original card-bundle identity (#12)', async () => {
+    await storage.load();
+    const original = await storage.store.create({
+      id: 'orig-1', name: 'Bundled', code: 'x', enabled: false, allowDangerous: false,
+      type: 'trigger', createdAt: 1, updatedAt: 1,
+      bundledFrom: { bundleCardId: 'card-1', bundleId: 'mindbound.dice', sourceHash: 'h' },
+    });
+    const copy = await storage.duplicateScript(original.id);
+    expect(copy).not.toBeNull();
+    expect(copy!.bundledFrom).toBeUndefined();                        // copy is a fresh local script
+    expect(storage.getScript('orig-1')!.bundledFrom?.bundleId).toBe('mindbound.dice'); // original untouched
+  });
 });
 
 // ─── importScripts ──────────────────────────────────────────────────────────

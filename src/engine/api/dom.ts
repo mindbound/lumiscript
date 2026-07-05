@@ -443,6 +443,7 @@ export function buildDOMAPI(deps: APIBuildDeps): LumiScriptAPI['ui']['dom'] {
         messageId:       options.messageId,
         preventDefault:  options.preventDefault,
         stopPropagation: options.stopPropagation,
+        pierceShadow:    options.pierceShadow,
       });
 
       return () => {

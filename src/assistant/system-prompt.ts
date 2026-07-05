@@ -44,9 +44,7 @@ import type { AssistantPersona } from './types.js';
  */
 export function buildAssistantSystemPrompt(
   persona: AssistantPersona = LISA_PERSONA,
-  memoryIndex?: string,
 ): string {
-  const notes = memoryIndex?.trim();
   return [
     '### WHO YOU ARE ###',
     '',
@@ -74,10 +72,26 @@ export function buildAssistantSystemPrompt(
     '',
     'Call `lookup_api` whenever the cheat-sheet one-liner isn\'t enough for the question. Don\'t guess at signatures or enum values — looking them up is fast and produces correct code.',
     '',
+    'You also have read-only tools into the user\'s LIVE runtime — reach for these when a question needs real state, not general knowledge:',
+    '- `read_diagnostics()` — a snapshot of the backend\'s health: script-runner workers, registrations, granted permissions, and the active chat/character context. This is your window into "why isn\'t my script firing / why is my `api.*` call doing nothing?" — call it and read the fail/warn checks first.',
+    '- `list_scripts()` then `read_script(id)` — the user\'s script library (names/types/ids, then full code by id). Use them to reason across scripts the user did NOT @-attach: macro or command-name collisions, shared `api.broadcast` channels, duplicate triggers.',
+    '',
     '---',
     '',
     CHEAT_SHEET,
-    '',
+  ].join('\n');
+}
+
+/**
+ * The SESSION NOTES section — the user's memory index + the remember/recall/forget
+ * guidance. Split OUT of the stable system prompt: the index is VOLATILE (changes
+ * when memory updates), so it must live in the UNCACHED tail of the system turn
+ * (#3 prompt caching). The stable persona + cheat-sheet prefix above is the part
+ * that carries the cache_control breakpoint.
+ */
+export function buildSessionNotesSection(memoryIndex?: string): string {
+  const notes = memoryIndex?.trim();
+  return [
     '### SESSION NOTES (your memory of this user — NOT authoritative) ###',
     '',
     'Across sessions you can keep durable notes about THIS user via the `remember` / `recall` / `forget` tools. The API reference above always wins: if a note ever conflicts with it, ignore the note. **Remember** durable, user-specific things that help you next time — style preferences, naming conventions, recurring project facts, decisions you agreed on, and corrections to something you concluded earlier in conversation (a concise one-line `hook`, optional longer `detail`). **Do NOT remember** API facts (if you think the reference is wrong or incomplete, tell the user — never patch it in memory), a script\'s current code (that comes live from any @-attached scripts and would only go stale), or transient chat detail.',

@@ -9,6 +9,8 @@ import type { ScriptStorageSummary } from '../engine/api/script-storage.js';
 import { DEFAULT_SETTINGS } from '../types/script.js';
 import { ManagePanel } from './manage/ManagePanel.js';
 import { StorageTab } from './storage/StorageTab.js';
+import { ErrorBoundary } from './common/ErrorBoundary.js';
+import { CardScriptsBanner } from './cardscripts/CardScriptsBanner.js';
 
 interface ScriptExecInfo {
   dot: ExecutionDot;
@@ -63,6 +65,12 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
   });
   const [injections, setInjections] = useState<InjectionInfo[]>([]);
   const [tools, setTools] = useState<RegisteredToolInfo[]>([]);
+
+  /** #12 Phase C — passive chat-open banner: the open character bundles scripts
+   *  the user doesn't have (and hasn't dismissed). null = no banner. */
+  const [cardScriptsAvailable, setCardScriptsAvailable] = useState<
+    { requestId: string; characterName: string | null; count: number } | null
+  >(null);
 
   const [variables, setVariables] = useState<VariablesSnapshot | null>(null);
 
@@ -162,8 +170,16 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
             characterName: msg.characterName,
             chatId: msg.chatId,
           });
+          // Clear any stale card-scripts banner on context change; a following
+          // `ls_card_scripts_available` (sent right after, by the chat-open
+          // re-detect) re-sets it for the new character.
+          setCardScriptsAvailable(null);
           // Auto-refresh variables when context changes
           sendToBackend({ type: 'get_variables' });
+          break;
+
+        case 'ls_card_scripts_available':
+          setCardScriptsAvailable({ requestId: msg.requestId, characterName: msg.characterName, count: msg.count });
           break;
 
         case 'variables_updated':
@@ -426,6 +442,18 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
     }
   }, [activeTab, sendToBackend]);
 
+  // #12 Phase C — pull-based card-scripts banner. The chat-open CHAT_SWITCHED
+  // push is one-shot and can be missed (panel not mounted at switch time, or a
+  // later active_context clearing the just-set banner). Re-asking on every
+  // Manage-tab activation (mount included — 'manage' is the default tab) makes
+  // the banner reliably appear when the user is actually looking at it. The
+  // backend re-runs detection against the live active character; idempotent.
+  useEffect(() => {
+    if (activeTab === 'manage') {
+      sendToBackend({ type: 'recheck_card_scripts' });
+    }
+  }, [activeTab, sendToBackend]);
+
   // Drop confirmation dialog needs a record count for the target. On
   // every dropTarget change, reset the cached count to null (so the
   // dialog shows a brief "Loading…" instead of last dialog's stale
@@ -540,8 +568,30 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
         </button>
       </div>
 
-      {/* Tab content */}
+      {/* #12 Phase C — passive "card bundles scripts you don't have" banner.
+          Sits between the tabs and the content as its own flex row (Manage tab
+          only) so it never fights the tab content's height. */}
+      {activeTab === 'manage' && cardScriptsAvailable && (
+        <CardScriptsBanner
+          characterName={cardScriptsAvailable.characterName}
+          count={cardScriptsAvailable.count}
+          onReview={() => {
+            sendToBackend({ type: 'ls_card_scripts_review', requestId: cardScriptsAvailable.requestId });
+            setCardScriptsAvailable(null);
+          }}
+          onDismiss={() => {
+            sendToBackend({ type: 'ls_card_scripts_dismiss_available', requestId: cardScriptsAvailable.requestId });
+            setCardScriptsAvailable(null);
+          }}
+        />
+      )}
+
+      {/* Tab content — keyed ErrorBoundary so a render crash in one tab degrades
+          to a localized fallback (and switching tabs remounts a fresh boundary
+          that clears the error) instead of blanking the whole panel. (audit
+          tail: per-major-tab error boundaries) */}
       <div style={{ flex: 1, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+        <ErrorBoundary key={activeTab} label={`${activeTab} tab`}>
         {activeTab === 'manage' && (
           <ManagePanel
             scripts={scripts}
@@ -551,6 +601,7 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
             isRunning={execState.isRunning}
             consoleHistory={execState.consoleHistory}
             editorFontSize={settings.editorFontSize}
+            editorIntellisense={settings.editorIntellisense}
             autosaveDebounceMs={settings.autosaveDebounceMs}
             onClearConsole={clearConsole}
             onScriptOpened={handleScriptOpened}
@@ -636,6 +687,7 @@ export const LumiScriptPanel: FC<LumiScriptPanelProps> = ({
             }}
           />
         )}
+        </ErrorBoundary>
       </div>
     </div>
   );

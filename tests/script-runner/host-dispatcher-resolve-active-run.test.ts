@@ -196,3 +196,41 @@ describe('resolveActiveRun: api-request fallback policy', () => {
     expect(result.resolved).toBe(false);
   });
 });
+
+// ─── field-test hygiene: fallback-log dedup ────────────────────────────────────
+//
+// A leaked live-render interval (setInterval(() => handle.update())) that outlives its run reroutes
+// on every fire (~1/sec forever). The routing is intended (the fallback exists to support exactly that
+// pattern across run rotation), but logging it per-fire firehoses the backend log. The audit log is
+// now deduped: FIRST reroute per orphan logs, identical repeats are suppressed. Routing is unchanged.
+
+describe('resolveActiveRun: fallback-log dedup', () => {
+  let cleanups: Array<() => void> = [];
+  afterEach(() => { for (const c of cleanups) c(); cleanups = []; });
+
+  const infoCalls = (): string[] => {
+    const sp = (globalThis as unknown as { spindle: { log: { info: { mock: { calls: unknown[][] } } } } }).spindle;
+    return sp.log.info.mock.calls.map((c) => c[0]).filter((m): m is string => typeof m === 'string');
+  };
+
+  test('a persistently-orphaned recurring reroute logs ONCE; routing still succeeds every time', () => {
+    cleanups.push(__installFakeActiveRunForTests('script-Z', 'run-body-current', { isScriptBodyRun: true }));
+    const deadRun = 'run-orphan-unique-42';
+    const ctx = { scriptId: 'script-Z', runId: deadRun, runIdSource: 'context' as const, targetHandle: DOM_HANDLE };
+    for (let i = 0; i < 5; i++) {
+      expect(__resolveActiveRunForTests(ctx, 'api-request').resolved).toBe(true); // routing unchanged per fire
+    }
+    const matching = infoCalls().filter((m) => m.includes(deadRun));
+    expect(matching.length).toBe(1); // 5 fires → 1 log line
+    expect(matching[0]).toContain('further identical reroutes suppressed');
+  });
+
+  test('dedup is per-orphan, not global — a DIFFERENT dead run still logs', () => {
+    cleanups.push(__installFakeActiveRunForTests('script-Z', 'run-body-current', { isScriptBodyRun: true }));
+    __resolveActiveRunForTests({ scriptId: 'script-Z', runId: 'orphan-A', runIdSource: 'context', targetHandle: DOM_HANDLE }, 'api-request');
+    __resolveActiveRunForTests({ scriptId: 'script-Z', runId: 'orphan-A', runIdSource: 'context', targetHandle: DOM_HANDLE }, 'api-request'); // repeat A
+    __resolveActiveRunForTests({ scriptId: 'script-Z', runId: 'orphan-B', runIdSource: 'context', targetHandle: DOM_HANDLE }, 'api-request'); // distinct B
+    const rerouteLogs = infoCalls().filter((m) => m.includes('no longer active'));
+    expect(rerouteLogs.length).toBe(2); // A once + B once (A's repeat suppressed)
+  });
+});

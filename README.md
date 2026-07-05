@@ -82,13 +82,15 @@ LumiScript ships with extensive documentation — both in the repo and in-app:
 
 ## Sandbox model
 
-Scripts execute server-side in `AsyncFunction` sandboxes inside a supervised Bun subprocess. DOM access is proxied through messaging — scripts can manipulate the page but can't directly touch globals like `window` or `document`. Permissions are granted at the extension level when you install LumiScript; individual risky surfaces (outbound HTTP, encrypted secrets, file I/O) additionally require a per-script `allowDangerous` toggle.
+Scripts execute server-side inside a supervised Bun subprocess. DOM access is proxied through messaging — scripts can manipulate the page but can't directly touch globals like `window` or `document`. Permissions are granted at the extension level when you install LumiScript; individual risky surfaces (outbound HTTP, encrypted secrets, file I/O) additionally require a per-script `allowDangerous` toggle. As of v2.0, outbound requests to **localhost and private-network** addresses are also blocked by default — if a script talks to a local model server (Ollama, ComfyUI, LM Studio) or a LAN device, allowlist that host under Settings → Network (see [`docs/guides/network.md`](docs/guides/network.md)).
 
 A runaway user script can't take down Lumiverse. The supervisor SIGKILLs the script-runner subprocess via a heartbeat watchdog and respawns it automatically.
 
+**Execution engine (new in v2.0).** By default, scripts run in `AsyncFunction` sandboxes — the long-term-support engine, unchanged from earlier versions. v2.0 adds an opt-in **QuickJS-WASM isolate** engine (choose it in the LumiScript settings): user code runs in a WebAssembly VM where host globals like `Bun` and `process` don't exist, with per-script memory and CPU limits, optional per-script context isolation, and graceful teardown. AsyncFunction remains the default and is fully supported — switch engines only when you want stronger structural isolation.
+
 ## Requirements
 
-- Lumiverse `v0.9.9` or later
+- Lumiverse `v1.0.4` or later
 
 ## Building from source
 

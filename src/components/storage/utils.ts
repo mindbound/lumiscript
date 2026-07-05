@@ -143,6 +143,78 @@ export function highlightJson(jsonString: string): string {
   );
 }
 
+// ─── Per-record highlight cache + body cap (collection-search perf) ───────────
+
+/**
+ * Cap (chars) on the pretty-printed body fed to {@link highlightJson}. A record
+ * larger than this highlights only its head; the remainder is replaced by a
+ * plain truncation marker, so the synchronous highlight + `dangerouslySetInnerHTML`
+ * DOM build stays bounded for pathologically large records. Copy-JSON / Edit
+ * still expose the full record, so nothing is lost — only the inline
+ * syntax-highlighted preview is clipped.
+ */
+export const RECORD_BODY_HIGHLIGHT_CAP = 8192;
+
+/**
+ * Highlight a pretty-printed record body, capping the highlighted portion at
+ * {@link RECORD_BODY_HIGHLIGHT_CAP}. The truncation marker is appended AFTER the
+ * `highlightJson` call (never inside its input), so a mid-string slice cannot
+ * leave an unbalanced quote that mis-tokenizes the tail; the marker contains no
+ * `& < >`, so it is safe to emit unescaped alongside the highlighter's output.
+ */
+export function highlightBodyCapped(pretty: string): string {
+  if (pretty.length <= RECORD_BODY_HIGHLIGHT_CAP) return highlightJson(pretty);
+  const omitted = pretty.length - RECORD_BODY_HIGHLIGHT_CAP;
+  return (
+    highlightJson(pretty.slice(0, RECORD_BODY_HIGHLIGHT_CAP)) +
+    `\n… (${omitted} more chars truncated — use Copy JSON for the full record)`
+  );
+}
+
+/**
+ * Module-level LRU cache of highlighted record HTML, keyed on record identity +
+ * version (`id:updatedAt`). Records are immutable except for an `updatedAt` bump
+ * on edit (see `DbStore.update`), so the key changes exactly when the body
+ * changes: a stale entry is structurally impossible, and an edit auto-busts it.
+ *
+ * Why it exists: every filter response hands the InspectModal a FRESH set of
+ * deserialized record objects (new identities), which defeats an identity-keyed
+ * `useMemo` and would force a full re-highlight + `dangerouslySetInnerHTML` DOM
+ * rebuild of every matching row on each keystroke. Returning a reference-stable
+ * HTML string for an unchanged record lets React skip both the recompute AND the
+ * innerHTML re-parse (its `dangerouslySetInnerHTML` diff is then a no-op).
+ */
+const HL_CACHE = new Map<string, string>();
+const HL_CACHE_MAX = 512;
+
+/** Return the cached highlighted HTML for `key`, or build + cache (LRU) it. */
+export function cachedRecordHtml(key: string, build: () => string): string {
+  const hit = HL_CACHE.get(key);
+  if (hit !== undefined) {
+    // Touch for LRU recency (delete + re-insert moves it to the tail).
+    HL_CACHE.delete(key);
+    HL_CACHE.set(key, hit);
+    return hit;
+  }
+  const html = build();
+  HL_CACHE.set(key, html);
+  if (HL_CACHE.size > HL_CACHE_MAX) {
+    const oldest = HL_CACHE.keys().next().value;
+    if (oldest !== undefined) HL_CACHE.delete(oldest);
+  }
+  return html;
+}
+
+/** Test seam — drop all cached highlight HTML. */
+export function _clearHighlightCache(): void {
+  HL_CACHE.clear();
+}
+
+/** Test seam — current cache entry count. */
+export function _highlightCacheSize(): number {
+  return HL_CACHE.size;
+}
+
 // ─── Clipboard helpers ───────────────────────────────────────────────────────
 
 /**
