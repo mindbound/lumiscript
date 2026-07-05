@@ -30,6 +30,13 @@ interface WorldInfoAPI {
   };
 
   getCapturedActive(chatId?):    Promise<ActivatedWorldInfoEntry[]>;
+
+  // Global (all-chats) activation — new in v2.0
+  getGlobal():                   Promise<string[]>;
+  setGlobal(refs):               Promise<string[]>;
+  activateGlobal(ref):           Promise<string[]>;
+  deactivateGlobal(ref):         Promise<string[]>;
+
   registerInterceptor(handler, options?): WorldInfoInterceptorHandle;
   listInterceptors():            RegisteredWorldInfoInterceptorInfo[];
 }
@@ -179,6 +186,85 @@ await widget.root.update(`<ul>${items.join('')}</ul>`);
 ```
 
 Performance: one `getActivated` host call + one `entries.get` per activated entry (in parallel). For typical activations (5–15 entries) this is fast. For unusually large activation sets, consider caching the result if you call it more than once per turn.
+
+## Globally-active world books
+
+> **New in v2.0.** Four methods on `api.worldInfo` read and edit the user's set of **global** world books.
+
+A **global** world book applies to **every chat**, regardless of which character or chat it's bound to. It's the "always in scope, everywhere" tier of world info — the user normally manages it in the Lumiverse UI; v2.0 exposes it to scripts.
+
+```ts
+getGlobal():                Promise<string[]>;              // read the global set
+setGlobal(refs):            Promise<string[]>;              // replace the whole set
+activateGlobal(ref):        Promise<string[]>;              // add one book
+deactivateGlobal(ref):      Promise<string[]>;              // remove one book
+```
+
+All four need the **`world_books`** permission.
+
+### Global books vs. `constant: true` entries
+
+These are two different mechanisms — don't confuse them:
+
+- **`constant: true`** (an *entry* field, [see the entries table above](#entries--the-key-concepts)) makes a single **entry** always active, but only within the books that are actually in scope for the current chat. It's per-entry, and it's still gated by which books the chat pulls in.
+- **Global activation** (this section) makes an entire **book** in scope for **every** chat — nothing is bound to a character or chat, it just always applies. Whether each entry inside that book then activates still depends on that entry's own rules (keywords, `constant`, selective logic, etc.).
+
+So global activation controls *which books are in scope everywhere*; `constant` controls *which entries fire once a book is in scope*.
+
+### Refs and return values
+
+`setGlobal`, `activateGlobal`, and `deactivateGlobal` take book references as either a **UUID or the book name** — the same [name-or-UUID resolution](#refs-uuid-or-name) as `get` / `update` / `delete`. Names are resolved through the per-run cache; a name that doesn't resolve throws `Error: api.worldInfo: world book "<name>" not found`.
+
+Every one of the four returns the **updated set of global book IDs** — a `string[]` of UUIDs, *not* book objects. If you want names or full records, map the IDs back through `get`:
+
+```js
+const ids   = await api.worldInfo.getGlobal();
+const books = await Promise.all(ids.map(id => api.worldInfo.get(id)));
+console.log(books.map(b => b?.name));
+```
+
+A few resolution details worth knowing:
+
+- **`setGlobal(refs)` replaces the entire set.** Pass `[]` to clear all global books. Each ref is resolved to an ID first, so you can mix names and UUIDs freely. The host silently drops any resolved ID that isn't an existing book, so the returned array can be **shorter than what you passed** — treat the return value as the source of truth, not your input list.
+- **`activateGlobal(ref)` adds one book** to the set and throws if the book doesn't exist (the ref fails to resolve).
+- **`deactivateGlobal(ref)` removes one book** and is a **no-op** if the book wasn't in the global set — it still returns the (unchanged) ID list rather than throwing.
+
+### Worked example
+
+Make a "House Rules" book apply to every chat, then confirm it landed:
+
+```js
+// @triggers ls:startup
+
+// Ensure the book exists (get returns null if it doesn't).
+let book = await api.worldInfo.get('House Rules');
+if (!book) {
+  book = await api.worldInfo.create({
+    name:        'House Rules',
+    description: 'Table conventions that apply to every chat',
+  });
+}
+
+// Activate it globally — by name; the ref resolves to the book's UUID.
+const active = await api.worldInfo.activateGlobal('House Rules');
+console.log('Global book IDs:', active);
+// → ["e7a9b1c3-4f2d-…", ...]
+
+// getGlobal returns IDs; map through get() for names.
+const names = await Promise.all(
+  active.map(async id => (await api.worldInfo.get(id))?.name),
+);
+console.log('Globally active:', names.filter(Boolean));
+// → ["House Rules", ...]
+```
+
+To take it back out later:
+
+```js
+await api.worldInfo.deactivateGlobal('House Rules');   // no-op if it wasn't global
+```
+
+Because these edit **user-level** state (not chat- or character-scoped), the change persists across chats and sessions until a script or the user reverses it. If your script activates a book globally, mirror it with a `deactivateGlobal` on `ls:teardown` unless the global binding is meant to outlive the script.
 
 ## Interceptors — dynamic activation control
 

@@ -1,6 +1,8 @@
 # API stability (v1.0)
 
-This is LumiScript's pre-GA **API-stability sign-off** — the record of what the v1.0 SemVer commitment covers, what it deliberately does not, and the contract decisions taken during the pre-lock audit. After v1.0.0 is tagged, the surfaces frozen here change only under the rules below.
+This is LumiScript's **API-stability sign-off** — the record of what the SemVer commitment covers, what it deliberately does not, and the contract decisions taken during the pre-lock audit. The surfaces frozen here change only under the rules below.
+
+**v2.0 status:** the 2.0.0 major bump signals the new opt-in QuickJS-WASM engine (see *Engine divergence* below) and the SSRF private-host default-block — *not* a breaking `api.*` surface change. The public contract in `script.ts` stayed strictly additive through 2.0, so existing scripts and data keep working.
 
 ## What "stable" means
 
@@ -14,7 +16,7 @@ From v1.0.0 onward, LumiScript follows strict SemVer on its **public contract** 
 
 ## The frozen public contract
 
-1. **The `api.*` surface** — the script-facing API. Source of truth: `src/types/script.ts` (`LumiScriptAPI`). Casing, signatures, return shapes (incl. `null`-on-absent vs throw), and Promise-ness are part of the contract. (`src/types/editor-lib.ts` is a hand-maintained Monaco mirror — see drift note below.)
+1. **The `api.*` surface** — the script-facing API. Source of truth: `src/types/script.ts` (`LumiScriptAPI`). Casing, signatures, return shapes (incl. `null`-on-absent vs throw), and Promise-ness are part of the contract. (`src/types/editor-lib.ts` is a **generated** Monaco mirror — see the note below.)
 2. **Persisted data schemas** — everything written to `spindle.userStorage`: `scripts.json` (`Script`), settings (`LumiScriptSettings`), assistant threads + index, assistant memory (`MemoryNote`), `api.db` collection records (`DbRecord` reserved fields + the on-disk path templates), per-character variables. See the compatibility guarantee below.
 3. **The trigger/event model** — the editor-UI event-wiring model, the recognized Lumiverse + `ls:*` event names, and each event's `data` payload shape (canonical list: the **Lumiverse Events** Reference section). Script bodies run as the handler; `data.__event` carries the name.
 4. **Frontmatter directives** — exactly one is parsed at runtime: `// @ls:reload-on-edit` (opt-in hot-reload). `@triggers` / `@name` / `@version` etc. are documentary (no event-wiring effect).
@@ -71,9 +73,9 @@ Scripts run under the **AsyncFunction** engine by default. A second, opt-in **Qu
 
 - **A *fired handler* sees an empty environment under QuickJS.** When a registered handler runs later — a `broadcast.on` subscriber, a modal `onDismiss`, a timer callback — AsyncFunction serves the `data` and list state captured lexically at registration; QuickJS re-seeds a fresh per-fire environment, so *inside such a handler* `data` is `{}` and the synchronous list-snapshot reads (`api.tools.list`, `api.macros.list`, `api.macros.listInterceptors`, `api.chat.getInjections`, `api.chat.listContentProcessors`, `api.worldInfo.listInterceptors`) return `[]`. This is architectural — a fire is an event, not a body-run; per-handler environment snapshots are a tracked follow-up. **Portable pattern:** don't read `data` or the sync lists from inside a fired handler — capture what you need into a closure variable at registration time, or re-fetch via an async call.
 
-## Known drift risk
+## Editor-type generation
 
-`src/types/editor-lib.ts` is a **hand-maintained string copy** of the `api.*` surface for Monaco — not generated. It is spot-checked in sync today, but the manual model means the editor's type hints can silently diverge from the frozen contract. Keep it updated alongside `script.ts`; a generated artifact is a post-1.0 candidate.
+`src/types/editor-lib.ts` — the Monaco IntelliSense mirror of the `api.*` surface — is **generated** from `src/types/script.ts` by `gen:editor-lib` (run automatically in `bun run build`, ahead of the typechecks). Because the editor's hints are rolled up from the frozen contract itself, they can't silently diverge from it. This retires the manual-copy drift risk this section previously flagged (the file was a hand-maintained string until v2.0). Don't hand-edit `editor-lib.ts` — regenerate it.
 
 ## Provenance
 

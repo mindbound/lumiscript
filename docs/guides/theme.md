@@ -303,6 +303,42 @@ When your script is disabled or deleted, the host walks its contributions out an
 
 This means scripts can apply themes confidently — there's no cleanup obligation. If you want to clear *mid-life* (e.g., a "revert to default" button in your UI), `clear()` is the explicit call.
 
+## Style mode (`api.chat.setStyleMode`)
+
+> **New in v2.0.** `api.chat.setStyleMode` lets a script relax the CSS containment the host applies to the active chat, so a full-bleed overlay injected into a message can paint at viewport scope instead of being clamped inside the message stream.
+
+This lives on `api.chat`, not `api.theme` — but it belongs in your theming toolkit. Recoloring the app (`api.theme.*`) and injecting DOM into messages (`api.ui.dom.*`) both stay *inside* the bounded chat container by default. When a heavy-theming or full-bleed script needs to break out of that box, `setStyleMode` is the switch.
+
+```ts
+setStyleMode(mode: 'bounded' | 'extension-relaxed'): Promise<void>;
+```
+
+Positional single argument. Operates on the **active chat** (like the rest of `api.chat.*`), so a chat must be open — it resolves the chat id from the current active context. Requires the `app_manipulation` permission (the same gate as `api.theme.*` and `api.ui.dom.*`); it throws `Error: PERMISSION_DENIED:app_manipulation — grant this permission to use this API` when the permission isn't granted.
+
+### What the modes do
+
+- **`'bounded'` (default)** — extension- and card-injected content is clamped inside the bounded message stream. A `position: fixed` element you inject into a message is contained by the chat container's CSS, not the viewport. This is the safe default: your injected UI can't escape the conversation area and overlap the app chrome.
+- **`'extension-relaxed'`** — the chat container's containment is relaxed, so `position: fixed` content injected into a message paints at **viewport** scope. This is what a full-bleed overlay — a weather effect, a scene-transition wipe, a cinematic vignette, a fixed HUD — authored by an injected-DOM or card script needs in order to cover the whole screen.
+
+### When you want `'extension-relaxed'`
+
+Reach for it when your script injects DOM into a message and that DOM uses `position: fixed` to cover the viewport, but the host's default containment is clamping it to the message stream. Typical cases: a full-screen ambient overlay tied to the scene, a fixed HUD/frame that should sit over the whole app, or any "break out of the message box" visual. If your theming stays within `--lumiverse-*` variable overrides and normally-flowed injected DOM, you don't need this — leave the chat `'bounded'`.
+
+```js
+// Let a full-bleed overlay injected into the chat paint over the whole viewport.
+await api.chat.setStyleMode('extension-relaxed');
+```
+
+Set it back to `'bounded'` when the effect is done, so later injected content is contained again:
+
+```js
+await api.chat.setStyleMode('bounded');
+```
+
+### Not the same as `api.ui.mountApp`
+
+`setStyleMode('extension-relaxed')` relaxes the **in-chat container** so message-injected content can reach viewport scope. It does *not* move your DOM out of the chat — the element still lives inside a message. If you want a surface that is genuinely host-owned and mounted at the document-body level (independent of any chat, unaffected by chat containment), that's `api.ui.mountApp` — a separate portal surface. Use `setStyleMode` when the visual is *anchored to the conversation* but needs to bleed past the message box; use `mountApp` when it's a standalone app-shell overlay.
+
 ## Macro-race resilience
 
 The host has a known race where mutating `spindle.*` calls (including theme writes) throw if they fire while a macro is being resolved with `commit: false` (chat-title regeneration, prompt previews). LumiScript wraps the mutating theme methods (`apply`, `applyPalette`, `clear`) in a transparent retry helper: backoff at 15 / 30 / 60 / 120 / 240 ms, 5 attempts total.

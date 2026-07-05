@@ -2,6 +2,8 @@
 
 By default, LumiScript scripts **cannot reach private network addresses** — localhost, your LAN, link-local, cloud-metadata endpoints. This page explains why, and how to allow the specific local host you actually want (a local model server, a home-lab device).
 
+> **New in v2.0.** Private-host egress is blocked by default as of LumiScript 2.0. Upgrading from 1.x? If a script talked to a local model server (Ollama, ComfyUI, LM Studio) or a LAN device, it will now be rejected until you allowlist that host — jump to [The fix](#the-fix-allow-specific-private-hosts).
+
 ## The default: SSRF-safe egress
 
 Every outbound HTTP request a script makes — through `api.utils.http.*` or a bare `fetch` (the `allowDangerous` feature) — is routed through the host's **SSRF-safe proxy**. That proxy resolves and pins DNS, then blocks any request whose target resolves to a private address:
