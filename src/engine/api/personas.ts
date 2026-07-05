@@ -21,6 +21,8 @@ import type {
   Persona,
   PersonaCreateInput,
   PersonaUpdateInput,
+  PersonaAddonInfo,
+  PersonaAddonUpdateInput,
   WorldInfo,
 } from '../../types/script.js';
 import type { APIBuildDeps } from './shared.js';
@@ -116,6 +118,33 @@ function mapWorldBook(
   };
 }
 
+// ─── GlobalAddonDTO ↔ PersonaAddon mapping ────────────────────────────────────
+
+function mapAddon(
+  dto: import('lumiverse-spindle-types').GlobalAddonDTO,
+): PersonaAddonInfo {
+  return {
+    id:        dto.id,
+    label:     dto.label,
+    content:   dto.content,
+    sortOrder: dto.sort_order,
+    metadata:  dto.metadata,
+    createdAt: dto.created_at,
+    updatedAt: dto.updated_at,
+  };
+}
+
+function mapAddonUpdateInput(
+  input: PersonaAddonUpdateInput,
+): import('lumiverse-spindle-types').GlobalAddonUpdateDTO {
+  const dto: import('lumiverse-spindle-types').GlobalAddonUpdateDTO = {};
+  if (input.label     !== undefined) dto.label      = input.label;
+  if (input.content   !== undefined) dto.content    = input.content;
+  if (input.sortOrder !== undefined) dto.sort_order = input.sortOrder;
+  if (input.metadata  !== undefined) dto.metadata   = input.metadata;
+  return dto;
+}
+
 // ─── API builder ──────────────────────────────────────────────────────────────
 
 export function buildPersonasAPI(deps: APIBuildDeps): LumiScriptAPI['personas'] {
@@ -173,6 +202,31 @@ export function buildPersonasAPI(deps: APIBuildDeps): LumiScriptAPI['personas'] 
       assertPerm('personas', hasPerm, script.name);
       const dto = await spindle.personas.getWorldBook(personaId, uid);
       return dto ? mapWorldBook(dto) : null;
+    },
+
+    // ── Global add-ons ────────────────────────────────────────────────────────
+    // spindle.global_addons.* — persona-adjacent injectable content blocks,
+    // exposed under `personas.addons` (co-located with the persona add-on states
+    // scripts already read). Authoring/removal stay host-UI-owned; scripts read +
+    // update existing add-ons. Gated on `personas` like the rest of this file.
+    addons: {
+      async list(options) {
+        assertPerm('personas', hasPerm, script.name);
+        const result = await spindle.global_addons.list({ ...options, userId: uid });
+        return { data: result.data.map(mapAddon), total: result.total };
+      },
+
+      async get(addonId) {
+        assertPerm('personas', hasPerm, script.name);
+        const dto = await spindle.global_addons.get(addonId, uid);
+        return dto ? mapAddon(dto) : null;
+      },
+
+      async update(addonId, input: PersonaAddonUpdateInput) {
+        assertPerm('personas', hasPerm, script.name);
+        const dto = await spindle.global_addons.update(addonId, mapAddonUpdateInput(input), uid);
+        return mapAddon(dto);
+      },
     },
   };
 }

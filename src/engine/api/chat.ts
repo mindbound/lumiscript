@@ -322,6 +322,20 @@ export function buildChatAPI(deps: APIBuildDeps): LumiScriptAPI['chat'] {
       return shielded(spindle.chat.isMessageHidden(id, msgId));
     },
 
+    // ── Chat style mode ────────────────────────────────────────────────────
+    //
+    // Relaxes the chat container's CSS containment so `position: fixed`
+    // content injected into a message paints at viewport scope. Gated by
+    // `app_manipulation` (host requires it) rather than `chat_mutation` — it
+    // manipulates the host app shell, not message data. Operates on the active
+    // chat like the rest of this namespace.
+
+    setStyleMode: (mode: 'bounded' | 'extension-relaxed') => {
+      assertPerm('app_manipulation', hasPerm, script.name);
+      const id = requireChatId(activeContext);
+      return shielded(spindle.chat.setStyleMode(id, mode));
+    },
+
     // ── Message content processor (per-script handler registration) ────────
     //
     // Multiplexed at LS backend startup behind one

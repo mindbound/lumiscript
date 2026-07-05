@@ -159,6 +159,7 @@ export function createMockSpindle() {
       setMessageHidden: mock(() => Promise.resolve()),
       setMessagesHidden: mock(() => Promise.resolve()),
       isMessageHidden: mock(() => Promise.resolve(false)),
+      setStyleMode: mock(() => Promise.resolve()),
     },
 
     // ─── Connections ───────────────────────────────────────────────────
@@ -300,6 +301,10 @@ export function createMockSpindle() {
         delete: mock(() => Promise.resolve(true)),
       },
       getActivated: mock(() => Promise.resolve([])),
+      getGlobal: mock(() => Promise.resolve([])),
+      setGlobal: mock(() => Promise.resolve([])),
+      activateGlobal: mock(() => Promise.resolve([])),
+      deactivateGlobal: mock(() => Promise.resolve([])),
     },
 
     // ─── Personas ──────────────────────────────────────────────────────
@@ -313,6 +318,13 @@ export function createMockSpindle() {
       delete: mock(() => Promise.resolve(true)),
       switchActive: mock(() => Promise.resolve()),
       getWorldBook: mock(() => Promise.resolve(null)),
+    },
+
+    // ─── Global add-ons (persona-adjacent) ─────────────────────────────
+    global_addons: {
+      list: mock(() => Promise.resolve({ data: [], total: 0 })),
+      get: mock(() => Promise.resolve(null)),
+      update: mock(() => Promise.resolve({ id: 'mock-addon-id' })),
     },
 
     // ─── Presets (v1.0.0-rc.2+) ────────────────────────────────────────

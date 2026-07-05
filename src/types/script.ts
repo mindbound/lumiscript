@@ -429,6 +429,8 @@ export interface LumiScriptAPI {
   users: UsersAPI;
   /** Running Lumiverse backend + frontend versions. Free tier. */
   version: VersionAPI;
+  /** Read the extension's runtime permission grant set. Free tier. */
+  permissions: PermissionsAPI;
   variables: VariablesAPI;
   json: JSONAPI;
   utils: UtilsAPI;
@@ -935,6 +937,17 @@ export interface ChatAPI {
    * never had the flag set. Requires chat_mutation permission.
    */
   isMessageHidden(id: string): Promise<boolean>;
+
+  /**
+   * Set the active chat's CSS containment mode.
+   *   - `'bounded'` (default): extension- and card-injected content is clamped
+   *     inside the bounded message stream.
+   *   - `'extension-relaxed'`: `position: fixed` content injected into a message
+   *     paints at viewport scope instead of being clamped — e.g. a full-bleed
+   *     overlay authored by an injected-DOM or card script.
+   * Operates on the active chat. Requires app_manipulation permission.
+   */
+  setStyleMode(mode: 'bounded' | 'extension-relaxed'): Promise<void>;
 
   /**
    * Register a message content processor — a handler that fires before a
@@ -1737,6 +1750,25 @@ export interface VersionAPI {
   getBackend(): Promise<string>;
   /** The running frontend bundle's semantic version. */
   getFrontend(): Promise<string>;
+}
+
+// ─── Permissions API ────────────────────────────────────────────────────────
+
+export interface PermissionsAPI {
+  /**
+   * The Spindle permissions currently granted to the LumiScript extension
+   * (e.g. `['chat_mutation', 'generation', ...]`). Permissions are
+   * extension-level, not per-script — this reflects what the user granted the
+   * whole extension. Free tier (no permission required).
+   */
+  getGranted(): Promise<string[]>;
+  /**
+   * Whether a specific permission is currently granted. Use as a pre-flight
+   * check before a gated call — `if (await api.permissions.has('images')) { … }`
+   * — to degrade gracefully instead of catching a `PERMISSION_DENIED` error
+   * after the fact. Free tier (no permission required).
+   */
+  has(permission: string): Promise<boolean>;
 }
 
 // ─── Variables API ────────────────────────────────────────────────────────────
@@ -2756,6 +2788,25 @@ export interface PersonaUpdateInput {
   metadata?: Record<string, unknown>;
 }
 
+/** A global add-on — a named, sortable injectable content block (persona-adjacent). */
+export interface PersonaAddonInfo {
+  id: string;
+  label: string;
+  content: string;
+  sortOrder: number;
+  metadata: Record<string, unknown>;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Partial update for a global add-on — only the provided fields change. */
+export interface PersonaAddonUpdateInput {
+  label?: string;
+  content?: string;
+  sortOrder?: number;
+  metadata?: Record<string, unknown>;
+}
+
 export interface PersonasAPI {
   /** List personas. Requires personas permission. */
   list(options?: { limit?: number; offset?: number }): Promise<{ data: Persona[]; total: number }>;
@@ -2782,6 +2833,22 @@ export interface PersonasAPI {
    * Only requires personas permission (not world_books).
    */
   getWorldBook(personaId: string): Promise<WorldInfo | null>;
+  /**
+   * Global add-ons — named, sortable injectable content blocks that pair with a
+   * generation's persona add-on states (the enable/disable map in
+   * `ChatGenerationOptions.personaAddonStates`). This resolves those add-on IDs
+   * to their label / content. Authoring and removal stay in the host UI;
+   * scripts can list, read, and update existing add-ons. Requires personas
+   * permission.
+   */
+  addons: {
+    /** List global add-ons (paginated). Requires personas permission. */
+    list(options?: { limit?: number; offset?: number }): Promise<{ data: PersonaAddonInfo[]; total: number }>;
+    /** Get a global add-on by ID. Returns null if not found. Requires personas permission. */
+    get(addonId: string): Promise<PersonaAddonInfo | null>;
+    /** Update a global add-on (partial — only the provided fields change). Requires personas permission. */
+    update(addonId: string, input: PersonaAddonUpdateInput): Promise<PersonaAddonInfo>;
+  };
 }
 
 // ─── Databanks API ───────────────────────────────────────────────────────────
@@ -4141,6 +4208,34 @@ export interface WorldInfoAPI {
    * Requires world_books permission.
    */
   getCapturedActive(chatId?: string): Promise<ActivatedWorldInfoEntry[]>;
+
+  /**
+   * Global (all-chats) activation. The user's "global" world books apply to
+   * EVERY chat, independent of character / chat scope. Book references accept a
+   * name or UUID (resolved like `get` / `update` / `delete`); the returned
+   * arrays are world-book IDs. Requires world_books permission.
+   *
+   * Read the IDs of the globally-active world books.
+   */
+  getGlobal(): Promise<string[]>;
+  /**
+   * Replace the set of globally-active world books. Returns the applied ID
+   * list (refs the host can't resolve to an existing book are dropped).
+   * Requires world_books permission.
+   */
+  setGlobal(refs: WorldInfoRef[]): Promise<string[]>;
+  /**
+   * Activate a single world book globally (add to the global set). Returns the
+   * updated global ID list. Throws if the book doesn't exist. Requires
+   * world_books permission.
+   */
+  activateGlobal(ref: WorldInfoRef): Promise<string[]>;
+  /**
+   * Deactivate a single globally-active world book (remove from the global
+   * set). No-op if it wasn't active. Returns the updated global ID list.
+   * Requires world_books permission.
+   */
+  deactivateGlobal(ref: WorldInfoRef): Promise<string[]>;
 
   /**
    * Register a world-info interceptor — a handler that runs BEFORE world

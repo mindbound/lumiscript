@@ -82,6 +82,7 @@ import type {
   WebSearchAPI,
   UsersAPI,
   VersionAPI,
+  PermissionsAPI,
   ChatAPI,
   ChatsAPI,
   CharactersAPI,
@@ -671,6 +672,7 @@ export interface ProxyHandle {
     | 'webSearch'
     | 'users'
     | 'version'
+    | 'permissions'
     // ── Phase 9d.1 additions ───────────────────────────────────────────────
     | 'chat'
     | 'chats'
@@ -3340,6 +3342,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
     setMessageHidden:   mkAsync<ChatAPI['setMessageHidden']>(dispatch,   'chat.setMessageHidden'),
     setMessagesHidden:  mkAsync<ChatAPI['setMessagesHidden']>(dispatch,  'chat.setMessagesHidden'),
     isMessageHidden:    mkAsync<ChatAPI['isMessageHidden']>(dispatch,    'chat.isMessageHidden'),
+    setStyleMode:       mkAsync<ChatAPI['setStyleMode']>(dispatch,       'chat.setStyleMode'),
 
     // Sync local — prefer the per-fire `liveContextStore` (populated
     // by `handleRunHandlerRequest` on each handler IPC), fall back to
@@ -3557,6 +3560,10 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
     update:             mkAsync<WorldInfoAPI['update']>(dispatch,             'worldInfo.update'),
     delete:             mkAsync<WorldInfoAPI['delete']>(dispatch,             'worldInfo.delete'),
     getCapturedActive:  mkAsync<WorldInfoAPI['getCapturedActive']>(dispatch,  'worldInfo.getCapturedActive'),
+    getGlobal:          mkAsync<WorldInfoAPI['getGlobal']>(dispatch,          'worldInfo.getGlobal'),
+    setGlobal:          mkAsync<WorldInfoAPI['setGlobal']>(dispatch,          'worldInfo.setGlobal'),
+    activateGlobal:     mkAsync<WorldInfoAPI['activateGlobal']>(dispatch,     'worldInfo.activateGlobal'),
+    deactivateGlobal:   mkAsync<WorldInfoAPI['deactivateGlobal']>(dispatch,   'worldInfo.deactivateGlobal'),
     entries: {
       list:                       mkAsync<WorldInfoAPI['entries']['list']>(dispatch,                       'worldInfo.entries.list'),
       get:                        mkAsync<WorldInfoAPI['entries']['get']>(dispatch,                        'worldInfo.entries.get'),
@@ -3745,6 +3752,11 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
     delete:         mkAsync<PersonasAPI['delete']>(dispatch,         'personas.delete'),
     switchActive:   mkAsync<PersonasAPI['switchActive']>(dispatch,   'personas.switchActive'),
     getWorldBook:   mkAsync<PersonasAPI['getWorldBook']>(dispatch,   'personas.getWorldBook'),
+    addons: {
+      list:   mkAsync<PersonasAPI['addons']['list']>(dispatch,   'personas.addons.list'),
+      get:    mkAsync<PersonasAPI['addons']['get']>(dispatch,    'personas.addons.get'),
+      update: mkAsync<PersonasAPI['addons']['update']>(dispatch, 'personas.addons.update'),
+    },
   };
 
   // ── presets (CRUD + nested blocks/categories — v1.0.0-rc.2+) ─────────────
@@ -3964,6 +3976,14 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
   const version: VersionAPI = {
     getBackend:  mkAsync<VersionAPI['getBackend']>(dispatch,  'version.getBackend'),
     getFrontend: mkAsync<VersionAPI['getFrontend']>(dispatch, 'version.getFrontend'),
+  };
+
+  // permissions — free-tier read of the extension's runtime grant set, so a
+  // script can pre-flight a gated capability instead of catching a
+  // PERMISSION_DENIED error after the fact.
+  const permissions: PermissionsAPI = {
+    getGranted: mkAsync<PermissionsAPI['getGranted']>(dispatch, 'permissions.getGranted'),
+    has:        mkAsync<PermissionsAPI['has']>(dispatch,        'permissions.has'),
   };
 
   // ── json (Phase 9d.2 — pure-local; jsonquery bundled into the child) ──────
@@ -4477,7 +4497,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
   // LumiScriptAPI even though we currently only implement a subset —
   // libraries that touch unimplemented namespaces will throw clearly.
   const apiForLibraries = {
-    utils, broadcast, variables, db, scriptStorage, ui, llm, connections, webSearch, users, version,
+    utils, broadcast, variables, db, scriptStorage, ui, llm, connections, webSearch, users, version, permissions,
     chat, chats, characters, worldInfo, databanks, memories, personas, presets, images, imageGen, oauth, theme, council,
     files, enclave, tokens, events, commands, tools, macros,
     json,
@@ -4674,7 +4694,7 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
 
   return {
     api: {
-      utils, broadcast, variables, db, scriptStorage, ui, llm, connections, webSearch, users, version,
+      utils, broadcast, variables, db, scriptStorage, ui, llm, connections, webSearch, users, version, permissions,
       chat, chats, characters, worldInfo, databanks, memories, personas, presets, images, imageGen, oauth, theme, council,
       files, enclave, tokens, events, commands, tools, macros,
       json,

@@ -315,6 +315,25 @@
       "Promise"
     ]
   },
+  "api.chat.setStyleMode": {
+    "kind": "method",
+    "method": "api.chat.setStyleMode",
+    "namespace": "api.chat",
+    "signature": "setStyleMode(mode: 'bounded' | 'extension-relaxed'): Promise<void>",
+    "description": "Set the active chat's CSS containment mode. 'bounded' (default) clamps injected content inside the message stream; 'extension-relaxed' lets position:fixed content injected into a message paint at viewport scope (e.g. a full-bleed overlay from an injected-DOM or card script). Requires app_manipulation permission.",
+    "permissions": [
+      "app_manipulation"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.chat.getMessages",
+      "api.chat.sendMessage",
+      "api.chat.editMessage",
+      "api.chat.deleteMessage",
+      "api.chat.getChatId",
+      "Promise"
+    ]
+  },
   "api.llm.generate": {
     "kind": "method",
     "method": "api.llm.generate",
@@ -564,6 +583,32 @@
     "examples": [],
     "see_also": [
       "api.version.getBackend",
+      "Promise"
+    ]
+  },
+  "api.permissions.getGranted": {
+    "kind": "method",
+    "method": "api.permissions.getGranted",
+    "namespace": "api.permissions",
+    "signature": "getGranted(): Promise<string[]>",
+    "description": "The Spindle permissions currently granted to the LumiScript extension (extension-level, not per-script). Free tier.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.permissions.has",
+      "Promise"
+    ]
+  },
+  "api.permissions.has": {
+    "kind": "method",
+    "method": "api.permissions.has",
+    "namespace": "api.permissions",
+    "signature": "has(permission: string): Promise<boolean>",
+    "description": "Whether a specific permission is currently granted. Use as a pre-flight check before a gated call to degrade gracefully instead of catching a PERMISSION_DENIED error. Free tier.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.permissions.getGranted",
       "Promise"
     ]
   },
@@ -3209,6 +3254,74 @@
       "Promise"
     ]
   },
+  "api.worldInfo.getGlobal": {
+    "kind": "method",
+    "method": "api.worldInfo.getGlobal",
+    "namespace": "api.worldInfo",
+    "signature": "getGlobal(): Promise<string[]>",
+    "description": "Read the IDs of the user's globally-active world books (apply to every chat). Requires world_books permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.worldInfo.list",
+      "api.worldInfo.get",
+      "api.worldInfo.create",
+      "api.worldInfo.update",
+      "api.worldInfo.delete",
+      "Promise"
+    ]
+  },
+  "api.worldInfo.setGlobal": {
+    "kind": "method",
+    "method": "api.worldInfo.setGlobal",
+    "namespace": "api.worldInfo",
+    "signature": "setGlobal(refs: WorldInfoRef[]): Promise<string[]>",
+    "description": "Replace the set of globally-active world books. Refs accept a name or UUID; returns the applied ID list (unresolvable refs are dropped). Requires world_books permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.worldInfo.list",
+      "api.worldInfo.get",
+      "api.worldInfo.create",
+      "api.worldInfo.update",
+      "api.worldInfo.delete",
+      "WorldInfoRef"
+    ]
+  },
+  "api.worldInfo.activateGlobal": {
+    "kind": "method",
+    "method": "api.worldInfo.activateGlobal",
+    "namespace": "api.worldInfo",
+    "signature": "activateGlobal(ref: WorldInfoRef): Promise<string[]>",
+    "description": "Activate a single world book globally (name or UUID). Returns the updated global ID list; throws if the book doesn't exist. Requires world_books permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.worldInfo.list",
+      "api.worldInfo.get",
+      "api.worldInfo.create",
+      "api.worldInfo.update",
+      "api.worldInfo.delete",
+      "WorldInfoRef"
+    ]
+  },
+  "api.worldInfo.deactivateGlobal": {
+    "kind": "method",
+    "method": "api.worldInfo.deactivateGlobal",
+    "namespace": "api.worldInfo",
+    "signature": "deactivateGlobal(ref: WorldInfoRef): Promise<string[]>",
+    "description": "Deactivate a single globally-active world book (name or UUID). No-op if it wasn't active. Returns the updated global ID list. Requires world_books permission.",
+    "permissions": [],
+    "examples": [],
+    "see_also": [
+      "api.worldInfo.list",
+      "api.worldInfo.get",
+      "api.worldInfo.create",
+      "api.worldInfo.update",
+      "api.worldInfo.delete",
+      "WorldInfoRef"
+    ]
+  },
   "api.worldInfo.registerInterceptor": {
     "kind": "method",
     "method": "api.worldInfo.registerInterceptor",
@@ -4373,6 +4486,63 @@
       "api.personas.getActive",
       "api.personas.create",
       "Promise"
+    ]
+  },
+  "api.personas.addons.list": {
+    "kind": "method",
+    "method": "api.personas.addons.list",
+    "namespace": "api.personas",
+    "signature": "list(options?: { limit?: number; offset?: number }): Promise<{ data: PersonaAddonInfo[]; total: number }>",
+    "description": "List global add-ons (paginated). Requires personas permission.",
+    "permissions": [
+      "personas"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.personas.list",
+      "api.personas.get",
+      "api.personas.getDefault",
+      "api.personas.getActive",
+      "api.personas.create",
+      "Promise"
+    ]
+  },
+  "api.personas.addons.get": {
+    "kind": "method",
+    "method": "api.personas.addons.get",
+    "namespace": "api.personas",
+    "signature": "get(addonId: string): Promise<PersonaAddonInfo | null>",
+    "description": "Get a global add-on by ID. Returns null if not found. Requires personas permission.",
+    "permissions": [
+      "personas"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.personas.list",
+      "api.personas.get",
+      "api.personas.getDefault",
+      "api.personas.getActive",
+      "api.personas.create",
+      "Promise"
+    ]
+  },
+  "api.personas.addons.update": {
+    "kind": "method",
+    "method": "api.personas.addons.update",
+    "namespace": "api.personas",
+    "signature": "update(addonId: string, input: PersonaAddonUpdateInput): Promise<PersonaAddonInfo>",
+    "description": "Update a global add-on (partial). Requires personas permission.",
+    "permissions": [
+      "personas"
+    ],
+    "examples": [],
+    "see_also": [
+      "api.personas.list",
+      "api.personas.get",
+      "api.personas.getDefault",
+      "api.personas.getActive",
+      "api.personas.create",
+      "PersonaAddonUpdateInput"
     ]
   },
   "api.presets.list": {

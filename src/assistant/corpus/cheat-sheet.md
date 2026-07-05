@@ -113,7 +113,7 @@ How permissions actually work: LumiScript permissions are declared **at the exte
 | `macro_interceptor` | Register macro-resolution interceptors (`api.macros.registerInterceptor`). Performance-sensitive; gated separately from `interceptor`. |
 | `memories` | Full access to Lumiverse's hybrid memory architecture via `api.memories.*` — the Memory Cortex (entity/relation graph, narrative-arc consolidations, salience, vault snapshots, chat interlinks, fused retrieval) and Long-Term Chat Memory (the vectorized chunk store behind the `{{memories}}` macro). Read + write; every chat-scoped call is ownership-checked against the active user. |
 | `oauth` | OAuth callback handling via `api.oauth.*` — the only inbound-HTTP hook Spindle exposes to extensions. Wrapper is intentionally thin: it covers the callback registration, CSRF state nonce, and the callback URL path. Constructing the authorize URL, exchanging the code for a token, and persisting + refreshing tokens are the script's responsibility (pair with `api.utils.http` + `api.enclave`). |
-| `personas` | CRUD on personas via `api.personas.*`. |
+| `personas` | CRUD on personas via `api.personas.*`, plus read/update of global add-ons via `api.personas.addons.*`. |
 | `presets` | CRUD on generation presets + their prompt blocks via `api.presets.*` (parameters, ordered prompt blocks with roles/positions/depth, behavior settings, metadata, plus host-derived category groupings). |
 | `push_notification` | OS-level push notifications via `api.ui.pushNotification` (delivered when the app is unfocused). |
 | `regex_scripts` | CRUD on regex find/replace scripts via `api.regexScripts.*`. |
@@ -143,6 +143,7 @@ How permissions actually work: LumiScript permissions are declared **at the exte
 | async `setMessageHidden` | id, hidden | Mark a single message as hidden or visible. Hidden messages are excluded from vector retrieval but still included in prompt assembly. Toggle pattern: pass `true` to hide, `false` to unhide. Persists on the message — survives reloads. Requires chat_mutation permission. [chat_mutation] |
 | async `setMessagesHidden` | ids, hidden | Bulk variant of `setMessageHidden`. Max 500 IDs per call. Same hidden-flag semantics (excluded from vector retrieval, still included in prompt assembly). Requires chat_mutation permission. [chat_mutation] |
 | async `isMessageHidden` | id | Check whether a message is hidden. Returns false for messages that have never had the flag set (default state). Requires chat_mutation permission. [chat_mutation] |
+| async `setStyleMode` | mode | Set the active chat's CSS containment mode. 'bounded' (default) clamps extension- and card-injected content inside the message stream; 'extension-relaxed' lets a `position: fixed` element injected into a message paint at viewport scope — e.g. a full-bleed overlay from an injected-DOM or card script. Distinct from `api.ui.mountApp` (a host-owned document.body portal): this relaxes the in-chat container. Requires app_manipulation permission. [app_manipulation] |
 
 ## api.llm
 
@@ -191,6 +192,15 @@ How permissions actually work: LumiScript permissions are declared **at the exte
 |---|---|---|
 | async `getBackend` | — | The running Lumiverse backend server's semantic version string (e.g. '1.2.0'). Returns Promise<string>. Free tier. Pair with feature gating / compatibility checks. |
 | async `getFrontend` | — | The running Lumiverse frontend bundle's semantic version string. Returns Promise<string>. Free tier. |
+
+## api.permissions
+
+> **Concepts:** Read the extension's runtime permission grant set. `getGranted()` returns the Spindle permissions the user granted the extension (extension-level, not per-script); `has(permission)` checks one. Use as a pre-flight guard so a script degrades gracefully — `if (await api.permissions.has('images')) { … }` — instead of catching a `PERMISSION_DENIED` error after the fact. The reactive host handlers (onDenied / onChanged) are intentionally not exposed. Free tier.
+
+| Method | Args | Description |
+|---|---|---|
+| async `getGranted` | — | The Spindle permissions currently granted to the LumiScript extension (e.g. ['chat_mutation', 'generation']). Extension-level, not per-script. Returns Promise<string[]>. Free tier. |
+| async `has` | permission | Whether a specific permission is currently granted. Returns Promise<boolean>. Use as a pre-flight check before a gated call — if (await api.permissions.has('images')) { … } — so a script degrades gracefully instead of catching a PERMISSION_DENIED error after the fact. Free tier. |
 
 ## api.variables.local / api.variables.global / api.variables.character / api.variables.chat
 
@@ -435,6 +445,10 @@ The delegation reads `event.target.dataset.action` (not a `closest()` walk), so 
 | async `entries.delete` | entryId | Delete an entry by ID. |
 | async `entries.listByAutomationIdPrefix` | prefix | Find all entries across all world books whose automationId starts with the given prefix. Useful for enumerating / cleaning up entries a script owns (e.g. "lumiscript:<scriptId>:" convention). Returns WorldInfoEntry[]; O(books × entries-per-book). |
 | async `getCapturedActive` | chatId? | Get all entries that would activate for the current chat (full pipeline). |
+| async `getGlobal` | — | Read the IDs of the user's globally-active world books — books applied to EVERY chat, independent of character/chat scope. Requires world_books permission. |
+| async `setGlobal` | refs | Replace the set of globally-active world books. Refs accept a name or UUID (resolved like get/update/delete). Returns the applied ID list; refs that don't resolve to an existing book are dropped by the host. Requires world_books permission. |
+| async `activateGlobal` | ref | Activate a single world book globally (name or UUID). Returns the updated global ID list. Throws if the book does not exist. Requires world_books permission. |
+| async `deactivateGlobal` | ref | Deactivate a single globally-active world book (name or UUID). No-op if it was not active. Returns the updated global ID list. Requires world_books permission. |
 | `registerInterceptor` | handler, options? | Register a handler that runs BEFORE world info activation. Returns disable / enable / force / mutate decisions for the candidate entries. Returns handle { id, remove }. Multiple handlers compose by priority; vote-off precedence on disabled. 2s soft timeout (configurable). Requires generation. [generation] |
 | `listInterceptors` | — | Sync read of all currently-registered world-info interceptors. Diagnostic surface. Returns RegisteredWorldInfoInterceptorInfo[]. [generation] |
 
@@ -577,6 +591,9 @@ The delegation reads `event.target.dataset.action` (not a `closest()` walk), so 
 | async `delete` | personaId | Delete a persona. [personas] |
 | async `switchActive` | personaId | Switch the active persona. Pass `personaId: string` to activate a persona, or `null` to deactivate. [personas] |
 | async `getWorldBook` | personaId | Get the world book attached to a persona. [personas] |
+| async `addons.list` | options? | List global add-ons — named, sortable injectable content blocks (persona-adjacent). Paginated { data, total }. Requires personas permission. [personas] |
+| async `addons.get` | addonId | Get a global add-on by ID — resolves an add-on-state ID (from a generation's personaAddonStates) to its label + content. Returns null if not found. Requires personas permission. [personas] |
+| async `addons.update` | addonId, input | Update a global add-on (partial: label / content / sortOrder / metadata). Authoring + removal stay in the host UI. Requires personas permission. [personas] |
 
 ## api.presets
 

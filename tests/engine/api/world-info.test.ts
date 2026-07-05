@@ -169,6 +169,52 @@ describe('getCapturedActive', () => {
   });
 });
 
+// ─── Global activation ───────────────────────────────────────────────────────
+
+describe('global activation', () => {
+  const UUID = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
+
+  test('getGlobal delegates to spindle.world_books.getGlobal', async () => {
+    mockSpindle.world_books.getGlobal.mockReturnValueOnce(Promise.resolve(['wb-1', 'wb-2']));
+    const api = buildApi();
+    expect(await api.getGlobal()).toEqual(['wb-1', 'wb-2']);
+  });
+
+  test('setGlobal resolves each ref (name or UUID) to an ID before delegating', async () => {
+    // 'My Lorebook' resolves via a list lookup → wb-1; the UUID passes through.
+    mockSpindle.world_books.list.mockReturnValueOnce(
+      Promise.resolve({ data: [bookDTO], total: 1 }),
+    );
+    mockSpindle.world_books.setGlobal.mockReturnValueOnce(Promise.resolve(['wb-1', UUID]));
+    const api = buildApi();
+    await api.setGlobal(['My Lorebook', UUID]);
+    const call = mockSpindle.world_books.setGlobal.mock.calls[0] as any;
+    expect(call[0]).toEqual(['wb-1', UUID]); // names resolved to IDs, order preserved
+  });
+
+  test('activateGlobal resolves the ref and delegates', async () => {
+    mockSpindle.world_books.activateGlobal.mockReturnValueOnce(Promise.resolve([UUID]));
+    const api = buildApi();
+    expect(await api.activateGlobal(UUID)).toEqual([UUID]); // UUID ref — no list lookup
+    expect((mockSpindle.world_books.activateGlobal.mock.calls[0] as any)[0]).toBe(UUID);
+  });
+
+  test('deactivateGlobal resolves the ref and delegates', async () => {
+    mockSpindle.world_books.deactivateGlobal.mockReturnValueOnce(Promise.resolve([]));
+    const api = buildApi();
+    expect(await api.deactivateGlobal(UUID)).toEqual([]);
+    expect((mockSpindle.world_books.deactivateGlobal.mock.calls[0] as any)[0]).toBe(UUID);
+  });
+
+  test('all four require world_books permission', async () => {
+    const api = buildApi({ hasPerm: () => false });
+    await expect(api.getGlobal()).rejects.toThrow('PERMISSION_DENIED');
+    await expect(api.setGlobal([UUID])).rejects.toThrow('PERMISSION_DENIED');
+    await expect(api.activateGlobal(UUID)).rejects.toThrow('PERMISSION_DENIED');
+    await expect(api.deactivateGlobal(UUID)).rejects.toThrow('PERMISSION_DENIED');
+  });
+});
+
 // ─── update ──────────────────────────────────────────────────────────────────
 
 describe('update', () => {

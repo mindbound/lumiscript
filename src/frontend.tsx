@@ -50,6 +50,15 @@ import { setHostComponents } from './host-ui.js';
 export function setup(ctx: SpindleFrontendContext) {
   const cleanups: (() => void)[] = [];
 
+  // ─── Startup readiness handshake ──────────────────────────────────────────
+  // Opt out of the host's legacy auto-ready so any startup message the backend
+  // sends while this bundle initializes stays QUEUED until we've installed the
+  // message multiplexer and every synchronous subtree consumer below; the queue
+  // is released with ctx.ready() at the end of setup. Feature-guarded —
+  // deferReady/ready postdate the extension's minimum_lumiverse_version, so
+  // older hosts keep their auto-ready behavior unchanged.
+  if (typeof ctx.deferReady === 'function') ctx.deferReady();
+
   // ─── CSS ────────────────────────────────────────────────────────────────
   const removeStyle = ctx.dom.addStyle(PANEL_CSS);
   cleanups.push(removeStyle);
@@ -330,6 +339,12 @@ export function setup(ctx: SpindleFrontendContext) {
       console.warn('[LumiScript] character-editor tab registration failed:', err);
     }
   }
+
+  // Every synchronous consumer (the message multiplexer + each install*Handler
+  // subtree) is now registered, so release any startup message the host queued
+  // while we set up. Paired with the ctx.deferReady() at the top of setup;
+  // a no-op on hosts that predate the handshake.
+  if (typeof ctx.ready === 'function') ctx.ready();
 
   // ─── Teardown ──────────────────────────────────────────────────────────
   return () => {

@@ -309,6 +309,10 @@ function resolvePermission(ns: string, method?: string): { namespace: string; pe
       if (method === 'getMetadata' || method === 'setMetadata') {
         return { namespace: 'chat.metadata', permission: 'chats' };
       }
+      // setStyleMode manipulates the host app shell (CSS containment), not message data.
+      if (method === 'setStyleMode') {
+        return { namespace: 'chat.setStyleMode', permission: 'app_manipulation' };
+      }
       // removeInjection / getInjections / listContentProcessors / getChatId / reads → free
       return method !== undefined && CHAT_MUTATION_METHODS.has(method)
         ? { namespace: 'chat', permission: 'chat_mutation' }
@@ -350,7 +354,7 @@ function resolvePermission(ns: string, method?: string): { namespace: string; pe
       return method === 'registerInterceptor'
         ? { namespace: 'macros.registerInterceptor', permission: 'macro_interceptor' }
         : null;
-    default:             return null; // variables / scriptStorage / db / broadcast / rpc / enclave / json / connections / version / council / commands → free
+    default:             return null; // variables / scriptStorage / db / broadcast / rpc / enclave / json / connections / version / permissions / council / commands → free
   }
 }
 

@@ -161,6 +161,7 @@ export const PERM_GROUPS: PermGroup[] = [
       { method: 'api.chat.isMessageHidden', perms: ['chat_mutation'] },
       { method: 'api.chat.registerContentProcessor', perms: ['chat_mutation'] },
       { method: 'api.chat.listContentProcessors', perms: [] },
+      { method: 'api.chat.setStyleMode', perms: ['app_manipulation'] },
     ],
   },
   {
@@ -175,6 +176,7 @@ export const PERM_GROUPS: PermGroup[] = [
       { method: 'api.webSearch.*', perms: ['web_search'] },
       { method: 'api.users.* (read-only)', perms: [] },
       { method: 'api.version.* (read-only)', perms: [] },
+      { method: 'api.permissions.* (read-only)', perms: [] },
     ],
   },
   {
@@ -223,7 +225,7 @@ export const PERM_GROUPS: PermGroup[] = [
     rows: [
       { method: 'api.characters.*', perms: ['characters'] },
       { method: 'api.chats.*', perms: ['chats'] },
-      { method: 'api.worldInfo.* (CRUD + getCapturedActive)', perms: ['world_books'] },
+      { method: 'api.worldInfo.* (CRUD + getCapturedActive + global activation)', perms: ['world_books'] },
       { method: 'api.worldInfo.registerInterceptor / listInterceptors', perms: ['generation'] },
       { method: 'api.personas.*', perms: ['personas'] },
       { method: 'api.presets.*', perms: ['presets'] },
@@ -3103,6 +3105,7 @@ export const API_GROUPS: FnGroup[] = [
       { name: 'setMessageHidden',  args: 'id, hidden',              desc: 'Mark a single message as hidden or visible. Hidden messages are excluded from vector retrieval but still included in prompt assembly. Toggle pattern: pass `true` to hide, `false` to unhide. Persists on the message — survives reloads. Requires chat_mutation permission.' },
       { name: 'setMessagesHidden', args: 'ids, hidden',             desc: 'Bulk variant of `setMessageHidden`. Max 500 IDs per call. Same hidden-flag semantics (excluded from vector retrieval, still included in prompt assembly). Requires chat_mutation permission.' },
       { name: 'isMessageHidden',   args: 'id',                      desc: 'Check whether a message is hidden. Returns false for messages that have never had the flag set (default state). Requires chat_mutation permission.' },
+      { name: 'setStyleMode',      args: 'mode',                    desc: "Set the active chat's CSS containment mode. 'bounded' (default) clamps extension- and card-injected content inside the message stream; 'extension-relaxed' lets a `position: fixed` element injected into a message paint at viewport scope — e.g. a full-bleed overlay from an injected-DOM or card script. Distinct from `api.ui.mountApp` (a host-owned document.body portal): this relaxes the in-chat container. Requires app_manipulation permission." },
     ],
   },
   {
@@ -3143,6 +3146,13 @@ export const API_GROUPS: FnGroup[] = [
     rows: [
       { name: 'getBackend',  args: '—', desc: "The running Lumiverse backend server's semantic version string (e.g. '1.2.0'). Returns Promise<string>. Free tier. Pair with feature gating / compatibility checks." },
       { name: 'getFrontend', args: '—', desc: "The running Lumiverse frontend bundle's semantic version string. Returns Promise<string>. Free tier." },
+    ],
+  },
+  {
+    group: 'api.permissions',
+    rows: [
+      { name: 'getGranted', args: '—',         desc: "The Spindle permissions currently granted to the LumiScript extension (e.g. ['chat_mutation', 'generation']). Extension-level, not per-script. Returns Promise<string[]>. Free tier." },
+      { name: 'has',        args: 'permission', desc: "Whether a specific permission is currently granted. Returns Promise<boolean>. Use as a pre-flight check before a gated call — if (await api.permissions.has('images')) { … } — so a script degrades gracefully instead of catching a PERMISSION_DENIED error after the fact. Free tier." },
     ],
   },
   {
@@ -3345,6 +3355,10 @@ export const API_GROUPS: FnGroup[] = [
       { name: 'entries.delete',      args: 'entryId',           desc: 'Delete an entry by ID.' },
       { name: 'entries.listByAutomationIdPrefix', args: 'prefix', desc: 'Find all entries across all world books whose automationId starts with the given prefix. Useful for enumerating / cleaning up entries a script owns (e.g. "lumiscript:<scriptId>:" convention). Returns WorldInfoEntry[]; O(books × entries-per-book).' },
       { name: 'getCapturedActive',   args: 'chatId?',           desc: 'Get all entries that would activate for the current chat (full pipeline).' },
+      { name: 'getGlobal',           args: '—',                 desc: "Read the IDs of the user's globally-active world books — books applied to EVERY chat, independent of character/chat scope. Requires world_books permission." },
+      { name: 'setGlobal',           args: 'refs',              desc: "Replace the set of globally-active world books. Refs accept a name or UUID (resolved like get/update/delete). Returns the applied ID list; refs that don't resolve to an existing book are dropped by the host. Requires world_books permission." },
+      { name: 'activateGlobal',      args: 'ref',               desc: "Activate a single world book globally (name or UUID). Returns the updated global ID list. Throws if the book does not exist. Requires world_books permission." },
+      { name: 'deactivateGlobal',    args: 'ref',               desc: "Deactivate a single globally-active world book (name or UUID). No-op if it was not active. Returns the updated global ID list. Requires world_books permission." },
       { name: 'registerInterceptor', args: 'handler, options?', desc: 'Register a handler that runs BEFORE world info activation. Returns disable / enable / force / mutate decisions for the candidate entries. Returns handle { id, remove }. Multiple handlers compose by priority; vote-off precedence on disabled. 2s soft timeout (configurable). Requires generation.' },
       { name: 'listInterceptors',    args: '—',                 desc: 'Sync read of all currently-registered world-info interceptors. Diagnostic surface. Returns RegisteredWorldInfoInterceptorInfo[].' },
     ],
@@ -3469,6 +3483,9 @@ export const API_GROUPS: FnGroup[] = [
       { name: 'delete',       args: 'personaId',          desc: 'Delete a persona.' },
       { name: 'switchActive', args: 'personaId',          desc: 'Switch the active persona. Pass `personaId: string` to activate a persona, or `null` to deactivate.' },
       { name: 'getWorldBook', args: 'personaId',          desc: 'Get the world book attached to a persona.' },
+      { name: 'addons.list',   args: 'options?',           desc: 'List global add-ons — named, sortable injectable content blocks (persona-adjacent). Paginated { data, total }. Requires personas permission.' },
+      { name: 'addons.get',    args: 'addonId',            desc: 'Get a global add-on by ID — resolves an add-on-state ID (from a generation\'s personaAddonStates) to its label + content. Returns null if not found. Requires personas permission.' },
+      { name: 'addons.update', args: 'addonId, input',     desc: 'Update a global add-on (partial: label / content / sortOrder / metadata). Authoring + removal stay in the host UI. Requires personas permission.' },
     ],
   },
   {
@@ -3976,6 +3993,9 @@ export const NAMESPACE_CONCEPTS: Record<string, string> = {
   'api.version':
     'The running Lumiverse versions: `getBackend()` and `getFrontend()` each return a semver string. Use for feature-gating — branch a script on whether the host is new enough for a given event or API. Compare numerically (split on `.`, strip any `-rc` / `+build` suffix) rather than string `===`; LumiScript\'s own `host-version.ts` `compareVersions` helper is the reference implementation. Free tier. (This is the script-facing view of the same version probe LumiScript uses internally for its `minimum_lumiverse_version` check.)',
 
+  'api.permissions':
+    "Read the extension's runtime permission grant set. `getGranted()` returns the Spindle permissions the user granted the extension (extension-level, not per-script); `has(permission)` checks one. Use as a pre-flight guard so a script degrades gracefully — `if (await api.permissions.has('images')) { … }` — instead of catching a `PERMISSION_DENIED` error after the fact. The reactive host handlers (onDenied / onChanged) are intentionally not exposed. Free tier.",
+
   'api.databanks':
     'Three ownership scopes — `global` (no owner key), `character` (owned by character UUID), `chat` (owned by chat UUID). Documents within a databank inherit their parent\'s scope. Document ingestion is **asynchronous**: `documents.create()` returns immediately with `status: \'pending\'`; use `documents.waitUntilReady(docId)` to await chunking + vectorization. For input-bar actions or other UI surfaces that need ready-state confirmation, prefer `waitUntilReady` over manual polling.\n\n**File-type constraint**: Lumiverse accepts text-oriented uploads only — `.txt`, `.md`, `.markdown`, `.csv`, `.tsv`, `.json`, `.xml`, `.html`, `.htm`, `.yaml`, `.yml`, `.log`, `.rst`, `.rtf`. PDFs, images, archives, audio, and other binary payloads are rejected at ingestion even though `DatabankDocumentCreateInput.data` is typed `string | Uint8Array`. For non-text persistence, use `api.files.*` (UTF-8 strings — base64-encode binary first) or `api.images.*` (raw image bytes). Max 10 MB per document.',
 
@@ -4055,7 +4075,7 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   chat_mutation:     'Read / send / edit / delete chat messages. Required for most `api.chat.*` operations.',
   chats:             'Chat session metadata + CRUD on the chat list. Distinct from message content (chat_mutation).',
   characters:        'CRUD on characters via `api.characters.*`.',
-  personas:          'CRUD on personas via `api.personas.*`.',
+  personas:          'CRUD on personas via `api.personas.*`, plus read/update of global add-ons via `api.personas.addons.*`.',
   presets:           'CRUD on generation presets + their prompt blocks via `api.presets.*` (parameters, ordered prompt blocks with roles/positions/depth, behavior settings, metadata, plus host-derived category groupings).',
   world_books:       'CRUD on world books and entries via `api.worldInfo.*`.',
   regex_scripts:     'CRUD on regex find/replace scripts via `api.regexScripts.*`.',

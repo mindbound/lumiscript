@@ -361,6 +361,39 @@ export function buildWorldInfoAPI(deps: APIBuildDeps): LumiScriptAPI['worldInfo'
       return results.filter((e): e is ActivatedWorldInfoEntry => e !== null);
     },
 
+    // ── Global activation ─────────────────────────────────────────────────────
+    //
+    // The user's "global" world books (the `globalWorldBooks` setting) apply to
+    // EVERY chat, independent of character/chat scope. Book refs accept a name or
+    // UUID, resolved via `resolveBookId` like the CRUD methods; the returned
+    // arrays are world-book IDs (the host's native shape — map via `get()` for
+    // names). All gated on `world_books`.
+
+    async getGlobal() {
+      assertPerm('world_books', hasPerm, script.name);
+      return spindle.world_books.getGlobal(uid);
+    },
+
+    async setGlobal(refs) {
+      assertPerm('world_books', hasPerm, script.name);
+      // Resolve every ref to an ID first so a caller can pass names (the host's
+      // setGlobal silently drops anything that isn't an existing book ID).
+      const ids = await Promise.all(refs.map((r) => resolveBookId(r)));
+      return spindle.world_books.setGlobal(ids, uid);
+    },
+
+    async activateGlobal(ref) {
+      assertPerm('world_books', hasPerm, script.name);
+      const id = await resolveBookId(ref);
+      return spindle.world_books.activateGlobal(id, uid);
+    },
+
+    async deactivateGlobal(ref) {
+      assertPerm('world_books', hasPerm, script.name);
+      const id = await resolveBookId(ref);
+      return spindle.world_books.deactivateGlobal(id, uid);
+    },
+
     // ── World Info interceptor (v0.27.0+) ────────────────────────────────────
     //
     // Same registration / stale-clean lifecycle as macros' interceptor and

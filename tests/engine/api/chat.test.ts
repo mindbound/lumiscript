@@ -529,6 +529,29 @@ describe('isMessageHidden', () => {
   });
 });
 
+// ─── setStyleMode ─────────────────────────────────────────────────────────────
+
+describe('setStyleMode', () => {
+  test('delegates to spindle.chat.setStyleMode with the active chatId + mode', async () => {
+    const api = buildApi();
+    await api.setStyleMode('extension-relaxed');
+    expect(mockSpindle.chat.setStyleMode).toHaveBeenCalledWith('test-chat-id', 'extension-relaxed');
+  });
+
+  test('is gated on app_manipulation, not chat_mutation', () => {
+    // Grant everything EXCEPT app_manipulation — it must still reject, proving it
+    // rides the app-shell permission (it relaxes CSS containment) rather than the
+    // chat_mutation gate its sibling message methods use.
+    const api = buildApi({ hasPerm: (p) => p !== 'app_manipulation' });
+    expect(() => api.setStyleMode('bounded')).toThrow('PERMISSION_DENIED');
+  });
+
+  test('throws when no active chat', () => {
+    const api = buildApi({ activeContext: { chatId: null, characterId: null } });
+    expect(() => api.setStyleMode('bounded')).toThrow('no active chat');
+  });
+});
+
 // ─── registerContentProcessor ───────────────────────────────────────────────
 //
 // The thin layer above `message-content-processor-registry`. Registry-internal

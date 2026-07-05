@@ -356,6 +356,8 @@ interface ChatAPI {
   setMessagesHidden(ids: string[], hidden: boolean): Promise<void>;
   /** Check whether a message is hidden. Returns false for messages that have never had the flag set. Requires chat_mutation permission. */
   isMessageHidden(id: string): Promise<boolean>;
+  /** Set the active chat's CSS containment mode. 'bounded' (default) clamps injected content inside the message stream; 'extension-relaxed' lets position:fixed content injected into a message paint at viewport scope (e.g. a full-bleed overlay from an injected-DOM or card script). Requires app_manipulation permission. */
+  setStyleMode(mode: 'bounded' | 'extension-relaxed'): Promise<void>;
 
   /**
    * Register a message content processor — handler fires before a
@@ -837,6 +839,14 @@ interface VersionAPI {
   getBackend(): Promise<string>;
   /** The running frontend bundle's semantic version. */
   getFrontend(): Promise<string>;
+}
+
+/** Read the extension's runtime permission grant set. Free tier. */
+interface PermissionsAPI {
+  /** The Spindle permissions currently granted to the LumiScript extension (extension-level, not per-script). Free tier. */
+  getGranted(): Promise<string[]>;
+  /** Whether a specific permission is currently granted. Use as a pre-flight check before a gated call to degrade gracefully instead of catching a PERMISSION_DENIED error. Free tier. */
+  has(permission: string): Promise<boolean>;
 }
 
 // ─── Variables API ────────────────────────────────────────────────────────────
@@ -2629,6 +2639,14 @@ interface WorldInfoAPI {
    * Runs the full Lumiverse activation pipeline. Requires world_books permission.
    */
   getCapturedActive(chatId?: string): Promise<ActivatedWorldInfoEntry[]>;
+  /** Read the IDs of the user's globally-active world books (apply to every chat). Requires world_books permission. */
+  getGlobal(): Promise<string[]>;
+  /** Replace the set of globally-active world books. Refs accept a name or UUID; returns the applied ID list (unresolvable refs are dropped). Requires world_books permission. */
+  setGlobal(refs: WorldInfoRef[]): Promise<string[]>;
+  /** Activate a single world book globally (name or UUID). Returns the updated global ID list; throws if the book doesn't exist. Requires world_books permission. */
+  activateGlobal(ref: WorldInfoRef): Promise<string[]>;
+  /** Deactivate a single globally-active world book (name or UUID). No-op if it wasn't active. Returns the updated global ID list. Requires world_books permission. */
+  deactivateGlobal(ref: WorldInfoRef): Promise<string[]>;
 }
 
 // ─── Personas API ─────────────────────────────────────────────────────────────
@@ -2669,6 +2687,24 @@ interface PersonaUpdateInput {
   metadata?: Record<string, unknown>;
 }
 
+/** A global add-on — a named, sortable injectable content block (persona-adjacent). */
+interface PersonaAddonInfo {
+  id: string;
+  label: string;
+  content: string;
+  sortOrder: number;
+  metadata: Record<string, unknown>;
+  createdAt: number;
+  updatedAt: number;
+}
+/** Partial update for a global add-on — only the provided fields change. */
+interface PersonaAddonUpdateInput {
+  label?: string;
+  content?: string;
+  sortOrder?: number;
+  metadata?: Record<string, unknown>;
+}
+
 interface PersonasAPI {
   list(options?: { limit?: number; offset?: number }): Promise<{ data: Persona[]; total: number }>;
   get(personaId: string): Promise<Persona | null>;
@@ -2680,6 +2716,15 @@ interface PersonasAPI {
   /** Switch the active persona. Pass null to deactivate. Emits SETTINGS_UPDATED. */
   switchActive(personaId: string | null): Promise<void>;
   getWorldBook(personaId: string): Promise<WorldInfo | null>;
+  /** Global add-ons — named, sortable injectable content blocks that pair with persona add-on states. Resolve add-on IDs to label/content. Authoring/removal stay in the host UI. Requires personas permission. */
+  addons: {
+    /** List global add-ons (paginated). Requires personas permission. */
+    list(options?: { limit?: number; offset?: number }): Promise<{ data: PersonaAddonInfo[]; total: number }>;
+    /** Get a global add-on by ID. Returns null if not found. Requires personas permission. */
+    get(addonId: string): Promise<PersonaAddonInfo | null>;
+    /** Update a global add-on (partial). Requires personas permission. */
+    update(addonId: string, input: PersonaAddonUpdateInput): Promise<PersonaAddonInfo>;
+  };
 }
 
 // ─── Presets API ──────────────────────────────────────────────────────────────
@@ -4382,6 +4427,8 @@ interface LumiScriptAPI {
   users: UsersAPI;
   /** Running Lumiverse backend + frontend versions. Free tier. */
   version: VersionAPI;
+  /** Read the extension's runtime permission grant set. Free tier. */
+  permissions: PermissionsAPI;
   variables: VariablesAPI;
   json: JSONAPI;
   utils: UtilsAPI;
