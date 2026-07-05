@@ -10,14 +10,16 @@
  * persists WITHIN the poisoning script, and that another script is unaffected.
  *
  * setup.ts beforeEach calls _disposeContextForTests(), which disposes the per-script pool + resets
- * contextModel to 'shared', so these tests don't leak contexts across files.
+ * contextModel to 'shared', so these tests don't leak contexts across files. Each context-building
+ * test below ALSO disposes the contexts it created, in-body, so the pool is deterministically empty
+ * for the next test regardless of run order or hook-vs-async-settle timing (the dispose-count
+ * assertions depend on that, and relying on the beforeEach alone was flaky when run standalone).
  */
 
 import { describe, test, expect } from 'bun:test';
 import {
   runUserScriptInQuickJS,
   fireHandlerInQuickJS,
-  disposeScriptVmHandlers,
   disposeContextForScript,
   setContextModel,
   getEngineTelemetry,
@@ -61,6 +63,12 @@ describe('#11 P7-2 cross-script isolation (contextModel=per-script)', () => {
     // Script B (its OWN context + own zod bundle) sees a PRISTINE z — cross-script isolation.
     const b = await runUserScriptInQuickJS(runOpts('iso-zB', `return typeof z.__lsPoison === 'undefined' ? 'clean' : 'poisoned';`));
     expect(b).toBe('clean');
+    // Dispose the contexts this test built, in-body (after every await has settled). The setup.ts
+    // beforeEach also disposes the per-script pool, but doing it here makes the file order-independent:
+    // the pool is provably empty when the later dispose-count assertions run, with no reliance on the
+    // hook winning a race against a still-settling context build from a prior test.
+    disposeContextForScript('iso-zA', true);
+    disposeContextForScript('iso-zB', true);
   });
 
   test('shared-context-concurrency: a globalThis assignment in one script does not leak to another', async () => {
@@ -68,6 +76,8 @@ describe('#11 P7-2 cross-script isolation (contextModel=per-script)', () => {
     await runUserScriptInQuickJS(runOpts('iso-gA', `globalThis.__leaked = 'from-A'; return null;`));
     const b = await runUserScriptInQuickJS(runOpts('iso-gB', `return typeof globalThis.__leaked === 'undefined' ? 'isolated' : globalThis.__leaked;`));
     expect(b).toBe('isolated');
+    disposeContextForScript('iso-gA', true);
+    disposeContextForScript('iso-gB', true);
   });
 
   test('a handler registered in script A fires in A\'s context (not another script\'s residue)', async () => {
@@ -80,7 +90,10 @@ describe('#11 P7-2 cross-script isolation (contextModel=per-script)', () => {
     // Fire A's handler — it must run in A's context and read 'A', not B's 'B'.
     const out = await fireHandlerInQuickJS(fireOpts({ scriptId: 'iso-hA', handlerId: hid }));
     expect(out).toBe('A');
-    disposeScriptVmHandlers('iso-hA');
+    // Dispose both contexts (disposeContextForScript with true also sweeps handlers, superseding the
+    // handler-only cleanup) so the pool is empty for the next test regardless of hook timing.
+    disposeContextForScript('iso-hA', true);
+    disposeContextForScript('iso-hB', true);
   });
 
   test('per-script runs are isolated even when interleaved (A, B, A see their own globalThis)', async () => {
@@ -89,6 +102,8 @@ describe('#11 P7-2 cross-script isolation (contextModel=per-script)', () => {
     await runUserScriptInQuickJS(runOpts('iso-iB', `globalThis.__v = 100; return null;`));
     const a2 = await runUserScriptInQuickJS(runOpts('iso-iA', `globalThis.__v = (globalThis.__v || 0) + 1; return globalThis.__v;`));
     expect(a2).toBe(2); // A's own counter (1→2), NOT B's 100 — A's context persisted across B's run
+    disposeContextForScript('iso-iA', true);
+    disposeContextForScript('iso-iB', true);
   });
 
   // #11 P7-2 audit (handle-lifecycle-dispose#0) — teardown MUST free the per-script context or the

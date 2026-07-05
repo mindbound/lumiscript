@@ -324,6 +324,13 @@ export interface ScriptRunnerProbeResult {
        * non-zero.
        */
       totalEvictionsSkippedByPin: number;
+      /**
+       * Per-worker memory readings the sweep substituted with a carried-
+       * forward last-known value because the live query timed out / failed.
+       * Surfaced in the "Evictions" diagnostics row when non-zero — a signal
+       * the ceiling sum is leaning on stale estimates.
+       */
+      totalMemoryReadingsCarriedForward: number;
     };
     settings: {
       idleTimeoutMs:      number;
@@ -789,17 +796,25 @@ function buildScriptRunnerSection(deps: DiagnosticsCollectorDeps): DiagnosticSec
     // A growing "N skipped" number alongside "no evictions" reads like a
     // bug to users who don't know the internals; better to omit it.
     const ev = p.evictionTelemetry;
+    // Unlike the pinned-skip counter, a non-zero carried-forward count IS
+    // actionable — it means the memory-ceiling sum has been leaning on stale
+    // last-known readings because a worker was too busy to answer the stats
+    // ping in time — so it's appended to the message when present.
+    const carriedNote = ev.totalMemoryReadingsCarriedForward > 0
+      ? ` (${ev.totalMemoryReadingsCarriedForward} memory reading(s) carried forward from a non-responding worker)`
+      : '';
     checks.push({
       label:   'Evictions (this session)',
       status:  'info',
-      message: ev.totalEvictions === 0
+      message: (ev.totalEvictions === 0
         ? 'No evictions since LumiScript loaded'
-        : `${ev.totalEvictions} eviction(s)${ev.lastEvictionReason ? ` — last reason: ${ev.lastEvictionReason}` : ''}`,
+        : `${ev.totalEvictions} eviction(s)${ev.lastEvictionReason ? ` — last reason: ${ev.lastEvictionReason}` : ''}`) + carriedNote,
       details: {
         totalEvictions:             ev.totalEvictions,
         lastEvictionAt:             ev.lastEvictionAt,
         lastEvictionReason:         ev.lastEvictionReason,
         totalEvictionsSkippedByPin: ev.totalEvictionsSkippedByPin,
+        totalMemoryReadingsCarriedForward: ev.totalMemoryReadingsCarriedForward,
       },
     });
   }

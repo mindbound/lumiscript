@@ -251,6 +251,10 @@ function setChildHandle(
 
 /** Drop the registration for a worker key. Returns `true` if an entry existed. */
 function deleteChildHandle(key: ScriptRunnerWorkerKey): boolean {
+  // Drop the carried-forward RSS so a respawn reusing this key starts from a
+  // fresh measurement instead of the disposed worker's last-known peak. This is
+  // the teardown funnel for every removal path (eviction, shutdown, crash-exit).
+  workerLastKnownRss.delete(key);
   return childHandles.delete(key);
 }
 
@@ -596,6 +600,9 @@ const EVICTION_SWEEP_INTERVAL_MS = 60_000;
  * contribution for this cycle.
  */
 const EVICTION_MEMORY_QUERY_TIMEOUT_MS = 2_000;
+// Test-only override so a sweep test can force the null-reading (timed-out)
+// path without a real 2s wait. null → use the constant above.
+let evictionMemoryQueryTimeoutMsOverride: number | null = null;
 
 /**
  * Hard-coded minimum warm workers — never evict below this count while
@@ -628,6 +635,15 @@ let evictionConfigReader: EvictionConfigReader = () => ({
  */
 export function setEvictionConfigReader(fn: EvictionConfigReader): void {
   evictionConfigReader = fn;
+}
+
+/**
+ * Test-only — override the per-worker memory-query timeout (ms) so a sweep test
+ * can force the null-reading (timed-out) path without a real 2s wait. Pass null
+ * to restore the production timeout. Reset automatically by `__resetForTests`.
+ */
+export function __setEvictionMemoryQueryTimeoutForTests(ms: number | null): void {
+  evictionMemoryQueryTimeoutMsOverride = ms;
 }
 
 /**
@@ -667,6 +683,24 @@ let lastEvictionReason: string | null = null;
 // running long-lived tool / panel scripts, anomalous if the user has
 // none of those.
 let totalEvictionsSkippedByPin: number = 0;
+
+// Last successful OS RSS reading (bytes) per spawned worker, recorded by the
+// eviction sweep's memory pass. When a later reading times out or the query
+// send fails, the sweep carries this value forward into the ceiling sum instead
+// of treating the worker as free: a worker too busy to answer the stats ping
+// within the query timeout (e.g. a QuickJS worker mid-GC-pause near its WASM
+// heap ceiling) is precisely the one whose memory pressure the ceiling is meant
+// to react to, so omitting it would suppress the eviction it warrants. Dropped
+// on worker teardown (deleteChildHandle) so a respawned worker starts from a
+// fresh measurement rather than inheriting the disposed worker's peak.
+const workerLastKnownRss = new Map<ScriptRunnerWorkerKey, number>();
+
+// Diagnostics counter — how many per-worker memory readings the eviction sweep
+// substituted with a carried-forward last-known value because the live query
+// returned null (timeout / send failure). Sustained growth means workers are
+// routinely too busy to answer the stats ping, so the ceiling sum is leaning on
+// carried-forward estimates rather than fresh readings. Reset by __resetForTests.
+let totalMemoryReadingsCarriedForward: number = 0;
 
 // v0.28.0+ — Diagnostics-only counters. Separate from `restartAttempts`
 // (which is the *current backoff index* and resets to 0 after a stable
@@ -6983,7 +7017,7 @@ export async function queryWorkerMemoryBytes(workerKey: ScriptRunnerWorkerKey): 
       settled = true;
       pendingDiagnosticStats.delete(requestId);
       resolve(null);
-    }, EVICTION_MEMORY_QUERY_TIMEOUT_MS);
+    }, evictionMemoryQueryTimeoutMsOverride ?? EVICTION_MEMORY_QUERY_TIMEOUT_MS);
 
     pendingDiagnosticStats.set(requestId, (stats) => {
       if (settled) return;
@@ -7266,9 +7300,37 @@ export async function evictionSweep(): Promise<void> {
   const memReadings = await Promise.all(
     remaining.map(async (k) => ({ key: k, bytes: await queryWorkerMemoryBytes(k) })),
   );
-  let totalBytes = 0;
-  for (const r of memReadings) {
+  // Resolve each worker's effective RSS for the ceiling sum. A successful reading
+  // is recorded as the worker's new last-known value; a null reading (query
+  // timeout / send failure) carries the last-known value forward rather than
+  // counting the worker as free — otherwise a worker thrashing under GC (the one
+  // most likely to miss the stats ping AND most likely to be near its heap
+  // ceiling) would be silently dropped from the very sum meant to evict it. A
+  // worker with no prior reading still contributes 0 (nothing to carry), as before.
+  let totalBytes  = 0;
+  let carriedThisSweep = 0;
+  const effective: { key: ScriptRunnerWorkerKey; bytes: number | null }[] = memReadings.map((r) => {
+    if (r.bytes !== null) {
+      workerLastKnownRss.set(r.key, r.bytes);
+      return { key: r.key, bytes: r.bytes };
+    }
+    const carried = workerLastKnownRss.get(r.key);
+    if (carried !== undefined) {
+      carriedThisSweep++;
+      return { key: r.key, bytes: carried };
+    }
+    return { key: r.key, bytes: null };
+  });
+  for (const r of effective) {
     if (r.bytes !== null) totalBytes += r.bytes;
+  }
+  if (carriedThisSweep > 0) {
+    totalMemoryReadingsCarriedForward += carriedThisSweep;
+    spindle.log.warn(
+      `[script-runner] eviction memory pass carried forward ${carriedThisSweep} last-known RSS ` +
+      `reading(s) — worker(s) did not answer the stats ping in time; ceiling sum is ` +
+      `${Math.round(totalBytes / 1024 / 1024)} MB (may still under-count any never-measured worker)`,
+    );
   }
   if (totalBytes <= config.memoryCeilingBytes) return;
 
@@ -7288,7 +7350,7 @@ export async function evictionSweep(): Promise<void> {
   // Same telemetry-bump rationale as the idle pass — pinned-skips are
   // counted imperatively so steady-state diagnostics reflect them.
   const lruCandidates: { key: ScriptRunnerWorkerKey; bytes: number | null; lastActivity: number }[] = [];
-  for (const r of memReadings) {
+  for (const r of effective) {
     if (workerHasActiveRun(r.key)) continue;
     if (workerHostsPinningRegistration(r.key)) {
       totalEvictionsSkippedByPin++;
@@ -7916,6 +7978,13 @@ export interface WorkerPoolDiagnostics {
      * scripts present would be anomalous.
      */
     totalEvictionsSkippedByPin: number;
+    /**
+     * Count of per-worker memory readings the sweep substituted with a
+     * carried-forward last-known value because the live query timed out or
+     * failed. Sustained growth means the ceiling sum is leaning on stale
+     * estimates — workers are too busy to answer the stats ping.
+     */
+    totalMemoryReadingsCarriedForward: number;
   };
   settings: {
     idleTimeoutMs:      number;
@@ -7974,6 +8043,7 @@ export function getWorkerPoolDiagnostics(): WorkerPoolDiagnostics {
       lastEvictionAt,
       lastEvictionReason,
       totalEvictionsSkippedByPin,
+      totalMemoryReadingsCarriedForward,
     },
     settings: {
       idleTimeoutMs:      config.idleTimeoutMs,
@@ -8173,6 +8243,8 @@ export function __resetForTests(): void {
   // the eviction-config reader's safe default; stop any in-flight sweep
   // timer so tests don't see surprise eviction during their own setup.
   workerLastActivity.clear();
+  workerLastKnownRss.clear();                  // drop carried-forward RSS between tests
+  evictionMemoryQueryTimeoutMsOverride = null; // restore the real 2s query timeout
   evictionConfigReader = () => ({
     idleTimeoutMs:      30 * 60 * 1000,
     memoryCeilingBytes: 512 * 1024 * 1024,
@@ -8186,6 +8258,7 @@ export function __resetForTests(): void {
   lastEvictionAt             = null;
   lastEvictionReason         = null;
   totalEvictionsSkippedByPin = 0;
+  totalMemoryReadingsCarriedForward = 0;
   openAwaitTimeoutOverride   = null;
   restartBackoffOverride     = null;
   stabilityThresholdOverride = null;
