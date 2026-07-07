@@ -37,6 +37,13 @@ jobs:
       - name: Build (typechecks + bundles)
         run: bun run build
 
+      # The build chain regenerates the committed in-VM library bundles
+      # (gen:vm-libs). If a vm-lib source changed without re-running gen:vm-libs
+      # and committing the result, the working tree now diverges — fail loud so
+      # a stale QuickJS bundle can't ship.
+      - name: Check generated VM bundles are not stale
+        run: git diff --exit-code src/script-runner/generated
+
       - name: Lint (type-aware async-safety rules)
         run: bun run lint
 

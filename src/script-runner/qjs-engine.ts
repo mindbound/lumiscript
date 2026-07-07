@@ -34,6 +34,9 @@ import type { HandleKind, HandleRef, EngineTelemetry } from '../types/script-run
 import { VM_WEBGLOBALS_BOOTSTRAP } from './vm-webglobals.js';
 import { VM_ZOD_BUNDLE } from './generated/vm-zod-bundle.js';
 import { VM_HANDLEBARS_BUNDLE } from './generated/vm-handlebars-bundle.js';
+import { VM_LS_COMPONENTS_BUNDLE } from './generated/vm-ls-components-bundle.js';
+import { VM_LS_ICONS_BUNDLE } from './generated/vm-ls-icons-bundle.js';
+import { VM_LS_COUNCIL_PROMPT_BUNDLE } from './generated/vm-ls-council-prompt-bundle.js';
 
 /** Captured-console surface the harness forwards in-VM `console.*` to. Modeled
  *  as an index-signature record to match `buildChildCapturedConsole`'s actual
@@ -839,8 +842,10 @@ globalThis.__lsCallHandler = function (fn, args) {
 // existing 'script.fetchLibrary' dispatch, then compiled + run INSIDE the VM
 // (replacing the host AsyncFunctionCtor at api-proxy.ts:4582) so library code is
 // isolated like the main script. Per-run cache + circular detection. `ls:*`
-// built-ins are host-side TS factories returning function-bearing objects that
-// can't be marshaled, so they fail loud for now (a later pass re-homes them).
+// built-ins are host-side TS factories whose function-bearing return can't be
+// marshaled across the VM boundary, so they're bundled in-VM (vm-ls-*-bundle.ts →
+// globalThis.__lsBuiltins) and their factory is invoked against globalThis.api on
+// require — parity with the asyncfn builtin-library-registry.
 // __lsMakeRequire(hostDispatch) returns a fresh require (its own cache) per run.
 const VM_REQUIRE_BOOTSTRAP = `
 (function () {
@@ -870,7 +875,22 @@ const VM_REQUIRE_BOOTSTRAP = `
       return Promise.reject(new Error('script.require: name must be a non-empty string'));
     }
     if (nameOrId.indexOf('ls:') === 0) {
-      return Promise.reject(new Error('script.require: built-in "' + nameOrId + '" libraries are not yet available in the QuickJS engine (host-side ls:* factories).'));
+      // In-VM built-in libraries: invoke the bundled factory against globalThis.api
+      // (parity with the asyncfn builtin-library-registry). Cached per-run like user
+      // libs; sync (factories don't await). globalThis.__lsBuiltins is populated +
+      // frozen at context bootstrap from the vm-ls-*-bundle.ts bundles.
+      if (Object.prototype.hasOwnProperty.call(cache, nameOrId)) return Promise.resolve(cache[nameOrId]);
+      var factory = globalThis.__lsBuiltins && globalThis.__lsBuiltins[nameOrId];
+      if (typeof factory !== 'function') {
+        return Promise.reject(new Error('script.require: built-in library "' + nameOrId + '" not found'));
+      }
+      try {
+        var ex = factory(globalThis.api);
+        cache[nameOrId] = ex;
+        return Promise.resolve(ex);
+      } catch (e) {
+        return Promise.reject(e);
+      }
     }
     if (Object.prototype.hasOwnProperty.call(cache, nameOrId)) return Promise.resolve(cache[nameOrId]);
     // inProgress is set only WHILE a library body executes, so a require reaching it is a nested (circular)
@@ -952,7 +972,7 @@ const VM_FLUSH_BOOTSTRAP = `
 // deep-frozen.) Eval'd LAST in createContext, after all scaffolding is built.
 const VM_FREEZE_BOOTSTRAP = `
 (function () {
-  var locked = ['__lsEncode', '__lsDecode', '__lsErrInfo', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', '__lsFetchAbort', 'fetch', 'Headers', 'Response', 'AbortController', 'AbortSignal', '__hostHandleDispatch', '__lsVmHandleProxy', '__hostRegisterHandler', '__hostUnregisterHandler', '__hostUnregisterHandlerNamed', '__hostRegisterComponentCallback', '__hostUnregisterComponentCallback', '__hostScheduleTimer', '__hostClearTimer', '__lsStreamStart', '__lsStreamPull', '__lsStreamCancel', '__lsCallHandler', '__hostBroadcastSubscribe', '__hostBroadcastUnsubscribe', '__lsBroadcastEmitCheck', '__lsTrackChain', '__lsFlush', '__hostAllocElementId', '__hostRegisterWidget', '__hostDropWidget', '__hostRegisterModal', '__hostRegisterModalDismiss', '__hostUnregisterModalDismiss'];
+  var locked = ['__lsEncode', '__lsDecode', '__lsErrInfo', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__lsBuiltins', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', '__lsFetchAbort', 'fetch', 'Headers', 'Response', 'AbortController', 'AbortSignal', '__hostHandleDispatch', '__lsVmHandleProxy', '__hostRegisterHandler', '__hostUnregisterHandler', '__hostUnregisterHandlerNamed', '__hostRegisterComponentCallback', '__hostUnregisterComponentCallback', '__hostScheduleTimer', '__hostClearTimer', '__lsStreamStart', '__lsStreamPull', '__lsStreamCancel', '__lsCallHandler', '__hostBroadcastSubscribe', '__hostBroadcastUnsubscribe', '__lsBroadcastEmitCheck', '__lsTrackChain', '__lsFlush', '__hostAllocElementId', '__hostRegisterWidget', '__hostDropWidget', '__hostRegisterModal', '__hostRegisterModalDismiss', '__hostUnregisterModalDismiss'];
   for (var i = 0; i < locked.length; i++) {
     var name = locked[i];
     if (Object.prototype.hasOwnProperty.call(globalThis, name)) {
@@ -1747,6 +1767,13 @@ async function createContext(): Promise<ScriptContext> {
     'globalThis.__hbsBuiltinPartials = Object.assign({}, globalThis.__hbs.partials);' +
     'globalThis.__hbsBuiltinDecorators = Object.assign({}, globalThis.__hbs.decorators || {});',
   )).dispose();
+  // Bundle the ls:* built-in libraries in-VM — each entry sets
+  // globalThis.__lsBuiltins['ls:name'] = factory, so script.require('ls:*') can
+  // invoke the factory against the run's globalThis.api (parity with the asyncfn
+  // builtin-library-registry). The factories run per require, not at bootstrap.
+  ctx.unwrapResult(ctx.evalCode(VM_LS_COMPONENTS_BUNDLE)).dispose();
+  ctx.unwrapResult(ctx.evalCode(VM_LS_ICONS_BUNDLE)).dispose();
+  ctx.unwrapResult(ctx.evalCode(VM_LS_COUNCIL_PROMPT_BUNDLE)).dispose();
   ctx.unwrapResult(ctx.evalCode(API_BOOTSTRAP)).dispose();
   // P3 D — in-VM script.require (defines globalThis.__lsRequire).
   ctx.unwrapResult(ctx.evalCode(VM_REQUIRE_BOOTSTRAP)).dispose();

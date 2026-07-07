@@ -31,6 +31,26 @@ const LIBS: VmLib[] = [
     constName: 'VM_HANDLEBARS_BUNDLE',
     label:     'handlebars',
   },
+  // ls:* built-in libraries — registered on globalThis.__lsBuiltins so
+  // script.require('ls:*') can invoke the factory in-VM (asyncfn parity).
+  {
+    entry:     join('scripts', 'vm-libs', 'ls-components-entry.ts'),
+    out:       'vm-ls-components-bundle.ts',
+    constName: 'VM_LS_COMPONENTS_BUNDLE',
+    label:     'ls:components',
+  },
+  {
+    entry:     join('scripts', 'vm-libs', 'ls-icons-entry.ts'),
+    out:       'vm-ls-icons-bundle.ts',
+    constName: 'VM_LS_ICONS_BUNDLE',
+    label:     'ls:icons',
+  },
+  {
+    entry:     join('scripts', 'vm-libs', 'ls-council-prompt-entry.ts'),
+    out:       'vm-ls-council-prompt-bundle.ts',
+    constName: 'VM_LS_COUNCIL_PROMPT_BUNDLE',
+    label:     'ls:council-prompt',
+  },
 ];
 
 await mkdir(OUT_DIR, { recursive: true });

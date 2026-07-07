@@ -140,5 +140,53 @@ for (const engine of ['asyncfn', 'quickjs'] as const) {
       expect(res.error?.name).toBe('Error');
       expect(res.error?.message).toContain('boom-xyz');
     });
+
+    // ls:* built-in libraries: bundled in-VM for QuickJS, resolved via the host
+    // builtin-library-registry for asyncfn. The same require must yield the same
+    // library on both engines — asserted via engine-independent invariants (any
+    // divergence fails on the offending engine's iteration).
+    test('ls:icons require returns the icon library', async () => {
+      await setupE2E();
+      _setEngineModeForTests(engine);
+      const code = `
+        const lib = await script.require('ls:icons');
+        const names = lib.names();
+        return { count: names.length, svgKeys: Object.keys(lib.svg).length, sample: lib.sized(names[0], 24) };
+      `;
+      const res = await dispatchRunScript(makeScript('lsicons', code), makeRequest());
+      expect(res.ok).toBe(true);
+      const v = res.value as { count: number; svgKeys: number; sample: string };
+      expect(v.count).toBeGreaterThan(0);
+      expect(v.count).toBe(v.svgKeys);        // names ↔ svg record agree
+      expect(v.sample).toContain('<svg');
+    });
+
+    test('ls:council-prompt require returns the builder surface', async () => {
+      await setupE2E();
+      _setEngineModeForTests(engine);
+      const code = `
+        const lib = await script.require('ls:council-prompt');
+        return {
+          hasBuild: typeof lib.buildCouncilMessages === 'function',
+          hasRole:  typeof lib.roleNote === 'function',
+          debugObj: typeof lib.debug === 'object' && lib.debug !== null,
+        };
+      `;
+      const res = await dispatchRunScript(makeScript('lscouncil', code), makeRequest());
+      expect(res.ok).toBe(true);
+      expect(res.value).toEqual({ hasBuild: true, hasRole: true, debugObj: true });
+    });
+
+    test('ls:components require loads (factory runs against api)', async () => {
+      await setupE2E();
+      _setEngineModeForTests(engine);
+      const code = `
+        const lib = await script.require('ls:components');
+        return { loaded: typeof lib === 'object' && lib !== null, nonEmpty: Object.keys(lib).length > 0 };
+      `;
+      const res = await dispatchRunScript(makeScript('lscomponents', code), makeRequest());
+      expect(res.ok).toBe(true);
+      expect(res.value).toEqual({ loaded: true, nonEmpty: true });
+    });
   });
 }
