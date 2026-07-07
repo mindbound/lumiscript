@@ -37,12 +37,16 @@ jobs:
       - name: Build (typechecks + bundles)
         run: bun run build
 
-      # The build chain regenerates the committed in-VM library bundles
-      # (gen:vm-libs). If a vm-lib source changed without re-running gen:vm-libs
-      # and committing the result, the working tree now diverges — fail loud so
-      # a stale QuickJS bundle can't ship.
-      - name: Check generated VM bundles are not stale
-        run: git diff --exit-code src/script-runner/generated
+      # The build chain regenerates the in-VM library bundles (gen:vm-libs) plus a
+      # source-graph manifest that hashes each bundle's raw transitive inputs. If a
+      # vm-lib SOURCE changed without re-running gen:vm-libs, the recomputed manifest
+      # diverges from the committed one — fail loud so a stale QuickJS bundle can't
+      # ship. We diff the MANIFEST, not the minified bundles: bun's minifier output
+      # varies across versions (CI tracks `canary`), so a byte-diff on the bundles
+      # themselves flakes on every toolchain bump, whereas the manifest hashes source
+      # content and is bundler-independent.
+      - name: Check VM-library bundles are in sync with their sources
+        run: git diff --exit-code src/script-runner/generated/vm-libs.manifest.json
 
       - name: Lint (type-aware async-safety rules)
         run: bun run lint

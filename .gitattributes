@@ -1,0 +1,5 @@
+# Generated in-VM library bundles + their source-graph manifest are written with
+# LF by scripts/build-vm-libs.ts. Pin them to LF in the working tree regardless of
+# core.autocrlf so they diff/hash identically on Windows and CI — the CI drift
+# guard (git diff of vm-libs.manifest.json) depends on this stability.
+/src/script-runner/generated/** text eol=lf
