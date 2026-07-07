@@ -53,6 +53,7 @@ import type {
   StreamEndMessage,
   StreamRequest,
   StreamCancelRequest,
+  AbortRequest,
 } from '../types/script-runner-ipc.js';
 import type { ConsoleEntry, ConsoleEntryType } from '../types/script.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -836,6 +837,7 @@ function fireVmModalDismiss(proc: SpindleBackendProcessContext, msg: AdvancedMod
         timeoutMs:                    BROADCAST_HANDLER_TIMEOUT_MS,
         dispatch:                     theProxy.dispatch,
         dispatchOnHandle:             theProxy.dispatchOnHandle,
+        dispatchWithSignal:           theProxy.dispatchWithSignal,
         console:                      capturedConsole,
         serializeError,
         allowDangerous,
@@ -1019,6 +1021,7 @@ function makeHandlerDispatchers(
   dispatchBroadcastUnsubscribe: (subId: string) => void;
   dispatchStreamStart: (requestId: string, method: string, args: unknown[], hasSignal: boolean) => void;
   dispatchStreamCancel: (requestId: string) => void;
+  dispatchStreamAbort: (requestId: string) => void;
 } {
   return {
     dispatchRegisterHandler: (kind, handlerId, meta) => {
@@ -1060,6 +1063,12 @@ function makeHandlerDispatchers(
     },
     dispatchStreamCancel: (requestId) => {
       proc.send({ type: 'stream-cancel', requestId } as StreamCancelRequest);
+    },
+    // generateStream AbortSignal — send an AbortRequest keyed by the stream requestId. The host maps it to
+    // the stream's AbortController (registered when the StreamRequest carried hasSignal), aborting the
+    // upstream. Distinct from stream-cancel (the cooperative consumer break).
+    dispatchStreamAbort: (requestId) => {
+      proc.send({ type: 'abort-request', requestId } as AbortRequest);
     },
   };
 }
@@ -1107,6 +1116,7 @@ async function fireVmHandler(
           timeoutMs:                 req.timeoutMs,
           dispatch:                  theProxy.dispatch,
           dispatchOnHandle:          theProxy.dispatchOnHandle,
+          dispatchWithSignal:        theProxy.dispatchWithSignal,
           console:                   capturedConsole,
           serializeError,
           // #11 P7-F3 — the fired script's identity, so the quickjs fire re-seeds globalThis.script
@@ -1196,6 +1206,7 @@ function fireVmBroadcast(proc: SpindleBackendProcessContext, msg: BroadcastFireM
       timeoutMs:                    BROADCAST_HANDLER_TIMEOUT_MS,
       dispatch:                     theProxy.dispatch,
       dispatchOnHandle:             theProxy.dispatchOnHandle,
+      dispatchWithSignal:           theProxy.dispatchWithSignal,
       console:                      capturedConsole,
       serializeError,
       allowDangerous,
@@ -1298,6 +1309,7 @@ function fireVmTimer(proc: SpindleBackendProcessContext, scriptId: string, timer
       timeoutMs:        BROADCAST_HANDLER_TIMEOUT_MS,
       dispatch:         theProxy.dispatch,
       dispatchOnHandle: theProxy.dispatchOnHandle,
+      dispatchWithSignal: theProxy.dispatchWithSignal,
       console:          capturedConsole,
       serializeError,
       allowDangerous,
@@ -1799,6 +1811,7 @@ async function runOne(
             // etc.) route method calls back through the SAME targetHandle IPC as the
             // asyncfn path. Boundary #1 unchanged.
             dispatchOnHandle: proxy.dispatchOnHandle,
+            dispatchWithSignal: proxy.dispatchWithSignal,
             // P5 — when an in-VM handler is registered/unregistered, send the
             // function-less register/unregister-handler IPC to the parent (the closure
             // stays in the VM registry, keyed by the same handlerId). Boundary #1

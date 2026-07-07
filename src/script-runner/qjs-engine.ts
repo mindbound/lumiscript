@@ -71,6 +71,9 @@ export interface QuickJSRunOptions {
    *  asyncfn path). Absent → in-VM handle methods report the capability is
    *  unavailable (the host did not grant it for this run). */
   dispatchOnHandle?: (targetHandle: HandleRef, method: string, args: unknown[]) => Promise<unknown>;
+  /** Signal-capable dispatch (proxy.dispatchWithSignal) — used by the in-VM __hostDispatchWithSignal for
+   *  method-level AbortSignal (utils.http.* / llm.generate / llm.generateStructured). */
+  dispatchWithSignal?: (method: string, args: unknown[], signal: AbortSignal | undefined) => Promise<unknown>;
   /** P5 — dispatch the (function-less) register-handler IPC to the parent when an
    *  in-VM handler is registered. The closure stays in the VM registry. Optional. */
   dispatchRegisterHandler?: (kind: string, handlerId: string, meta: unknown) => void;
@@ -86,6 +89,9 @@ export interface QuickJSRunOptions {
    *  the chunk queue (vmStreams); only these two envelopes cross to the host. */
   dispatchStreamStart?: (requestId: string, method: string, args: unknown[], hasSignal: boolean) => void;
   dispatchStreamCancel?: (requestId: string) => void;
+  /** generateStream AbortSignal — send an AbortRequest keyed by the stream requestId (distinct from
+   *  the cooperative stream-cancel: abort fires the host AbortController, cancel is a consumer break). */
+  dispatchStreamAbort?: (requestId: string) => void;
   /** #11 list-methods parity — the run's sync-list snapshots, seeded into the VM so the 6
    *  declared-SYNC list reads (tools.list / macros.list / macros.listInterceptors /
    *  chat.getInjections / chat.listContentProcessors / worldInfo.listInterceptors) return arrays
@@ -127,6 +133,45 @@ globalThis.__lsBuildApi = function (hostDispatch) {
   var send = function (method, args) {
     return Promise.resolve(hostDispatch(method, JSON.stringify(globalThis.__lsEncode(args || [])))).then(unwrap);
   };
+  // #11 (v2.0.1) — method-level AbortSignal. Signal-bearing methods (utils.http.* / llm.generate /
+  // llm.generateStructured — parity with the asyncfn proxy's dispatchWithSignal) strip the in-VM signal
+  // before marshaling, mint an abortId, and dispatch via __hostDispatchWithSignal (the host reconstructs a
+  // real AbortController keyed by abortId + routes through run.dispatchWithSignal). An in-VM 'abort' listener
+  // fires __lsMethodAbort(abortId); it detaches on settle (asyncfn C7-01 leak fix); a pre-aborted signal
+  // fires immediately. Cancellation takes effect on the direct/allowlisted-local egress path only — the cors
+  // path carries no signal (same as asyncfn).
+  var __lsAbortSeq = 0;
+  var stripSignal = function (opts) {
+    if (!opts || typeof opts !== 'object' || opts.signal === undefined || opts.signal === null) return { opts: opts, signal: undefined };
+    var rest = {};
+    for (var k in opts) { if (Object.prototype.hasOwnProperty.call(opts, k) && k !== 'signal') rest[k] = opts[k]; }
+    return { opts: rest, signal: opts.signal };
+  };
+  var stripSignalFromArgs = function (args) {
+    var out = args ? args.slice() : [];
+    for (var i = out.length - 1; i >= 0; i--) {
+      var a = out[i];
+      if (a !== null && typeof a === 'object' && !Array.isArray(a)) {
+        if (a.signal !== undefined && a.signal !== null) { var s = stripSignal(a); out[i] = s.opts; return { args: out, signal: s.signal }; }
+        break; // only the last object-shaped arg is the opts position (mirrors asyncfn mkHttp)
+      }
+    }
+    return { args: out, signal: undefined };
+  };
+  var sendSignal = function (method, args, signal) {
+    if (signal === undefined || signal === null) return send(method, args);
+    var abortId = 'vmabort:' + (++__lsAbortSeq);
+    var p = Promise.resolve(globalThis.__hostDispatchWithSignal(method, JSON.stringify(globalThis.__lsEncode(args || [])), abortId)).then(unwrap);
+    var onAbort = null;
+    var detach = function () { if (onAbort) { try { signal.removeEventListener('abort', onAbort); } catch (e) {} onAbort = null; } };
+    if (signal.aborted) {
+      globalThis.__lsMethodAbort(abortId);
+    } else if (typeof signal.addEventListener === 'function') {
+      onAbort = function () { globalThis.__lsMethodAbort(abortId); };
+      signal.addEventListener('abort', onAbort);
+    }
+    return p.then(function (v) { detach(); return v; }, function (e) { detach(); throw e; });
+  };
   // #11 P3 B — a Zod schema is a VM object (methods) that cannot cross IPC.
   // Convert it to JSON Schema IN the VM (z.toJSONSchema) before dispatch and run
   // .parse on the response IN the VM, mirroring the asyncfn proxy's
@@ -141,8 +186,9 @@ globalThis.__lsBuildApi = function (hostDispatch) {
     var messages = args[0], schema = args[1], options = args[2];
     var zodSchema = isZod(schema) ? schema : null;
     var jsonSchema = zodSchema ? toJsonSchema(schema) : schema;
-    var dispatchArgs = options !== undefined ? [messages, jsonSchema, options] : [messages, jsonSchema];
-    return send('llm.generateStructured', dispatchArgs).then(function (parsed) {
+    var st = stripSignal(options);
+    var dispatchArgs = st.opts !== undefined ? [messages, jsonSchema, st.opts] : [messages, jsonSchema];
+    return sendSignal('llm.generateStructured', dispatchArgs, st.signal).then(function (parsed) {
       return zodSchema ? zodSchema.parse(parsed) : parsed;
     });
   };
@@ -153,21 +199,40 @@ globalThis.__lsBuildApi = function (hostDispatch) {
   // iterated opens nothing — no leaked stream cell, no wasted upstream generation. Each __lsStreamPull
   // settles with the next event (a JSON string) once a chunk/end arrives; the finally cancels the upstream
   // on an early break. Break the for-await (or let it finish) to end the stream. A user-supplied AbortSignal
-  // in options is not yet supported here (a later phase). It does NOT fail at marshaling — a signal has no
-  // own-enumerable keys, so the encoder would quietly drop it and the stream would ignore it — so reject it
-  // up front with a clear error rather than silently diverging from the AsyncFunction engine (which honours
-  // the signal).
+  // in options is honoured (parity with AsyncFunction): the signal is stripped before marshaling (it has no
+  // own-enumerable keys and can't cross the boundary) and wired via __lsStreamAbort — an in-VM 'abort'
+  // listener sends an abort-request keyed by the stream's requestId, which the host maps to the stream's
+  // AbortController (registered when hasSignal is true); a pre-aborted signal fires immediately. Either way
+  // the host aborts the upstream, which pushes a terminal end/error event that ends the pull loop below.
   var generateStream = function (args) {
     var messages = args[0], options = args[1];
-    if (options && options.signal !== undefined) {
-      throw new Error('api.llm.generateStream: AbortSignal is not yet supported in the QuickJS engine (a later phase). Break the for-await (or let it finish) to end the stream.');
+    var signal = options ? options.signal : undefined;
+    var hasSignal = signal !== undefined && signal !== null;
+    // The signal can't (and shouldn't) cross the marshaling boundary — strip it; abort rides __lsStreamAbort.
+    var wireOptions = options;
+    if (hasSignal) {
+      wireOptions = {};
+      for (var k in options) {
+        if (Object.prototype.hasOwnProperty.call(options, k) && k !== 'signal') wireOptions[k] = options[k];
+      }
     }
-    var wireArgs = (options !== undefined) ? [messages, options] : [messages];
+    var wireArgs = (wireOptions !== undefined) ? [messages, wireOptions] : [messages];
     return (async function* () {
       // Lazy open: the request goes out on the FIRST pull, not at creation. __lsStreamStart returns '' when
       // no run is active (a generator iterated outside any run) — nothing to stream, so just end.
-      var requestId = globalThis.__lsStreamStart(JSON.stringify(globalThis.__lsEncode(wireArgs)), false);
+      var requestId = globalThis.__lsStreamStart(JSON.stringify(globalThis.__lsEncode(wireArgs)), hasSignal);
       if (!requestId) return;
+      // Abort wiring (mirrors the AsyncFunction engine): pre-aborted fires now (addEventListener would miss
+      // it); otherwise listen, and detach in the finally. The abort-request is keyed by requestId.
+      var onAbort = null;
+      if (hasSignal) {
+        if (signal.aborted) {
+          globalThis.__lsStreamAbort(requestId);
+        } else {
+          onAbort = function () { globalThis.__lsStreamAbort(requestId); };
+          signal.addEventListener('abort', onAbort);
+        }
+      }
       try {
         while (true) {
           var ev = JSON.parse(await globalThis.__lsStreamPull(requestId));
@@ -180,6 +245,7 @@ globalThis.__lsBuildApi = function (hostDispatch) {
           yield globalThis.__lsDecode(ev.chunk);
         }
       } finally {
+        if (onAbort) signal.removeEventListener('abort', onAbort);
         globalThis.__lsStreamCancel(requestId);
       }
     })();
@@ -776,6 +842,16 @@ globalThis.__lsBuildApi = function (hostDispatch) {
           globalThis.__lsTrackChain(send(path, a).catch(function () {}));
           return;
         }
+        // Method-level AbortSignal (parity with the asyncfn dispatchWithSignal): llm.generate carries the
+        // signal on its options arg; utils.http.* carries it on the last object-shaped arg (the mkHttp rule).
+        if (path === 'llm.generate') {
+          var gsig = stripSignal(a[1]);
+          return sendSignal('llm.generate', gsig.opts !== undefined ? [a[0], gsig.opts] : [a[0]], gsig.signal);
+        }
+        if (path.indexOf('utils.http.') === 0) {
+          var hsig = stripSignalFromArgs(a);
+          return sendSignal(path, hsig.args, hsig.signal);
+        }
         return send(path, a);
       },
     });
@@ -972,7 +1048,7 @@ const VM_FLUSH_BOOTSTRAP = `
 // deep-frozen.) Eval'd LAST in createContext, after all scaffolding is built.
 const VM_FREEZE_BOOTSTRAP = `
 (function () {
-  var locked = ['__lsEncode', '__lsDecode', '__lsErrInfo', '__hostDispatch', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__lsBuiltins', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', '__lsFetchAbort', 'fetch', 'Headers', 'Response', 'AbortController', 'AbortSignal', '__hostHandleDispatch', '__lsVmHandleProxy', '__hostRegisterHandler', '__hostUnregisterHandler', '__hostUnregisterHandlerNamed', '__hostRegisterComponentCallback', '__hostUnregisterComponentCallback', '__hostScheduleTimer', '__hostClearTimer', '__lsStreamStart', '__lsStreamPull', '__lsStreamCancel', '__lsCallHandler', '__hostBroadcastSubscribe', '__hostBroadcastUnsubscribe', '__lsBroadcastEmitCheck', '__lsTrackChain', '__lsFlush', '__hostAllocElementId', '__hostRegisterWidget', '__hostDropWidget', '__hostRegisterModal', '__hostRegisterModalDismiss', '__hostUnregisterModalDismiss'];
+  var locked = ['__lsEncode', '__lsDecode', '__lsErrInfo', '__hostDispatch', '__hostDispatchWithSignal', '__lsMethodAbort', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__lsBuiltins', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', '__lsFetchAbort', 'fetch', 'Headers', 'Response', 'AbortController', 'AbortSignal', '__hostHandleDispatch', '__lsVmHandleProxy', '__hostRegisterHandler', '__hostUnregisterHandler', '__hostUnregisterHandlerNamed', '__hostRegisterComponentCallback', '__hostUnregisterComponentCallback', '__hostScheduleTimer', '__hostClearTimer', '__lsStreamStart', '__lsStreamPull', '__lsStreamCancel', '__lsStreamAbort', '__lsCallHandler', '__hostBroadcastSubscribe', '__hostBroadcastUnsubscribe', '__lsBroadcastEmitCheck', '__lsTrackChain', '__lsFlush', '__hostAllocElementId', '__hostRegisterWidget', '__hostDropWidget', '__hostRegisterModal', '__hostRegisterModalDismiss', '__hostUnregisterModalDismiss'];
   for (var i = 0; i < locked.length; i++) {
     var name = locked[i];
     if (Object.prototype.hasOwnProperty.call(globalThis, name)) {
@@ -1036,6 +1112,10 @@ const FETCH_MAX_RESPONSE_BYTES = 64 * 1024 * 1024; // 64 MiB
 // in-VM ctrl.abort() (routed via __lsFetchAbort) cancels the real host fetch. Self-cleared when the
 // fetch settles; entries are host objects (GC'd on delete), no VM handle to dispose.
 const vmFetchAborts = new Map<string, AbortController>();
+// #11 (v2.0.1) — method-level AbortSignal: pending host AbortControllers keyed by the VM-minted abortId,
+// so an in-VM ctrl.abort() (via __lsMethodAbort) aborts the host-side dispatchWithSignal controller.
+// Mirrors vmFetchAborts (the bare-fetch bridge); self-clears when the dispatch settles.
+const vmMethodAborts = new Map<string, AbortController>();
 
 // __lsFetch(url, optsJson) is an ASYNC host fn (createContext, deferred-promise
 // pattern like __hostDispatch): it runs the child's globalThis.fetch, reads the
@@ -1336,6 +1416,9 @@ interface ActiveRun {
   hostFetch?: (url: string, init?: RequestInit) => Promise<Response>;
   /** Per-run handle-method dispatcher (see QuickJSRunOptions.dispatchOnHandle). */
   dispatchOnHandle?: (targetHandle: HandleRef, method: string, args: unknown[]) => Promise<unknown>;
+  /** Signal-capable dispatch (proxy.dispatchWithSignal) — used by the in-VM __hostDispatchWithSignal for
+   *  method-level AbortSignal (utils.http.* / llm.generate / llm.generateStructured). */
+  dispatchWithSignal?: (method: string, args: unknown[], signal: AbortSignal | undefined) => Promise<unknown>;
   /** P5 — the scriptId of the current run/fire; keys the per-script VM handler registry. */
   scriptId?: string;
   /** P5 — dispatch the (function-less) register-handler IPC to the parent (the closure
@@ -1353,6 +1436,9 @@ interface ActiveRun {
   dispatchBroadcastUnsubscribe?: (subId: string) => void;
   dispatchStreamStart?: (requestId: string, method: string, args: unknown[], hasSignal: boolean) => void;
   dispatchStreamCancel?: (requestId: string) => void;
+  /** generateStream AbortSignal — send an AbortRequest keyed by the stream requestId (distinct from
+   *  the cooperative stream-cancel: abort fires the host AbortController, cancel is a consumer break). */
+  dispatchStreamAbort?: (requestId: string) => void;
 }
 
 /**
@@ -1811,6 +1897,54 @@ async function createContext(): Promise<ScriptContext> {
   });
   ctx.setProp(ctx.global, '__hostDispatch', hostDispatch);
   hostDispatch.dispose(); // VM retains it via the global; this frees only the host handle
+  // #11 (v2.0.1) — method-level AbortSignal bridge. Same deferred-promise pattern as __hostDispatch, but
+  // routes through run.dispatchWithSignal with a host AbortController keyed by the VM-minted abortId (so an
+  // in-VM abort() → __lsMethodAbort(abortId) → controller.abort() → the child proxy sends the AbortRequest).
+  // Falls back to plain dispatch (signal dropped) if the run has no dispatchWithSignal — defensive.
+  const hostDispatchWithSignal = ctx.newFunction('__hostDispatchWithSignal', (pathHandle, argsHandle, abortIdHandle) => {
+    const method = ctx.getString(pathHandle);
+    const args = marshalDecode(JSON.parse(ctx.getString(argsHandle))) as unknown[];
+    const abortId = ctx.getString(abortIdHandle);
+    const deferred = ctx.newPromise();
+    const settle = (kind: 'v' | 'e', payload: unknown, fallbackMessage: string): void => {
+      let s: string;
+      try {
+        s = JSON.stringify(kind === 'v' ? { v: marshalEncode(payload) } : { e: payload });
+      } catch {
+        s = JSON.stringify({ e: { name: 'QuickJSMarshalError', message: fallbackMessage } });
+      }
+      ctx.newString(s).consume((h) => deferred.resolve(h));
+      pump();
+    };
+    const run = sc.activeRun;
+    if (!run) {
+      settle('e', { name: 'Error', message: `LumiScript QuickJS: no active run for ${method}().` }, 'no active run');
+    } else if (run.dispatchWithSignal) {
+      const controller = new AbortController();
+      vmMethodAborts.set(abortId, controller);
+      const cleanup = (): void => { vmMethodAborts.delete(abortId); };
+      void run.dispatchWithSignal(method, args, controller.signal).then(
+        (result) => { cleanup(); settle('v', result, `Result of ${method}() could not be marshaled to the QuickJS engine.`); },
+        (err) => { cleanup(); settle('e', run.serializeError(err), `Error from ${method}() could not be serialized.`); },
+      );
+    } else {
+      void run.dispatch(method, args).then(
+        (result) => settle('v', result, `Result of ${method}() could not be marshaled to the QuickJS engine.`),
+        (err) => settle('e', run.serializeError(err), `Error from ${method}() could not be serialized.`),
+      );
+    }
+    void deferred.settled.then(pump);
+    return deferred.handle;
+  });
+  ctx.setProp(ctx.global, '__hostDispatchWithSignal', hostDispatchWithSignal);
+  hostDispatchWithSignal.dispose();
+  const methodAbortFn = ctx.newFunction('__lsMethodAbort', (abortIdHandle) => {
+    const abortId = ctx.getString(abortIdHandle);
+    const controller = vmMethodAborts.get(abortId);
+    if (controller) { try { controller.abort(); } catch { /* teardown */ } vmMethodAborts.delete(abortId); }
+  });
+  ctx.setProp(ctx.global, '__lsMethodAbort', methodAbortFn);
+  methodAbortFn.dispose();
 
   // Build the api proxy ONCE (its recursive `make` closure is cyclic; building
   // it per run was the churn the leak oracle caught).
@@ -2039,6 +2173,19 @@ async function createContext(): Promise<ScriptContext> {
   });
   ctx.setProp(ctx.global, '__lsStreamCancel', hostStreamCancel);
   hostStreamCancel.dispose();
+  const hostStreamAbort = ctx.newFunction('__lsStreamAbort', (requestIdHandle) => {
+    const requestId = ctx.getString(requestIdHandle);
+    const cell = vmStreams.get(requestId);
+    // Ownership: only the owning script may abort its stream (the requestId is VM-supplied + enumerable). A
+    // missing / non-owned / already-ended cell is a no-op. Unlike cancel, abort does NOT drop the cell — it
+    // fires the host AbortController (via AbortRequest keyed by requestId), which tears down the upstream and
+    // pushes a terminal end/error event; the generator's pull loop consumes that and ends through the normal
+    // finally (which then calls __lsStreamCancel).
+    if (!cell || cell.scriptId !== sc.activeRun?.scriptId || cell.ended) return;
+    sc.activeRun?.dispatchStreamAbort?.(requestId);
+  });
+  ctx.setProp(ctx.global, '__lsStreamAbort', hostStreamAbort);
+  hostStreamAbort.dispose();
 
   // ── P5 inc3c: macro/tool unregister BY NAME. macro/tool stores resolve by (scriptId,
   // name), NOT handlerId, so this sends a name-keyed unregister IPC (distinct from
@@ -2439,7 +2586,7 @@ export async function runUserScriptInQuickJS(opts: QuickJSRunOptions): Promise<u
 
   sc.currentDeadline = Date.now() + opts.timeoutMs;
   sc.lastUsedAt = Date.now(); // #11 P7-3 — a run/fire start counts as use (LRU recency; keeps a hot script's context fresh)
-  sc.activeRun = { dispatch: opts.dispatch, console: opts.console, serializeError: opts.serializeError, allowDangerous: opts.allowDangerous ?? false, hostFetch: opts.hostFetch, dispatchOnHandle: opts.dispatchOnHandle, scriptId: opts.script.id, dispatchRegisterHandler: opts.dispatchRegisterHandler, dispatchUnregisterHandler: opts.dispatchUnregisterHandler, dispatchUnregisterHandlerNamed: opts.dispatchUnregisterHandlerNamed, dispatchBroadcastSubscribe: opts.dispatchBroadcastSubscribe, dispatchBroadcastUnsubscribe: opts.dispatchBroadcastUnsubscribe, dispatchStreamStart: opts.dispatchStreamStart, dispatchStreamCancel: opts.dispatchStreamCancel };
+  sc.activeRun = { dispatch: opts.dispatch, console: opts.console, serializeError: opts.serializeError, allowDangerous: opts.allowDangerous ?? false, hostFetch: opts.hostFetch, dispatchOnHandle: opts.dispatchOnHandle, dispatchWithSignal: opts.dispatchWithSignal, scriptId: opts.script.id, dispatchRegisterHandler: opts.dispatchRegisterHandler, dispatchUnregisterHandler: opts.dispatchUnregisterHandler, dispatchUnregisterHandlerNamed: opts.dispatchUnregisterHandlerNamed, dispatchBroadcastSubscribe: opts.dispatchBroadcastSubscribe, dispatchBroadcastUnsubscribe: opts.dispatchBroadcastUnsubscribe, dispatchStreamStart: opts.dispatchStreamStart, dispatchStreamCancel: opts.dispatchStreamCancel, dispatchStreamAbort: opts.dispatchStreamAbort };
   // Guard against a disposed context: a settle's `deferred.settled.then(pump)` microtask can fire AFTER
   // the context was disposed (e.g. a parked stream pull settled by the teardown sweep, then the context
   // disposed on the same tick). executePendingJobs on a freed runtime throws "Lifetime not alive"; skip it.
@@ -2881,6 +3028,9 @@ export interface QuickJSFireOptions {
    *  is a SELF-reentrant invoke that would deadlock; reject it fast instead. */
   callerScriptId?: string;
   dispatchOnHandle?: (targetHandle: HandleRef, method: string, args: unknown[]) => Promise<unknown>;
+  /** Signal-capable dispatch (proxy.dispatchWithSignal) — used by the in-VM __hostDispatchWithSignal for
+   *  method-level AbortSignal (utils.http.* / llm.generate / llm.generateStructured). */
+  dispatchWithSignal?: (method: string, args: unknown[], signal: AbortSignal | undefined) => Promise<unknown>;
   dispatchRegisterHandler?: (kind: string, handlerId: string, meta: unknown) => void;
   dispatchUnregisterHandler?: (kind: string, handlerId: string) => void;
   dispatchUnregisterHandlerNamed?: (kind: string, name: string) => void;
@@ -2888,6 +3038,9 @@ export interface QuickJSFireOptions {
   dispatchBroadcastUnsubscribe?: (subId: string) => void;
   dispatchStreamStart?: (requestId: string, method: string, args: unknown[], hasSignal: boolean) => void;
   dispatchStreamCancel?: (requestId: string) => void;
+  /** generateStream AbortSignal — send an AbortRequest keyed by the stream requestId (distinct from
+   *  the cooperative stream-cancel: abort fires the host AbortController, cancel is a consumer break). */
+  dispatchStreamAbort?: (requestId: string) => void;
 }
 
 /**
@@ -2964,7 +3117,7 @@ export async function fireHandlerInQuickJS(opts: QuickJSFireOptions): Promise<un
   sc.activeRun = {
     dispatch: opts.dispatch, console: opts.console, serializeError: opts.serializeError,
     allowDangerous: opts.allowDangerous ?? false, hostFetch: opts.hostFetch,
-    dispatchOnHandle: opts.dispatchOnHandle, scriptId: opts.scriptId,
+    dispatchOnHandle: opts.dispatchOnHandle, dispatchWithSignal: opts.dispatchWithSignal, scriptId: opts.scriptId,
     dispatchRegisterHandler: opts.dispatchRegisterHandler,
     dispatchUnregisterHandler: opts.dispatchUnregisterHandler,
     dispatchUnregisterHandlerNamed: opts.dispatchUnregisterHandlerNamed,
@@ -2972,6 +3125,7 @@ export async function fireHandlerInQuickJS(opts: QuickJSFireOptions): Promise<un
     dispatchBroadcastUnsubscribe: opts.dispatchBroadcastUnsubscribe,
     dispatchStreamStart: opts.dispatchStreamStart,
     dispatchStreamCancel: opts.dispatchStreamCancel,
+    dispatchStreamAbort: opts.dispatchStreamAbort,
   };
   // Guard against a disposed context: a settle's `deferred.settled.then(pump)` microtask can fire AFTER
   // the context was disposed (e.g. a parked stream pull settled by the teardown sweep, then the context

@@ -37,6 +37,7 @@ function streamOpts(over: Partial<QuickJSRunOptions> & { scriptId: string; code:
     serializeError,
     dispatchStreamStart: over.dispatchStreamStart,
     dispatchStreamCancel: over.dispatchStreamCancel,
+    dispatchStreamAbort: over.dispatchStreamAbort,
   };
 }
 
@@ -240,14 +241,55 @@ describe('QuickJS generateStream', () => {
     disposeContextForScript('strm-after', true);
   });
 
-  test('a user-supplied AbortSignal is rejected up front (not yet supported on this engine), not silently dropped', async () => {
+  test('a user-supplied AbortSignal is honoured: aborting mid-stream ends it (was: rejected up front)', async () => {
     _setContextModelForTests('per-script');
+    let abortedReqId: string | undefined;
+    const dispatchStreamAbort = (requestId: string): void => {
+      abortedReqId = requestId;
+      // The host aborts the upstream generation → ends the stream with an AbortError (the terminal event
+      // the generator's pull loop consumes). Parity with the AsyncFunction engine.
+      pushVmStreamEnd(requestId, false, { name: 'AbortError', message: 'The operation was aborted' });
+    };
+    const dispatchStreamStart = (requestId: string): void => {
+      pushVmStreamChunk(requestId, { token: 'a' }); // one chunk, then the stream stays open until aborted
+    };
     const r = await runUserScriptInQuickJS(streamOpts({
       scriptId: 'strm-signal',
-      code: `try { api.llm.generateStream([{ role: 'user', content: 'hi' }], { signal: {} }); return 'NO-THROW'; } catch (e) { return e.message; }`,
-    }));
-    expect(String(r)).toContain('AbortSignal is not yet supported'); // loud error, not a silent no-op divergence from asyncfn
+      code: `const c = new AbortController(); const out = [];
+        try {
+          for await (const chunk of api.llm.generateStream([{ role: 'user', content: 'hi' }], { signal: c.signal })) { out.push(chunk.token); c.abort(); }
+          return { out: out, ended: 'clean' };
+        } catch (e) { return { out: out, ended: e.name }; }`,
+      dispatchStreamStart,
+      dispatchStreamAbort,
+    })) as { out: string[]; ended: string };
+    expect(r.out).toEqual(['a']);               // got the first chunk before aborting
+    expect(r.ended).toBe('AbortError');         // the abort ended the stream (the host's AbortError)
+    expect(typeof abortedReqId).toBe('string'); // __lsStreamAbort → dispatchStreamAbort fired an abort-request
     disposeContextForScript('strm-signal', true);
+  });
+
+  test('a pre-aborted AbortSignal ends the stream immediately (no chunks)', async () => {
+    _setContextModelForTests('per-script');
+    let abortedReqId: string | undefined;
+    const dispatchStreamAbort = (requestId: string): void => {
+      abortedReqId = requestId;
+      pushVmStreamEnd(requestId, false, { name: 'AbortError', message: 'aborted' });
+    };
+    const r = await runUserScriptInQuickJS(streamOpts({
+      scriptId: 'strm-preabort',
+      code: `const c = new AbortController(); c.abort(); const out = [];
+        try {
+          for await (const chunk of api.llm.generateStream([{ role: 'user', content: 'hi' }], { signal: c.signal })) { out.push(chunk.token); }
+          return { out: out, ended: 'clean' };
+        } catch (e) { return { out: out, ended: e.name }; }`,
+      dispatchStreamStart: () => { /* pre-abort ends it before any chunk is pushed */ },
+      dispatchStreamAbort,
+    })) as { out: string[]; ended: string };
+    expect(r.out).toEqual([]);
+    expect(r.ended).toBe('AbortError');
+    expect(typeof abortedReqId).toBe('string');
+    disposeContextForScript('strm-preabort', true);
   });
 
   test('one script CANNOT pull or cancel another script\'s stream (ownership check blocks cross-script access)', async () => {
