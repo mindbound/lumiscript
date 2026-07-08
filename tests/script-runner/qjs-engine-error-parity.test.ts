@@ -46,4 +46,34 @@ describe('#11 toHostError parity', () => {
     await expect(runUserScriptInQuickJS(makeOpts(`throw { toString: function () { return 'CUSTOM_STR'; } };`)))
       .rejects.toMatchObject({ name: 'Error', message: 'CUSTOM_STR' });
   });
+
+  test('a thrown null surfaces String(null) = "null"', async () => {
+    await expect(runUserScriptInQuickJS(makeOpts(`throw null;`)))
+      .rejects.toMatchObject({ name: 'Error', message: 'null' });
+  });
+
+  test('a thrown undefined surfaces String(undefined) = "undefined"', async () => {
+    await expect(runUserScriptInQuickJS(makeOpts(`throw undefined;`)))
+      .rejects.toMatchObject({ name: 'Error', message: 'undefined' });
+  });
+
+  test('a thrown boolean surfaces String(true) = "true"', async () => {
+    await expect(runUserScriptInQuickJS(makeOpts(`throw true;`)))
+      .rejects.toMatchObject({ name: 'Error', message: 'true' });
+  });
+
+  test('a custom Error subclass keeps its custom .name (in-VM instanceof Error still holds)', async () => {
+    await expect(runUserScriptInQuickJS(makeOpts(`class C extends Error { constructor(m) { super(m); this.name = 'MyCustomError'; } } throw new C('x');`)))
+      .rejects.toMatchObject({ name: 'MyCustomError', message: 'x' });
+  });
+
+  test('a non-Error throw carries no stack — host-internal frames are not leaked', async () => {
+    const err = await runUserScriptInQuickJS(makeOpts(`throw 42;`)).then(
+      () => { throw new Error('expected rejection'); },
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toBe('42');
+    expect((err as Error).stack).toBeUndefined();
+  });
 });

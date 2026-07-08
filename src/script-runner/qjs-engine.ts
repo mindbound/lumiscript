@@ -2526,6 +2526,16 @@ async function createContext(): Promise<ScriptContext> {
   }
 }
 
+/**
+ * Drop a host-synthesized Error's stack. A non-Error thrown value becomes a real
+ * host Error here, whose .stack would point at qjs-engine internals — but asyncfn
+ * serializes a non-Error throw with NO stack (serializeError's non-Error branch),
+ * so leaking host frames into the user-visible error.stack is both a divergence
+ * and noise. Clearing it keeps stack-presence at parity (undefined on both engines).
+ * Applied only to the non-Error / fallback paths; a real Error keeps its in-VM stack.
+ */
+function withoutHostStack(e: Error): Error { e.stack = undefined; return e; }
+
 function toHostError(ctx: QuickJSContext, errorHandle: QuickJSHandle): Error {
   // Discriminate `instanceof Error` IN-VM (parity with asyncfn's serializeError) — ctx.dump alone
   // loses it, so a thrown plain object `{message:'x'}` would otherwise be upgraded to Error('x')
@@ -2552,11 +2562,11 @@ function toHostError(ctx: QuickJSContext, errorHandle: QuickJSHandle): Error {
     return err;
   }
   if (info && info.isError === false) {
-    return new Error(String(info.str ?? '')); // non-Error thrown value → String() parity
+    return withoutHostStack(new Error(String(info.str ?? ''))); // non-Error thrown value → String() parity
   }
   // Helper unavailable: best-effort raw dump (objects → '[object Object]' like asyncfn's String()).
   const dumped = ctx.dump(errorHandle);
-  return new Error(typeof dumped === 'object' && dumped !== null ? '[object Object]' : String(dumped));
+  return withoutHostStack(new Error(typeof dumped === 'object' && dumped !== null ? '[object Object]' : String(dumped)));
 }
 
 /**

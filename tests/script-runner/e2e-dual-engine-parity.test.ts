@@ -41,7 +41,7 @@ import { _setEngineModeForTests } from '../../src/script-runner/child-entry.js';
 import { setupE2E } from '../_infra/script-runner-fixture.js';
 import type { Script } from '../../src/types/script.js';
 import type { MockSpindle } from '../_infra/mock-spindle.js';
-import type { RegisterHandler, BroadcastSubscribeMessage, HandlerKind, ApiProxyRequest } from '../../src/types/script-runner-ipc.js';
+import type { RegisterHandler, BroadcastSubscribeMessage, HandlerKind, ApiProxyRequest, SerializedError } from '../../src/types/script-runner-ipc.js';
 
 type EngineMode = 'quickjs' | undefined; // undefined = asyncfn
 
@@ -295,4 +295,66 @@ describe('#11 parity sweep: gated-factory CREATE dispatch (asyncfn vs quickjs)',
       expect(quickjs).toEqual(asyncfn);
     });
   }
+});
+
+// ── Error-shape parity: a throwing body surfaces {name, message} identically ──
+// across engines, and a non-Error throw leaks no stack. Runs through the REAL
+// serializeError via dispatchRunScript (unlike the qjs-engine-error-parity unit
+// stub), so it exercises the shipped path end-to-end on both engines.
+interface ThrowCase { name: string; body: string; want: { name: string; message: string }; }
+const THROW_CASES: ThrowCase[] = [
+  { name: 'TypeError',                 body: `throw new TypeError('te');`, want: { name: 'TypeError', message: 'te' } },
+  { name: 'Error',                     body: `throw new Error('boom');`,   want: { name: 'Error', message: 'boom' } },
+  { name: 'empty-message Error',       body: `throw new Error('');`,       want: { name: 'Error', message: 'Error' } },
+  { name: 'custom Error subclass',     body: `class C extends Error { constructor(m) { super(m); this.name = 'MyCustomError'; } } throw new C('x');`, want: { name: 'MyCustomError', message: 'x' } },
+  { name: 'string',                    body: `throw 'oops';`,              want: { name: 'Error', message: 'oops' } },
+  { name: 'number',                    body: `throw 42;`,                  want: { name: 'Error', message: '42' } },
+  { name: 'null',                      body: `throw null;`,                want: { name: 'Error', message: 'null' } },
+  { name: 'undefined',                 body: `throw undefined;`,           want: { name: 'Error', message: 'undefined' } },
+  { name: 'boolean',                   body: `throw true;`,                want: { name: 'Error', message: 'true' } },
+  { name: 'plain object',              body: `throw { code: 1 };`,         want: { name: 'Error', message: '[object Object]' } },
+  { name: 'object w/ custom toString', body: `throw { toString() { return 'X'; } };`, want: { name: 'Error', message: 'X' } },
+];
+
+async function observeThrow(engine: EngineMode, body: string): Promise<SerializedError> {
+  __resetForTests();
+  _setEngineModeForTests(engine);
+  const sid = `throw-${engine ?? 'asyncfn'}`;
+  const { childCleanup } = await setupE2E();
+  try {
+    const runRes = await dispatchRunScript(makeScript(sid, body), makeRequest());
+    expect(runRes.ok).toBe(false);
+    if (!runRes.error) throw new Error(`[${engine ?? 'asyncfn'}] expected a run error for body: ${body}`);
+    return runRes.error;
+  } finally {
+    childCleanup();
+  }
+}
+
+describe('#11 §D error-shape parity (asyncfn vs quickjs)', () => {
+  for (const tc of THROW_CASES) {
+    test(`${tc.name}: identical {name,message} across engines`, async () => {
+      const a = await observeThrow(undefined, tc.body);
+      const q = await observeThrow('quickjs', tc.body);
+      expect({ name: a.name, message: a.message }).toEqual(tc.want);
+      expect({ name: q.name, message: q.message }).toEqual(tc.want);
+    });
+  }
+
+  test('a thrown Error carries a string stack on both engines', async () => {
+    const a = await observeThrow(undefined, `throw new Error('e');`);
+    const q = await observeThrow('quickjs', `throw new Error('e');`);
+    expect(typeof a.stack).toBe('string');
+    expect(typeof q.stack).toBe('string');
+  });
+
+  test('a non-Error throw leaks NO stack on either engine', async () => {
+    // Pre-fix, quickjs synthesized a host Error whose stack pointed into
+    // qjs-engine internals; withoutHostStack clears it to match asyncfn, which
+    // serializes a non-Error throw with no stack at all.
+    const a = await observeThrow(undefined, `throw 42;`);
+    const q = await observeThrow('quickjs', `throw 42;`);
+    expect(a.stack).toBeUndefined();
+    expect(q.stack).toBeUndefined();
+  });
 });
