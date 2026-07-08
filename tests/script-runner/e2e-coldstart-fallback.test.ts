@@ -97,4 +97,24 @@ describe('#11 cold-start-fallback: engine-selection degrade (runOne)', () => {
       _setQuickJSAvailabilityForTests(undefined);
     }
   });
+
+  test('api.utils.getEngine() reports the fallback engine (asyncfn) when quickjs degrades', async () => {
+    __resetForTests();
+    _setEngineModeForTests('quickjs');
+    _setQuickJSAvailabilityForTests(false); // force the platform-unavailable fallback
+    const { childCleanup } = await setupE2E();
+    try {
+      const runRes = await dispatchRunScript(
+        makeScript('coldstart-getengine', `return api.utils.getEngine();`), makeRequest(),
+      );
+      expect(runRes.ok).toBe(true);
+      // Requested quickjs but fell back — getEngine must report the engine that
+      // ACTUALLY ran (asyncfn), not the requested one.
+      expect(runRes.value).toBe('asyncfn');
+    } finally {
+      childCleanup();
+      _setEngineModeForTests(undefined);
+      _setQuickJSAvailabilityForTests(undefined);
+    }
+  });
 });

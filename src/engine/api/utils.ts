@@ -227,6 +227,10 @@ export function buildUtilsAPI(deps: APIBuildDeps): LumiScriptAPI['utils'] {
   return {
     uuid:    () => generateUUID(),
     shortId: () => generateShortId(),
+    // The canonical/in-process api is the asyncfn engine. A quickjs run never
+    // reaches this method — the in-VM proxy intercepts utils.getEngine locally
+    // and returns 'quickjs' before any dispatch to this canonical api.
+    getEngine: () => 'asyncfn',
     wait:    (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)),
 
     random: {

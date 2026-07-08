@@ -1103,6 +1103,11 @@ export function buildProxiedAPI(ctx: ProxyContext): ProxyHandle {
     /* Sync, pure: implement locally. */
     uuid: () => crypto.randomUUID(),
 
+    // This api object backs asyncfn child runs only; quickjs has its own in-VM
+    // intercept that returns 'quickjs'. Constant is correct incl. the cold-start
+    // fallback, since a fell-back run executes through exactly this path.
+    getEngine: () => 'asyncfn',
+
     shortId: () => {
       // 8-char base36 random — sufficient for in-script disambiguation.
       const a = Math.random().toString(36).slice(2, 6);

@@ -1823,6 +1823,16 @@ interface HttpResponse {
 interface UtilsAPI {
 	uuid(): string;
 	shortId(): string;
+	/**
+	 * The script engine executing THIS run — \`'asyncfn'\` (the default in-process
+	 * \`AsyncFunction\` engine) or \`'quickjs'\` (the opt-in WASM isolate). Synchronous.
+	 *
+	 * Reflects the engine actually running, including the cold-start fallback: a run
+	 * that requested \`'quickjs'\` but couldn't warm the isolate falls back to, and
+	 * reports, \`'asyncfn'\`. Use it to branch on engine-specific behaviour (e.g. the
+	 * documented QuickJS divergences) or for diagnostics.
+	 */
+	getEngine(): "asyncfn" | "quickjs";
 	wait(ms: number): Promise<void>;
 	random: {
 		int(min: number, max: number): number;

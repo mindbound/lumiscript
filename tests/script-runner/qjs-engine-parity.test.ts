@@ -70,6 +70,19 @@ for (const engine of ['asyncfn', 'quickjs'] as const) {
       expect(res.value).toBe('v1');
     });
 
+    test('api.utils.getEngine() reports this run\'s engine', async () => {
+      await setupE2E();
+      _setEngineModeForTests(engine);
+
+      // Sync method returned straight from the body. Each engine reports its own
+      // identity (asyncfn -> 'asyncfn'; quickjs -> 'quickjs' via the in-VM
+      // intercept), proven here over the real dispatch path.
+      const res = await dispatchRunScript(makeScript('get-engine', `return api.utils.getEngine();`), makeRequest());
+
+      expect(res.ok).toBe(true);
+      expect(res.value).toBe(engine);
+    });
+
     test('.then chaining round-trips', async () => {
       await setupE2E();
       _setEngineModeForTests(engine);

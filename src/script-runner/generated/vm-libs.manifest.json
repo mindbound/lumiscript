@@ -4,7 +4,7 @@
     "console-format": "sha256:66c4cbaf289af68cbca54033af42b45eb8c96987b42fb1a2b8c1aef909d86eca",
     "handlebars": "sha256:a02e2b2cf12b9e30a103eb6d558bfbc1edcfa93af2682d7a5f873a090ac01fda",
     "ls:components": "sha256:0400eadd3bdc385cbb41be03fe8f47a6922475d523d5310c1de0c6624abf1599",
-    "ls:council-prompt": "sha256:f10441889d13308d2fcec4d2b68aba3eeabe41fd12b8db0ec9b5ce8e7b1ef1e5",
+    "ls:council-prompt": "sha256:a7438f6f4e32e509a115b4aaabeb6e96891a8234e42092364a8e5955511aac23",
     "ls:icons": "sha256:009e9c36312ba6a404572eec950c798901b525b1f750a2428afb130407f5cf77",
     "zod": "sha256:52a7b08dec177a0b9b0d1bf7003829b05ae9737ddd6cea1586e6a0660ae9a1ea"
   }

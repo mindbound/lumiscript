@@ -3189,6 +3189,7 @@ export const API_GROUPS: FnGroup[] = [
     rows: [
       { name: 'uuid',                   args: '—',                             desc: 'Generate a UUID v4 string. Cryptographically random (uses crypto.randomUUID).' },
       { name: 'shortId',                args: '—',                             desc: 'Generate a short random ID (8 chars, URL-safe). Cryptographically random (derived from crypto.randomUUID).' },
+      { name: 'getEngine',              args: '—',                             desc: 'The script engine running this run: `asyncfn` (default) or `quickjs` (the opt-in WASM isolate). Synchronous. Reflects the cold-start fallback — a run that requested quickjs but could not warm the isolate reports `asyncfn`.' },
       { name: 'wait',                   args: 'ms',                            desc: 'Pause execution for ms milliseconds.' },
       { name: 'random.int',             args: 'min, max',                      desc: 'Random integer in [min, max] inclusive. **NOT cryptographically secure** — uses Math.random for gameplay/UI use cases. For tokens or security-sensitive identifiers use api.utils.uuid / shortId or globalThis.crypto.getRandomValues.' },
       { name: 'random.float',           args: 'min, max',                      desc: 'Random float in [min, max). **NOT cryptographically secure** (Math.random — see random.int).' },

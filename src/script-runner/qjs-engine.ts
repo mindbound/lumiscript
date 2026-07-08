@@ -761,6 +761,11 @@ globalThis.__lsBuildApi = function (hostDispatch) {
         if (path === 'utils.template.compile') return templateCompile(a);
         if (path === 'utils.template.registerHelper') return templateRegisterHelper(a);
         if (path === 'utils.template.render') return templateRender(a);
+        // Sync local intercept — this VM IS the quickjs engine, so return the
+        // constant directly (parity: the asyncfn api returns 'asyncfn'). Must NOT
+        // fall through to send(): that would be async AND round-trip to the parent
+        // canonical api, which reports 'asyncfn'.
+        if (path === 'utils.getEngine') return 'quickjs';
         if (path === 'db.collection') return dbCollection(a);
         // P4b Inc 1 — string-id DOM injection. Allocates elementId in-VM, threads _elementId,
         // un-gated fire-and-forget send, returns a sync DOMHandle (update/remove/makeDraggable/
