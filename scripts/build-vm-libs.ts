@@ -54,6 +54,14 @@ const LIBS: VmLib[] = [
     constName: 'VM_LS_COUNCIL_PROMPT_BUNDLE',
     label:     'ls:council-prompt',
   },
+  // The shared console-arg formatter — registered on globalThis.__lsFormatConsoleArg
+  // so the in-VM console can format values with type identity intact (parity).
+  {
+    entry:     join('scripts', 'vm-libs', 'console-format-entry.ts'),
+    out:       'vm-console-format-bundle.ts',
+    constName: 'VM_CONSOLE_FORMAT_BUNDLE',
+    label:     'console-format',
+  },
 ];
 
 /**

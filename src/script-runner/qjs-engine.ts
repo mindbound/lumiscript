@@ -37,6 +37,7 @@ import { VM_HANDLEBARS_BUNDLE } from './generated/vm-handlebars-bundle.js';
 import { VM_LS_COMPONENTS_BUNDLE } from './generated/vm-ls-components-bundle.js';
 import { VM_LS_ICONS_BUNDLE } from './generated/vm-ls-icons-bundle.js';
 import { VM_LS_COUNCIL_PROMPT_BUNDLE } from './generated/vm-ls-council-prompt-bundle.js';
+import { VM_CONSOLE_FORMAT_BUNDLE } from './generated/vm-console-format-bundle.js';
 
 /** Captured-console surface the harness forwards in-VM `console.*` to. Modeled
  *  as an index-signature record to match `buildChildCapturedConsole`'s actual
@@ -1048,7 +1049,7 @@ const VM_FLUSH_BOOTSTRAP = `
 // deep-frozen.) Eval'd LAST in createContext, after all scaffolding is built.
 const VM_FREEZE_BOOTSTRAP = `
 (function () {
-  var locked = ['__lsEncode', '__lsDecode', '__lsErrInfo', '__hostDispatch', '__hostDispatchWithSignal', '__lsMethodAbort', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__lsBuiltins', '__console', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', '__lsFetchAbort', 'fetch', 'Headers', 'Response', 'AbortController', 'AbortSignal', '__hostHandleDispatch', '__lsVmHandleProxy', '__hostRegisterHandler', '__hostUnregisterHandler', '__hostUnregisterHandlerNamed', '__hostRegisterComponentCallback', '__hostUnregisterComponentCallback', '__hostScheduleTimer', '__hostClearTimer', '__lsStreamStart', '__lsStreamPull', '__lsStreamCancel', '__lsStreamAbort', '__lsCallHandler', '__hostBroadcastSubscribe', '__hostBroadcastUnsubscribe', '__lsBroadcastEmitCheck', '__lsTrackChain', '__lsFlush', '__hostAllocElementId', '__hostRegisterWidget', '__hostDropWidget', '__hostRegisterModal', '__hostRegisterModalDismiss', '__hostUnregisterModalDismiss'];
+  var locked = ['__lsEncode', '__lsDecode', '__lsErrInfo', '__hostDispatch', '__hostDispatchWithSignal', '__lsMethodAbort', '__lsBuildApi', 'api', 'z', 'Handlebars', '__hbs', '__lsRequire', '__lsBuiltins', '__console', '__lsFormatConsoleArg', '__lsRandomFill', 'crypto', 'TextEncoder', 'TextDecoder', 'atob', 'btoa', 'queueMicrotask', 'performance', 'structuredClone', 'URL', 'URLSearchParams', '__lsFetch', '__lsFetchAbort', 'fetch', 'Headers', 'Response', 'AbortController', 'AbortSignal', '__hostHandleDispatch', '__lsVmHandleProxy', '__hostRegisterHandler', '__hostUnregisterHandler', '__hostUnregisterHandlerNamed', '__hostRegisterComponentCallback', '__hostUnregisterComponentCallback', '__hostScheduleTimer', '__hostClearTimer', '__lsStreamStart', '__lsStreamPull', '__lsStreamCancel', '__lsStreamAbort', '__lsCallHandler', '__hostBroadcastSubscribe', '__hostBroadcastUnsubscribe', '__lsBroadcastEmitCheck', '__lsTrackChain', '__lsFlush', '__hostAllocElementId', '__hostRegisterWidget', '__hostDropWidget', '__hostRegisterModal', '__hostRegisterModalDismiss', '__hostUnregisterModalDismiss'];
   for (var i = 0; i < locked.length; i++) {
     var name = locked[i];
     if (Object.prototype.hasOwnProperty.call(globalThis, name)) {
@@ -1860,6 +1861,9 @@ async function createContext(): Promise<ScriptContext> {
   ctx.unwrapResult(ctx.evalCode(VM_LS_COMPONENTS_BUNDLE)).dispose();
   ctx.unwrapResult(ctx.evalCode(VM_LS_ICONS_BUNDLE)).dispose();
   ctx.unwrapResult(ctx.evalCode(VM_LS_COUNCIL_PROMPT_BUNDLE)).dispose();
+  // The shared console-arg formatter → globalThis.__lsFormatConsoleArg. Eval'd
+  // here so the __console wrapper (built below) can consume it. Pure; ignores api.
+  ctx.unwrapResult(ctx.evalCode(VM_CONSOLE_FORMAT_BUNDLE)).dispose();
   ctx.unwrapResult(ctx.evalCode(API_BOOTSTRAP)).dispose();
   // P3 D — in-VM script.require (defines globalThis.__lsRequire).
   ctx.unwrapResult(ctx.evalCode(VM_REQUIRE_BOOTSTRAP)).dispose();
@@ -2364,6 +2368,23 @@ async function createContext(): Promise<ScriptContext> {
   }
   ctx.setProp(ctx.global, '__console', consoleObj);
   consoleObj.dispose();
+
+  // Wrap __console so each arg is formatted IN-VM — where a Map is still a real
+  // Map — via the shared serializeConsoleArg (globalThis.__lsFormatConsoleArg).
+  // The raw shim above uses ctx.dump(), which flattens Map/Set/Error/Date to {}
+  // at the WASM boundary; formatting first (in-VM) matches asyncfn output. Runs
+  // before the body/handler bind `const console = globalThis.__console`, so every
+  // console usage inherits it. Pre-formatted strings dump losslessly, and the
+  // host serializeConsoleArg is idempotent on strings.
+  ctx.unwrapResult(ctx.evalCode(
+    '(function () {' +
+    '  var raw = globalThis.__console; var fmt = globalThis.__lsFormatConsoleArg;' +
+    '  function wrap(level) {' +
+    '    return function () { return raw[level].apply(raw, Array.prototype.map.call(arguments, function (a) { return fmt(a); })); };' +
+    '  }' +
+    '  globalThis.__console = Object.freeze({ log: wrap("log"), warn: wrap("warn"), error: wrap("error"), info: wrap("info") });' +
+    '})();',
+  )).dispose();
 
   // ── Sync CSPRNG bridge (P3 A2 crypto) — host fn returns n strong bytes as JSON.
   // newFunction callbacks run synchronously in the VM, so crypto.* stays sync. ──
