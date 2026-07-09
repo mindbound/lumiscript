@@ -20,7 +20,7 @@
 
 /**
  * Serialize a single console.* argument to a human-readable string.
- * Handles Promises, Errors, Maps/Sets and other built-ins that
+ * Handles Promises, Errors, Maps/Sets, Dates, RegExps and other built-ins that
  * `JSON.stringify` would silently reduce to "{}" or "[]".
  */
 export function serializeConsoleArg(a: unknown): string {
@@ -39,6 +39,10 @@ export function serializeConsoleArg(a: unknown): string {
       return `Set(${a.size}) { ${[...a].map(serializeConsoleArg).join(', ')} }`;
     } catch { return `[Set(${a.size})]`; }
   }
+  // Date → ISO string (matches Node/Bun console); guard an invalid date whose
+  // toISOString() would throw. RegExp → its literal source + flags, e.g. /x/g.
+  if (a instanceof Date)   return Number.isNaN(a.getTime()) ? 'Invalid Date' : a.toISOString();
+  if (a instanceof RegExp) return a.toString();
   if (typeof a === 'object') {
     const tag = Object.prototype.toString.call(a);
     if (tag !== '[object Object]' && tag !== '[object Array]') return tag;

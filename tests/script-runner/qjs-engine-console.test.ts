@@ -47,6 +47,23 @@ describe('#11 QuickJS console type-identity', () => {
     expect(seen).toEqual([['TypeError: boom']]);
   });
 
+  test('a Date renders as an ISO string (not [object Date])', async () => {
+    const seen = await runWithConsole(`console.log(new Date(0));`);
+    expect(seen).toEqual([['1970-01-01T00:00:00.000Z']]);
+    expect(seen[0]).toEqual([serializeConsoleArg(new Date(0))]); // parity anchor
+  });
+
+  test('an invalid Date renders as "Invalid Date" (no throw)', async () => {
+    const seen = await runWithConsole(`console.log(new Date('not-a-date'));`);
+    expect(seen).toEqual([['Invalid Date']]);
+  });
+
+  test('a RegExp renders as its source + flags (not [object RegExp])', async () => {
+    const seen = await runWithConsole(`console.log(/x/gi);`);
+    expect(seen).toEqual([['/x/gi']]);
+    expect(seen[0]).toEqual([serializeConsoleArg(/x/gi)]);
+  });
+
   test('multiple args are each formatted then joined host-side', async () => {
     const seen = await runWithConsole(`console.log('count', new Set([9]));`);
     expect(seen).toEqual([['count', 'Set(1) { 9 }']]);
