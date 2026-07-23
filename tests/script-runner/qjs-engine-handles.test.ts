@@ -316,7 +316,7 @@ describe('#11 P4 handles: errors + gating + freeze', () => {
 // ─── leak oracle ────────────────────────────────────────────────────────────
 
 describe('#11 P4 handles: leak oracle', () => {
-  test('VM object count stays flat across 150 schema-bearing collection runs', async () => {
+  test('post-GC VM object floor stays flat across sustained schema-bearing runs', async () => {
     const stub = collectionStub();
     // Exercise the increment-2 headline: a Zod schema captured in the wrapper's
     // closure (the in-VM object graph the oracle measures) + a validated insert.
@@ -327,11 +327,33 @@ describe('#11 P4 handles: leak oracle', () => {
              const c = await api.db.collection('x', { schema: Schema });
              await c.insert({ n: 1 }); await c.count(); return null;`,
     });
-    for (let i = 0; i < 10; i++) await runUserScriptInQuickJS(opts());
-    const before = _vmObjectCountForTests();
-    expect(before).not.toBeNull();
-    for (let i = 0; i < 150; i++) await runUserScriptInQuickJS(opts());
-    const after = _vmObjectCountForTests();
-    expect((after as number) - (before as number)).toBeLessThan(50);
+
+    // `obj_count` is a SAWTOOTH, not a level: it climbs as runs allocate and
+    // collapses whenever QuickJS's cycle collector fires (measured here: a
+    // ~60-run period swinging ~6.3k → ~11.4k). Comparing two instantaneous
+    // samples therefore measures GC PHASE, not retention — the delta ranges over
+    // roughly ±5000 depending purely on where the samples land, which is why the
+    // previous form passed locally and failed on CI with the same engine.
+    //
+    // The leak-relevant quantity is the post-GC FLOOR: the minimum across a
+    // window spanning several collections, i.e. the live steady state. A genuine
+    // per-run leak raises that floor monotonically; a healthy engine holds it
+    // flat (measured flat to the object across 600 runs). Sample every run so the
+    // trough is captured exactly — a fixed stride aliases against the GC period.
+    const floorOver = async (runs: number): Promise<number> => {
+      let min = Infinity;
+      for (let i = 0; i < runs; i++) {
+        await runUserScriptInQuickJS(opts());
+        const c = _vmObjectCountForTests();
+        if (c !== null && c < min) min = c;
+      }
+      return min;
+    };
+
+    await floorOver(20);                       // warm the context to steady state
+    const baseline = await floorOver(150);     // >2 GC periods, so a trough is seen
+    expect(Number.isFinite(baseline)).toBe(true);
+    const later = await floorOver(150);
+    expect(later - baseline).toBeLessThan(50);
   }, 30_000);
 });
