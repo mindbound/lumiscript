@@ -5,8 +5,10 @@
  * (default: Keep) and, on confirm, fires the existing `delete_script` per script
  * — which also records the dismissal (Phase B), so they won't be re-offered.
  *
- * Own frontend root (like the consent host); colours hard-coded — `--lumiverse-*`
- * tokens are unset on `createPortal(document.body)` surfaces.
+ * Own frontend root (like the consent host); colours hard-coded rgb() by choice
+ * — `--lumiverse-*` tokens ARE declared on `:root` and cascade into portals fine.
+ * Only `--lumiverse-accent` is undefined host-side (its accent is
+ * `--lumiverse-primary`).
  */
 import { useEffect, useState, type FC, type CSSProperties } from 'react';
 import { Trash2 } from 'lucide-react';

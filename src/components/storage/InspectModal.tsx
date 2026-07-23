@@ -23,6 +23,7 @@
 
 import { useState, useEffect, useMemo, useCallback, useRef, memo, type FC, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
+import { getPortalRoot } from '../../host-ui.js';
 import { X, Database, Search, ChevronLeft, ChevronRight, RefreshCw, Copy, Braces, Layers, Code2, AlertTriangle, Pencil, Trash2, ListOrdered, BarChart3 } from 'lucide-react';
 import type { FrontendToBackend } from '../../types/messages.js';
 import type { DbRecord } from '../../types/script.js';
@@ -852,7 +853,9 @@ export const InspectModal: FC<InspectModalProps> = ({
 
   return (
     <>
-      {createPortal(modal, document.body)}
+      {/* Extension-owned, host-registered portal root (see host-ui.ts); falls
+          back to document.body. */}
+      {createPortal(modal, getPortalRoot())}
       {editingRecord && (
         <EditRecordModal
           path={path}

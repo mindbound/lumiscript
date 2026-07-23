@@ -19,7 +19,7 @@ import { installTagInterceptorHandler } from './tag-interceptor-handler.js';
 import { installFloatWidgetHandler } from './float-widget-handler.js';
 import { installAppMountHandler } from './app-mount-handler.js';
 import { installDrawerTabHandler } from './drawer-tab-handler.js';
-import { setHostComponents } from './host-ui.js';
+import { setHostComponents, setPortalRoot } from './host-ui.js';
 
 // ─── LumiScript Frontend ──────────────────────────────────────────────────
 // Runs in the browser via dynamic import.
@@ -189,6 +189,28 @@ export function setup(ctx: SpindleFrontendContext) {
   // reach it via `getHostComponents()` (see host-ui.ts). Older hosts may not
   // expose `ctx.components` — the accessor stays null and callers fall back.
   setHostComponents(ctx.components);
+
+  // ─── Dialog portal root ──────────────────────────────────────────────────
+  // Our modals render through createPortal. The host only lets shared
+  // components mount inside an extension-owned element under a REGISTERED
+  // placement root, and `document.body` is neither — so a HostSelect inside a
+  // body-portaled dialog gets refused. An app mount at position 'end' IS such a
+  // root, and the host appends it to document.body with position/z-index
+  // cleared, so our stacking and focus handling are unchanged. See host-ui.ts.
+  // Needs `app_manipulation`; if that's unavailable we simply keep portaling to
+  // document.body (dialogs work, host selects degrade to native <select>).
+  try {
+    const portalMount = ctx.ui.mountApp({ position: 'end', className: 'ls-portal-root' });
+    setPortalRoot(portalMount.root);
+    cleanups.push(() => {
+      setPortalRoot(null);
+      try { portalMount.destroy(); } catch { /* ignore */ }
+    });
+  } catch (err) {
+    console.warn(
+      `[LumiScript] dialog portal root unavailable, falling back to document.body — ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 
   // ─── Dock Panel ─────────────────────────────────────────────────────────
   // We request `edge: 'right'` unconditionally — Lumiverse upstream

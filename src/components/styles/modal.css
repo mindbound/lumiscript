@@ -1036,6 +1036,16 @@
  * host component themes itself, so the wrapper only owns layout (fills its
  * flex parent). The `> *` rule nudges the host's mounted root to fill width.
  */
+/* The host portals a mounted select's dropdown to document.body at z-index 10002
+   (its own stylesheet). Our dialogs render above that (up to 10010), so without
+   this the dropdown would open behind the overlay and the picker would look
+   dead. HostSelect toggles this class on <html> (ref-counted) only while one of
+   our host selects is mounted, so nobody else's stacking is disturbed otherwise.
+   !important because the host may set the popover's z-index inline. */
+html.ls-host-popover-above [data-spindle-component-portal] {
+  z-index: 10011 !important;
+}
+
 .ls-host-select {
   flex: 1;
   min-width: 0;
@@ -1046,7 +1056,10 @@
   min-width: 0;
 }
 
-/* Fallback native <select> (hosts predating ctx.components). */
+/* Fallback native <select> — hosts predating ctx.components, AND any surface the
+   host refuses to mount into (e.g. a createPortal(document.body) dialog, which
+   isn't a registered extension-owned placement root). Keeps its own rgb()
+   fallbacks because --lumiverse-* tokens are unset on portal surfaces. */
 .ls-host-select-native {
   flex: 1;
   min-width: 0;

@@ -17,14 +17,22 @@
  * STREAM_RENDER_THROTTLE_MS (50ms), capping markdown re-parse cost to
  * ~20Hz regardless of token rate.
  *
- * Portal note: this modal is `createPortal`-mounted under `document.body`,
- * so the host theme's `--lumiverse-*` tokens don't cascade in. All token
- * references in `assistant.css` carry hard-coded fallbacks per the
- * portal-modal CSS-token gotcha.
+ * Portal note: this modal `createPortal`s into LumiScript's extension-owned
+ * portal root (see host-ui.ts) rather than `document.body` — that is what lets
+ * shared host components inside it (the connection picker) mount at all, since
+ * the host only permits mounts under a registered placement root.
+ *
+ * Theme tokens: `--lumiverse-*` are declared on `:root`, so they cascade into a
+ * portal fine — the long-standing "tokens don't reach portals" note was a
+ * misdiagnosis. The only token that genuinely resolves to nothing is
+ * `--lumiverse-accent`, which the host never defines (its accent is
+ * `--lumiverse-primary`), so the fallbacks in `assistant.css` are harmless but
+ * only strictly needed there.
  */
 
 import { FC, useState, useEffect, useRef, useMemo, useCallback, memo, KeyboardEvent, ChangeEvent } from 'react';
 import { createPortal } from 'react-dom';
+import { getPortalRoot } from '../../host-ui.js';
 import { Send, X, Loader2, Coffee, Square, Brain, ChevronRight, MessageSquarePlus, Pencil, Trash2, Check, Download, RotateCcw, Code2, BookMarked, RefreshCw, AlertTriangle, NotebookPen, Paperclip, FileText, FoldVertical } from 'lucide-react';
 import type { BackendToFrontend, FrontendToBackend } from '../../types/messages.js';
 import { ContextBreakdownPopover, type ContextBreakdown } from './ContextBreakdownPopover.js';
@@ -1427,7 +1435,10 @@ export const AssistantModal: FC<AssistantModalProps> = ({
         )}
       </div>
     </div>,
-    document.body,
+    // Extension-owned, host-registered portal root (see host-ui.ts) — this is
+    // what lets the connection picker mount the rich host select rather than
+    // degrading to a native one. Falls back to document.body.
+    getPortalRoot(),
   );
 };
 

@@ -12,8 +12,11 @@
  * `ls:open-bundle-modal` window event the script-manager toolbar dispatches —
  * avoids threading onBackendMessage through ManagePanel/ScriptList.
  *
- * Colours are hard-coded rgb() — `--lumiverse-*` tokens are unset on
- * `createPortal(document.body)` surfaces (see the portal-token note).
+ * Colours are hard-coded rgb(). That's belt-and-braces, NOT a portal
+ * requirement: `--lumiverse-*` tokens are declared on `:root` and cascade into
+ * portals fine. The long-standing "tokens are unset in portals" note was a
+ * misdiagnosis — the only token that resolves to nothing is `--lumiverse-accent`,
+ * which the host never defines (its accent token is `--lumiverse-primary`).
  */
 import { useEffect, useMemo, useRef, useState, type FC, type CSSProperties } from 'react';
 import type { SpindleSelectOption } from 'lumiverse-spindle-types';

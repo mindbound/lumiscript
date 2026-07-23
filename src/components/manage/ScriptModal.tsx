@@ -1,5 +1,6 @@
 import { FC, useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
+import { getPortalRoot } from '../../host-ui.js';
 import { X, Terminal } from 'lucide-react';
 import type { Script, ConsoleEntry } from '../../types/script.js';
 import type { FrontendToBackend } from '../../types/messages.js';
@@ -129,5 +130,7 @@ export const ScriptModal: FC<ScriptModalProps> = ({
     </div>
   );
 
-  return createPortal(modal, document.body);
+  // Extension-owned, host-registered portal root (see host-ui.ts) so shared
+  // components rendered inside keep working; falls back to document.body.
+  return createPortal(modal, getPortalRoot());
 };

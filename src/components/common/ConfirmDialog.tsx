@@ -28,6 +28,7 @@
 import { useEffect, useRef, type FC, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
+import { getPortalRoot } from '../../host-ui.js';
 
 export interface ConfirmDialogProps {
   /** Header title text. */
@@ -189,5 +190,8 @@ export const ConfirmDialog: FC<ConfirmDialogProps> = ({
     </div>
   );
 
-  return createPortal(dialog, document.body);
+  // Portal into the extension-owned, host-registered root (falls back to
+  // document.body) so shared components rendered inside the dialog — e.g.
+  // HostSelect — pass the host's placement-ownership check. See host-ui.ts.
+  return createPortal(dialog, getPortalRoot());
 };

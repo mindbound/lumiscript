@@ -23,6 +23,7 @@
 
 import { useState, useEffect, useCallback, useMemo, type FC } from 'react';
 import { createPortal } from 'react-dom';
+import { getPortalRoot } from '../../host-ui.js';
 import { X, RefreshCw, Activity, CheckCircle2, AlertTriangle, Info, XCircle, Download, Check } from 'lucide-react';
 import type { FrontendToBackend, BackendToFrontend } from '../../types/messages.js';
 import type {
@@ -221,7 +222,9 @@ export const DiagnosticsModal: FC<DiagnosticsModalProps> = ({
         </div>
       </div>
     </div>,
-    document.body,
+    // Extension-owned, host-registered portal root (see host-ui.ts) so shared
+    // components rendered inside keep working; falls back to document.body.
+    getPortalRoot(),
   );
 };
 

@@ -19,6 +19,7 @@
 
 import { useEffect, useRef, type FC } from 'react';
 import { createPortal } from 'react-dom';
+import { getPortalRoot } from '../../host-ui.js';
 import { X, Trash2, AlertTriangle } from 'lucide-react';
 import type { CollectionSummary } from '../../engine/db-admin.js';
 import { formatBytes, SCOPE_LABEL_LONG } from './utils.js';
@@ -201,5 +202,7 @@ export const DropConfirmDialog: FC<DropConfirmDialogProps> = ({
     </div>
   );
 
-  return createPortal(dialog, document.body);
+  // Extension-owned, host-registered portal root (see host-ui.ts) so shared
+  // components rendered inside keep working; falls back to document.body.
+  return createPortal(dialog, getPortalRoot());
 };

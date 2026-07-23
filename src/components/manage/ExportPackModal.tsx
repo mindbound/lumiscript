@@ -13,8 +13,10 @@
  * (matching the "Bundle into card" modal) — pick the ones to include, or use
  * Select all.
  *
- * Colours are hard-coded rgb() — `--lumiverse-*` tokens are unset on the
- * `ConfirmDialog`'s `createPortal(document.body)` surface (portal-token note).
+ * Colours are hard-coded rgb() by choice, not necessity — `--lumiverse-*` tokens
+ * are declared on `:root` and cascade into the ConfirmDialog's portal fine. Only
+ * `--lumiverse-accent` resolves to nothing (the host never defines it; its accent
+ * token is `--lumiverse-primary`).
  */
 import { useState, type FC, type CSSProperties } from 'react';
 import { Download } from 'lucide-react';

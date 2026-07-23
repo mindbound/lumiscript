@@ -26,6 +26,7 @@
 
 import { useEffect, useRef, useState, type FC } from 'react';
 import { createPortal } from 'react-dom';
+import { getPortalRoot } from '../../host-ui.js';
 import { X, Save, Pencil, AlertTriangle } from 'lucide-react';
 import type { FrontendToBackend } from '../../types/messages.js';
 import type { DbRecord } from '../../types/script.js';
@@ -243,5 +244,7 @@ export const EditRecordModal: FC<EditRecordModalProps> = ({
     </div>
   );
 
-  return createPortal(dialog, document.body);
+  // Extension-owned, host-registered portal root (see host-ui.ts) so shared
+  // components rendered inside keep working; falls back to document.body.
+  return createPortal(dialog, getPortalRoot());
 };

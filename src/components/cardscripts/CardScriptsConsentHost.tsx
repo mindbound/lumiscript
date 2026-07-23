@@ -9,8 +9,10 @@
  * ConfirmDialog chrome. On confirm it replies `ls_card_scripts_install` with the
  * selected bundleIds; the backend is authoritative for the actual install.
  *
- * Colours are hard-coded rgb() rather than `--lumiverse-*` tokens — those tokens
- * are unset on `createPortal(document.body)` surfaces (see the portal-token note).
+ * Colours are hard-coded rgb() rather than `--lumiverse-*` tokens. That's a
+ * stylistic choice, not a portal requirement: those tokens are declared on
+ * `:root` and cascade into portals fine. Only `--lumiverse-accent` resolves to
+ * nothing — the host never defines it (its accent token is `--lumiverse-primary`).
  */
 import { useEffect, useState, type FC, type CSSProperties } from 'react';
 import { ConfirmDialog } from '../common/ConfirmDialog.js';
